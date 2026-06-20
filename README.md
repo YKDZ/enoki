@@ -207,14 +207,16 @@ Hub 的 Managed Hosts 页面应出现该主机，详情页应持续更新 Invent
 
 ## CI 与发布
 
-GitHub Actions 分为两个 workflow：
+GitHub Actions 分为三个 workflow：
 
 - `CI`：在 Pull Request、`main` push 和手动触发时运行。它分阶段执行 Node 系
   format、lint、typecheck、test、protobuf 生成检查，Rust 系 `fmt`、`clippy`、
   `test`，并验证 Hub/Web 构建、Probe release 构建和 Hub Docker 镜像构建。
-- `Release`：在推送 `v*` tag 或手动输入版本号时运行。它先执行完整
-  `pnpm run check`，再构建 Probe 二进制包并发布到 GitHub Release，同时构建 Hub
-  Docker 镜像并推送到 GHCR。
+- `Release Hub`：在推送 `hub-v*` tag 或手动输入版本号时运行。它执行 Node 系
+  检查、构建和测试，然后构建 Hub Docker 镜像并推送到 GHCR。
+- `Release Probe`：在推送 `probe-v*` tag 或手动输入版本号时运行。它执行
+  protobuf 和 Rust 检查，然后构建 Probe 二进制包并发布到 GitHub Release。
+  `probe-v*` 只是发布触发 tag；下载地址和安装命令仍使用普通 `v*` 版本。
 
 Probe 发布产物命名为：
 
@@ -236,8 +238,11 @@ ghcr.io/<github-owner>/enoki-hub:latest
 例如发版：
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag hub-v0.1.0
+git push origin hub-v0.1.0
+
+git tag probe-v0.1.0
+git push origin probe-v0.1.0
 ```
 
 Turborepo 继续用于 monorepo 内部的 JS/TS build、test、typecheck 调度；GitHub

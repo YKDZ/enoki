@@ -5,7 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { Card, CardContent } from "@/components/ui/card";
 
 import AppHeader from "./components/AppHeader.vue";
-import EnrollmentPanel from "./components/EnrollmentPanel.vue";
+import EnrollmentDialog from "./components/EnrollmentDialog.vue";
 import GlobalConfigurationPanel from "./components/GlobalConfigurationPanel.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import ManagedHostCard from "./components/ManagedHostCard.vue";
@@ -29,6 +29,7 @@ const isCheckingSession = ref(true);
 const isAuthenticated = ref(false);
 const isSubmitting = ref(false);
 const isCreatingEnrollment = ref(false);
+const isShowingEnrollmentDialog = ref(false);
 const isShowingGlobalConfiguration = ref(false);
 const isSavingGlobalConfiguration = ref(false);
 const isSavingHostConfiguration = ref(false);
@@ -148,6 +149,7 @@ async function logout() {
   hosts.value = [];
   enrollment.value = null;
   enrollmentError.value = "";
+  isShowingEnrollmentDialog.value = false;
   globalConfigurationDraft.value = null;
   globalConfigurationError.value = "";
   globalConfigurationMessage.value = "";
@@ -171,6 +173,7 @@ async function loadHosts() {
 }
 
 async function createEnrollment() {
+  isShowingEnrollmentDialog.value = true;
   enrollmentError.value = "";
   isCreatingEnrollment.value = true;
 
@@ -191,6 +194,18 @@ async function createEnrollment() {
     enrollmentError.value = "无法连接 Hub，请检查服务是否正在运行。";
   } finally {
     isCreatingEnrollment.value = false;
+  }
+}
+
+async function openEnrollmentDialog() {
+  isShowingEnrollmentDialog.value = true;
+
+  if (
+    !enrollment.value &&
+    !enrollmentError.value &&
+    !isCreatingEnrollment.value
+  ) {
+    await createEnrollment();
   }
 }
 
@@ -497,9 +512,19 @@ function hostDetailPath(hostId: number) {
     <AppHeader
       :is-authenticated="isAuthenticated"
       :is-creating-enrollment="isCreatingEnrollment"
-      @create-enrollment="createEnrollment"
       @logout="logout"
+      @open-enrollment="openEnrollmentDialog"
       @toggle-global-configuration="toggleGlobalConfiguration"
+    />
+
+    <EnrollmentDialog
+      v-if="isAuthenticated"
+      v-model:open="isShowingEnrollmentDialog"
+      :enrollment="enrollment"
+      :enrollment-error="enrollmentError"
+      :is-creating-enrollment="isCreatingEnrollment"
+      @copy-install-command="copyInstallCommand"
+      @create-enrollment="createEnrollment"
     />
 
     <section
@@ -546,12 +571,6 @@ function hostDetailPath(hostId: number) {
         :is-saving="isSavingGlobalConfiguration"
         :message="globalConfigurationMessage"
         @save="saveGlobalConfiguration"
-      />
-
-      <EnrollmentPanel
-        :enrollment="enrollment"
-        :enrollment-error="enrollmentError"
-        @copy-install-command="copyInstallCommand"
       />
 
       <Card

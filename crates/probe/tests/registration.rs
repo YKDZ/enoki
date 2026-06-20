@@ -56,7 +56,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
         .expect("registration request decodes");
     assert_eq!(request.enrollment_token, "enk_enroll_secret");
-    assert_eq!(request.inventory.expect("inventory").probe_version, "0.1.0");
+    assert_eq!(request.inventory.expect("inventory").probe_version, "dev");
 
     let bootstrap_config =
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");

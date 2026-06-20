@@ -1,6 +1,5 @@
 {
   "name": "enoki",
-  "version": "1.0.0",
   "private": true,
   "description": "Self-hosted Managed Host monitoring with a Hono Hub, Vue Web UI, and Rust Probe.",
   "type": "module",

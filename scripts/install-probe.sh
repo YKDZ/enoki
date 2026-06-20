@@ -4,8 +4,9 @@ set -euo pipefail
 SERVICE_NAME="enoki-probe"
 SERVICE_USER="${ENOKI_SERVICE_USER:-enoki-probe}"
 SERVICE_GROUP="${ENOKI_SERVICE_GROUP:-enoki-probe}"
-PROBE_VERSION="${ENOKI_PROBE_VERSION:-v0.1.0}"
+PROBE_VERSION="${ENOKI_PROBE_VERSION:-}"
 GITHUB_RELEASE_BASE_URL="${ENOKI_GITHUB_RELEASE_BASE_URL:-https://github.com/enoki-monitor/enoki/releases/download}"
+GITHUB_LATEST_RELEASE_BASE_URL="${ENOKI_GITHUB_LATEST_RELEASE_BASE_URL:-https://github.com/enoki-monitor/enoki/releases/latest/download}"
 INSTALL_PATH="${ENOKI_INSTALL_PATH:-/usr/local/bin/enoki-probe}"
 CONFIG_PATH="${ENOKI_CONFIG_PATH:-/etc/enoki/probe-bootstrap.toml}"
 STATE_DIR="${ENOKI_STATE_DIR:-/var/lib/enoki-probe}"
@@ -96,7 +97,11 @@ download_urls() {
   local checksum_url="${ENOKI_PROBE_SHA256_URL:-}"
 
   if [ -z "$archive_url" ]; then
-    archive_url="${GITHUB_RELEASE_BASE_URL}/${PROBE_VERSION}/enoki-probe-${target}.tar.gz"
+    if [ -n "$PROBE_VERSION" ]; then
+      archive_url="${GITHUB_RELEASE_BASE_URL}/${PROBE_VERSION}/enoki-probe-${target}.tar.gz"
+    else
+      archive_url="${GITHUB_LATEST_RELEASE_BASE_URL}/enoki-probe-${target}.tar.gz"
+    fi
   fi
 
   if [ -z "$checksum_url" ]; then

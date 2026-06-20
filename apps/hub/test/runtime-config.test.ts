@@ -12,7 +12,10 @@ describe("Hub runtime configuration", () => {
     expect(config.database.dataRoot).toBe("/data");
     expect(config.database.sqlitePath).toBe("/data/enoki.db");
     expect(config.installation.installPath).toBe("/usr/local/bin/enoki-probe");
-    expect(config.installation.probeReleaseVersion).toBe("v0.1.0");
+    expect(config.installation.installScriptUrl).toBe(
+      "https://github.com/enoki-monitor/enoki/releases/latest/download/install-probe.sh",
+    );
+    expect(config.installation.probeReleaseVersion).toBeUndefined();
     expect(config.clockSkew.thresholdMs).toBe(300_000);
     expect(config.hostStatus).toEqual({
       offlineAfterMs: 90_000,

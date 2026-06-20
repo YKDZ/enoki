@@ -9,7 +9,7 @@ defineProps<{
 }>();
 
 defineEmits<{
-  createEnrollment: [];
+  openEnrollment: [];
   logout: [];
   toggleGlobalConfiguration: [];
 }>();
@@ -39,7 +39,7 @@ defineEmits<{
           aria-label="添加探针"
           title="添加探针"
           :disabled="isCreatingEnrollment"
-          @click="$emit('createEnrollment')"
+          @click="$emit('openEnrollment')"
         >
           <LoaderCircle
             v-if="isCreatingEnrollment"

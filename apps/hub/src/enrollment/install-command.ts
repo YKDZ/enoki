@@ -20,18 +20,14 @@ export type InstallCommandResult = {
   probeReleaseVersion?: string;
 };
 
-const defaultProbeReleaseVersion = "v0.1.0";
 const defaultGitHubReleaseBaseUrl =
-  "https://github.com/enoki-monitor/enoki/releases/download";
+  "https://github.com/enoki-monitor/enoki/releases/latest/download";
 const defaultInstallPath = "/usr/local/bin/enoki-probe";
 
 export function createDefaultInstallationCommandConfig(): InstallationCommandConfig {
-  const probeReleaseVersion = defaultProbeReleaseVersion;
-
   return {
     installPath: defaultInstallPath,
-    installScriptUrl: `${defaultGitHubReleaseBaseUrl}/${probeReleaseVersion}/install-probe.sh`,
-    probeReleaseVersion,
+    installScriptUrl: `${defaultGitHubReleaseBaseUrl}/install-probe.sh`,
   };
 }
 
@@ -45,8 +41,11 @@ export function renderInstallCommand(
   const variables: Array<[string, string]> = [
     ["ENOKI_HUB_URL", hubUrl],
     ["ENOKI_ENROLLMENT_TOKEN", input.enrollmentToken],
-    ["ENOKI_INSTALL_PATH", config.installPath],
   ];
+
+  if (config.installPath !== defaultInstallPath) {
+    variables.push(["ENOKI_INSTALL_PATH", config.installPath]);
+  }
 
   if (config.probeDownloadUrl) {
     variables.push(["ENOKI_PROBE_DOWNLOAD_URL", config.probeDownloadUrl]);

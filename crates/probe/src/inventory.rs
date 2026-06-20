@@ -39,7 +39,7 @@ pub fn collect_local_inventory() -> Inventory {
         network_interfaces: collect_network_interfaces(),
         os: read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string()),
         process_count: process_snapshot.process_count,
-        probe_version: env!("CARGO_PKG_VERSION").to_string(),
+        probe_version: crate::version::probe_version().to_string(),
         thread_count: process_snapshot.thread_count,
     }
 }

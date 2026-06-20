@@ -53,10 +53,9 @@ describe("Owner add-host install command", () => {
       },
       database,
       installation: {
-        installPath: "/opt/enoki/bin/enoki-probe",
+        installPath: "/usr/local/bin/enoki-probe",
         installScriptUrl:
-          "https://github.com/example/enoki/releases/download/v0.1.0/install-probe.sh",
-        probeReleaseVersion: "v0.1.0",
+          "https://github.com/example/enoki/releases/latest/download/install-probe.sh",
         publicHubUrl: "https://hub.example",
       },
     });
@@ -74,13 +73,13 @@ describe("Owner add-host install command", () => {
       enrollmentToken: string;
       installCommand: string;
       installPath: string;
-      probeReleaseVersion: string;
+      probeReleaseVersion?: string;
     };
 
-    expect(body.installPath).toBe("/opt/enoki/bin/enoki-probe");
-    expect(body.probeReleaseVersion).toBe("v0.1.0");
+    expect(body.installPath).toBe("/usr/local/bin/enoki-probe");
+    expect(body.probeReleaseVersion).toBeUndefined();
     expect(body.installCommand).toContain(
-      "https://github.com/example/enoki/releases/download/v0.1.0/install-probe.sh",
+      "https://github.com/example/enoki/releases/latest/download/install-probe.sh",
     );
     expect(body.installCommand).toContain(
       "ENOKI_HUB_URL='https://hub.example'",
@@ -88,7 +87,44 @@ describe("Owner add-host install command", () => {
     expect(body.installCommand).toContain(
       `ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}'`,
     );
-    expect(body.installCommand).toContain("ENOKI_PROBE_VERSION='v0.1.0'");
+    expect(body.installCommand).not.toContain("ENOKI_PROBE_VERSION=");
+    expect(body.installCommand).not.toContain("ENOKI_INSTALL_PATH=");
+
+    database.close();
+  });
+
+  it("keeps explicit install path overrides in the generated command", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      installation: {
+        installPath: "/opt/enoki/bin/enoki-probe",
+        installScriptUrl:
+          "https://github.com/example/enoki/releases/latest/download/install-probe.sh",
+        publicHubUrl: "https://hub.example",
+      },
+    });
+    const ownerSession = await loginOwner(app);
+
+    const response = await app.request("/api/web/enrollments", {
+      headers: {
+        cookie: ownerSession,
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      installCommand: string;
+      installPath: string;
+    };
+
+    expect(body.installPath).toBe("/opt/enoki/bin/enoki-probe");
     expect(body.installCommand).toContain(
       "ENOKI_INSTALL_PATH='/opt/enoki/bin/enoki-probe'",
     );

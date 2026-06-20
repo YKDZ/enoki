@@ -106,7 +106,7 @@ fn inventory_hash_matches_the_cross_runtime_canonical_fixture() {
 fn local_inventory_snapshot_contains_host_capacity_and_probe_version() {
     let inventory = collect_local_inventory();
 
-    assert_eq!(inventory.probe_version, "0.1.0");
+    assert_eq!(inventory.probe_version, "dev");
     assert!(!inventory.architecture.is_empty());
     assert!(inventory.cpu_count >= 1);
     assert!(inventory.memory_total_bytes > 0);

@@ -101,6 +101,6 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         ProbeCommand::Run { .. } => {
             "Probe runtime loop reports Managed Host observations to the Hub.\n".to_string()
         }
-        ProbeCommand::Version => format!("enoki-probe {}\n", env!("CARGO_PKG_VERSION")),
+        ProbeCommand::Version => format!("enoki-probe {}\n", crate::version::probe_version()),
     }
 }

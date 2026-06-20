@@ -7,7 +7,7 @@ use enoki_probe::cli::{ProbeCommand, parse_probe_command, render_probe_output};
 fn renders_version_output_for_owner_smoke_checks() {
     let output = render_probe_output(ProbeCommand::Version);
 
-    assert_eq!(output, "enoki-probe 0.1.0\n");
+    assert_eq!(output, "enoki-probe dev\n");
 }
 
 #[test]
