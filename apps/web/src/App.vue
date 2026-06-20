@@ -14,6 +14,7 @@ import ManagedHostDetailPage from "./components/ManagedHostDetailPage.vue";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
 import { useManagedHostDetail } from "./composables/useManagedHostDetail";
 import { apiGet, saveConfiguration } from "./lib/api";
+import { shouldCreateEnrollmentOnOpen } from "./lib/enrollment-dialog-state";
 import { configurationErrorText } from "./lib/probe-configuration";
 import type {
   EnrollmentResponse,
@@ -201,9 +202,11 @@ async function openEnrollmentDialog() {
   isShowingEnrollmentDialog.value = true;
 
   if (
-    !enrollment.value &&
-    !enrollmentError.value &&
-    !isCreatingEnrollment.value
+    shouldCreateEnrollmentOnOpen({
+      enrollment: enrollment.value,
+      enrollmentError: enrollmentError.value,
+      isCreatingEnrollment: isCreatingEnrollment.value,
+    })
   ) {
     await createEnrollment();
   }

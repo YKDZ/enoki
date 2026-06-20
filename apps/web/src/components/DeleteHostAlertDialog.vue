@@ -29,7 +29,7 @@ defineEmits<{
   <AlertDialog>
     <AlertDialogTrigger as-child>
       <Button
-        variant="outline"
+        variant="destructive"
         size="icon"
         type="button"
         aria-label="删除"
@@ -48,13 +48,15 @@ defineEmits<{
       <AlertDialogHeader>
         <AlertDialogTitle>删除主机</AlertDialogTitle>
         <AlertDialogDescription>
-          删除后，此主机的记录和历史指标将不再显示。
+          删除后，Hub 会隐藏此主机的记录、历史指标和详情页，并使当前 Probe
+          身份失效。目标主机上的 enoki-probe systemd 服务和二进制文件不会被远程卸载；
+          如不再需要采集，请在目标主机上停止并卸载探针。
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
         <AlertDialogCancel>取消</AlertDialogCancel>
         <AlertDialogAction
-          class="bg-destructive text-white hover:bg-destructive/90"
+          variant="destructive"
           @click="$emit('deleteHost', host)"
         >
           删除
