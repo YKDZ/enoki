@@ -130,7 +130,7 @@ function createInstallationCommandConfigFromEnvironment(
     installScriptUrl:
       environment.ENOKI_INSTALL_SCRIPT_URL ??
       (probeReleaseVersion
-        ? `https://github.com/enoki-monitor/enoki/releases/download/${probeReleaseVersion}/install-probe.sh`
+        ? `https://github.com/YKDZ/enoki/releases/download/${probeReleaseVersion}/install-probe.sh`
         : defaults.installScriptUrl),
     probeDownloadUrl: environment.ENOKI_PROBE_DOWNLOAD_URL,
     probeReleaseVersion,

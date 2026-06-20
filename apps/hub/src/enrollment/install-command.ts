@@ -21,7 +21,7 @@ export type InstallCommandResult = {
 };
 
 const defaultGitHubReleaseBaseUrl =
-  "https://github.com/enoki-monitor/enoki/releases/latest/download";
+  "https://github.com/YKDZ/enoki/releases/latest/download";
 const defaultInstallPath = "/usr/local/bin/enoki-probe";
 
 export function createDefaultInstallationCommandConfig(): InstallationCommandConfig {

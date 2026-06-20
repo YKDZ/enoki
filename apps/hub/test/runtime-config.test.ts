@@ -13,7 +13,7 @@ describe("Hub runtime configuration", () => {
     expect(config.database.sqlitePath).toBe("/data/enoki.db");
     expect(config.installation.installPath).toBe("/usr/local/bin/enoki-probe");
     expect(config.installation.installScriptUrl).toBe(
-      "https://github.com/enoki-monitor/enoki/releases/latest/download/install-probe.sh",
+      "https://github.com/YKDZ/enoki/releases/latest/download/install-probe.sh",
     );
     expect(config.installation.probeReleaseVersion).toBeUndefined();
     expect(config.clockSkew.thresholdMs).toBe(300_000);
