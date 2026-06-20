@@ -1,0 +1,543 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
+
+import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
+import { initializeHubDatabase } from "../src/database/index";
+import { createHubNodeServer } from "../src/node-server";
+
+const tempRoots: string[] = [];
+const openServers: Array<{ close: () => Promise<void> }> = [];
+
+async function createTemporaryDatabase() {
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-ws-db-"));
+  tempRoots.push(dataRoot);
+
+  return initializeHubDatabase({
+    dataRoot,
+    sqlitePath: path.join(dataRoot, "enoki.db"),
+  });
+}
+
+async function startHubServer(options: {
+  database: Awaited<ReturnType<typeof createTemporaryDatabase>>;
+  now?: () => number;
+}) {
+  const server = await createHubNodeServer({
+    auth: {
+      failureDelayMs: 0,
+      ownerPassword: "correct horse battery staple",
+      sessionCookieName: "enoki_owner_session",
+    },
+    database: options.database,
+    hostname: "127.0.0.1",
+    now: options.now,
+    port: 0,
+  });
+  openServers.push(server);
+
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const webSocketUrl = `ws://127.0.0.1:${address.port}/api/web/ws`;
+
+  return {
+    baseUrl,
+    server,
+    webSocketUrl,
+  };
+}
+
+async function loginOwner(baseUrl: string) {
+  const response = await fetch(`${baseUrl}/api/web/auth/login`, {
+    body: JSON.stringify({
+      password: "correct horse battery staple",
+    }),
+    headers: {
+      "content-type": "application/json",
+    },
+    method: "POST",
+  });
+
+  expect(response.status).toBe(200);
+  return response.headers.get("set-cookie") ?? "";
+}
+
+async function createEnrollmentToken(baseUrl: string, ownerSession: string) {
+  const response = await fetch(`${baseUrl}/api/web/enrollments`, {
+    headers: {
+      cookie: ownerSession,
+    },
+    method: "POST",
+  });
+
+  expect(response.status).toBe(201);
+  return ((await response.json()) as { enrollmentToken: string })
+    .enrollmentToken;
+}
+
+async function registerProbe(baseUrl: string, enrollmentToken: string) {
+  const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+  const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
+  const response = await fetch(`${baseUrl}/api/probe/register`, {
+    body: RegistrationRequest.encode(
+      RegistrationRequest.create({
+        enrollmentToken,
+        inventory: {
+          architecture: "x86_64",
+          cpuCount: 2,
+          hostname: "managed-host-01",
+          kernel: "6.8.0",
+          memoryTotalBytes: 2_147_483_648,
+          os: "linux",
+          probeVersion: "0.1.0",
+        },
+      }),
+    ).finish(),
+    headers: {
+      "content-type": "application/x-protobuf",
+    },
+    method: "POST",
+  });
+
+  expect(response.status).toBe(200);
+  return RegistrationResponse.decode(
+    new Uint8Array(await response.arrayBuffer()),
+  );
+}
+
+async function sendReport(
+  baseUrl: string,
+  registration: {
+    probeId: string;
+    probeSecret: string;
+  },
+  options: {
+    bootId?: string;
+    cpuPercent?: number;
+    sequence?: number;
+  } = {},
+) {
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const sequence = options.sequence ?? 1;
+  const response = await fetch(`${baseUrl}/api/probe/report`, {
+    body: ReportRequest.encode(
+      ReportRequest.create({
+        bootId: options.bootId ?? "boot-live-summary",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_009_500,
+            cpuCores: [
+              {
+                idle: 850,
+                name: "cpu0",
+                nice: 10,
+                softirq: 2,
+                steal: 1,
+                system: 40,
+                usagePercent: 15,
+                user: 100,
+              },
+            ],
+            cpuPercent: options.cpuPercent ?? 42.5,
+            disks: [
+              {
+                availableBytes: 512,
+                filesystemType: "ext4",
+                mountPoint: "/",
+                totalBytes: 2_048,
+                usedBytes: 1_536,
+              },
+            ],
+            memoryTotalBytes: 2_147_483_648,
+            memoryUsedBytes: 1_073_741_824,
+            networkInterfaces: [
+              {
+                name: "eth0",
+                rxBytes: 9_000,
+                rxBytesDelta: 4_000,
+                txBytes: 11_000,
+                txBytesDelta: 2_000,
+              },
+            ],
+            sequence,
+            uptimeSeconds: 86_400,
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: sequence,
+        sequenceStart: sequence,
+      }),
+    ).finish(),
+    headers: {
+      authorization: `Bearer ${registration.probeSecret}`,
+      "content-type": "application/x-protobuf",
+    },
+    method: "POST",
+  });
+
+  expect(response.status).toBe(200);
+}
+
+function openWebSocket(
+  url: string,
+  options: {
+    cookie?: string;
+  } = {},
+) {
+  return new Promise<WebSocket>((resolve, reject) => {
+    const socket = new WebSocket(url, {
+      headers: options.cookie
+        ? {
+            cookie: options.cookie,
+          }
+        : undefined,
+    });
+
+    socket.once("open", () => {
+      resolve(socket);
+    });
+    socket.once("error", reject);
+    socket.once("unexpected-response", (_request, response) => {
+      reject(new Error(`unexpected response ${response.statusCode}`));
+    });
+  });
+}
+
+function readWebSocketJson(socket: WebSocket) {
+  return new Promise<unknown>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for WebSocket message."));
+    }, 500);
+    const onMessage = (data: WebSocket.RawData) => {
+      cleanup();
+      resolve(JSON.parse(data.toString()));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
+function collectWebSocketJson(
+  socket: WebSocket,
+  options: {
+    quietMs?: number;
+    timeoutMs?: number;
+  } = {},
+) {
+  const quietMs = options.quietMs ?? 50;
+  const timeoutMs = options.timeoutMs ?? 500;
+
+  return new Promise<unknown[]>((resolve, reject) => {
+    const messages: unknown[] = [];
+    let quietTimer: NodeJS.Timeout | null = null;
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for WebSocket messages."));
+    }, timeoutMs);
+    const finishAfterQuiet = () => {
+      if (quietTimer) {
+        clearTimeout(quietTimer);
+      }
+
+      quietTimer = setTimeout(() => {
+        cleanup();
+        resolve(messages);
+      }, quietMs);
+    };
+    const onMessage = (data: WebSocket.RawData) => {
+      messages.push(JSON.parse(data.toString()));
+      finishAfterQuiet();
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      if (quietTimer) {
+        clearTimeout(quietTimer);
+      }
+
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
+async function closeSocket(socket: WebSocket) {
+  if (
+    socket.readyState === WebSocket.CLOSED ||
+    socket.readyState === WebSocket.CLOSING
+  ) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    socket.once("close", () => {
+      resolve();
+    });
+    socket.close();
+  });
+}
+
+function waitForSocketClose(socket: WebSocket) {
+  return new Promise<void>((resolve) => {
+    if (
+      socket.readyState === WebSocket.CLOSED ||
+      socket.readyState === WebSocket.CLOSING
+    ) {
+      resolve();
+      return;
+    }
+
+    socket.once("close", () => {
+      resolve();
+    });
+  });
+}
+
+describe("WebSocket live updates", () => {
+  afterEach(async () => {
+    await Promise.all(openServers.splice(0).map((server) => server.close()));
+    await Promise.all(
+      tempRoots
+        .splice(0)
+        .map((root) => rm(root, { force: true, recursive: true })),
+    );
+  });
+
+  it("requires an Owner session for the browser WebSocket endpoint", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({ database });
+
+    await expect(openWebSocket(webSocketUrl)).rejects.toThrow(
+      "unexpected response 401",
+    );
+
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    await closeSocket(socket);
+
+    database.close();
+  });
+
+  it("closes live update sockets when the Owner session logs out", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({ database });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+
+    const closed = waitForSocketClose(socket);
+    const response = await fetch(`${baseUrl}/api/web/auth/logout`, {
+      headers: {
+        cookie: ownerSession,
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(closed).resolves.toBeUndefined();
+
+    database.close();
+  });
+
+  it("broadcasts a lightweight Managed Host summary after an accepted Probe report", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+
+    socket.send("not-json");
+    socket.send(
+      JSON.stringify({
+        managedHostId: "not-a-number",
+        type: "subscribe_managed_host_detail",
+      }),
+    );
+    const summaryMessage = readWebSocketJson(socket);
+    await sendReport(baseUrl, registration);
+
+    await expect(summaryMessage).resolves.toEqual({
+      host: {
+        id: 1,
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: {
+          collectedAtMs: 1_725_000_009_500,
+          cpuPercent: 42.5,
+          diskTotalBytes: 2_048,
+          diskUsedBytes: 1_536,
+          memoryTotalBytes: 2_147_483_648,
+          memoryUsedBytes: 1_073_741_824,
+          networkRxBitsPerSecond: 6_400,
+          networkRxBytesDelta: 4_000,
+          networkTxBitsPerSecond: 3_200,
+          networkTxBytesDelta: 2_000,
+          receivedAtMs: 1_725_000_010_000,
+          uptimeSeconds: 86_400,
+        },
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+      type: "managed_host_summary",
+    });
+
+    await closeSocket(socket);
+    database.close();
+  });
+
+  it("sends detailed samples only for the subscribed Managed Host", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const hostOneEnrollment = await createEnrollmentToken(
+      baseUrl,
+      ownerSession,
+    );
+    const hostOneRegistration = await registerProbe(baseUrl, hostOneEnrollment);
+    const hostTwoEnrollment = await createEnrollmentToken(
+      baseUrl,
+      ownerSession,
+    );
+    const hostTwoRegistration = await registerProbe(baseUrl, hostTwoEnrollment);
+
+    socket.send(
+      JSON.stringify({
+        managedHostId: 1,
+        type: "subscribe_managed_host_detail",
+      }),
+    );
+    const hostOneMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, hostOneRegistration, {
+      bootId: "boot-host-one",
+      cpuPercent: 42.5,
+      sequence: 1,
+    });
+
+    await expect(hostOneMessages).resolves.toEqual([
+      expect.objectContaining({
+        host: expect.objectContaining({
+          id: 1,
+        }),
+        type: "managed_host_summary",
+      }),
+      {
+        managedHostId: 1,
+        sample: {
+          collectedAtMs: 1_725_000_009_500,
+          cpuCores: [
+            {
+              name: "cpu0",
+              usagePercent: 15,
+            },
+          ],
+          cpuPercent: 42.5,
+          disks: [
+            {
+              availableBytes: 512,
+              filesystemType: "ext4",
+              mountPoint: "/",
+              totalBytes: 2_048,
+              usedBytes: 1_536,
+            },
+          ],
+          managedHostId: 1,
+          memoryTotalBytes: 2_147_483_648,
+          memoryUsedBytes: 1_073_741_824,
+          networkInterfaces: [
+            {
+              name: "eth0",
+              rxBytesDelta: 4_000,
+              txBytesDelta: 2_000,
+            },
+          ],
+          receivedAtMs: 1_725_000_010_000,
+          sequence: 1,
+          uptimeSeconds: 86_400,
+        },
+        type: "managed_host_detail_sample",
+      },
+    ]);
+
+    const hostTwoMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, hostTwoRegistration, {
+      bootId: "boot-host-two",
+      cpuPercent: 12.5,
+      sequence: 1,
+    });
+
+    await expect(hostTwoMessages).resolves.toEqual([
+      expect.objectContaining({
+        host: expect.objectContaining({
+          id: 2,
+        }),
+        type: "managed_host_summary",
+      }),
+    ]);
+
+    socket.send(
+      JSON.stringify({
+        managedHostId: 1,
+        type: "unsubscribe_managed_host_detail",
+      }),
+    );
+    const unsubscribedMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, hostOneRegistration, {
+      bootId: "boot-host-one",
+      cpuPercent: 84,
+      sequence: 2,
+    });
+
+    await expect(unsubscribedMessages).resolves.toEqual([
+      expect.objectContaining({
+        host: expect.objectContaining({
+          id: 1,
+        }),
+        type: "managed_host_summary",
+      }),
+    ]);
+
+    await closeSocket(socket);
+    database.close();
+  });
+});

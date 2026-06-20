@@ -1,0 +1,90 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1781891242960,
+      "tag": "0000_high_karma",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1781892837216,
+      "tag": "0001_funny_fat_cobra",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1781892961637,
+      "tag": "0002_hesitant_zarek",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1781894887137,
+      "tag": "0003_equal_peter_quill",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1781896269177,
+      "tag": "0004_bitter_skreet",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1781896370985,
+      "tag": "0005_petite_living_mummy",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1781897000000,
+      "tag": "0006_linux_metrics",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1781898000000,
+      "tag": "0007_probe_configuration",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1781899000000,
+      "tag": "0008_probe_configuration_errors",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1781900000000,
+      "tag": "0009_host_metadata_connect_address",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1781901000000,
+      "tag": "0010_managed_host_soft_delete",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1781955000000,
+      "tag": "0011_managed_host_cpu_model",
+      "breakpoints": true
+    }
+  ]
+}

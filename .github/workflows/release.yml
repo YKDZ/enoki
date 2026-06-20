@@ -1,0 +1,181 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release-version:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            echo "::error::Release version is required for manual runs."
+            exit 1
+          fi
+
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+[.][0-9]+[.][0-9]+'; then
+            echo "::error::Release version must start with a semantic tag like v0.1.0."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: Checks
+    needs: release-version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Run repository check
+        run: pnpm run check
+
+  build-probe:
+    name: Build Probe (${{ matrix.target }})
+    needs: checks
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Build Probe
+        run: cargo build -p enoki-probe --release --target ${{ matrix.target }}
+
+      - name: Package Probe
+        run: |
+          mkdir -p "dist/enoki-probe-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/enoki-probe" "dist/enoki-probe-${{ matrix.target }}/enoki-probe"
+          tar -C "dist/enoki-probe-${{ matrix.target }}" -czf "dist/enoki-probe-${{ matrix.target }}.tar.gz" enoki-probe
+          cd dist
+          sha256sum "enoki-probe-${{ matrix.target }}.tar.gz" > "enoki-probe-${{ matrix.target }}.tar.gz.sha256"
+
+      - name: Upload Probe artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: enoki-probe-${{ matrix.target }}
+          path: |
+            dist/enoki-probe-${{ matrix.target }}.tar.gz
+            dist/enoki-probe-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish-probe-release:
+    name: Publish Probe release artifacts
+    needs: [release-version, build-probe]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Probe artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: enoki-probe-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" --title "$VERSION" --notes "Enoki $VERSION"
+          fi
+
+          gh release upload "$VERSION" scripts/install-probe.sh dist/* --clobber
+
+  publish-hub-image:
+    name: Publish Hub image
+    needs: [release-version, checks]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Login to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push Hub image
+        env:
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/enoki-hub"
+          docker buildx create --use
+          docker buildx build \
+            -f apps/hub/Dockerfile \
+            --platform linux/amd64 \
+            --tag "${image}:${VERSION}" \
+            --tag "${image}:latest" \
+            --push \
+            .

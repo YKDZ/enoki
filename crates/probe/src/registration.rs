@@ -1,0 +1,271 @@
+use std::{
+    error::Error,
+    fmt, fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+use prost::Message;
+
+use crate::{
+    inventory::collect_local_inventory,
+    protocol::enoki::v1::{ProbeRegistrationRequest, ProbeRegistrationResponse},
+};
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProbeRegistrationInput {
+    pub bootstrap_config_path: PathBuf,
+    pub enrollment_token: String,
+    pub hub_url: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProbeRegistrationOutcome {
+    pub initial_probe_configuration_version: Option<String>,
+    pub probe_id: String,
+}
+
+pub trait RegistrationTransport {
+    fn post_protobuf(&mut self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, RegistrationError>;
+}
+
+#[derive(Debug)]
+pub enum RegistrationError {
+    Decode(String),
+    Http(String),
+    InvalidResponse(&'static str),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for RegistrationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode(message) => write!(
+                formatter,
+                "failed to decode registration response: {message}"
+            ),
+            Self::Http(message) => write!(formatter, "registration request failed: {message}"),
+            Self::InvalidResponse(message) => {
+                write!(formatter, "invalid registration response: {message}")
+            }
+            Self::Io(error) => write!(formatter, "failed to store Probe bootstrap config: {error}"),
+        }
+    }
+}
+
+impl Error for RegistrationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Decode(_) | Self::Http(_) | Self::InvalidResponse(_) => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for RegistrationError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+pub struct HttpRegistrationTransport;
+
+impl RegistrationTransport for HttpRegistrationTransport {
+    fn post_protobuf(&mut self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, RegistrationError> {
+        let response = ureq::post(url)
+            .set("accept", "application/x-protobuf")
+            .set("content-type", "application/x-protobuf")
+            .send_bytes(&body)
+            .map_err(|error| RegistrationError::Http(error.to_string()))?;
+        let mut bytes = Vec::new();
+        response.into_reader().read_to_end(&mut bytes)?;
+
+        Ok(bytes)
+    }
+}
+
+pub fn register_probe(
+    input: ProbeRegistrationInput,
+    transport: &mut impl RegistrationTransport,
+) -> Result<ProbeRegistrationOutcome, RegistrationError> {
+    let request = ProbeRegistrationRequest {
+        enrollment_token: input.enrollment_token,
+        inventory: Some(collect_local_inventory()),
+    };
+    let response_body =
+        transport.post_protobuf(&registration_url(&input.hub_url), request.encode_to_vec())?;
+    let response = ProbeRegistrationResponse::decode(response_body.as_slice())
+        .map_err(|error| RegistrationError::Decode(error.to_string()))?;
+
+    if response.probe_id.is_empty() {
+        return Err(RegistrationError::InvalidResponse("missing Probe ID"));
+    }
+
+    if response.probe_secret.is_empty() {
+        return Err(RegistrationError::InvalidResponse(
+            "missing Probe Identity secret",
+        ));
+    }
+
+    store_bootstrap_config(
+        &input.bootstrap_config_path,
+        &BootstrapConfig {
+            collect_cpu: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.collect_cpu),
+            collect_disk: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.collect_disk),
+            collect_load: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.collect_load),
+            collect_memory: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.collect_memory),
+            collect_network: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.collect_network),
+            collect_uptime: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.collect_uptime),
+            hub_url: input.hub_url,
+            metrics_collection_interval_seconds: response.initial_configuration.as_ref().and_then(
+                |configuration| {
+                    (configuration.metrics_collection_interval_seconds > 0)
+                        .then_some(configuration.metrics_collection_interval_seconds)
+                },
+            ),
+            probe_configuration_version: response
+                .initial_configuration
+                .as_ref()
+                .map(|configuration| configuration.version.as_str()),
+            reporting_batch_interval_seconds: response.initial_configuration.as_ref().and_then(
+                |configuration| {
+                    (configuration.reporting_batch_interval_seconds > 0)
+                        .then_some(configuration.reporting_batch_interval_seconds)
+                },
+            ),
+            probe_id: response.probe_id.as_str(),
+            probe_secret: response.probe_secret.as_str(),
+        },
+    )?;
+
+    Ok(ProbeRegistrationOutcome {
+        initial_probe_configuration_version: response
+            .initial_configuration
+            .map(|configuration| configuration.version),
+        probe_id: response.probe_id,
+    })
+}
+
+fn registration_url(hub_url: &str) -> String {
+    format!("{}/api/probe/register", hub_url.trim_end_matches('/'))
+}
+
+struct BootstrapConfig<'a> {
+    collect_cpu: Option<bool>,
+    collect_disk: Option<bool>,
+    collect_load: Option<bool>,
+    collect_memory: Option<bool>,
+    collect_network: Option<bool>,
+    collect_uptime: Option<bool>,
+    hub_url: String,
+    metrics_collection_interval_seconds: Option<u32>,
+    probe_configuration_version: Option<&'a str>,
+    probe_id: &'a str,
+    probe_secret: &'a str,
+    reporting_batch_interval_seconds: Option<u32>,
+}
+
+fn store_bootstrap_config(
+    path: &Path,
+    config: &BootstrapConfig<'_>,
+) -> Result<(), RegistrationError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+
+    write_secret_file(path, render_bootstrap_config(config).as_bytes())?;
+
+    Ok(())
+}
+
+fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("hub_url = {}\n", toml_string(&config.hub_url)));
+    output.push_str(&format!("probe_id = {}\n", toml_string(config.probe_id)));
+    output.push_str(&format!(
+        "probe_secret = {}\n",
+        toml_string(config.probe_secret)
+    ));
+
+    if let Some(version) = config.probe_configuration_version {
+        output.push_str(&format!(
+            "probe_configuration_version = {}\n",
+            toml_string(version)
+        ));
+    }
+
+    if let Some(reporting_batch_interval_seconds) = config.reporting_batch_interval_seconds {
+        output.push_str(&format!(
+            "reporting_batch_interval_seconds = {reporting_batch_interval_seconds}\n",
+        ));
+    }
+
+    if let Some(metrics_collection_interval_seconds) = config.metrics_collection_interval_seconds {
+        output.push_str(&format!(
+            "metrics_collection_interval_seconds = {metrics_collection_interval_seconds}\n",
+        ));
+    }
+
+    push_optional_bool(&mut output, "collect_cpu", config.collect_cpu);
+    push_optional_bool(&mut output, "collect_memory", config.collect_memory);
+    push_optional_bool(&mut output, "collect_disk", config.collect_disk);
+    push_optional_bool(&mut output, "collect_network", config.collect_network);
+    push_optional_bool(&mut output, "collect_load", config.collect_load);
+    push_optional_bool(&mut output, "collect_uptime", config.collect_uptime);
+
+    output
+}
+
+fn push_optional_bool(output: &mut String, key: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        output.push_str(&format!("{key} = {value}\n"));
+    }
+}
+
+fn toml_string(value: &str) -> String {
+    let escaped = value
+        .chars()
+        .flat_map(|character| character.escape_default())
+        .collect::<String>();
+
+    format!("\"{escaped}\"")
+}
+
+#[cfg(unix)]
+fn write_secret_file(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
+    use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .mode(0o600)
+        .truncate(true)
+        .write(true)
+        .open(path)?;
+    file.write_all(contents)
+}
+
+#[cfg(not(unix))]
+fn write_secret_file(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
+    fs::write(path, contents)
+}

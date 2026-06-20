@@ -1,0 +1,183 @@
+import { Hono } from "hono";
+
+import type { AuditRepository } from "../database/audit.js";
+import type { ManagedHostRepository } from "../database/managed-hosts.js";
+import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
+import {
+  parseProbeConfigurationValues,
+  validateProbeConfigurationValues,
+} from "./model.js";
+
+export type ProbeConfigurationRouteServices = {
+  audit?: AuditRepository;
+  managedHosts?: ManagedHostRepository;
+  now?: () => number;
+  probeConfigurations: ProbeConfigurationRepository;
+};
+
+export function createProbeConfigurationRoutes(
+  services: ProbeConfigurationRouteServices,
+) {
+  const routes = new Hono();
+  const now = services.now ?? Date.now;
+
+  routes.get("/", (context) =>
+    context.json({
+      configuration: services.probeConfigurations.getGlobal(),
+    }),
+  );
+
+  routes.put("/", async (context) => {
+    const input = parseProbeConfigurationValues(await context.req.json());
+
+    if (!input) {
+      return configurationError("invalid_probe_configuration");
+    }
+
+    const validationError = validateProbeConfigurationValues(input);
+    if (validationError) {
+      return configurationError(validationError);
+    }
+
+    const updatedAtMs = now();
+    const configuration = services.probeConfigurations.updateGlobal(
+      input,
+      updatedAtMs,
+    );
+
+    services.audit?.record({
+      action: "probe_configuration.global.update",
+      actor: "owner",
+      details: {
+        version: configuration.version,
+      },
+      occurredAtMs: updatedAtMs,
+      outcome: "success",
+      subjectType: "probe_configuration",
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
+
+    return context.json({
+      configuration,
+    });
+  });
+
+  return routes;
+}
+
+export function createHostProbeConfigurationRoutes(
+  services: ProbeConfigurationRouteServices,
+) {
+  const routes = new Hono();
+  const now = services.now ?? Date.now;
+
+  routes.get("/", (context) => {
+    const managedHostId = numericHostId(context.req.param("hostId"));
+    if (!managedHostId) {
+      return configurationError("managed_host_not_found", 404);
+    }
+
+    if (!services.managedHosts?.exists(managedHostId)) {
+      return configurationError("managed_host_not_found", 404);
+    }
+
+    return context.json(
+      services.probeConfigurations.getEffectiveForHost(managedHostId),
+    );
+  });
+
+  routes.put("/", async (context) => {
+    const managedHostId = numericHostId(context.req.param("hostId"));
+    if (!managedHostId) {
+      return configurationError("managed_host_not_found", 404);
+    }
+
+    if (!services.managedHosts?.exists(managedHostId)) {
+      return configurationError("managed_host_not_found", 404);
+    }
+
+    const body = (await context.req.json()) as unknown;
+    if (!body || typeof body !== "object") {
+      return configurationError("invalid_probe_configuration");
+    }
+
+    const candidate = body as {
+      configuration?: unknown;
+      mode?: unknown;
+    };
+
+    if (candidate.mode === "inherit") {
+      const changedAtMs = now();
+      const effective =
+        services.probeConfigurations.clearHostOverride(managedHostId);
+
+      services.audit?.record({
+        action: "probe_configuration.host.inherit",
+        actor: "owner",
+        details: {
+          version: effective.configuration.version,
+        },
+        occurredAtMs: changedAtMs,
+        outcome: "success",
+        subjectId: String(managedHostId),
+        subjectType: "managed_host",
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      });
+
+      return context.json(effective);
+    }
+
+    if (candidate.mode !== "override") {
+      return configurationError("invalid_probe_configuration_mode");
+    }
+
+    const input = parseProbeConfigurationValues(candidate.configuration);
+    if (!input) {
+      return configurationError("invalid_probe_configuration");
+    }
+
+    const validationError = validateProbeConfigurationValues(input);
+    if (validationError) {
+      return configurationError(validationError);
+    }
+
+    const changedAtMs = now();
+    const effective = services.probeConfigurations.updateHostOverride(
+      managedHostId,
+      input,
+      changedAtMs,
+    );
+
+    services.audit?.record({
+      action: "probe_configuration.host.override",
+      actor: "owner",
+      details: {
+        version: effective.configuration.version,
+      },
+      occurredAtMs: changedAtMs,
+      outcome: "success",
+      subjectId: String(managedHostId),
+      subjectType: "managed_host",
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
+
+    return context.json(effective);
+  });
+
+  return routes;
+}
+
+function configurationError(error: string, status: 400 | 404 = 400) {
+  return new Response(JSON.stringify({ error }), {
+    headers: {
+      "content-type": "application/json",
+    },
+    status,
+  });
+}
+
+function numericHostId(value: string | undefined) {
+  const hostId = Number(value);
+
+  return Number.isInteger(hostId) && hostId > 0 ? hostId : null;
+}

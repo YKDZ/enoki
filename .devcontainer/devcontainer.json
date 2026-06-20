@@ -1,0 +1,79 @@
+{
+  "name": "Enoki",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    "--security-opt=seccomp=unconfined",
+    "--security-opt=apparmor=unconfined",
+    "--cap-add=SYS_ADMIN"
+  ],
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2.5.9": {
+      "installZsh": false,
+      "installOhMyZsh": false,
+      "installOhMyZshConfig": false,
+      "upgradePackages": true,
+      "installSsl": true,
+      "username": "automatic",
+      "userUid": "automatic",
+      "userGid": "automatic"
+    },
+    "ghcr.io/devcontainers/features/git-lfs:1": {
+      "autoPull": true,
+      "version": "latest"
+    },
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1.10.0": {
+      "moby": true,
+      "installDockerBuildx": true,
+      "installDockerComposeSwitch": true,
+      "version": "latest",
+      "dockerDashComposeVersion": "v2"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {
+      "installDirectlyFromGitHubRelease": true,
+      "version": "latest"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "redhat.vscode-yaml",
+        "fill-labs.dependi",
+        "oxc.oxc-vscode",
+        "Selemondev.shadcn-vue",
+        "Vue.volar"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.formatOnSaveMode": "file",
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.procMacro.enable": true,
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        },
+        "[toml]": {
+          "editor.defaultFormatter": "tamasfe.even-better-toml"
+        }
+      }
+    }
+  },
+  "containerEnv": {
+    "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+    "RUST_BACKTRACE": "1"
+  },
+  "postCreateCommand": {
+    "installNodeDependencies": "pnpm install",
+    "prefetchRustDependencies": "cargo fetch"
+  },
+  "remoteUser": "root",
+  "mounts": [
+    "source=agen-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=agen-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=agen-target,target=${containerWorkspaceFolder}/target,type=volume"
+  ]
+}

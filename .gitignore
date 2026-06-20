@@ -1,0 +1,12 @@
+node_modules
+.turbo
+.pnpm-store
+target
+dist
+
+.agents
+AGENTS.md
+CONTEXT.md
+.scratch
+.mcp.json
+/docs

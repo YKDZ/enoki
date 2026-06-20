@@ -1,0 +1,13 @@
+[package]
+name = "enoki-proto-gen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1.0.102"
+prost-build = "0.14.1"
+protoc-bin-vendored = "3.2.0"
+
+[lints]
+workspace = true

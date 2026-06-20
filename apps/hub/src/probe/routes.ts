@@ -1,0 +1,814 @@
+import { createHash, randomBytes } from "node:crypto";
+
+import type { ManagedHostDetailSample } from "@enoki/api-client/websocket";
+import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
+import { getConnInfo } from "@hono/node-server/conninfo";
+import { Hono } from "hono";
+import type { Context } from "hono";
+
+import type { EnrollmentRepository } from "../database/enrollments.js";
+import type {
+  HostStatusThresholds,
+  ManagedHostRepository,
+} from "../database/managed-hosts.js";
+import type { MetricsRepository } from "../database/metrics.js";
+import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
+import { hashSecret } from "../enrollment/routes.js";
+import {
+  liveSummaryFromManagedHost,
+  type LiveUpdateBroadcaster,
+} from "../live-updates.js";
+import { defaultProbeConfiguration } from "./configuration.js";
+
+const RegistrationRequest = enoki.v1.ProbeRegistrationRequest;
+const RegistrationResponse = enoki.v1.ProbeRegistrationResponse;
+const ReportRequest = enoki.v1.ProbeReportRequest;
+const ReportResponse = enoki.v1.ProbeReportResponse;
+const InventoryMessage = enoki.v1.Inventory;
+const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest;
+const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse;
+const maxProbeReportPayloadBytes = 1024 * 1024;
+const maxReportObservationRange = 10_000;
+const defaultClockSkewThresholdMs = 5 * 60 * 1000;
+
+export type ProbeRouteServices = {
+  enrollments: EnrollmentRepository;
+  managedHosts: ManagedHostRepository;
+  metrics: MetricsRepository;
+  probeConfigurations: ProbeConfigurationRepository;
+  clockSkewThresholdMs?: number;
+  hostStatus?: HostStatusThresholds;
+  liveUpdates?: LiveUpdateBroadcaster | null;
+  now?: () => number;
+  trustForwardedHeaders?: boolean;
+};
+
+export function createProbeRoutes(services: ProbeRouteServices) {
+  const routes = new Hono();
+  const now = services.now ?? Date.now;
+
+  routes.use("*", async (context, next) => {
+    if (!isIdentityContentEncoding(context.req.raw.headers)) {
+      return probeJsonError("payload_compression_not_supported", 415);
+    }
+
+    return next();
+  });
+
+  routes.post("/register", async (context) => {
+    const request = decodeRegistrationRequest(
+      new Uint8Array(await context.req.arrayBuffer()),
+    );
+
+    if (!request?.enrollmentToken) {
+      return probeJsonError("invalid_enrollment_token", 401);
+    }
+
+    const registeredAtMs = now();
+    const enrollment = services.enrollments.consume(
+      hashSecret(request.enrollmentToken),
+      registeredAtMs,
+    );
+
+    if (!enrollment) {
+      return probeJsonError("invalid_enrollment_token", 401);
+    }
+
+    const probeId = createProbeId();
+    const probeSecret = createProbeSecret();
+    const inventory = request.inventory;
+    const inventoryJson = inventory ? serializeInventory(inventory) : null;
+    const inventoryHash = inventory ? hashInventory(inventory) : null;
+    const observedIp = observedIpFromContext(
+      context,
+      services.trustForwardedHeaders,
+    );
+    const displayName =
+      inventory?.hostname?.trim() || fallbackDisplayName(probeId);
+
+    services.managedHosts.create({
+      architecture: inventory?.architecture || null,
+      clockSkewDetected: false,
+      connectAddress: firstInventoryAddress(inventory) ?? observedIp ?? "",
+      createdAtMs: registeredAtMs,
+      cpuCount: inventory?.cpuCount || null,
+      cpuModel: inventory?.cpuModel?.trim() || null,
+      displayName,
+      displayNameEdited: false,
+      hostname: inventory?.hostname || null,
+      inventoryHash,
+      inventoryJson,
+      kernel: inventory?.kernel || null,
+      lastClockSkewMs: null,
+      lastReportAtMs: null,
+      memoryTotalBytes: inventory?.memoryTotalBytes
+        ? Number(inventory.memoryTotalBytes)
+        : null,
+      observedIp,
+      os: inventory?.os || null,
+      probeConfigurationVersion: defaultProbeConfiguration.version,
+      probeId,
+      probeSecretHash: hashSecret(probeSecret),
+      probeVersion: inventory?.probeVersion || null,
+    });
+
+    const body = RegistrationResponse.encode(
+      RegistrationResponse.create({
+        initialConfiguration: defaultProbeConfiguration,
+        probeId,
+        probeSecret,
+        serverTimeMs: registeredAtMs,
+      }),
+    ).finish();
+
+    return context.body(toArrayBuffer(body), 200, {
+      "cache-control": "no-store",
+      "content-type": "application/x-protobuf",
+    });
+  });
+
+  routes.post("/report", async (context) => {
+    if (
+      contentLengthExceeds(context.req.raw.headers, maxProbeReportPayloadBytes)
+    ) {
+      return probeJsonError("probe_report_too_large", 413);
+    }
+
+    const host = authenticateProbe(
+      services.managedHosts,
+      context.req.raw.headers.get("authorization"),
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    const requestBody = await readCappedRequestBody(
+      context.req.raw,
+      maxProbeReportPayloadBytes,
+    );
+
+    if (!requestBody) {
+      return probeJsonError("probe_report_too_large", 413);
+    }
+
+    const request = decodeReportRequest(requestBody);
+
+    if (!request) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
+
+    if (request.probeId !== host.probeId) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    const validatedReport = validateReportEnvelope(request);
+
+    if (!validatedReport) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
+
+    const suppliedInventoryHash = request.inventory
+      ? hashInventory(request.inventory)
+      : null;
+
+    if (
+      request.inventory &&
+      request.inventoryHash &&
+      request.inventoryHash !== suppliedInventoryHash
+    ) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
+
+    const reportReceivedAtMs = now();
+    const inventoryJson = request.inventory
+      ? serializeInventory(request.inventory)
+      : host.inventoryJson;
+    const inventoryHash = suppliedInventoryHash ?? host.inventoryHash;
+    const inventoryNeeded =
+      !request.inventory &&
+      (!request.inventoryHash || request.inventoryHash !== host.inventoryHash);
+    const clockSkew = detectClockSkew(
+      request.metrics ?? [],
+      reportReceivedAtMs,
+      services.clockSkewThresholdMs ?? defaultClockSkewThresholdMs,
+    );
+
+    const observedIp = observedIpFromContext(
+      context,
+      services.trustForwardedHeaders,
+    );
+
+    services.managedHosts.recordReport(host.id, {
+      architecture: request.inventory?.architecture || undefined,
+      clockSkewDetected: clockSkew.detected,
+      connectAddress: reportConnectAddress(request.inventory, host, observedIp),
+      cpuCount: request.inventory
+        ? request.inventory.cpuCount || null
+        : undefined,
+      cpuModel: request.inventory
+        ? request.inventory.cpuModel?.trim() || null
+        : undefined,
+      hostname: request.inventory?.hostname || undefined,
+      inventoryHash,
+      inventoryJson,
+      kernel: request.inventory?.kernel || undefined,
+      lastClockSkewMs: clockSkew.lastDeltaMs,
+      lastReportAtMs: reportReceivedAtMs,
+      memoryTotalBytes: request.inventory
+        ? unsignedNumber(request.inventory.memoryTotalBytes) || null
+        : undefined,
+      observedIp,
+      os: request.inventory?.os || undefined,
+      probeConfigurationError: request.probeConfigurationError
+        ? {
+            errorCode: request.probeConfigurationError.errorCode ?? "",
+            failedVersion: request.probeConfigurationError.failedVersion ?? "",
+            message: request.probeConfigurationError.message ?? "",
+            reportedAtMs: reportReceivedAtMs,
+          }
+        : null,
+      probeVersion: request.inventory?.probeVersion || undefined,
+    });
+
+    const samplesBySequence = new Map(
+      (request.metrics ?? []).map((sample) => [
+        unsignedNumber(sample.sequence),
+        sample,
+      ]),
+    );
+    const detailSamples: ManagedHostDetailSample[] = [];
+
+    for (
+      let sequence = validatedReport.sequenceStart;
+      sequence <= validatedReport.sequenceEnd;
+      sequence += 1
+    ) {
+      const inserted = services.metrics.recordObservation({
+        bootId: request.bootId,
+        managedHostId: host.id,
+        probeId: host.probeId,
+        receivedAtMs: reportReceivedAtMs,
+        sequence,
+      });
+      const sample = samplesBySequence.get(sequence);
+
+      if (inserted && sample) {
+        services.metrics.recordSample({
+          bootId: request.bootId,
+          collectedAtMs: signedNumber(sample.collectedAtMs),
+          cpuCores: (sample.cpuCores ?? []).map((core) => ({
+            idle: unsignedNumber(core.idle),
+            iowait: unsignedNumber(core.iowait),
+            irq: unsignedNumber(core.irq),
+            name: core.name ?? "",
+            nice: unsignedNumber(core.nice),
+            softirq: unsignedNumber(core.softirq),
+            steal: unsignedNumber(core.steal),
+            system: unsignedNumber(core.system),
+            usagePercent: core.usagePercent ?? 0,
+            user: unsignedNumber(core.user),
+          })),
+          cpuPercent: metricField(sample, "cpuPercent"),
+          disks: (sample.disks ?? []).map((disk) => ({
+            availableBytes: unsignedNumber(disk.availableBytes),
+            filesystemType: disk.filesystemType ?? "",
+            mountPoint: disk.mountPoint ?? "",
+            totalBytes: unsignedNumber(disk.totalBytes),
+            usedBytes: unsignedNumber(disk.usedBytes),
+          })),
+          diskTotalBytes: sample.disks?.length
+            ? sumUnsigned(sample.disks, (disk) => disk.totalBytes)
+            : null,
+          diskUsedBytes: sample.disks?.length
+            ? sumUnsigned(sample.disks, (disk) => disk.usedBytes)
+            : null,
+          load1: metricField(sample, "load_1"),
+          load5: metricField(sample, "load_5"),
+          load15: metricField(sample, "load_15"),
+          managedHostId: host.id,
+          memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
+          memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
+          networkInterfaces: (sample.networkInterfaces ?? []).map(
+            (networkInterface) => ({
+              name: networkInterface.name ?? "",
+              rxBytes: unsignedNumber(networkInterface.rxBytes),
+              rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
+              txBytes: unsignedNumber(networkInterface.txBytes),
+              txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
+            }),
+          ),
+          networkRxBytesDelta: sample.networkInterfaces?.length
+            ? sumUnsigned(
+                sample.networkInterfaces,
+                (networkInterface) => networkInterface.rxBytesDelta,
+              )
+            : null,
+          networkTxBytesDelta: sample.networkInterfaces?.length
+            ? sumUnsigned(
+                sample.networkInterfaces,
+                (networkInterface) => networkInterface.txBytesDelta,
+              )
+            : null,
+          probeId: host.probeId,
+          receivedAtMs: reportReceivedAtMs,
+          sequence,
+          uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
+        });
+        detailSamples.push(
+          liveDetailSampleFromMetricSample(host.id, sample, reportReceivedAtMs),
+        );
+      }
+    }
+
+    broadcastManagedHostSummary(services, host.id, reportReceivedAtMs);
+    for (const sample of detailSamples) {
+      services.liveUpdates?.broadcastDetailSample(sample);
+    }
+
+    const responseBody = ReportResponse.encode(
+      ReportResponse.create({
+        acceptedSequenceEnd: validatedReport.sequenceEnd,
+        inventoryNeeded,
+        currentProbeConfigurationVersion:
+          services.probeConfigurations.getEffectiveForHost(host.id)
+            .configuration.version,
+        serverTimeMs: reportReceivedAtMs,
+      }),
+    ).finish();
+
+    return context.body(toArrayBuffer(responseBody), 200, {
+      "cache-control": "no-store",
+      "content-type": "application/x-protobuf",
+    });
+  });
+
+  routes.post("/config", async (context) => {
+    const host = authenticateProbe(
+      services.managedHosts,
+      context.req.raw.headers.get("authorization"),
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    const request = decodeConfigurationRequest(
+      new Uint8Array(await context.req.arrayBuffer()),
+    );
+
+    if (!request || request.probeId !== host.probeId) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    const body = ConfigurationResponse.encode(
+      ConfigurationResponse.create(
+        services.probeConfigurations.getEffectiveForHost(host.id).configuration,
+      ),
+    ).finish();
+
+    return context.body(toArrayBuffer(body), 200, {
+      "cache-control": "no-store",
+      "content-type": "application/x-protobuf",
+    });
+  });
+
+  return routes;
+}
+
+function broadcastManagedHostSummary(
+  services: ProbeRouteServices,
+  managedHostId: number,
+  nowMs: number,
+) {
+  if (!services.liveUpdates) {
+    return;
+  }
+
+  const hostSummary = services.managedHosts
+    .listSummaries({
+      latestMetricForHost: (hostId) =>
+        services.metrics.findLatestSample(hostId),
+      nowMs,
+      probeConfigurationForHost: (hostId) => {
+        const effective =
+          services.probeConfigurations.getEffectiveForHost(hostId);
+
+        return {
+          mode: effective.mode,
+          version: effective.configuration.version,
+        };
+      },
+      thresholds: services.hostStatus,
+    })
+    .find((summary) => summary.id === managedHostId);
+
+  if (hostSummary) {
+    const effectiveConfiguration =
+      services.probeConfigurations.getEffectiveForHost(managedHostId);
+
+    services.liveUpdates.broadcastManagedHostSummary(
+      liveSummaryFromManagedHost(hostSummary, {
+        metricsCollectionIntervalSeconds:
+          effectiveConfiguration.configuration.metricsCollectionIntervalSeconds,
+      }),
+    );
+  }
+}
+
+function liveDetailSampleFromMetricSample(
+  managedHostId: number,
+  sample: enoki.v1.IMetricSample,
+  receivedAtMs: number,
+): ManagedHostDetailSample {
+  return {
+    collectedAtMs: signedNumber(sample.collectedAtMs),
+    cpuCores: (sample.cpuCores ?? []).map((core) => ({
+      name: core.name ?? "",
+      usagePercent: core.usagePercent ?? 0,
+    })),
+    cpuPercent: metricField(sample, "cpuPercent"),
+    disks: (sample.disks ?? []).map((disk) => ({
+      availableBytes: unsignedNumber(disk.availableBytes),
+      filesystemType: disk.filesystemType ?? "",
+      mountPoint: disk.mountPoint ?? "",
+      totalBytes: unsignedNumber(disk.totalBytes),
+      usedBytes: unsignedNumber(disk.usedBytes),
+    })),
+    managedHostId,
+    memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
+    memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
+    networkInterfaces: (sample.networkInterfaces ?? []).map(
+      (networkInterface) => ({
+        name: networkInterface.name ?? "",
+        rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
+        txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
+      }),
+    ),
+    receivedAtMs,
+    sequence: unsignedNumber(sample.sequence),
+    uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
+  };
+}
+
+function decodeRegistrationRequest(body: Uint8Array) {
+  try {
+    return RegistrationRequest.decode(body);
+  } catch {
+    return null;
+  }
+}
+
+function decodeReportRequest(body: Uint8Array) {
+  try {
+    return ReportRequest.decode(body);
+  } catch {
+    return null;
+  }
+}
+
+function decodeConfigurationRequest(body: Uint8Array) {
+  try {
+    return ConfigurationRequest.decode(body);
+  } catch {
+    return null;
+  }
+}
+
+function authenticateProbe(
+  managedHosts: ManagedHostRepository,
+  authorization: string | null,
+) {
+  const probeSecret = parseBearerSecret(authorization);
+
+  if (!probeSecret) {
+    return null;
+  }
+
+  return managedHosts.findByProbeSecretHash(hashSecret(probeSecret));
+}
+
+function parseBearerSecret(authorization: string | null) {
+  const [scheme, secret, extra] = authorization?.split(/\s+/) ?? [];
+
+  if (scheme !== "Bearer" || !secret || extra) {
+    return null;
+  }
+
+  return secret;
+}
+
+function isIdentityContentEncoding(headers: Headers) {
+  const contentEncoding = headers.get("content-encoding");
+
+  return (
+    contentEncoding === null ||
+    contentEncoding.trim() === "" ||
+    contentEncoding.toLowerCase() === "identity"
+  );
+}
+
+function contentLengthExceeds(headers: Headers, maxBytes: number) {
+  const contentLength = headers.get("content-length")?.trim();
+
+  if (!contentLength || !/^\d+$/.test(contentLength)) {
+    return false;
+  }
+
+  return Number(contentLength) > maxBytes;
+}
+
+async function readCappedRequestBody(request: Request, maxBytes: number) {
+  if (!request.body) {
+    return new Uint8Array();
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      totalBytes += value.byteLength;
+
+      if (totalBytes > maxBytes) {
+        await reader.cancel();
+        return null;
+      }
+
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return body;
+}
+
+function probeJsonError(error: string, status: 400 | 401 | 413 | 415) {
+  return new Response(JSON.stringify({ error }), {
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/json",
+    },
+    status,
+  });
+}
+
+function createProbeId() {
+  return `probe_${randomBytes(16).toString("base64url")}`;
+}
+
+function createProbeSecret() {
+  return `enk_probe_${randomBytes(32).toString("base64url")}`;
+}
+
+function hashInventory(inventory: enoki.v1.IInventory) {
+  const bytes = InventoryMessage.encode(
+    InventoryMessage.create(stableInventory(inventory)),
+  ).finish();
+
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function serializeInventory(inventory: enoki.v1.IInventory) {
+  return JSON.stringify(
+    InventoryMessage.toObject(
+      InventoryMessage.create(stableInventory(inventory)),
+      {
+        longs: String,
+      },
+    ),
+  );
+}
+
+function stableInventory(inventory: enoki.v1.IInventory): enoki.v1.IInventory {
+  return {
+    ...inventory,
+    filesystems: [...(inventory.filesystems ?? [])].sort(
+      (left, right) =>
+        String(left.mountPoint ?? "").localeCompare(
+          String(right.mountPoint ?? ""),
+        ) ||
+        String(left.filesystemType ?? "").localeCompare(
+          String(right.filesystemType ?? ""),
+        ),
+    ),
+    networkInterfaces: [...(inventory.networkInterfaces ?? [])]
+      .map((networkInterface) => ({
+        ...networkInterface,
+        addresses: [...new Set(networkInterface.addresses ?? [])].sort(),
+      }))
+      .sort((left, right) =>
+        String(left.name ?? "").localeCompare(String(right.name ?? "")),
+      ),
+  };
+}
+
+function validateReportEnvelope(request: enoki.v1.IProbeReportRequest) {
+  const sequenceStart = unsignedNumber(request.sequenceStart);
+  const sequenceEnd = unsignedNumber(request.sequenceEnd);
+
+  if (
+    !request.bootId ||
+    sequenceStart < 1 ||
+    sequenceEnd < sequenceStart ||
+    sequenceEnd - sequenceStart + 1 > maxReportObservationRange
+  ) {
+    return null;
+  }
+
+  const samples = request.metrics ?? [];
+  const sequenceCount = sequenceEnd - sequenceStart + 1;
+
+  if (samples.length === 0 && sequenceCount !== 1) {
+    return null;
+  }
+
+  if (samples.length > 0 && samples.length !== sequenceCount) {
+    return null;
+  }
+
+  const sampleSequences = new Set<number>();
+
+  for (const sample of samples) {
+    const sequence = unsignedNumber(sample.sequence);
+    const collectedAtMs = signedNumber(sample.collectedAtMs);
+
+    if (
+      sequence < sequenceStart ||
+      sequence > sequenceEnd ||
+      collectedAtMs < 1 ||
+      (hasMetricField(sample, "cpuPercent") &&
+        !Number.isFinite(sample.cpuPercent))
+    ) {
+      return null;
+    }
+
+    if (sampleSequences.has(sequence)) {
+      return null;
+    }
+
+    sampleSequences.add(sequence);
+  }
+
+  for (
+    let sequence = sequenceStart;
+    samples.length > 0 && sequence <= sequenceEnd;
+    sequence += 1
+  ) {
+    if (!sampleSequences.has(sequence)) {
+      return null;
+    }
+  }
+
+  return { sequenceEnd, sequenceStart };
+}
+
+function detectClockSkew(
+  samples: enoki.v1.IMetricSample[],
+  receivedAtMs: number,
+  thresholdMs: number,
+) {
+  const deltas = samples.map((sample) =>
+    Math.abs(receivedAtMs - signedNumber(sample.collectedAtMs)),
+  );
+  const lastDeltaMs = deltas.length > 0 ? Math.max(...deltas) : null;
+
+  return {
+    detected: lastDeltaMs !== null && lastDeltaMs >= thresholdMs,
+    lastDeltaMs,
+  };
+}
+
+function firstInventoryAddress(
+  inventory: enoki.v1.IInventory | null | undefined,
+) {
+  for (const networkInterface of inventory?.networkInterfaces ?? []) {
+    const address = networkInterface.addresses?.find(
+      (candidate) => candidate.trim() !== "",
+    );
+
+    if (address) {
+      return address;
+    }
+  }
+
+  return null;
+}
+
+function reportConnectAddress(
+  inventory: enoki.v1.IInventory | null | undefined,
+  host: {
+    connectAddress: string;
+    observedIp: string | null;
+  },
+  observedIp: string | null,
+) {
+  const inventoryAddress = firstInventoryAddress(inventory);
+  if (inventoryAddress) {
+    return inventoryAddress;
+  }
+
+  if (!host.connectAddress || host.connectAddress === host.observedIp) {
+    return observedIp;
+  }
+
+  return undefined;
+}
+
+function unsignedNumber(
+  value: number | { toNumber: () => number } | null | undefined,
+) {
+  if (value === null || value === undefined) {
+    return 0;
+  }
+
+  return typeof value === "number" ? value : value.toNumber();
+}
+
+function signedNumber(
+  value: number | { toNumber: () => number } | null | undefined,
+) {
+  return unsignedNumber(value);
+}
+
+function metricField(
+  sample: enoki.v1.IMetricSample,
+  field: "cpuPercent" | "load_1" | "load_5" | "load_15",
+) {
+  return hasMetricField(sample, field) ? (sample[field] ?? null) : null;
+}
+
+function metricUnsignedField(
+  sample: enoki.v1.IMetricSample,
+  field: "memoryTotalBytes" | "memoryUsedBytes" | "uptimeSeconds",
+) {
+  return hasMetricField(sample, field) ? unsignedNumber(sample[field]) : null;
+}
+
+function hasMetricField(sample: enoki.v1.IMetricSample, field: string) {
+  return Object.prototype.hasOwnProperty.call(sample, field);
+}
+
+function sumUnsigned<T>(
+  values: T[],
+  select: (value: T) => number | { toNumber: () => number } | null | undefined,
+) {
+  return values.reduce((sum, value) => sum + unsignedNumber(select(value)), 0);
+}
+
+function fallbackDisplayName(probeId: string) {
+  return probeId.slice(0, 14);
+}
+
+function observedIpFromContext(
+  context: Context,
+  trustForwardedHeaders = false,
+) {
+  const request = context.req.raw;
+
+  const forwardedAddress = trustForwardedHeaders
+    ? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      request.headers.get("x-real-ip")?.trim() ||
+      null
+    : null;
+
+  return forwardedAddress || directRemoteAddress(context);
+}
+
+function directRemoteAddress(context: Context) {
+  try {
+    return normalizeRemoteAddress(getConnInfo(context).remote.address);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRemoteAddress(address: string | undefined) {
+  if (!address) {
+    return null;
+  }
+
+  return address.startsWith("::ffff:") ? address.slice(7) : address;
+}
+
+function toArrayBuffer(bytes: Uint8Array) {
+  const output = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(output).set(bytes);
+  return output;
+}
