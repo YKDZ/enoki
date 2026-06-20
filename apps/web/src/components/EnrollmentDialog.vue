@@ -154,7 +154,7 @@ async function copyInstallCommand() {
             <div>
               <dt class="text-muted-foreground">探针版本</dt>
               <dd class="mt-1">
-                {{ enrollment.probeReleaseVersion ?? "最新版本" }}
+                {{ enrollment.probeReleaseVersion ?? "默认最新版本" }}
               </dd>
             </div>
             <div>
