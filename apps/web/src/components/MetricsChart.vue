@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useEventListener } from "@vueuse/core";
 import * as echarts from "echarts";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
@@ -49,14 +50,14 @@ onMounted(async () => {
     }
   });
   renderChart();
-  window.addEventListener("resize", resizeChart);
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", resizeChart);
   chart?.dispose();
   chart = null;
 });
+
+useEventListener("resize", resizeChart);
 
 watch(
   () => [

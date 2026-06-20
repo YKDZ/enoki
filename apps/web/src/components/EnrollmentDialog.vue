@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { Copy, LoaderCircle } from "@lucide/vue";
+import { useClipboard, useTimeoutFn } from "@vueuse/core";
+import { Check, Copy, LoaderCircle, X } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import type { EnrollmentResponse } from "../types";
 
-defineProps<{
+const props = defineProps<{
   enrollment: EnrollmentResponse | null;
   enrollmentError: string;
   isCreatingEnrollment: boolean;
@@ -19,10 +21,75 @@ defineProps<{
 }>();
 
 defineEmits<{
-  copyInstallCommand: [];
   createEnrollment: [];
   "update:open": [open: boolean];
 }>();
+
+const installCommand = computed(() => props.enrollment?.installCommand ?? "");
+const copyStatus = ref<"idle" | "success" | "error">("idle");
+const { copied, copy, isSupported } = useClipboard({
+  copiedDuring: 2_000,
+  source: installCommand,
+});
+const { start: clearCopyError } = useTimeoutFn(
+  () => {
+    if (copyStatus.value === "error") {
+      copyStatus.value = "idle";
+    }
+  },
+  2_000,
+  { immediate: false },
+);
+const copyButtonClass = computed(() => {
+  if (copyStatus.value === "success") {
+    return "border-green-200 text-green-700 hover:bg-green-50 hover:text-green-800";
+  }
+
+  if (copyStatus.value === "error") {
+    return "border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800";
+  }
+
+  return "";
+});
+const copyButtonLabel = computed(() => {
+  if (copyStatus.value === "success") {
+    return "已复制";
+  }
+
+  if (copyStatus.value === "error") {
+    return "复制失败";
+  }
+
+  return "复制";
+});
+
+watch(copied, (value) => {
+  if (!value && copyStatus.value === "success") {
+    copyStatus.value = "idle";
+  }
+});
+
+watch(installCommand, () => {
+  copyStatus.value = "idle";
+});
+
+async function copyInstallCommand() {
+  if (!installCommand.value) {
+    return;
+  }
+
+  try {
+    if (!isSupported.value) {
+      throw new Error("clipboard_not_supported");
+    }
+
+    await copy();
+    copyStatus.value = "success";
+  } catch {
+    copyStatus.value = "error";
+    clearCopyError();
+  }
+}
 </script>
 
 <template>
@@ -59,16 +126,27 @@ defineEmits<{
               variant="outline"
               size="sm"
               type="button"
-              @click="$emit('copyInstallCommand')"
+              :class="copyButtonClass"
+              @click="copyInstallCommand"
             >
-              <Copy class="size-4" aria-hidden="true" />
-              复制
+              <Check
+                v-if="copyStatus === 'success'"
+                class="size-4"
+                aria-hidden="true"
+              />
+              <X
+                v-else-if="copyStatus === 'error'"
+                class="size-4"
+                aria-hidden="true"
+              />
+              <Copy v-else class="size-4" aria-hidden="true" />
+              {{ copyButtonLabel }}
             </Button>
           </div>
 
           <dl class="grid gap-3 text-sm sm:grid-cols-3">
             <div>
-              <dt class="text-muted-foreground">Hub</dt>
+              <dt class="text-muted-foreground">Hub API URL</dt>
               <dd class="mt-1 break-all">
                 {{ enrollment.hubUrl }}
               </dd>
@@ -76,7 +154,7 @@ defineEmits<{
             <div>
               <dt class="text-muted-foreground">探针版本</dt>
               <dd class="mt-1">
-                {{ enrollment.probeReleaseVersion ?? "自定义下载地址" }}
+                {{ enrollment.probeReleaseVersion ?? "最新版本" }}
               </dd>
             </div>
             <div>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { LoaderCircle } from "@lucide/vue";
+import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import { Card, CardContent } from "@/components/ui/card";
@@ -98,10 +99,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disconnectLiveUpdates();
-  window.removeEventListener("popstate", syncRouteFromLocation);
 });
 
-window.addEventListener("popstate", syncRouteFromLocation);
+useEventListener("popstate", syncRouteFromLocation);
 
 async function login() {
   loginError.value = "";
@@ -207,14 +207,6 @@ async function openEnrollmentDialog() {
   ) {
     await createEnrollment();
   }
-}
-
-async function copyInstallCommand() {
-  if (!enrollment.value) {
-    return;
-  }
-
-  await navigator.clipboard.writeText(enrollment.value.installCommand);
 }
 
 async function toggleGlobalConfiguration() {
@@ -523,7 +515,6 @@ function hostDetailPath(hostId: number) {
       :enrollment="enrollment"
       :enrollment-error="enrollmentError"
       :is-creating-enrollment="isCreatingEnrollment"
-      @copy-install-command="copyInstallCommand"
       @create-enrollment="createEnrollment"
     />
 
