@@ -12,6 +12,7 @@ const existingHost: ManagedHostSummary = {
   connectAddress: "10.0.0.10",
   cpu: "2 cores",
   cpuModel: null,
+  description: "生产数据库",
   displayName: "managed-host-01",
   id: 1,
   lastReportAtMs: null,
@@ -106,6 +107,7 @@ describe("live Managed Host summaries", () => {
           {
             ...existingHost,
             connectAddress: "10.0.0.11",
+            description: "备用节点",
             displayName: "managed-host-02",
             id: 2,
             status: "online",

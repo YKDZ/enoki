@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import type { HostMetadataDraft, ManagedHostDetail } from "../types";
 
 const props = defineProps<{
@@ -51,6 +52,14 @@ function updateOpen(open: boolean) {
         <Label class="grid gap-2 text-sm font-medium">
           显示名称
           <Input v-model="hostMetadataDraft.displayName" type="text" required />
+        </Label>
+        <Label class="grid gap-2 text-sm font-medium">
+          描述
+          <Textarea
+            v-model="hostMetadataDraft.description"
+            class="min-h-24 resize-none"
+            maxlength="500"
+          />
         </Label>
         <Label class="grid gap-2 text-sm font-medium">
           IP 地址

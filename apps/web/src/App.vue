@@ -329,7 +329,7 @@ async function saveHostConfiguration() {
 function openHostMetadata(
   host: Pick<
     ManagedHostSummary | ManagedHostDetail,
-    "connectAddress" | "displayName" | "id"
+    "connectAddress" | "description" | "displayName" | "id"
   >,
 ) {
   hostMetadataError.value = "";
@@ -344,6 +344,7 @@ function openHostMetadata(
   activeHostMetadataId.value = host.id;
   hostMetadataDraft.value = {
     connectAddress: host.connectAddress,
+    description: host.description,
     displayName: host.displayName,
   };
   hostMetadataOriginal.value = { ...hostMetadataDraft.value };
@@ -365,6 +366,7 @@ async function saveHostMetadata() {
     const metadataUpdate: Partial<HostMetadataDraft> = {};
     const displayName = hostMetadataDraft.value.displayName.trim();
     const connectAddress = hostMetadataDraft.value.connectAddress.trim();
+    const description = hostMetadataDraft.value.description.trim();
 
     if (!displayName || !connectAddress) {
       throw new Error("invalid_host_metadata");
@@ -376,6 +378,10 @@ async function saveHostMetadata() {
 
     if (connectAddress !== hostMetadataOriginal.value.connectAddress) {
       metadataUpdate.connectAddress = connectAddress;
+    }
+
+    if (description !== hostMetadataOriginal.value.description) {
+      metadataUpdate.description = description;
     }
 
     if (Object.keys(metadataUpdate).length === 0) {

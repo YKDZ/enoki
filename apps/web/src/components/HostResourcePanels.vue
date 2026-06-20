@@ -184,46 +184,51 @@ function frequencyText(value: number) {
       </div>
     </div>
     <p v-else class="text-sm text-muted-foreground">暂无核心数据</p>
-    <div class="grid gap-3 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-3">
-      <div>
+    <div
+      class="grid min-w-0 gap-3 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-3"
+    >
+      <div class="min-w-0">
         <p>CPU 型号</p>
-        <p class="mt-1 truncate font-medium text-foreground" :title="cpuModel ?? undefined">
+        <p
+          class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal"
+          :title="cpuModel ?? undefined"
+        >
           {{ cpuModel || "暂无" }}
         </p>
       </div>
-      <div>
+      <div class="min-w-0">
         <p>进程</p>
-        <p class="mt-1 font-medium text-foreground">
+        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
           {{ inventoryText("processCount") }}
         </p>
       </div>
-      <div>
+      <div class="min-w-0">
         <p>线程</p>
-        <p class="mt-1 font-medium text-foreground">
+        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
           {{ inventoryText("threadCount") }}
         </p>
       </div>
-      <div>
+      <div class="min-w-0">
         <p>L3 缓存</p>
-        <p class="mt-1 font-medium text-foreground">
+        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
           {{ inventoryText("cpuCacheL3Bytes", formatBytes) }}
         </p>
       </div>
-      <div>
+      <div class="min-w-0">
         <p>基准频率</p>
-        <p class="mt-1 font-medium text-foreground">
+        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
           {{ inventoryText("cpuBaseFrequencyMhz", frequencyText) }}
         </p>
       </div>
-      <div>
+      <div class="min-w-0">
         <p>物理 CPU</p>
-        <p class="mt-1 font-medium text-foreground">
+        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
           {{ inventoryText("cpuPhysicalCount") }}
         </p>
       </div>
-      <div>
+      <div class="min-w-0">
         <p>插槽</p>
-        <p class="mt-1 font-medium text-foreground">
+        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
           {{ inventoryText("cpuSocketCount") }}
         </p>
       </div>

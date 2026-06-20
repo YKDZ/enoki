@@ -10,6 +10,7 @@ export type ManagedHostSummary = {
   connectAddress: string;
   cpu: string;
   cpuModel: string | null;
+  description: string;
   displayName: string;
   id: number;
   lastReportAtMs: number | null;
@@ -70,6 +71,7 @@ export type HostProbeConfigurationResponse = {
 
 export type HostMetadataDraft = {
   connectAddress: string;
+  description: string;
   displayName: string;
 };
 
@@ -112,6 +114,7 @@ export type MetricsWindow = "1h" | "6h" | "24h" | "7d";
 export type ManagedHostDetail = ManagedHostSummary & {
   hostMetadata: {
     connectAddress: string;
+    description: string;
     displayName: string;
     observedIp: string | null;
   };

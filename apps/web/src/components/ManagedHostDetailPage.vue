@@ -1,11 +1,5 @@
 <script setup lang="ts">
-import {
-  AlertTriangle,
-  ArrowLeft,
-  LoaderCircle,
-  Server,
-  Settings,
-} from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, LoaderCircle, Settings } from "@lucide/vue";
 import { computed, onMounted } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -140,14 +134,12 @@ function statusClass(status: string) {
                 {{ hostStatusText(host.status) }}
               </Badge>
             </div>
-            <div
-              class="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
+            <p
+              v-if="host.description"
+              class="mt-1 max-w-3xl break-words text-sm text-muted-foreground whitespace-normal"
             >
-              <Server class="size-3.5" aria-hidden="true" />
-              <span>{{ host.connectAddress }}</span>
-              <span>/</span>
-              <span>{{ host.system }}</span>
-            </div>
+              {{ host.description }}
+            </p>
           </div>
         </div>
 

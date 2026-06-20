@@ -13,6 +13,7 @@ const host: ManagedHostSummary = {
   connectAddress: "10.0.0.10",
   cpu: "2 cores",
   cpuModel: null,
+  description: "生产数据库",
   displayName: "managed-host-01",
   id: 1,
   lastReportAtMs: 1_725_000_000_000,
@@ -53,6 +54,7 @@ describe("Managed Host overview card", () => {
     expect(html).toContain("磁盘");
     expect(html).toContain("18.4 Mb/s");
     expect(html).toContain("在线");
+    expect(html).toContain("生产数据库");
     expect(html).toContain("时钟偏移 60s");
     expect(html).not.toContain("最新 CPU");
     expect(html).not.toContain("最新上报");

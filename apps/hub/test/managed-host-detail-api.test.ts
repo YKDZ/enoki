@@ -277,6 +277,7 @@ describe("Managed Host detail API", () => {
       host: expect.objectContaining({
         hostMetadata: {
           connectAddress: "10.0.0.10",
+          description: "",
           displayName: "managed-host-01",
           observedIp: null,
         },

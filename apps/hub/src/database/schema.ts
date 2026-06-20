@@ -49,6 +49,7 @@ export const managedHosts = sqliteTable(
     displayNameEdited: integer("display_name_edited", {
       mode: "boolean",
     }).notNull(),
+    description: text("description").notNull().default(""),
     hostname: text("hostname"),
     os: text("os"),
     kernel: text("kernel"),

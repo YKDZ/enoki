@@ -202,7 +202,7 @@ describe("Host Metadata API", () => {
     );
   });
 
-  it("lets the Owner edit Display Name and Connect Address", async () => {
+  it("lets the Owner edit Display Name, Description, and Connect Address", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -223,6 +223,7 @@ describe("Host Metadata API", () => {
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
+          description: "华东区主机",
           displayName: "生产探针 01",
         }),
         headers: {
@@ -236,6 +237,7 @@ describe("Host Metadata API", () => {
     expect(updateResponse.status).toBe(200);
     await expect(updateResponse.json()).resolves.toEqual({
       connectAddress: "ssh.internal.example",
+      description: "华东区主机",
       displayName: "生产探针 01",
       id: hostId,
     });
@@ -249,6 +251,7 @@ describe("Host Metadata API", () => {
       hosts: [
         expect.objectContaining({
           connectAddress: "ssh.internal.example",
+          description: "华东区主机",
           displayName: "生产探针 01",
           id: hostId,
         }),
@@ -267,7 +270,7 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
-  it("does not send Display Name or Connect Address in Probe Configuration", async () => {
+  it("does not send Host Metadata in Probe Configuration", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -287,6 +290,7 @@ describe("Host Metadata API", () => {
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
+          description: "不下发给探针",
           displayName: "生产探针 01",
         }),
         headers: {
@@ -330,6 +334,7 @@ describe("Host Metadata API", () => {
     );
     expect(configuration).not.toHaveProperty("displayName");
     expect(configuration).not.toHaveProperty("connectAddress");
+    expect(configuration).not.toHaveProperty("description");
 
     database.close();
   });
@@ -402,6 +407,7 @@ describe("Host Metadata API", () => {
     expect(updateResponse.status).toBe(200);
     await expect(updateResponse.json()).resolves.toEqual({
       connectAddress: "ssh.internal.example",
+      description: "",
       displayName: "managed-host-01",
       id: hostId,
     });
@@ -463,6 +469,7 @@ describe("Host Metadata API", () => {
     expect(updateResponse.status).toBe(200);
     await expect(updateResponse.json()).resolves.toEqual({
       connectAddress: "10.0.0.10",
+      description: "",
       displayName: "生产探针 01",
       id: hostId,
     });

@@ -84,9 +84,11 @@ function memoryPercent() {
     <CardHeader class="pb-3">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="truncate text-base font-semibold">{{ host.displayName }}</h3>
-          <p class="mt-1 truncate text-sm text-muted-foreground">
-            {{ host.connectAddress }}
+          <h3 class="break-words text-base font-semibold whitespace-normal">
+            {{ host.displayName }}
+          </h3>
+          <p class="mt-1 break-words text-sm text-muted-foreground whitespace-normal">
+            {{ host.description || "暂无描述" }}
           </p>
         </div>
         <div class="flex flex-col items-end gap-2">

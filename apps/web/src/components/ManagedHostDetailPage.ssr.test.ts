@@ -23,9 +23,11 @@ describe("Managed Host detail page", () => {
         connectAddress: "10.0.0.10",
         cpu: "2 cores",
         cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+        description: "生产数据库",
         displayName: "managed-host-01",
         hostMetadata: {
           connectAddress: "10.0.0.10",
+          description: "生产数据库",
           displayName: "managed-host-01",
           observedIp: "203.0.113.10",
         },
@@ -116,6 +118,9 @@ describe("Managed Host detail page", () => {
     expect(html).toContain("1 GiB / 2 GiB");
     expect(html).toContain("1 小时 1 分钟");
     expect(html).toContain("Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz");
+    expect(html).toContain("生产数据库");
+    expect(html).toContain("IP 地址");
+    expect(html).toContain("操作系统");
     expect(html).toContain("探针未能应用最新配置，请检查探针连通性或配置下发状态。");
     expect(html).not.toContain("技术详情");
     expect(html).not.toContain("report request failed: 503 Service Unavailable");

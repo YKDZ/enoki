@@ -68,6 +68,7 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
         ...hostSummary,
         hostMetadata: {
           connectAddress: host.connectAddress,
+          description: host.description,
           displayName: host.displayName,
           observedIp: host.observedIp,
         },
@@ -181,6 +182,7 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
 
     return context.json({
       connectAddress: host.connectAddress,
+      description: host.description,
       displayName: host.displayName,
       id: host.id,
     });
@@ -220,10 +222,12 @@ function parseHostMetadata(input: unknown) {
 
   const candidate = input as {
     connectAddress?: unknown;
+    description?: unknown;
     displayName?: unknown;
   };
   const output: {
     connectAddress?: string;
+    description?: string;
     displayName?: string;
   } = {};
 
@@ -241,6 +245,14 @@ function parseHostMetadata(input: unknown) {
       return null;
     }
     output.connectAddress = connectAddress;
+  }
+
+  if (Object.hasOwn(candidate, "description")) {
+    const description = stringValue(candidate.description);
+    if (description.length > 500) {
+      return null;
+    }
+    output.description = description;
   }
 
   if (Object.keys(output).length === 0) {

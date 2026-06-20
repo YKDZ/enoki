@@ -17,6 +17,7 @@ export type ManagedHostSummary = {
   connectAddress: string;
   cpu: string;
   cpuModel: string | null;
+  description: string;
   displayName: string;
   id: number;
   lastReportAtMs: number | null;
@@ -117,6 +118,7 @@ export type ManagedHostRepository = {
     id: number,
     input: {
       connectAddress?: string;
+      description?: string;
       displayName?: string;
     },
   ) => ManagedHostRow | null;
@@ -187,6 +189,7 @@ export function createManagedHostRepository(
             },
             cpu: formatCpu(host.cpuCount),
             cpuModel: host.cpuModel,
+            description: host.description,
             displayName: host.displayName,
             id: host.id,
             lastReportAtMs: host.lastReportAtMs,
@@ -323,6 +326,7 @@ export function createManagedHostRepository(
       const values: {
         connectAddress?: string;
         connectAddressEdited?: boolean;
+        description?: string;
         displayName?: string;
         displayNameEdited?: boolean;
       } = {};
@@ -341,6 +345,13 @@ export function createManagedHostRepository(
       ) {
         values.displayName = input.displayName;
         values.displayNameEdited = true;
+      }
+
+      if (
+        input.description !== undefined &&
+        input.description !== current.description
+      ) {
+        values.description = input.description;
       }
 
       if (Object.keys(values).length === 0) {

@@ -85,6 +85,13 @@
       "when": 1781955000000,
       "tag": "0011_managed_host_cpu_model",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1781980000000,
+      "tag": "0012_managed_host_description",
+      "breakpoints": true
     }
   ]
 }
