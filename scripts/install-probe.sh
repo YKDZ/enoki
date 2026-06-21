@@ -121,9 +121,10 @@ verify_manifest_signature() {
 verify_public_key_trust() {
   local public_key="$1"
   local expected="${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
+  local placeholder="__ENOKI_PROBE_ASSET_PUBLIC_KEY""_SHA256__"
   local actual
 
-  if [ -z "$expected" ] || [ "$expected" = "__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__" ]; then
+  if [ -z "$expected" ] || [ "$expected" = "$placeholder" ]; then
     fail "Probe installer does not include a trusted asset signing key fingerprint."
   fi
   if ! [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then

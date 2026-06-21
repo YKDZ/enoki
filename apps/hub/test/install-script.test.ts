@@ -136,6 +136,39 @@ describe("Probe systemd installer", () => {
     );
   });
 
+  it("trusts the embedded release signing key fingerprint without environment overrides", async () => {
+    const root = await createTempRoot("enoki-install-embedded-key-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+    const embeddedInstaller = path.join(root, "install-probe.sh");
+    const source = await readFile(installScript, "utf8");
+    await writeFile(
+      embeddedInstaller,
+      source.replaceAll(
+        "__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__",
+        assets.publicKeySha256,
+      ),
+    );
+    await chmod(embeddedInstaller, 0o755);
+
+    const result = await runInstaller(
+      {
+        ENOKI_ENROLLMENT_TOKEN: "enk_enroll_embedded",
+        ENOKI_HUB_URL: assets.hubUrl,
+        ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+        ENOKI_TEST_ROOT: root,
+        PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+      },
+      embeddedInstaller,
+    );
+
+    expect(result).toEqual({
+      code: 0,
+      stderr: "",
+      stdout: expect.stringContaining("Enoki Probe installed"),
+    });
+  });
+
   it("escapes bootstrap TOML strings written from environment values", async () => {
     const root = await createTempRoot("enoki-install-escaping-root-");
     const assets = await createProbeAssets(root);
@@ -446,8 +479,11 @@ async function writeExecutable(filePath: string, contents: string) {
   await chmod(filePath, 0o755);
 }
 
-async function runInstaller(environment: NodeJS.ProcessEnv) {
-  const child = spawn("bash", [installScript], {
+async function runInstaller(
+  environment: NodeJS.ProcessEnv,
+  scriptPath = installScript,
+) {
+  const child = spawn("bash", [scriptPath], {
     env: {
       ...process.env,
       ...environment,
