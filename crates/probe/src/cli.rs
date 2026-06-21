@@ -5,8 +5,6 @@ pub enum ProbeCommand {
     Help,
     InternalUpgrader {
         bootstrap_config_path: PathBuf,
-        operation_id: String,
-        target_probe_version: String,
     },
     Register {
         bootstrap_config_path: PathBuf,
@@ -34,33 +32,21 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
 
 fn parse_internal_upgrader_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
     let mut bootstrap_config_path = None;
-    let mut operation_id = None;
-    let mut target_probe_version = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => {
                 bootstrap_config_path = args.next().map(PathBuf::from);
             }
-            "--operation-id" => {
-                operation_id = args.next();
-            }
-            "--target-probe-version" => {
-                target_probe_version = args.next();
-            }
             _ => return ProbeCommand::Help,
         }
     }
 
-    match (bootstrap_config_path, operation_id, target_probe_version) {
-        (Some(bootstrap_config_path), Some(operation_id), Some(target_probe_version)) => {
-            ProbeCommand::InternalUpgrader {
-                bootstrap_config_path,
-                operation_id,
-                target_probe_version,
-            }
-        }
-        _ => ProbeCommand::Help,
+    match bootstrap_config_path {
+        Some(bootstrap_config_path) => ProbeCommand::InternalUpgrader {
+            bootstrap_config_path,
+        },
+        None => ProbeCommand::Help,
     }
 }
 

@@ -9,8 +9,6 @@ use std::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderRunInput {
     pub bootstrap_config_path: PathBuf,
-    pub operation_id: String,
-    pub target_probe_version: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +21,7 @@ pub struct ProbeUpgraderNoopResult {
 #[derive(Debug)]
 pub enum ProbeUpgraderRunError {
     InvalidConfig(&'static str),
+    InvalidMetadata(&'static str),
     Io(std::io::Error),
     MissingToken,
     TokenValidation(String),
@@ -33,6 +32,12 @@ impl fmt::Display for ProbeUpgraderRunError {
         match self {
             Self::InvalidConfig(message) => {
                 write!(formatter, "invalid Probe bootstrap config: {message}")
+            }
+            Self::InvalidMetadata(message) => {
+                write!(
+                    formatter,
+                    "invalid Probe Upgrader operation metadata: {message}"
+                )
             }
             Self::Io(_) => write!(formatter, "failed to read Probe bootstrap config"),
             Self::MissingToken => write!(formatter, "missing Probe Operation Token on stdin"),
@@ -50,7 +55,10 @@ impl Error for ProbeUpgraderRunError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::InvalidConfig(_) | Self::MissingToken | Self::TokenValidation(_) => None,
+            Self::InvalidConfig(_)
+            | Self::InvalidMetadata(_)
+            | Self::MissingToken
+            | Self::TokenValidation(_) => None,
         }
     }
 }
@@ -95,8 +103,8 @@ pub fn run_probe_upgrader(
     stdin: &str,
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> Result<ProbeUpgraderNoopResult, ProbeUpgraderRunError> {
-    let token = stdin.trim();
-    if token.is_empty() {
+    let operation = read_operation_metadata(stdin)?;
+    if operation.token.is_empty() {
         return Err(ProbeUpgraderRunError::MissingToken);
     }
 
@@ -112,15 +120,15 @@ pub fn run_probe_upgrader(
             ))?;
     let body = format!(
         "{{\"targetProbeVersion\":\"{}\",\"token\":\"{}\"}}",
-        json_string_fragment(&input.target_probe_version),
-        json_string_fragment(token),
+        json_string_fragment(&operation.target_probe_version),
+        json_string_fragment(&operation.token),
     );
 
     transport.post_token_validation(
         &format!(
             "{}/api/probe/operations/{}/token/validate",
             hub_url.trim_end_matches('/'),
-            input.operation_id,
+            operation.operation_id,
         ),
         &probe_secret,
         &body,
@@ -128,9 +136,49 @@ pub fn run_probe_upgrader(
 
     Ok(ProbeUpgraderNoopResult {
         error_code: "probe_upgrader_noop".to_string(),
-        operation_id: input.operation_id,
+        operation_id: operation.operation_id,
         status: "failed".to_string(),
     })
+}
+
+struct ProbeUpgraderOperationMetadata {
+    operation_id: String,
+    target_probe_version: String,
+    token: String,
+}
+
+fn read_operation_metadata(
+    stdin: &str,
+) -> Result<ProbeUpgraderOperationMetadata, ProbeUpgraderRunError> {
+    if stdin.trim().is_empty() {
+        return Err(ProbeUpgraderRunError::MissingToken);
+    }
+
+    let value = stdin
+        .parse::<toml::Value>()
+        .map_err(|_| ProbeUpgraderRunError::InvalidMetadata("invalid TOML"))?;
+    let operation_id = required_metadata_string(&value, "operation_id")?;
+    let target_probe_version = required_metadata_string(&value, "target_probe_version")?;
+    let token = required_metadata_string(&value, "token")?;
+
+    Ok(ProbeUpgraderOperationMetadata {
+        operation_id,
+        target_probe_version,
+        token,
+    })
+}
+
+fn required_metadata_string(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<String, ProbeUpgraderRunError> {
+    match value.get(key) {
+        Some(toml::Value::String(string)) => Ok(string.clone()),
+        Some(_) => Err(ProbeUpgraderRunError::InvalidMetadata(
+            "expected string values",
+        )),
+        None => Err(ProbeUpgraderRunError::InvalidMetadata("missing field")),
+    }
 }
 
 struct ProbeUpgraderBootstrapConfig {
@@ -184,6 +232,11 @@ pub struct ProbeUpgraderLaunch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeUpgraderCommandOutput {
+    pub stdout: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeUpgraderLaunchError {
     InsufficientPrivilege(String),
     UnsupportedInstallation(String),
@@ -195,7 +248,7 @@ pub trait ProbeUpgraderCommandRunner {
         program: &str,
         args: &[String],
         stdin: &str,
-    ) -> Result<(), ProbeUpgraderLaunchError>;
+    ) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError>;
 }
 
 pub struct SystemProbeUpgraderCommandRunner;
@@ -206,11 +259,11 @@ impl ProbeUpgraderCommandRunner for SystemProbeUpgraderCommandRunner {
         program: &str,
         args: &[String],
         stdin: &str,
-    ) -> Result<(), ProbeUpgraderLaunchError> {
+    ) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
@@ -238,7 +291,9 @@ impl ProbeUpgraderCommandRunner for SystemProbeUpgraderCommandRunner {
             .map_err(|error| ProbeUpgraderLaunchError::InsufficientPrivilege(error.to_string()))?;
 
         if output.status.success() {
-            return Ok(());
+            return Ok(ProbeUpgraderCommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -255,25 +310,77 @@ impl ProbeUpgraderCommandRunner for SystemProbeUpgraderCommandRunner {
 pub fn launch_systemd_probe_upgrader(
     input: ProbeUpgraderLaunch,
     runner: &mut impl ProbeUpgraderCommandRunner,
-) -> Result<(), ProbeUpgraderLaunchError> {
+) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
     let args = vec![
         "/usr/bin/systemd-run".to_string(),
         "--collect".to_string(),
         "--pipe".to_string(),
         "--wait".to_string(),
-        format!("--unit=enoki-probe-upgrader-{}", input.operation_id),
+        "--unit=enoki-probe-upgrader".to_string(),
         "--property=Type=exec".to_string(),
+        "--".to_string(),
         input.install_path.display().to_string(),
         "internal-upgrader".to_string(),
         "--config".to_string(),
         input.bootstrap_config_path.display().to_string(),
-        "--operation-id".to_string(),
-        input.operation_id,
-        "--target-probe-version".to_string(),
-        input.target_probe_version,
     ];
+    let stdin = render_probe_upgrader_stdin(&input);
 
-    runner.run("sudo", &args, &input.token)
+    runner.run("sudo", &args, &stdin)
+}
+
+pub fn render_probe_upgrader_stdin(input: &ProbeUpgraderLaunch) -> String {
+    [
+        format!("operation_id = {}", toml_string(&input.operation_id)),
+        format!(
+            "target_probe_version = {}",
+            toml_string(&input.target_probe_version),
+        ),
+        format!("token = {}", toml_string(&input.token)),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+pub fn format_probe_upgrader_noop_result(result: &ProbeUpgraderNoopResult) -> String {
+    format!(
+        "Probe Upgrader no-op result: operation={} status={} error_code={}",
+        result.operation_id, result.status, result.error_code
+    )
+}
+
+pub fn parse_probe_upgrader_noop_result(output: &str) -> Option<ProbeUpgraderNoopResult> {
+    output.lines().find_map(|line| {
+        let rest = line.strip_prefix("Probe Upgrader no-op result: ")?;
+        let mut operation_id = None;
+        let mut status = None;
+        let mut error_code = None;
+
+        for field in rest.split_whitespace() {
+            if let Some(value) = field.strip_prefix("operation=") {
+                operation_id = Some(value.to_string());
+            } else if let Some(value) = field.strip_prefix("status=") {
+                status = Some(value.to_string());
+            } else if let Some(value) = field.strip_prefix("error_code=") {
+                error_code = Some(value.to_string());
+            }
+        }
+
+        Some(ProbeUpgraderNoopResult {
+            error_code: error_code?,
+            operation_id: operation_id?,
+            status: status?,
+        })
+    })
+}
+
+fn toml_string(value: &str) -> String {
+    let escaped = value
+        .chars()
+        .flat_map(|character| character.escape_default())
+        .collect::<String>();
+
+    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]
@@ -316,12 +423,14 @@ mod tests {
             program: &str,
             args: &[String],
             stdin: &str,
-        ) -> Result<(), ProbeUpgraderLaunchError> {
+        ) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
             self.program = program.to_string();
             self.args = args.to_vec();
             self.stdin = stdin.to_string();
 
-            Ok(())
+            Ok(ProbeUpgraderCommandOutput {
+                stdout: String::new(),
+            })
         }
     }
 
@@ -349,20 +458,28 @@ mod tests {
                 "--collect",
                 "--pipe",
                 "--wait",
-                "--unit=enoki-probe-upgrader-42",
+                "--unit=enoki-probe-upgrader",
                 "--property=Type=exec",
+                "--",
                 "/usr/local/bin/enoki-probe",
                 "internal-upgrader",
                 "--config",
                 "/etc/enoki/probe-bootstrap.toml",
-                "--operation-id",
-                "42",
-                "--target-probe-version",
-                "0.2.0",
             ],
         );
-        assert_eq!(runner.stdin, "probe-operation-token");
+        assert_eq!(
+            runner.stdin,
+            [
+                "operation_id = \"42\"",
+                "target_probe_version = \"0.2.0\"",
+                "token = \"probe-operation-token\"",
+                "",
+            ]
+            .join("\n"),
+        );
         assert!(!runner.args.iter().any(|arg| arg == "probe-operation-token"));
+        assert!(!runner.args.iter().any(|arg| arg == "42"));
+        assert!(!runner.args.iter().any(|arg| arg == "0.2.0"));
     }
 
     #[test]
@@ -384,8 +501,6 @@ mod tests {
         let error = run_probe_upgrader(
             ProbeUpgraderRunInput {
                 bootstrap_config_path,
-                operation_id: "42".to_string(),
-                target_probe_version: "0.2.0".to_string(),
             },
             "",
             &mut transport,
@@ -414,11 +529,15 @@ mod tests {
 
         let result = run_probe_upgrader(
             ProbeUpgraderRunInput {
-                bootstrap_config_path,
-                operation_id: "42".to_string(),
-                target_probe_version: "0.2.0".to_string(),
+                bootstrap_config_path: bootstrap_config_path.clone(),
             },
-            "probe-operation-token\n",
+            &[
+                "operation_id = \"42\"",
+                "target_probe_version = \"0.2.0\"",
+                "token = \"probe-operation-token\"",
+                "",
+            ]
+            .join("\n"),
             &mut transport,
         )
         .expect("token validates");
@@ -439,6 +558,10 @@ mod tests {
                 operation_id: "42".to_string(),
                 status: "failed".to_string(),
             },
+        );
+        assert_eq!(
+            parse_probe_upgrader_noop_result(&format_probe_upgrader_noop_result(&result)),
+            Some(result),
         );
     }
 }

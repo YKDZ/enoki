@@ -67,18 +67,12 @@ fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
         "internal-upgrader".to_string(),
         "--config".to_string(),
         "/etc/enoki/probe-bootstrap.toml".to_string(),
-        "--operation-id".to_string(),
-        "42".to_string(),
-        "--target-probe-version".to_string(),
-        "0.2.0".to_string(),
     ]);
 
     assert_eq!(
         command,
         ProbeCommand::InternalUpgrader {
             bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
-            operation_id: "42".to_string(),
-            target_probe_version: "0.2.0".to_string(),
         },
     );
 }

@@ -2,7 +2,10 @@ use enoki_probe::{
     cli::{ProbeCommand, parse_probe_command, render_probe_output},
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{ProbeRunInput, run_loop_control_from_environment, run_probe_with_loop_control},
-    upgrader::{HttpProbeUpgraderValidationTransport, ProbeUpgraderRunInput, run_probe_upgrader},
+    upgrader::{
+        HttpProbeUpgraderValidationTransport, ProbeUpgraderRunInput,
+        format_probe_upgrader_noop_result, run_probe_upgrader,
+    },
 };
 use std::io::Read;
 
@@ -18,8 +21,6 @@ fn main() {
         }
         ProbeCommand::InternalUpgrader {
             bootstrap_config_path,
-            operation_id,
-            target_probe_version,
         } => {
             let mut stdin = String::new();
             if let Err(error) = std::io::stdin().read_to_string(&mut stdin) {
@@ -30,17 +31,12 @@ fn main() {
             match run_probe_upgrader(
                 ProbeUpgraderRunInput {
                     bootstrap_config_path,
-                    operation_id,
-                    target_probe_version,
                 },
                 &stdin,
                 &mut transport,
             ) {
                 Ok(result) => {
-                    println!(
-                        "Probe Upgrader no-op result: operation={} status={} error_code={}",
-                        result.operation_id, result.status, result.error_code
-                    );
+                    println!("{}", format_probe_upgrader_noop_result(&result));
                 }
                 Err(error) => {
                     eprintln!("Probe Upgrader failed: {error}");

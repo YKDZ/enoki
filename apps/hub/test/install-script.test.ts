@@ -82,10 +82,20 @@ describe("Probe systemd installer", () => {
     ).resolves.toBe(
       [
         "# Managed by Enoki Probe installer.",
-        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader-* --property=Type=exec /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap.toml --operation-id * --target-probe-version *",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run ^--collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap\\.toml$",
         "",
       ].join("\n"),
     );
+    const sudoers = await readFile(
+      path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
+      "utf8",
+    );
+    expect(sudoers).not.toContain("*");
+    expect(sudoers).not.toContain("--operation-id");
+    expect(sudoers).not.toContain("--target-probe-version");
+    expect(sudoers).toContain("^--collect");
+    expect(sudoers).toContain("\\.toml$");
+    expect(sudoers).toContain(" -- /usr/local/bin/enoki-probe ");
     await expect(
       readFile(path.join(root, "tmp/groupadd.log"), "utf8"),
     ).resolves.toEqual(expect.stringContaining("--system enoki-probe"));

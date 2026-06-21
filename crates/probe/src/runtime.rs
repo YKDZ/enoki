@@ -15,8 +15,9 @@ use crate::{
     },
     report::{full_inventory_report, regular_report, startup_report},
     upgrader::{
-        ProbeUpgraderLaunch, ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
-        launch_systemd_probe_upgrader,
+        ProbeUpgraderCommandOutput, ProbeUpgraderLaunch, ProbeUpgraderLaunchError,
+        SystemProbeUpgraderCommandRunner, launch_systemd_probe_upgrader,
+        parse_probe_upgrader_noop_result,
     },
 };
 use prost::Message;
@@ -213,10 +214,37 @@ pub fn run_probe_with_loop_control(
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
 ) -> Result<(), ProbeRunError> {
+    run_probe_with_loop_control_and_runner_factory(
+        input,
+        transport,
+        sleeper,
+        control,
+        InstalledProbeOperationRunner::from_bootstrap,
+    )
+}
+
+fn run_probe_with_loop_control_and_runner_factory<Runner>(
+    input: ProbeRunInput,
+    transport: &mut impl ProbeTransport,
+    sleeper: &mut impl ProbeRuntimeSleeper,
+    control: RunLoopControl,
+    mut runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
+) -> Result<(), ProbeRunError>
+where
+    Runner: ProbeOperationRunner,
+{
     let bootstrap_config = read_bootstrap_config(&input.bootstrap_config_path)?;
 
     if bootstrap_config.has_probe_identity() {
-        run_reporting_loop(&bootstrap_config, transport, sleeper, control)?;
+        let mut operation_runner =
+            runner_factory(&bootstrap_config, input_bootstrap_path(&bootstrap_config));
+        run_reporting_loop(
+            &bootstrap_config,
+            transport,
+            sleeper,
+            control,
+            &mut operation_runner,
+        )?;
         return Ok(());
     }
 
@@ -239,7 +267,15 @@ pub fn run_probe_with_loop_control(
     )?;
 
     let bootstrap_config = read_bootstrap_config(&input.bootstrap_config_path)?;
-    run_reporting_loop(&bootstrap_config, transport, sleeper, control)?;
+    let mut operation_runner =
+        runner_factory(&bootstrap_config, input_bootstrap_path(&bootstrap_config));
+    run_reporting_loop(
+        &bootstrap_config,
+        transport,
+        sleeper,
+        control,
+        &mut operation_runner,
+    )?;
 
     Ok(())
 }
@@ -249,6 +285,7 @@ fn run_reporting_loop(
     transport: &mut impl ReportTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
+    operation_runner: &mut impl ProbeOperationRunner,
 ) -> Result<(), ReportError> {
     if report_limit_reached(0, control) {
         return Ok(());
@@ -282,10 +319,6 @@ fn run_reporting_loop(
     let mut reports_sent = 0;
     let mut metrics_collector = MetricsCollector::default();
     let mut operation_reports = ProbeOperationReportQueue::default();
-    let mut operation_runner = InstalledProbeOperationRunner::from_bootstrap(
-        bootstrap_config,
-        input_bootstrap_path(bootstrap_config),
-    );
     let mut pending_report_body = None;
     let request = startup_report(
         probe_id,
@@ -308,7 +341,7 @@ fn run_reporting_loop(
         )?;
         active_configuration = outcome.active_configuration;
         pending_configuration_error = outcome.configuration_error;
-        operation_reports.observe_response(&response, &mut operation_runner);
+        operation_reports.observe_response(&response, operation_runner);
     }
 
     if response.inventory_needed {
@@ -338,7 +371,7 @@ fn run_reporting_loop(
             )?;
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
-            operation_reports.observe_response(&response, &mut operation_runner);
+            operation_reports.observe_response(&response, operation_runner);
         }
     }
 
@@ -387,7 +420,7 @@ fn run_reporting_loop(
             )?;
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
-            operation_reports.observe_response(&response, &mut operation_runner);
+            operation_reports.observe_response(&response, operation_runner);
         }
 
         if response.inventory_needed && !report_limit_reached(reports_sent, control) {
@@ -423,7 +456,7 @@ fn run_reporting_loop(
                 )?;
                 active_configuration = outcome.active_configuration;
                 pending_configuration_error = outcome.configuration_error;
-                operation_reports.observe_response(&response, &mut operation_runner);
+                operation_reports.observe_response(&response, operation_runner);
             }
         }
     }
@@ -450,7 +483,7 @@ struct ProbeUpgradeRunnerOperationMetadata<'a> {
 }
 
 enum ProbeUpgradeRunnerOutcome {
-    Launched,
+    Running,
     Failed(ProbeOperationFailed),
 }
 
@@ -497,7 +530,7 @@ impl ProbeOperationRunner for InstalledProbeOperationRunner {
         }
 
         let mut runner = SystemProbeUpgraderCommandRunner;
-        match launch_systemd_probe_upgrader(
+        probe_upgrade_outcome_from_launch_result(launch_systemd_probe_upgrader(
             ProbeUpgraderLaunch {
                 bootstrap_config_path: self.bootstrap_config_path.clone(),
                 install_path,
@@ -506,29 +539,43 @@ impl ProbeOperationRunner for InstalledProbeOperationRunner {
                 token: input.stdin.to_string(),
             },
             &mut runner,
-        ) {
-            Ok(()) => ProbeUpgradeRunnerOutcome::Launched,
-            Err(ProbeUpgraderLaunchError::UnsupportedInstallation(message)) => {
+        ))
+    }
+}
+
+fn probe_upgrade_outcome_from_launch_result(
+    result: Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError>,
+) -> ProbeUpgradeRunnerOutcome {
+    match result {
+        Ok(output) => match parse_probe_upgrader_noop_result(&output.stdout) {
+            Some(result) if result.status == "failed" => {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                    error_code: "unsupported_installation".to_string(),
-                    message,
+                    error_code: result.error_code,
+                    message: "Probe Upgrader completed the fake no-op path.".to_string(),
                 })
             }
-            Err(ProbeUpgraderLaunchError::InsufficientPrivilege(message)) => {
-                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                    error_code: "insufficient_privilege".to_string(),
-                    message,
-                })
-            }
+            _ => ProbeUpgradeRunnerOutcome::Running,
+        },
+        Err(ProbeUpgraderLaunchError::UnsupportedInstallation(message)) => {
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message,
+            })
+        }
+        Err(ProbeUpgraderLaunchError::InsufficientPrivilege(message)) => {
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "insufficient_privilege".to_string(),
+                message,
+            })
         }
     }
 }
 
 #[derive(Default)]
 struct ProbeOperationReportQueue {
-    failed: Vec<(String, ProbeOperationFailed)>,
+    acknowledgements: Vec<String>,
     seen_operation_ids: HashSet<String>,
-    started: Vec<String>,
+    statuses: Vec<(String, Status)>,
 }
 
 impl ProbeOperationReportQueue {
@@ -557,35 +604,134 @@ impl ProbeOperationReportQueue {
                 target_probe_version: &probe_upgrade.target_probe_version,
             },
         });
-        self.started.push(operation.id.clone());
-        if let ProbeUpgradeRunnerOutcome::Failed(failed) = outcome {
-            self.failed.push((operation.id.clone(), failed));
-        }
+        self.acknowledgements.push(operation.id.clone());
+        self.statuses.push((
+            operation.id.clone(),
+            match outcome {
+                ProbeUpgradeRunnerOutcome::Running => Status::Running(ProbeOperationRunning {}),
+                ProbeUpgradeRunnerOutcome::Failed(failed) => Status::Failed(failed),
+            },
+        ));
     }
 
     fn with_operation_reports(&mut self, mut request: ProbeReportRequest) -> ProbeReportRequest {
-        for operation_id in self.started.drain(..) {
+        for operation_id in self.acknowledgements.drain(..) {
             request
                 .operation_acknowledgements
                 .push(ProbeOperationAcknowledgement {
                     operation_id: operation_id.clone(),
                 });
+        }
+
+        for (operation_id, status) in self.statuses.drain(..) {
             request.operation_statuses.push(ProbeOperationStatus {
                 operation_id,
-                status: Some(Status::Running(ProbeOperationRunning {})),
+                status: Some(status),
             });
         }
 
-        if request.operation_statuses.is_empty() {
-            for (operation_id, failed) in self.failed.drain(..) {
-                request.operation_statuses.push(ProbeOperationStatus {
-                    operation_id,
-                    status: Some(Status::Failed(failed)),
-                });
+        request
+    }
+}
+
+#[cfg(test)]
+mod operation_report_tests {
+    use super::*;
+
+    #[test]
+    fn successful_fake_launch_reports_noop_failure_without_running_first() {
+        let outcome =
+            probe_upgrade_outcome_from_launch_result(Ok(ProbeUpgraderCommandOutput {
+                stdout:
+                    "Probe Upgrader no-op result: operation=operation-01 status=failed error_code=probe_upgrader_noop\n"
+                        .to_string(),
+            }));
+
+        assert!(matches!(
+            outcome,
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                ref error_code,
+                ..
+            }) if error_code == "probe_upgrader_noop"
+        ));
+    }
+
+    #[test]
+    fn launch_insufficient_privilege_reports_failed_status() {
+        let outcome = probe_upgrade_outcome_from_launch_result(Err(
+            ProbeUpgraderLaunchError::InsufficientPrivilege("sudo denied".to_string()),
+        ));
+
+        assert!(matches!(
+            outcome,
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                ref error_code,
+                ref message,
+            }) if error_code == "insufficient_privilege" && message == "sudo denied"
+        ));
+    }
+
+    #[test]
+    fn unsupported_installation_reports_failed_status() {
+        let outcome = probe_upgrade_outcome_from_launch_result(Err(
+            ProbeUpgraderLaunchError::UnsupportedInstallation("sudo missing".to_string()),
+        ));
+
+        assert!(matches!(
+            outcome,
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                ref error_code,
+                ref message,
+            }) if error_code == "unsupported_installation" && message == "sudo missing"
+        ));
+    }
+
+    #[test]
+    fn report_queue_acknowledges_and_reports_failed_operation_in_one_request() {
+        struct FailingRunner;
+
+        impl ProbeOperationRunner for FailingRunner {
+            fn run_probe_upgrade(
+                &mut self,
+                _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                    error_code: "insufficient_privilege".to_string(),
+                    message: "sudo denied".to_string(),
+                })
             }
         }
 
-        request
+        let mut queue = ProbeOperationReportQueue::default();
+        let mut runner = FailingRunner;
+        queue.observe_response(
+            &ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "default-v1".to_string(),
+                inventory_needed: false,
+                pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                    id: "operation-01".to_string(),
+                    operation: Some(Operation::ProbeUpgrade(
+                        crate::protocol::enoki::v1::ProbeUpgradeOperation {
+                            current_probe_version: "0.1.0".to_string(),
+                            operation_token: "operation-token".to_string(),
+                            target_probe_version: "0.2.0".to_string(),
+                        },
+                    )),
+                }),
+                server_time_ms: 1,
+            },
+            &mut runner,
+        );
+
+        let request = queue.with_operation_reports(ProbeReportRequest::default());
+
+        assert_eq!(request.operation_acknowledgements.len(), 1);
+        assert_eq!(request.operation_statuses.len(), 1);
+        assert!(matches!(
+            request.operation_statuses[0].status,
+            Some(Status::Failed(ref failed)) if failed.error_code == "insufficient_privilege"
+        ));
     }
 }
 
@@ -948,7 +1094,10 @@ fn bool_value(value: &toml::Value, key: &'static str) -> Result<Option<bool>, Pr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::enoki::v1::ProbeUpgradeOperation;
+    use crate::protocol::enoki::v1::{
+        ProbeConfigurationResponse, ProbeRegistrationResponse, ProbeUpgradeOperation,
+    };
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
     #[derive(Default)]
     struct RecordingOperationRunner {
@@ -1042,9 +1191,9 @@ mod tests {
         };
 
         queue.observe_response(&response, &mut runner);
-        let _running_request = queue.with_operation_reports(ProbeReportRequest::default());
         let request = queue.with_operation_reports(ProbeReportRequest::default());
 
+        assert_eq!(request.operation_acknowledgements.len(), 1);
         assert!(matches!(
             &request.operation_statuses[0],
             ProbeOperationStatus {
@@ -1053,5 +1202,181 @@ mod tests {
             } if failed.error_code == "insufficient_privilege"
                 && failed.message == "sudoers rule is missing"
         ));
+    }
+
+    #[test]
+    fn install_config_registration_then_operation_uses_preserved_fake_launch_metadata() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "enrollment_token = \"enk_enroll_secret\"",
+                "state_dir = \"/var/lib/enoki-probe\"",
+                "install_path = \"/usr/local/bin/enoki-probe\"",
+                "upgrader_launch = \"systemd\"",
+                "log_level = \"info\"",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("write installer config");
+        let mut transport = RegistrationThenOperationTransport {
+            observed_report_bodies: Vec::new(),
+            registration_response: ProbeRegistrationResponse {
+                initial_configuration: Some(ProbeConfigurationResponse {
+                    collect_cpu: false,
+                    collect_disk: false,
+                    collect_load: false,
+                    collect_memory: false,
+                    collect_network: false,
+                    collect_uptime: false,
+                    metrics_collection_interval_seconds: 1,
+                    reporting_batch_interval_seconds: 1,
+                    version: "default-v1".to_string(),
+                }),
+                probe_id: "probe_01".to_string(),
+                probe_secret: "enk_probe_secret".to_string(),
+                server_time_ms: 1,
+            }
+            .encode_to_vec(),
+            report_responses: VecDeque::from([
+                ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    inventory_needed: false,
+                    pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                        id: "operation-01".to_string(),
+                        operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                            current_probe_version: "0.1.0".to_string(),
+                            operation_token: "operation-token-01".to_string(),
+                            target_probe_version: "0.2.0".to_string(),
+                        })),
+                    }),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec(),
+                ProbeReportResponse {
+                    accepted_sequence_end: 2,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    inventory_needed: false,
+                    pending_operation: None,
+                    server_time_ms: 2,
+                }
+                .encode_to_vec(),
+            ]),
+        };
+        let observed_launches = Rc::new(RefCell::new(Vec::new()));
+        let observed_launches_for_factory = Rc::clone(&observed_launches);
+        let mut sleeper = NoopSleeper;
+
+        run_probe_with_loop_control_and_runner_factory(
+            ProbeRunInput {
+                bootstrap_config_path: bootstrap_config_path.clone(),
+            },
+            &mut transport,
+            &mut sleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+            move |bootstrap_config, _bootstrap_config_path| {
+                assert_eq!(
+                    bootstrap_config.install_path.as_deref(),
+                    Some("/usr/local/bin/enoki-probe"),
+                );
+                assert_eq!(bootstrap_config.upgrader_launch.as_deref(), Some("systemd"));
+                SharedFakeOperationRunner {
+                    observed_launches: Rc::clone(&observed_launches_for_factory),
+                }
+            },
+        )
+        .expect("registration then operation reporting succeeds");
+
+        assert_eq!(
+            observed_launches.borrow().as_slice(),
+            &[(
+                "operation-01".to_string(),
+                "0.2.0".to_string(),
+                "operation-token-01".to_string(),
+            )],
+        );
+        let bootstrap_config =
+            fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
+        assert!(bootstrap_config.contains("install_path = \"/usr/local/bin/enoki-probe\""));
+        assert!(bootstrap_config.contains("upgrader_launch = \"systemd\""));
+
+        let reports = transport
+            .observed_report_bodies
+            .iter()
+            .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reports[1].operation_acknowledgements[0].operation_id,
+            "operation-01"
+        );
+        assert!(matches!(
+            reports[1].operation_statuses[0].status,
+            Some(Status::Failed(ref failed)) if failed.error_code == "probe_upgrader_noop"
+        ));
+    }
+
+    struct RegistrationThenOperationTransport {
+        observed_report_bodies: Vec<Vec<u8>>,
+        registration_response: Vec<u8>,
+        report_responses: VecDeque<Vec<u8>>,
+    }
+
+    impl RegistrationTransport for RegistrationThenOperationTransport {
+        fn post_protobuf(
+            &mut self,
+            _url: &str,
+            _body: Vec<u8>,
+        ) -> Result<Vec<u8>, RegistrationError> {
+            Ok(self.registration_response.clone())
+        }
+    }
+
+    impl ReportTransport for RegistrationThenOperationTransport {
+        fn post_protobuf_with_bearer(
+            &mut self,
+            _url: &str,
+            _bearer_secret: &str,
+            body: Vec<u8>,
+        ) -> Result<Vec<u8>, ReportError> {
+            self.observed_report_bodies.push(body);
+            self.report_responses
+                .pop_front()
+                .ok_or(ReportError::InvalidResponse("missing fake report response"))
+        }
+    }
+
+    impl ProbeTransport for RegistrationThenOperationTransport {}
+
+    struct NoopSleeper;
+
+    impl ProbeRuntimeSleeper for NoopSleeper {
+        fn sleep(&mut self, _duration: Duration) {}
+    }
+
+    struct SharedFakeOperationRunner {
+        observed_launches: Rc<RefCell<Vec<(String, String, String)>>>,
+    }
+
+    impl ProbeOperationRunner for SharedFakeOperationRunner {
+        fn run_probe_upgrade(
+            &mut self,
+            input: ProbeUpgradeRunnerInput<'_>,
+        ) -> ProbeUpgradeRunnerOutcome {
+            self.observed_launches.borrow_mut().push((
+                input.operation.operation_id.to_string(),
+                input.operation.target_probe_version.to_string(),
+                input.stdin.to_string(),
+            ));
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "probe_upgrader_noop".to_string(),
+                message: "fake no-op launch".to_string(),
+            })
+        }
     }
 }

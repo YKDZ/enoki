@@ -107,6 +107,8 @@ pub fn register_probe(
         ));
     }
 
+    let installer_owned_fields = read_installer_owned_fields(&input.bootstrap_config_path)?;
+
     store_bootstrap_config(
         &input.bootstrap_config_path,
         &BootstrapConfig {
@@ -153,6 +155,7 @@ pub fn register_probe(
             ),
             probe_id: response.probe_id.as_str(),
             probe_secret: response.probe_secret.as_str(),
+            installer_owned_fields,
         },
     )?;
 
@@ -181,6 +184,35 @@ struct BootstrapConfig<'a> {
     probe_id: &'a str,
     probe_secret: &'a str,
     reporting_batch_interval_seconds: Option<u32>,
+    installer_owned_fields: InstallerOwnedFields,
+}
+
+#[derive(Default)]
+struct InstallerOwnedFields {
+    install_path: Option<String>,
+    log_level: Option<String>,
+    state_dir: Option<String>,
+    upgrader_launch: Option<String>,
+}
+
+fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, RegistrationError> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(InstallerOwnedFields::default());
+        }
+        Err(error) => return Err(RegistrationError::Io(error)),
+    };
+    let value = contents
+        .parse::<toml::Value>()
+        .map_err(|_| RegistrationError::InvalidResponse("invalid bootstrap config TOML"))?;
+
+    Ok(InstallerOwnedFields {
+        install_path: string_value(&value, "install_path")?,
+        log_level: string_value(&value, "log_level")?,
+        state_dir: string_value(&value, "state_dir")?,
+        upgrader_launch: string_value(&value, "upgrader_launch")?,
+    })
 }
 
 fn store_bootstrap_config(
@@ -207,6 +239,26 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
         "probe_secret = {}\n",
         toml_string(config.probe_secret)
     ));
+    push_optional_string(
+        &mut output,
+        "state_dir",
+        config.installer_owned_fields.state_dir.as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "install_path",
+        config.installer_owned_fields.install_path.as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "upgrader_launch",
+        config.installer_owned_fields.upgrader_launch.as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "log_level",
+        config.installer_owned_fields.log_level.as_deref(),
+    );
 
     if let Some(version) = config.probe_configuration_version {
         output.push_str(&format!(
@@ -240,6 +292,25 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
 fn push_optional_bool(output: &mut String, key: &str, value: Option<bool>) {
     if let Some(value) = value {
         output.push_str(&format!("{key} = {value}\n"));
+    }
+}
+
+fn push_optional_string(output: &mut String, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        output.push_str(&format!("{key} = {}\n", toml_string(value)));
+    }
+}
+
+fn string_value(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<Option<String>, RegistrationError> {
+    match value.get(key) {
+        Some(toml::Value::String(string)) => Ok(Some(string.clone())),
+        Some(_) => Err(RegistrationError::InvalidResponse(
+            "expected string bootstrap config values",
+        )),
+        None => Ok(None),
     }
 }
 

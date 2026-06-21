@@ -1039,21 +1039,18 @@ fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
         reports[1].operation_acknowledgements[0].operation_id,
         "operation-01"
     );
-    assert!(matches!(
-        reports[1].operation_statuses[0].status,
-        Some(Status::Running(_))
-    ));
     assert_eq!(
-        reports[2].operation_statuses[0].operation_id,
+        reports[1].operation_statuses[0].operation_id,
         "operation-01"
     );
     assert!(matches!(
-        &reports[2].operation_statuses[0],
+        &reports[1].operation_statuses[0],
         ProbeOperationStatus {
             status: Some(Status::Failed(failed)),
             ..
         } if failed.error_code == "unsupported_installation"
     ));
+    assert!(reports[2].operation_statuses.is_empty());
 }
 
 fn report_response(accepted_sequence_end: u64, inventory_needed: bool) -> Vec<u8> {
