@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 
 import type { AuditRepository } from "../database/audit.js";
-import type { ManagedHostRepository } from "../database/managed-hosts.js";
+import type { HostRepository } from "../database/hosts.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import {
   parseProbeConfigurationValues,
@@ -10,7 +10,7 @@ import {
 
 export type ProbeConfigurationRouteServices = {
   audit?: AuditRepository;
-  managedHosts?: ManagedHostRepository;
+  hosts?: HostRepository;
   now?: () => number;
   probeConfigurations: ProbeConfigurationRepository;
 };
@@ -72,28 +72,28 @@ export function createHostProbeConfigurationRoutes(
   const now = services.now ?? Date.now;
 
   routes.get("/", (context) => {
-    const managedHostId = numericHostId(context.req.param("hostId"));
-    if (!managedHostId) {
-      return configurationError("managed_host_not_found", 404);
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId) {
+      return configurationError("host_not_found", 404);
     }
 
-    if (!services.managedHosts?.exists(managedHostId)) {
-      return configurationError("managed_host_not_found", 404);
+    if (!services.hosts?.exists(hostId)) {
+      return configurationError("host_not_found", 404);
     }
 
     return context.json(
-      services.probeConfigurations.getEffectiveForHost(managedHostId),
+      services.probeConfigurations.getEffectiveForHost(hostId),
     );
   });
 
   routes.put("/", async (context) => {
-    const managedHostId = numericHostId(context.req.param("hostId"));
-    if (!managedHostId) {
-      return configurationError("managed_host_not_found", 404);
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId) {
+      return configurationError("host_not_found", 404);
     }
 
-    if (!services.managedHosts?.exists(managedHostId)) {
-      return configurationError("managed_host_not_found", 404);
+    if (!services.hosts?.exists(hostId)) {
+      return configurationError("host_not_found", 404);
     }
 
     const body = (await context.req.json()) as unknown;
@@ -108,8 +108,7 @@ export function createHostProbeConfigurationRoutes(
 
     if (candidate.mode === "inherit") {
       const changedAtMs = now();
-      const effective =
-        services.probeConfigurations.clearHostOverride(managedHostId);
+      const effective = services.probeConfigurations.clearHostOverride(hostId);
 
       services.audit?.record({
         action: "probe_configuration.host.inherit",
@@ -119,8 +118,8 @@ export function createHostProbeConfigurationRoutes(
         },
         occurredAtMs: changedAtMs,
         outcome: "success",
-        subjectId: String(managedHostId),
-        subjectType: "managed_host",
+        subjectId: String(hostId),
+        subjectType: "host",
         userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
       });
 
@@ -143,7 +142,7 @@ export function createHostProbeConfigurationRoutes(
 
     const changedAtMs = now();
     const effective = services.probeConfigurations.updateHostOverride(
-      managedHostId,
+      hostId,
       input,
       changedAtMs,
     );
@@ -156,8 +155,8 @@ export function createHostProbeConfigurationRoutes(
       },
       occurredAtMs: changedAtMs,
       outcome: "success",
-      subjectId: String(managedHostId),
-      subjectType: "managed_host",
+      subjectId: String(hostId),
+      subjectType: "host",
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 

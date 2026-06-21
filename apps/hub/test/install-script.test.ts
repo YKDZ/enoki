@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -32,13 +32,13 @@ describe("Probe systemd installer", () => {
 
   it("installs a verified x86_64 GNU Probe release as a non-root systemd service", async () => {
     const root = await createTempRoot("enoki-install-root-");
-    const release = await createProbeRelease(root);
-    const commands = await createCommandMocks(root);
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
-      ENOKI_HUB_URL: "https://hub.example",
-      ENOKI_PROBE_DOWNLOAD_URL: release.archiveUrl,
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
       ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
       ENOKI_TEST_ROOT: root,
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
@@ -97,21 +97,21 @@ describe("Probe systemd installer", () => {
 
   it("selects the aarch64 GNU Probe artifact from a release version", async () => {
     const root = await createTempRoot("enoki-install-arm-root-");
-    const release = await createProbeRelease(
+    const assets = await createProbeAssets(
       root,
       "aarch64-unknown-linux-gnu",
       "v0.2.0",
     );
     const commands = await createCommandMocks(root, {
       architecture: "aarch64",
+      assetDir: assets.dir,
     });
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: "enk_enroll_arm",
-      ENOKI_GITHUB_RELEASE_BASE_URL: release.releaseBaseUrl,
-      ENOKI_HUB_URL: "https://hub.example",
+      ENOKI_HUB_URL: assets.hubUrl,
       ENOKI_INSTALL_PATH: "/opt/enoki/bin/enoki-probe",
-      ENOKI_PROBE_VERSION: "v0.2.0",
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
       ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
       ENOKI_TEST_ROOT: root,
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
@@ -123,7 +123,9 @@ describe("Probe systemd installer", () => {
     ).resolves.toBe("#!/bin/sh\necho probe\n");
     await expect(
       readFile(path.join(root, "tmp/curl.log"), "utf8"),
-    ).resolves.toContain("v0.2.0/enoki-probe-aarch64-unknown-linux-gnu.tar.gz");
+    ).resolves.toContain(
+      "https://hub.example/api/probe/assets/enoki-probe-aarch64-unknown-linux-gnu.tar.gz",
+    );
     await expect(
       readFile(
         path.join(root, "etc/systemd/system/enoki-probe.service"),
@@ -136,14 +138,14 @@ describe("Probe systemd installer", () => {
 
   it("escapes bootstrap TOML strings written from environment values", async () => {
     const root = await createTempRoot("enoki-install-escaping-root-");
-    const release = await createProbeRelease(root);
-    const commands = await createCommandMocks(root);
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: 'enk_"quoted"\nsecret\\tail',
-      ENOKI_HUB_URL: 'https://hub.example/"quoted"\nnext',
+      ENOKI_HUB_URL: assets.hubUrl,
       ENOKI_LOG_LEVEL: 'info"\nnext = "bad',
-      ENOKI_PROBE_DOWNLOAD_URL: release.archiveUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
       ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
       ENOKI_TEST_ROOT: root,
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
@@ -154,7 +156,7 @@ describe("Probe systemd installer", () => {
       readFile(path.join(root, "etc/enoki/probe-bootstrap.toml"), "utf8"),
     ).resolves.toBe(
       [
-        'hub_url = "https://hub.example/\\"quoted\\"\\nnext"',
+        'hub_url = "https://hub.example"',
         'enrollment_token = "enk_\\"quoted\\"\\nsecret\\\\tail"',
         'state_dir = "/var/lib/enoki-probe"',
         'log_level = "info\\"\\nnext = \\"bad"',
@@ -202,17 +204,15 @@ describe("Probe systemd installer", () => {
 
   it("rejects a Probe artifact when sha256 verification fails", async () => {
     const root = await createTempRoot("enoki-install-badsha-root-");
-    const release = await createProbeRelease(root);
-    const commands = await createCommandMocks(root);
-    await writeFile(
-      fileURLToPath(`${release.archiveUrl}.sha256`),
-      `${"0".repeat(64)}  enoki-probe-x86_64-unknown-linux-gnu.tar.gz\n`,
-    );
+    const assets = await createProbeAssets(root, {
+      sha256: "0".repeat(64),
+    });
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
-      ENOKI_HUB_URL: "https://hub.example",
-      ENOKI_PROBE_DOWNLOAD_URL: release.archiveUrl,
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
       ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
       ENOKI_TEST_ROOT: root,
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
@@ -226,6 +226,48 @@ describe("Probe systemd installer", () => {
       code: "ENOENT",
     });
   });
+
+  it("rejects Probe assets when the signed manifest cannot be verified", async () => {
+    const root = await createTempRoot("enoki-install-badsig-root-");
+    const assets = await createProbeAssets(root, {
+      signature: Buffer.from("not a valid signature"),
+    });
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "Probe asset manifest signature verification failed",
+    );
+  });
+
+  it("rejects Probe assets when the signing key fingerprint is not trusted", async () => {
+    const root = await createTempRoot("enoki-install-badkey-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: "0".repeat(64),
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "Probe asset signing key fingerprint verification failed",
+    );
+  });
 });
 
 async function createTempRoot(prefix: string) {
@@ -237,20 +279,32 @@ async function createTempRoot(prefix: string) {
   return root;
 }
 
-async function createProbeRelease(
+async function createProbeAssets(
   root: string,
-  target = "x86_64-unknown-linux-gnu",
+  targetOrOptions:
+    | string
+    | {
+        sha256?: string;
+        signature?: Buffer;
+        target?: string;
+        version?: string;
+      } = "x86_64-unknown-linux-gnu",
   version = "v0.1.0",
 ) {
-  const releaseRoot = path.join(root, "release", version);
+  const options =
+    typeof targetOrOptions === "string"
+      ? { target: targetOrOptions, version }
+      : targetOrOptions;
+  const target = options.target ?? "x86_64-unknown-linux-gnu";
+  const assetRoot = path.join(root, "hub-assets");
   const payloadRoot = path.join(root, "payload");
-  await mkdir(releaseRoot, { recursive: true });
+  await mkdir(assetRoot, { recursive: true });
   await mkdir(payloadRoot, { recursive: true });
   const binaryPath = path.join(payloadRoot, "enoki-probe");
   await writeFile(binaryPath, "#!/bin/sh\necho probe\n");
   await chmod(binaryPath, 0o755);
 
-  const archivePath = path.join(releaseRoot, `enoki-probe-${target}.tar.gz`);
+  const archivePath = path.join(assetRoot, `enoki-probe-${target}.tar.gz`);
   await spawnProcess("tar", [
     "-czf",
     archivePath,
@@ -259,22 +313,54 @@ async function createProbeRelease(
     "enoki-probe",
   ]);
   const archive = await readFile(archivePath);
-  await writeFile(
-    `${archivePath}.sha256`,
-    `${createHash("sha256").update(archive).digest("hex")}  ${path.basename(
-      archivePath,
-    )}\n`,
+  const sha256 =
+    options.sha256 ?? createHash("sha256").update(archive).digest("hex");
+  const manifest = JSON.stringify(
+    {
+      assets: [
+        {
+          file: path.basename(archivePath),
+          sha256,
+          size: archive.byteLength,
+          target,
+        },
+      ],
+      kind: "enoki-probe-assets",
+      signature: {
+        algorithm: "rsa-sha256",
+        file: "manifest.json.sig",
+        publicKey: "signing-key.pem",
+      },
+      version: options.version ?? version,
+    },
+    null,
+    2,
   );
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+  });
+  const signature =
+    options.signature ?? sign("RSA-SHA256", Buffer.from(manifest), privateKey);
+
+  const publicKeyPem = publicKey.export({ format: "pem", type: "spki" });
+  await writeFile(path.join(assetRoot, "manifest.json"), manifest);
+  await writeFile(path.join(assetRoot, "manifest.json.sig"), signature);
+  await writeFile(path.join(assetRoot, "signing-key.pem"), publicKeyPem);
 
   return {
-    archiveUrl: `file://${archivePath}`,
-    releaseBaseUrl: `file://${path.join(root, "release")}`,
+    dir: assetRoot,
+    hubUrl: "https://hub.example",
+    publicKeySha256: createHash("sha256").update(publicKeyPem).digest("hex"),
   };
 }
 
 async function createCommandMocks(
   root: string,
-  options: { architecture?: string; currentUserId?: string } = {},
+  options: {
+    architecture?: string;
+    assetDir?: string;
+    currentUserId?: string;
+  } = {},
 ) {
   const bin = path.join(root, "mock-bin");
   await mkdir(bin, { recursive: true });
@@ -292,6 +378,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$url" in
+  https://hub.example/api/probe/assets/*) printf '%s\\n' "$url" >> '${path.join(
+    root,
+    "tmp/curl.log",
+  )}'; cp '${options.assetDir ?? root}'/"\${url##*/}" "$out" ;;
   file://*) printf '%s\\n' "$url" >> '${path.join(
     root,
     "tmp/curl.log",

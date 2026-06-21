@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -12,18 +13,19 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import type { HostMetadataDraft, ManagedHostDetail } from "../types";
+
+import type { HostMetadataDraft, HostDetail } from "../types";
 
 const props = defineProps<{
   activeHostMetadataId: number | null;
-  host: ManagedHostDetail;
+  host: HostDetail;
   hostMetadataDraft: HostMetadataDraft | null;
   hostMetadataError: string;
   isSavingHostMetadata: boolean;
 }>();
 
 const emit = defineEmits<{
-  closeHostMetadata: [host: ManagedHostDetail];
+  closeHostMetadata: [host: HostDetail];
   saveHostMetadata: [];
 }>();
 
@@ -35,13 +37,13 @@ function updateOpen(open: boolean) {
 </script>
 
 <template>
-  <Dialog
-    :open="activeHostMetadataId === host.id"
-    @update:open="updateOpen"
-  >
+  <Dialog :open="activeHostMetadataId === host.id" @update:open="updateOpen">
     <DialogContent>
       <DialogHeader>
         <DialogTitle>主机信息</DialogTitle>
+        <DialogDescription class="sr-only">
+          编辑主机显示名称、描述和连接地址。
+        </DialogDescription>
       </DialogHeader>
 
       <form
@@ -63,7 +65,11 @@ function updateOpen(open: boolean) {
         </Label>
         <Label class="grid gap-2 text-sm font-medium">
           IP 地址
-          <Input v-model="hostMetadataDraft.connectAddress" type="text" required />
+          <Input
+            v-model="hostMetadataDraft.connectAddress"
+            type="text"
+            required
+          />
         </Label>
 
         <p v-if="hostMetadataError" class="text-sm text-red-600" role="alert">
@@ -72,7 +78,10 @@ function updateOpen(open: boolean) {
 
         <DialogFooter>
           <Button type="submit" :disabled="isSavingHostMetadata">
-            <LoaderCircle v-if="isSavingHostMetadata" class="size-4 animate-spin" />
+            <LoaderCircle
+              v-if="isSavingHostMetadata"
+              class="size-4 animate-spin"
+            />
             <Save v-else class="size-4" aria-hidden="true" />
             保存
           </Button>

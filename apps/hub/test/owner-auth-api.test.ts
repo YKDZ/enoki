@@ -37,7 +37,7 @@ describe("Owner authentication API", () => {
       },
     });
 
-    const response = await app.request("/api/web/managed-hosts");
+    const response = await app.request("/api/web/hosts");
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toEqual({
@@ -198,7 +198,7 @@ describe("Owner authentication API", () => {
     });
     const sessionCookie = loginResponse.headers.get("set-cookie");
 
-    const response = await app.request("/api/web/managed-hosts", {
+    const response = await app.request("/api/web/hosts", {
       headers: {
         cookie: sessionCookie ?? "",
       },
@@ -238,13 +238,13 @@ describe("Owner authentication API", () => {
       "/api/web/file-read",
       "/api/web/log-tail",
       "/api/web/external-checks",
-      "/api/web/managed-hosts/1/commands",
-      "/api/web/managed-hosts/1/shell",
-      "/api/web/managed-hosts/1/scripts",
-      "/api/web/managed-hosts/1/service-restarts",
-      "/api/web/managed-hosts/1/file-read",
-      "/api/web/managed-hosts/1/log-tail",
-      "/api/web/managed-hosts/1/external-checks",
+      "/api/web/hosts/1/commands",
+      "/api/web/hosts/1/shell",
+      "/api/web/hosts/1/scripts",
+      "/api/web/hosts/1/service-restarts",
+      "/api/web/hosts/1/file-read",
+      "/api/web/hosts/1/log-tail",
+      "/api/web/hosts/1/external-checks",
     ];
 
     for (const path of forbiddenWebApiPaths) {
@@ -387,7 +387,7 @@ describe("Owner authentication API", () => {
       authenticated: false,
     });
 
-    const protectedResponse = await app.request("/api/web/managed-hosts", {
+    const protectedResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: sessionCookie,
       },

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
-import type { ManagedHostDetailSample } from "@enoki/api-client/websocket";
+import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
@@ -9,13 +9,13 @@ import type { Context } from "hono";
 import type { EnrollmentRepository } from "../database/enrollments.js";
 import type {
   HostStatusThresholds,
-  ManagedHostRepository,
-} from "../database/managed-hosts.js";
+  HostRepository,
+} from "../database/hosts.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import { hashSecret } from "../enrollment/routes.js";
 import {
-  liveSummaryFromManagedHost,
+  liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "./configuration.js";
@@ -33,7 +33,7 @@ const defaultClockSkewThresholdMs = 5 * 60 * 1000;
 
 export type ProbeRouteServices = {
   enrollments: EnrollmentRepository;
-  managedHosts: ManagedHostRepository;
+  hosts: HostRepository;
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   clockSkewThresholdMs?: number;
@@ -86,7 +86,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const displayName =
       inventory?.hostname?.trim() || fallbackDisplayName(probeId);
 
-    services.managedHosts.create({
+    services.hosts.create({
       architecture: inventory?.architecture || null,
       clockSkewDetected: false,
       connectAddress: firstInventoryAddress(inventory) ?? observedIp ?? "",
@@ -135,7 +135,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const host = authenticateProbe(
-      services.managedHosts,
+      services.hosts,
       context.req.raw.headers.get("authorization"),
     );
 
@@ -199,7 +199,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.trustForwardedHeaders,
     );
 
-    services.managedHosts.recordReport(host.id, {
+    services.hosts.recordReport(host.id, {
       architecture: request.inventory?.architecture || undefined,
       clockSkewDetected: clockSkew.detected,
       connectAddress: reportConnectAddress(request.inventory, host, observedIp),
@@ -237,7 +237,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         sample,
       ]),
     );
-    const detailSamples: ManagedHostDetailSample[] = [];
+    const detailSamples: HostDetailSample[] = [];
 
     for (
       let sequence = validatedReport.sequenceStart;
@@ -246,7 +246,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     ) {
       const inserted = services.metrics.recordObservation({
         bootId: request.bootId,
-        managedHostId: host.id,
+        hostId: host.id,
         probeId: host.probeId,
         receivedAtMs: reportReceivedAtMs,
         sequence,
@@ -286,7 +286,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           load1: metricField(sample, "load_1"),
           load5: metricField(sample, "load_5"),
           load15: metricField(sample, "load_15"),
-          managedHostId: host.id,
+          hostId: host.id,
           memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
           memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
           networkInterfaces: (sample.networkInterfaces ?? []).map(
@@ -321,7 +321,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       }
     }
 
-    broadcastManagedHostSummary(services, host.id, reportReceivedAtMs);
+    broadcastHostSummary(services, host.id, reportReceivedAtMs);
     for (const sample of detailSamples) {
       services.liveUpdates?.broadcastDetailSample(sample);
     }
@@ -345,7 +345,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
   routes.post("/config", async (context) => {
     const host = authenticateProbe(
-      services.managedHosts,
+      services.hosts,
       context.req.raw.headers.get("authorization"),
     );
 
@@ -376,16 +376,16 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   return routes;
 }
 
-function broadcastManagedHostSummary(
+function broadcastHostSummary(
   services: ProbeRouteServices,
-  managedHostId: number,
+  hostId: number,
   nowMs: number,
 ) {
   if (!services.liveUpdates) {
     return;
   }
 
-  const hostSummary = services.managedHosts
+  const hostSummary = services.hosts
     .listSummaries({
       latestMetricForHost: (hostId) =>
         services.metrics.findLatestSample(hostId),
@@ -401,14 +401,14 @@ function broadcastManagedHostSummary(
       },
       thresholds: services.hostStatus,
     })
-    .find((summary) => summary.id === managedHostId);
+    .find((summary) => summary.id === hostId);
 
   if (hostSummary) {
     const effectiveConfiguration =
-      services.probeConfigurations.getEffectiveForHost(managedHostId);
+      services.probeConfigurations.getEffectiveForHost(hostId);
 
-    services.liveUpdates.broadcastManagedHostSummary(
-      liveSummaryFromManagedHost(hostSummary, {
+    services.liveUpdates.broadcastHostSummary(
+      liveSummaryFromHost(hostSummary, {
         metricsCollectionIntervalSeconds:
           effectiveConfiguration.configuration.metricsCollectionIntervalSeconds,
       }),
@@ -417,10 +417,10 @@ function broadcastManagedHostSummary(
 }
 
 function liveDetailSampleFromMetricSample(
-  managedHostId: number,
+  hostId: number,
   sample: enoki.v1.IMetricSample,
   receivedAtMs: number,
-): ManagedHostDetailSample {
+): HostDetailSample {
   return {
     collectedAtMs: signedNumber(sample.collectedAtMs),
     cpuCores: (sample.cpuCores ?? []).map((core) => ({
@@ -435,7 +435,7 @@ function liveDetailSampleFromMetricSample(
       totalBytes: unsignedNumber(disk.totalBytes),
       usedBytes: unsignedNumber(disk.usedBytes),
     })),
-    managedHostId,
+    hostId,
     memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
     memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
     networkInterfaces: (sample.networkInterfaces ?? []).map(
@@ -476,7 +476,7 @@ function decodeConfigurationRequest(body: Uint8Array) {
 }
 
 function authenticateProbe(
-  managedHosts: ManagedHostRepository,
+  hosts: HostRepository,
   authorization: string | null,
 ) {
   const probeSecret = parseBearerSecret(authorization);
@@ -485,7 +485,7 @@ function authenticateProbe(
     return null;
   }
 
-  return managedHosts.findByProbeSecretHash(hashSecret(probeSecret));
+  return hosts.findByProbeSecretHash(hashSecret(probeSecret));
 }
 
 function parseBearerSecret(authorization: string | null) {

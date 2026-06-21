@@ -39,7 +39,7 @@ export const enrollmentTokens = sqliteTable(
 export type EnrollmentTokenRow = typeof enrollmentTokens.$inferSelect;
 export type NewEnrollmentTokenRow = typeof enrollmentTokens.$inferInsert;
 
-export const managedHosts = sqliteTable(
+export const hosts = sqliteTable(
   "managed_hosts",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
@@ -94,14 +94,14 @@ export const managedHosts = sqliteTable(
   ],
 );
 
-export type ManagedHostRow = typeof managedHosts.$inferSelect;
-export type NewManagedHostRow = typeof managedHosts.$inferInsert;
+export type HostRow = typeof hosts.$inferSelect;
+export type NewHostRow = typeof hosts.$inferInsert;
 
 export const reportObservations = sqliteTable(
   "report_observations",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    managedHostId: integer("managed_host_id").notNull(),
+    hostId: integer("managed_host_id").notNull(),
     probeId: text("probe_id").notNull(),
     bootId: text("boot_id").notNull(),
     sequence: integer("sequence").notNull(),
@@ -123,7 +123,7 @@ export const metricSamples = sqliteTable(
   "metric_samples",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    managedHostId: integer("managed_host_id").notNull(),
+    hostId: integer("managed_host_id").notNull(),
     probeId: text("probe_id").notNull(),
     bootId: text("boot_id").notNull(),
     sequence: integer("sequence").notNull(),
@@ -231,7 +231,7 @@ export type NewProbeConfigurationGlobalDefaultRow =
 export const probeConfigurationHostOverrides = sqliteTable(
   "probe_configuration_host_overrides",
   {
-    managedHostId: integer("managed_host_id").primaryKey(),
+    hostId: integer("managed_host_id").primaryKey(),
     version: text("version").notNull(),
     updatedAtMs: integer("updated_at_ms").notNull(),
     metricsCollectionIntervalSeconds: integer(

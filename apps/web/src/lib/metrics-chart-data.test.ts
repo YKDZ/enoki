@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ManagedHostMetricSample } from "../types";
+import type { HostMetricSample } from "../types";
 import { buildMetricsChartData } from "./metrics-chart-data";
 
-const samples: ManagedHostMetricSample[] = [
+const samples: HostMetricSample[] = [
   {
     collectedAtMs: 1_725_000_000_000,
     cpuCores: [

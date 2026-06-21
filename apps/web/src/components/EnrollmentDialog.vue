@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { useClipboard, useTimeoutFn } from "@vueuse/core";
 import { Check, Copy, LoaderCircle, X } from "@lucide/vue";
+import { useClipboard, useTimeoutFn } from "@vueuse/core";
 import { computed, ref, watch } from "vue";
 
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+
 import type { EnrollmentResponse } from "../types";
 
 const props = defineProps<{
@@ -97,6 +99,9 @@ async function copyInstallCommand() {
     <DialogContent class="sm:max-w-3xl">
       <DialogHeader>
         <DialogTitle>添加主机</DialogTitle>
+        <DialogDescription class="sr-only">
+          生成并复制用于部署探针的一次性安装命令。
+        </DialogDescription>
       </DialogHeader>
 
       <div class="grid gap-4">
@@ -110,7 +115,7 @@ async function copyInstallCommand() {
 
         <div
           v-if="isCreatingEnrollment"
-          class="flex items-center gap-2 text-sm text-muted-foreground"
+          class="text-muted-foreground flex items-center gap-2 text-sm"
           aria-live="polite"
         >
           <LoaderCircle class="size-4 animate-spin" aria-hidden="true" />
@@ -119,7 +124,7 @@ async function copyInstallCommand() {
 
         <template v-else-if="enrollment">
           <div class="flex items-center justify-between gap-3">
-            <p class="text-sm text-muted-foreground">
+            <p class="text-muted-foreground text-sm">
               {{ new Date(enrollment.expiresAtMs).toLocaleString() }} 过期
             </p>
             <Button
@@ -153,9 +158,7 @@ async function copyInstallCommand() {
             </div>
             <div>
               <dt class="text-muted-foreground">探针版本</dt>
-              <dd class="mt-1">
-                {{ enrollment.probeReleaseVersion ?? "默认最新版本" }}
-              </dd>
+              <dd class="mt-1">由 Hub 分发</dd>
             </div>
             <div>
               <dt class="text-muted-foreground">安装路径</dt>
@@ -166,13 +169,13 @@ async function copyInstallCommand() {
           </dl>
 
           <code
-            class="block max-h-56 overflow-auto rounded-md border bg-muted px-3 py-2 text-sm leading-6 whitespace-pre-wrap"
+            class="bg-muted block max-h-56 overflow-auto rounded-md border px-3 py-2 text-sm leading-6 whitespace-pre-wrap"
           >
             {{ enrollment.installCommand }}
           </code>
         </template>
 
-        <div v-else class="text-sm text-muted-foreground">暂无安装命令。</div>
+        <div v-else class="text-muted-foreground text-sm">暂无安装命令。</div>
       </div>
 
       <DialogFooter>

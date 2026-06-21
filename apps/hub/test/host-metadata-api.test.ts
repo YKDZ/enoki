@@ -182,7 +182,7 @@ async function firstHostId(
   app: ReturnType<typeof createHubApp>,
   ownerSession: string,
 ) {
-  const response = await app.request("/api/web/managed-hosts", {
+  const response = await app.request("/api/web/hosts", {
     headers: {
       cookie: ownerSession,
     },
@@ -219,7 +219,7 @@ describe("Host Metadata API", () => {
     const hostId = await firstHostId(app, ownerSession);
 
     const updateResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metadata`,
+      `/api/web/hosts/${hostId}/metadata`,
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
@@ -242,7 +242,7 @@ describe("Host Metadata API", () => {
       id: hostId,
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -259,11 +259,11 @@ describe("Host Metadata API", () => {
     });
     expect(database.audit.recent(10)).toContainEqual(
       expect.objectContaining({
-        action: "managed_host.metadata.update",
+        action: "host.metadata.update",
         actor: "owner",
         outcome: "success",
         subjectId: String(hostId),
-        subjectType: "managed_host",
+        subjectType: "host",
       }),
     );
 
@@ -286,7 +286,7 @@ describe("Host Metadata API", () => {
     const hostId = await firstHostId(app, ownerSession);
 
     const updateResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metadata`,
+      `/api/web/hosts/${hostId}/metadata`,
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
@@ -358,7 +358,7 @@ describe("Host Metadata API", () => {
 
     await reportMetric(app, registration, 1, "203.0.113.55");
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -392,7 +392,7 @@ describe("Host Metadata API", () => {
     const hostId = await firstHostId(app, ownerSession);
 
     const updateResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metadata`,
+      `/api/web/hosts/${hostId}/metadata`,
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
@@ -419,7 +419,7 @@ describe("Host Metadata API", () => {
       sequence: 1,
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -454,7 +454,7 @@ describe("Host Metadata API", () => {
     const hostId = await firstHostId(app, ownerSession);
 
     const updateResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metadata`,
+      `/api/web/hosts/${hostId}/metadata`,
       {
         body: JSON.stringify({
           displayName: "生产探针 01",
@@ -481,7 +481,7 @@ describe("Host Metadata API", () => {
       sequence: 1,
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -522,7 +522,7 @@ describe("Host Metadata API", () => {
       sequence: 1,
     });
 
-    let hostsResponse = await app.request("/api/web/managed-hosts", {
+    let hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -538,7 +538,7 @@ describe("Host Metadata API", () => {
     });
 
     const updateResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metadata`,
+      `/api/web/hosts/${hostId}/metadata`,
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
@@ -560,7 +560,7 @@ describe("Host Metadata API", () => {
       sequence: 1,
     });
 
-    hostsResponse = await app.request("/api/web/managed-hosts", {
+    hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -578,7 +578,7 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
-  it("soft-deletes Managed Hosts from normal views and rejects their Probe Identity", async () => {
+  it("soft-deletes Hosts from normal views and rejects their Probe Identity", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -595,19 +595,16 @@ describe("Host Metadata API", () => {
     const hostId = await firstHostId(app, ownerSession);
     await reportMetric(app, registration, 1);
 
-    const deleteResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}`,
-      {
-        headers: {
-          cookie: ownerSession,
-        },
-        method: "DELETE",
+    const deleteResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
       },
-    );
+      method: "DELETE",
+    });
 
     expect(deleteResponse.status).toBe(204);
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -617,7 +614,7 @@ describe("Host Metadata API", () => {
     });
 
     const metadataResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metadata`,
+      `/api/web/hosts/${hostId}/metadata`,
       {
         body: JSON.stringify({
           connectAddress: "ssh.internal.example",
@@ -682,11 +679,11 @@ describe("Host Metadata API", () => {
     });
     expect(database.audit.recent(10)).toContainEqual(
       expect.objectContaining({
-        action: "managed_host.delete",
+        action: "host.delete",
         actor: "owner",
         outcome: "success",
         subjectId: String(hostId),
-        subjectType: "managed_host",
+        subjectType: "host",
       }),
     );
 

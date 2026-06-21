@@ -9,6 +9,7 @@ import {
   metricToggleFields,
   type MetricToggleKey,
 } from "@/lib/probe-configuration";
+
 import type { ProbeConfiguration } from "../types";
 
 const props = defineProps<{
@@ -22,7 +23,10 @@ defineEmits<{
   save: [];
 }>();
 
-function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate") {
+function setMetricToggle(
+  key: MetricToggleKey,
+  value: boolean | "indeterminate",
+) {
   if (!props.draft) {
     return;
   }
@@ -37,7 +41,7 @@ function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate")
       <div>
         <h3 class="text-base font-semibold">全局探针配置</h3>
       </div>
-      <span class="text-xs text-muted-foreground">
+      <span class="text-muted-foreground text-xs">
         版本 {{ draft?.version ?? "读取中" }}
       </span>
     </div>
@@ -86,11 +90,7 @@ function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate")
         {{ message }}
       </p>
 
-      <Button
-        class="h-10 w-fit"
-        type="submit"
-        :disabled="isSaving"
-      >
+      <Button class="h-10 w-fit" type="submit" :disabled="isSaving">
         <LoaderCircle v-if="isSaving" class="size-4 animate-spin" />
         保存全局配置
       </Button>

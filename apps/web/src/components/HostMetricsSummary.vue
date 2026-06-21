@@ -8,36 +8,38 @@ import {
   formatDuration,
   formatPercent,
 } from "@/lib/format";
-import type { ManagedHostMetricSample, ManagedHostSummary } from "../types";
+
+import type { HostMetricSample, HostSummary } from "../types";
 
 defineProps<{
-  latestMetric:
-    | ManagedHostMetricSample
-    | ManagedHostSummary["latestMetrics"]
-    | null;
+  latestMetric: HostMetricSample | HostSummary["latestMetrics"] | null;
 }>();
 </script>
 
 <template>
   <Card>
-    <CardContent class="grid gap-4 p-4 md:grid-cols-5">
+    <CardContent class="grid grid-cols-2 gap-3 p-4 md:grid-cols-5">
       <div class="flex items-center gap-3">
-        <div class="rounded-md bg-emerald-50 p-2 text-emerald-700">
+        <div
+          class="rounded-md bg-[var(--metric-cpu-bg)] p-2 text-[var(--metric-cpu-fg)]"
+        >
           <Cpu class="size-4" aria-hidden="true" />
         </div>
         <div>
-          <p class="text-xs text-muted-foreground">CPU</p>
+          <p class="text-muted-foreground text-xs">CPU</p>
           <p class="text-lg font-semibold">
             {{ formatPercent(latestMetric?.cpuPercent ?? null) }}
           </p>
         </div>
       </div>
       <div class="flex items-center gap-3">
-        <div class="rounded-md bg-sky-50 p-2 text-sky-700">
+        <div
+          class="rounded-md bg-[var(--metric-memory-bg)] p-2 text-[var(--metric-memory-fg)]"
+        >
           <MemoryStick class="size-4" aria-hidden="true" />
         </div>
         <div>
-          <p class="text-xs text-muted-foreground">内存</p>
+          <p class="text-muted-foreground text-xs">内存</p>
           <p class="text-sm font-semibold">
             {{
               formatByteUsage(
@@ -49,41 +51,43 @@ defineProps<{
         </div>
       </div>
       <div class="flex items-center gap-3">
-        <div class="rounded-md bg-violet-50 p-2 text-violet-700">
+        <div
+          class="rounded-md bg-[var(--metric-network-rx-bg)] p-2 text-[var(--metric-network-rx-fg)]"
+        >
           <Download class="size-4" aria-hidden="true" />
         </div>
         <div>
-          <p class="text-xs text-muted-foreground">接收</p>
+          <p class="text-muted-foreground text-xs">接收</p>
           <p class="text-lg font-semibold">
             {{
-              formatBitsPerSecond(
-                latestMetric?.networkRxBitsPerSecond ?? null,
-              )
+              formatBitsPerSecond(latestMetric?.networkRxBitsPerSecond ?? null)
             }}
           </p>
         </div>
       </div>
       <div class="flex items-center gap-3">
-        <div class="rounded-md bg-amber-50 p-2 text-amber-700">
+        <div
+          class="rounded-md bg-[var(--metric-network-tx-bg)] p-2 text-[var(--metric-network-tx-fg)]"
+        >
           <Upload class="size-4" aria-hidden="true" />
         </div>
         <div>
-          <p class="text-xs text-muted-foreground">发送</p>
+          <p class="text-muted-foreground text-xs">发送</p>
           <p class="text-lg font-semibold">
             {{
-              formatBitsPerSecond(
-                latestMetric?.networkTxBitsPerSecond ?? null,
-              )
+              formatBitsPerSecond(latestMetric?.networkTxBitsPerSecond ?? null)
             }}
           </p>
         </div>
       </div>
       <div class="flex items-center gap-3">
-        <div class="rounded-md bg-slate-100 p-2 text-slate-700">
+        <div
+          class="rounded-md bg-[var(--metric-neutral-bg)] p-2 text-[var(--metric-neutral-fg)]"
+        >
           <Clock3 class="size-4" aria-hidden="true" />
         </div>
         <div>
-          <p class="text-xs text-muted-foreground">运行时间</p>
+          <p class="text-muted-foreground text-xs">运行时间</p>
           <p class="text-sm font-semibold">
             {{ formatDuration(latestMetric?.uptimeSeconds) }}
           </p>

@@ -31,6 +31,9 @@ FROM installer AS builder
 
 COPY --from=prepare /repo/out/full/ ./
 COPY --from=prepare /repo/tsconfig.base.json ./tsconfig.base.json
+RUN mkdir -p /app/probe-assets && \
+  cp scripts/install-probe.sh /app/probe-assets/install-probe.sh && \
+  if [ -d probe-assets ]; then cp -R probe-assets/. /app/probe-assets/; fi
 
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
@@ -52,6 +55,7 @@ WORKDIR /app
 COPY --from=builder --chown=node:node /app/deploy ./
 COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
+COPY --from=builder --chown=node:node /app/probe-assets probe-assets
 
 RUN mkdir -p /data && chown -R node:node /app /data
 

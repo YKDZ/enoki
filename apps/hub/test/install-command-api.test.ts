@@ -54,8 +54,7 @@ describe("Owner add-host install command", () => {
       database,
       installation: {
         installPath: "/usr/local/bin/enoki-probe",
-        installScriptUrl:
-          "https://github.com/example/enoki/releases/latest/download/install-probe.sh",
+        installScriptPath: "/api/probe/install.sh",
         publicHubUrl: "https://hub.example",
       },
     });
@@ -73,13 +72,11 @@ describe("Owner add-host install command", () => {
       enrollmentToken: string;
       installCommand: string;
       installPath: string;
-      probeReleaseVersion?: string;
     };
 
     expect(body.installPath).toBe("/usr/local/bin/enoki-probe");
-    expect(body.probeReleaseVersion).toBeUndefined();
     expect(body.installCommand).toContain(
-      "https://github.com/example/enoki/releases/latest/download/install-probe.sh",
+      "https://hub.example/api/probe/install.sh",
     );
     expect(body.installCommand).toContain(
       "ENOKI_HUB_URL='https://hub.example'",
@@ -88,6 +85,7 @@ describe("Owner add-host install command", () => {
       `ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}'`,
     );
     expect(body.installCommand).not.toContain("ENOKI_PROBE_VERSION=");
+    expect(body.installCommand).not.toContain("ENOKI_PROBE_DOWNLOAD_URL=");
     expect(body.installCommand).not.toContain("ENOKI_INSTALL_PATH=");
 
     database.close();
@@ -104,8 +102,7 @@ describe("Owner add-host install command", () => {
       database,
       installation: {
         installPath: "/opt/enoki/bin/enoki-probe",
-        installScriptUrl:
-          "https://github.com/example/enoki/releases/latest/download/install-probe.sh",
+        installScriptPath: "/api/probe/install.sh",
         publicHubUrl: "https://hub.example",
       },
     });

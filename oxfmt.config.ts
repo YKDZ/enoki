@@ -5,5 +5,8 @@ export default defineConfig({
   sortImports: true,
   sortPackageJson: true,
   sortTailwindcss: true,
-  ignorePatterns: ["packages/proto/src/generated", "apps/web/src/components"],
+  ignorePatterns: [
+    "packages/proto/src/generated",
+    "apps/web/src/components/ui",
+  ],
 });

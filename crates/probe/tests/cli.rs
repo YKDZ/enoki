@@ -15,7 +15,7 @@ fn renders_help_without_remote_administration_language() {
     let output = render_probe_output(ProbeCommand::Help);
 
     assert!(output.contains("Enoki Probe"));
-    assert!(output.contains("reports Managed Host observations to the Hub"));
+    assert!(output.contains("reports Host observations to the Hub"));
     assert!(output.contains("enoki-probe register --hub-url"));
     assert!(!output.contains("command execution"));
 }

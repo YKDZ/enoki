@@ -102,6 +102,31 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
+      - name: Download Probe assets for Hub distribution
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-version.outputs.version }}
+        run: |
+          mkdir -p probe-assets
+          gh release download "$VERSION" \
+            --pattern 'enoki-probe-*.tar.gz' \
+            --pattern 'manifest.json' \
+            --pattern 'manifest.json.sig' \
+            --pattern 'signing-key.pem' \
+            --pattern 'install-probe.sh' \
+            --dir probe-assets
+
+          for required in manifest.json manifest.json.sig signing-key.pem install-probe.sh; do
+            if [ ! -f "probe-assets/$required" ]; then
+              echo "::error::Missing Probe release asset: $required"
+              exit 1
+            fi
+          done
+          if ! ls probe-assets/enoki-probe-*.tar.gz >/dev/null 2>&1; then
+            echo "::error::Missing Probe binary release assets."
+            exit 1
+          fi
+
       - name: Build and push Hub image
         env:
           VERSION: ${{ needs.release-version.outputs.version }}

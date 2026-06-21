@@ -279,7 +279,7 @@ describe("Probe report API", () => {
       },
     ]);
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -376,7 +376,7 @@ describe("Probe report API", () => {
       uptime_seconds: null,
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -468,7 +468,7 @@ describe("Probe report API", () => {
       samples: 1,
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -526,7 +526,7 @@ describe("Probe report API", () => {
     expect(response.status).toBe(200);
 
     const readStatus = async () => {
-      const hostsResponse = await app.request("/api/web/managed-hosts", {
+      const hostsResponse = await app.request("/api/web/hosts", {
         headers: {
           cookie: ownerSession,
         },
@@ -610,7 +610,7 @@ describe("Probe report API", () => {
 
     expect(response.status).toBe(200);
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -630,7 +630,7 @@ describe("Probe report API", () => {
     database.close();
   });
 
-  it("persists Probe Configuration errors from reports into Managed Host summaries", async () => {
+  it("persists Probe Configuration errors from reports into Host summaries", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -671,7 +671,7 @@ describe("Probe report API", () => {
 
     expect(response.status).toBe(200);
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -751,7 +751,7 @@ describe("Probe report API", () => {
     });
     expect(cleanResponse.status).toBe(200);
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -1020,7 +1020,7 @@ describe("Probe report API", () => {
       error: "malformed_probe_report",
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -1099,7 +1099,7 @@ describe("Probe report API", () => {
       samples: 0,
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },

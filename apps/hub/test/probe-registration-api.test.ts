@@ -182,7 +182,7 @@ describe("Probe registration API", () => {
     );
   });
 
-  it("creates a pending Enrollment Token without creating a Managed Host card", async () => {
+  it("creates a pending Enrollment Token without creating a Host card", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -209,7 +209,7 @@ describe("Probe registration API", () => {
     expect(enrollment.enrollmentToken).toMatch(/^enk_enroll_/);
     expect(enrollment.expiresAtMs).toBeGreaterThan(Date.now());
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -230,7 +230,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("registers a Probe with an Enrollment Token and creates a Managed Host", async () => {
+  it("registers a Probe with an Enrollment Token and creates a Host", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -271,7 +271,7 @@ describe("Probe registration API", () => {
       }),
     );
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -283,7 +283,7 @@ describe("Probe registration API", () => {
         expect.objectContaining({
           cpu: "2 cores",
           displayName: "managed-host-01",
-          memory: "2 GiB",
+          memory: "2 GB",
           probeVersion: "0.1.0",
           status: "offline",
           system: "linux 6.8.0 x86_64",
@@ -325,7 +325,7 @@ describe("Probe registration API", () => {
       error: "invalid_enrollment_token",
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -425,7 +425,7 @@ describe("Probe registration API", () => {
       error: "invalid_enrollment_token",
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -656,7 +656,7 @@ describe("Probe registration API", () => {
       }),
     );
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -774,7 +774,7 @@ describe("Probe registration API", () => {
       .get() as { inventory_hash: string };
     expect(storedHost.inventory_hash).toBe(canonicalHash);
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -819,7 +819,7 @@ describe("Probe registration API", () => {
       observed_ip: "203.0.113.10",
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -897,7 +897,7 @@ describe("Probe registration API", () => {
     const response = await registerProbe(app, enrollmentToken, "");
 
     expect(response.status).toBe(200);
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -1119,7 +1119,7 @@ describe("Probe registration API", () => {
       error: "invalid_enrollment_token",
     });
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },

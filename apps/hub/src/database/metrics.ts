@@ -40,7 +40,7 @@ export type RawMetricSampleInput = {
   load1?: number | null;
   load5?: number | null;
   load15?: number | null;
-  managedHostId: number;
+  hostId: number;
   memoryTotalBytes?: number | null;
   memoryUsedBytes?: number | null;
   networkInterfaces?: Array<{
@@ -60,7 +60,7 @@ export type RawMetricSampleInput = {
 
 export type ReportObservationInput = {
   bootId: string;
-  managedHostId: number;
+  hostId: number;
   probeId: string;
   receivedAtMs: number;
   sequence: number;
@@ -86,10 +86,10 @@ export type MetricHistorySample = MetricSampleRow & {
 };
 
 export type MetricsRepository = {
-  findLatestSample: (managedHostId: number) => MetricSampleRow | null;
+  findLatestSample: (hostId: number) => MetricSampleRow | null;
   findSamplesForHost: (input: {
     fromCollectedAtMs: number;
-    managedHostId: number;
+    hostId: number;
     toCollectedAtMs: number;
   }) => MetricHistorySample[];
   recordObservation: (input: ReportObservationInput) => boolean;
@@ -100,12 +100,12 @@ export function createMetricsRepository(
   database: MetricsDatabase,
 ): MetricsRepository {
   return {
-    findLatestSample(managedHostId) {
+    findLatestSample(hostId) {
       return (
         database
           .select()
           .from(metricSamples)
-          .where(eq(metricSamples.managedHostId, managedHostId))
+          .where(eq(metricSamples.hostId, hostId))
           .orderBy(
             desc(metricSamples.receivedAtMs),
             desc(metricSamples.sequence),
@@ -120,7 +120,7 @@ export function createMetricsRepository(
         .from(metricSamples)
         .where(
           and(
-            eq(metricSamples.managedHostId, input.managedHostId),
+            eq(metricSamples.hostId, input.hostId),
             gte(metricSamples.collectedAtMs, input.fromCollectedAtMs),
             lte(metricSamples.collectedAtMs, input.toCollectedAtMs),
           ),
@@ -218,7 +218,7 @@ export function createMetricsRepository(
         .insert(reportObservations)
         .values({
           bootId: input.bootId,
-          managedHostId: input.managedHostId,
+          hostId: input.hostId,
           probeId: input.probeId,
           receivedAtMs: input.receivedAtMs,
           sequence: input.sequence,
@@ -247,7 +247,7 @@ export function createMetricsRepository(
           load1: input.load1 ?? null,
           load5: input.load5 ?? null,
           load15: input.load15 ?? null,
-          managedHostId: input.managedHostId,
+          hostId: input.hostId,
           memoryTotalBytes: input.memoryTotalBytes ?? null,
           memoryUsedBytes: input.memoryUsedBytes ?? null,
           networkRxBytesDelta: input.networkRxBytesDelta ?? null,

@@ -406,6 +406,10 @@ fn parse_network_interface_line(line: &str) -> Option<NetworkCounters> {
         return None;
     }
 
+    if name == "lo" {
+        return None;
+    }
+
     let values = counters.split_whitespace().collect::<Vec<_>>();
 
     Some(NetworkCounters {

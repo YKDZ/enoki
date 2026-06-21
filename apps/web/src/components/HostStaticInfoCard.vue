@@ -4,17 +4,18 @@ import { Cpu, MemoryStick } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatBytes, formatTimestamp } from "@/lib/format";
-import type { ManagedHostDetail } from "../types";
+
+import type { HostDetail } from "../types";
 
 defineProps<{
-  host: ManagedHostDetail;
+  host: HostDetail;
 }>();
 
 defineEmits<{
-  openHostMetadata: [host: ManagedHostDetail];
+  openHostMetadata: [host: HostDetail];
 }>();
 
-function inventoryText(host: ManagedHostDetail, key: string) {
+function inventoryText(host: HostDetail, key: string) {
   const value = host.inventory?.[key];
 
   if (value === null || value === undefined || value === "") {
@@ -24,15 +25,15 @@ function inventoryText(host: ManagedHostDetail, key: string) {
   return String(value);
 }
 
-function memoryTotal(host: ManagedHostDetail) {
+function memoryTotal(host: HostDetail) {
   return Number(host.inventory?.memoryTotalBytes ?? 0) || null;
 }
 
-function cpuModel(host: ManagedHostDetail) {
+function cpuModel(host: HostDetail) {
   return host.cpuModel || "暂无型号";
 }
 
-function cpuCoreCount(host: ManagedHostDetail) {
+function cpuCoreCount(host: HostDetail) {
   const value = Number(host.inventory?.cpuCount ?? 0);
 
   return value > 0 ? `${value} 核心` : "核心数暂无";
@@ -56,63 +57,65 @@ function cpuCoreCount(host: ManagedHostDetail) {
       <div
         class="flex min-w-0 items-start justify-between gap-3 rounded-md border px-3 py-2"
       >
-        <span class="shrink-0 text-muted-foreground">显示名称</span>
-        <span class="min-w-0 break-words text-right font-medium whitespace-normal">
+        <span class="text-muted-foreground shrink-0">显示名称</span>
+        <span
+          class="min-w-0 text-right font-medium break-words whitespace-normal"
+        >
           {{ host.hostMetadata.displayName }}
         </span>
       </div>
       <div class="grid gap-2">
-        <div class="min-w-0 rounded-md bg-muted/50 p-3">
-          <Cpu class="mb-2 size-4 text-muted-foreground" aria-hidden="true" />
-          <p class="text-xs text-muted-foreground">CPU</p>
+        <div class="bg-muted/50 min-w-0 rounded-md p-3">
+          <Cpu class="text-muted-foreground mb-2 size-4" aria-hidden="true" />
+          <p class="text-muted-foreground text-xs">CPU</p>
           <p
-            class="min-w-0 break-words font-semibold whitespace-normal"
+            class="min-w-0 font-semibold break-words whitespace-normal"
             :title="cpuModel(host)"
           >
             {{ cpuModel(host) }}
           </p>
-          <p class="mt-1 min-w-0 break-words text-xs text-muted-foreground">
+          <p class="text-muted-foreground mt-1 min-w-0 text-xs break-words">
             {{ cpuCoreCount(host) }}
           </p>
         </div>
-        <div class="min-w-0 rounded-md bg-muted/50 p-3">
+        <div class="bg-muted/50 min-w-0 rounded-md p-3">
           <MemoryStick
-            class="mb-2 size-4 text-muted-foreground"
+            class="text-muted-foreground mb-2 size-4"
             aria-hidden="true"
           />
-          <p class="text-xs text-muted-foreground">RAM</p>
-          <p class="min-w-0 break-words font-semibold whitespace-normal">
+          <p class="text-muted-foreground text-xs">RAM</p>
+          <p class="min-w-0 font-semibold break-words whitespace-normal">
             {{ formatBytes(memoryTotal(host)) }}
           </p>
         </div>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-xs text-muted-foreground">IP 地址</p>
-        <p class="mt-1 min-w-0 break-words font-medium whitespace-normal">
+        <p class="text-muted-foreground text-xs">IP 地址</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{ host.connectAddress }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-xs text-muted-foreground">操作系统</p>
-        <p class="mt-1 min-w-0 break-words font-medium whitespace-normal">
+        <p class="text-muted-foreground text-xs">操作系统</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{ host.system }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-xs text-muted-foreground">主机名</p>
-        <p class="mt-1 min-w-0 break-words font-medium whitespace-normal">
+        <p class="text-muted-foreground text-xs">主机名</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{ inventoryText(host, "hostname") }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-xs text-muted-foreground">架构</p>
-        <p class="mt-1 min-w-0 break-words font-medium whitespace-normal">
+        <p class="text-muted-foreground text-xs">架构</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{ inventoryText(host, "architecture") }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-xs text-muted-foreground">最近上报</p>
-        <p class="mt-1 min-w-0 break-words font-medium whitespace-normal">
+        <p class="text-muted-foreground text-xs">最近上报</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{ formatTimestamp(host.lastReportAtMs) }}
         </p>
       </div>

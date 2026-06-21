@@ -10,22 +10,22 @@ describe("WebSocket contracts", () => {
   it("validates browser detail subscription messages", () => {
     expect(
       parseWebSocketClientMessage({
-        managedHostId: 42,
-        type: "subscribe_managed_host_detail",
+        hostId: 42,
+        type: "subscribe_host_detail",
       }),
     ).toEqual({
-      managedHostId: 42,
-      type: "subscribe_managed_host_detail",
+      hostId: 42,
+      type: "subscribe_host_detail",
     });
 
     expect(
       parseWebSocketClientMessage({
-        managedHostId: 42,
-        type: "unsubscribe_managed_host_detail",
+        hostId: 42,
+        type: "unsubscribe_host_detail",
       }),
     ).toEqual({
-      managedHostId: 42,
-      type: "unsubscribe_managed_host_detail",
+      hostId: 42,
+      type: "unsubscribe_host_detail",
     });
   });
 
@@ -33,8 +33,8 @@ describe("WebSocket contracts", () => {
     expect(parseWebSocketClientMessage("not an object")).toBeNull();
     expect(
       parseWebSocketClientMessage({
-        managedHostId: "42",
-        type: "subscribe_managed_host_detail",
+        hostId: "42",
+        type: "subscribe_host_detail",
       }),
     ).toBeNull();
     expect(
@@ -48,7 +48,7 @@ describe("WebSocket contracts", () => {
     expect(webSocketClientMessageSchema).toBeDefined();
   });
 
-  it("validates server Managed Host summary messages", () => {
+  it("validates server Host summary messages", () => {
     expect(
       parseWebSocketServerMessage({
         host: {
@@ -61,7 +61,7 @@ describe("WebSocket contracts", () => {
             probeConfigurationError: false,
           },
         },
-        type: "managed_host_summary",
+        type: "host_summary",
       }),
     ).toEqual({
       host: {
@@ -74,7 +74,7 @@ describe("WebSocket contracts", () => {
           probeConfigurationError: false,
         },
       },
-      type: "managed_host_summary",
+      type: "host_summary",
     });
   });
 
@@ -104,7 +104,7 @@ describe("WebSocket contracts", () => {
             probeConfigurationError: false,
           },
         },
-        type: "managed_host_summary",
+        type: "host_summary",
       }),
     ).toEqual({
       host: {
@@ -130,20 +130,20 @@ describe("WebSocket contracts", () => {
           probeConfigurationError: false,
         },
       },
-      type: "managed_host_summary",
+      type: "host_summary",
     });
   });
 
   it("validates uptime in live detail samples", () => {
     expect(
       parseWebSocketServerMessage({
-        managedHostId: 1,
+        hostId: 1,
         sample: {
           collectedAtMs: 1_725_000_009_500,
           cpuCores: [],
           cpuPercent: 12,
           disks: [],
-          managedHostId: 1,
+          hostId: 1,
           memoryTotalBytes: 2_147_483_648,
           memoryUsedBytes: 1_073_741_824,
           networkInterfaces: [],
@@ -151,16 +151,16 @@ describe("WebSocket contracts", () => {
           sequence: 1,
           uptimeSeconds: 86_400,
         },
-        type: "managed_host_detail_sample",
+        type: "host_detail_sample",
       }),
     ).toEqual({
-      managedHostId: 1,
+      hostId: 1,
       sample: {
         collectedAtMs: 1_725_000_009_500,
         cpuCores: [],
         cpuPercent: 12,
         disks: [],
-        managedHostId: 1,
+        hostId: 1,
         memoryTotalBytes: 2_147_483_648,
         memoryUsedBytes: 1_073_741_824,
         networkInterfaces: [],
@@ -168,7 +168,7 @@ describe("WebSocket contracts", () => {
         sequence: 1,
         uptimeSeconds: 86_400,
       },
-      type: "managed_host_detail_sample",
+      type: "host_detail_sample",
     });
   });
 });

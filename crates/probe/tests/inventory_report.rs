@@ -119,6 +119,12 @@ fn local_inventory_snapshot_contains_host_capacity_and_probe_version() {
             .flat_map(|network_interface| &network_interface.addresses)
             .any(|address| !address.is_empty())
     );
+    assert!(
+        !inventory
+            .network_interfaces
+            .iter()
+            .any(|network_interface| network_interface.name == "lo")
+    );
 }
 
 fn sample_inventory() -> Inventory {

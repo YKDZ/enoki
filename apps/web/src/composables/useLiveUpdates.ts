@@ -1,21 +1,21 @@
 import {
-  type ManagedHostDetailSample,
-  type ManagedHostLiveSummary,
+  type HostDetailSample,
+  type HostLiveSummary,
   parseWebSocketServerMessage,
   type WebSocketClientMessage,
 } from "@enoki/api-client/websocket";
 import type { Ref } from "vue";
 
-import type { ManagedHostSummary } from "../types";
+import type { HostSummary } from "../types";
 
 export type LiveSummaryApplyResult = {
-  hosts: ManagedHostSummary[];
+  hosts: HostSummary[];
   needsReload: boolean;
 };
 
-export function applyManagedHostLiveSummary(
-  hosts: ManagedHostSummary[],
-  summary: ManagedHostLiveSummary,
+export function applyHostLiveSummary(
+  hosts: HostSummary[],
+  summary: HostLiveSummary,
 ): LiveSummaryApplyResult {
   let matched = false;
   const updatedHosts = hosts.map((host) => {
@@ -60,16 +60,16 @@ export function applyManagedHostLiveSummary(
 }
 
 export function useLiveUpdates(options: {
-  hosts: Ref<ManagedHostSummary[]>;
+  hosts: Ref<HostSummary[]>;
   isAuthenticated: Ref<boolean>;
   loadHosts: () => Promise<void>;
-  onDetailSample?: (sample: ManagedHostDetailSample) => void;
-  onSummary?: (summary: ManagedHostLiveSummary) => void;
+  onDetailSample?: (sample: HostDetailSample) => void;
+  onSummary?: (summary: HostLiveSummary) => void;
   reconnectDelayMs?: number;
   recoverDetail?: () => Promise<void>;
 }) {
   let liveUpdatesSocket: WebSocket | null = null;
-  let detailManagedHostId: number | null = null;
+  let detailHostId: number | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   const reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
 
@@ -93,10 +93,10 @@ export function useLiveUpdates(options: {
       void handleLiveUpdate(event.data);
     });
     socket.addEventListener("open", () => {
-      if (detailManagedHostId !== null) {
+      if (detailHostId !== null) {
         sendClientMessage({
-          managedHostId: detailManagedHostId,
-          type: "subscribe_managed_host_detail",
+          hostId: detailHostId,
+          type: "subscribe_host_detail",
         });
       }
     });
@@ -149,7 +149,7 @@ export function useLiveUpdates(options: {
   async function recoverCurrentHttpState() {
     try {
       await options.loadHosts();
-      if (detailManagedHostId !== null) {
+      if (detailHostId !== null) {
         await options.recoverDetail?.();
       }
     } catch {
@@ -171,17 +171,14 @@ export function useLiveUpdates(options: {
 
     const message = parseWebSocketServerMessage(payload);
 
-    if (message?.type !== "managed_host_summary") {
-      if (message?.type === "managed_host_detail_sample") {
+    if (message?.type !== "host_summary") {
+      if (message?.type === "host_detail_sample") {
         options.onDetailSample?.(message.sample);
       }
       return;
     }
 
-    const result = applyManagedHostLiveSummary(
-      options.hosts.value,
-      message.host,
-    );
+    const result = applyHostLiveSummary(options.hosts.value, message.host);
     options.hosts.value = result.hosts;
     options.onSummary?.(message.host);
 
@@ -190,21 +187,21 @@ export function useLiveUpdates(options: {
     }
   }
 
-  function subscribeManagedHostDetail(managedHostId: number) {
-    detailManagedHostId = managedHostId;
+  function subscribeHostDetail(hostId: number) {
+    detailHostId = hostId;
     sendClientMessage({
-      managedHostId,
-      type: "subscribe_managed_host_detail",
+      hostId,
+      type: "subscribe_host_detail",
     });
   }
 
-  function unsubscribeManagedHostDetail(managedHostId: number) {
-    if (detailManagedHostId === managedHostId) {
-      detailManagedHostId = null;
+  function unsubscribeHostDetail(hostId: number) {
+    if (detailHostId === hostId) {
+      detailHostId = null;
     }
     sendClientMessage({
-      managedHostId,
-      type: "unsubscribe_managed_host_detail",
+      hostId,
+      type: "unsubscribe_host_detail",
     });
   }
 
@@ -220,7 +217,7 @@ export function useLiveUpdates(options: {
     connectLiveUpdates,
     disconnectLiveUpdates,
     handleLiveUpdate,
-    subscribeManagedHostDetail,
-    unsubscribeManagedHostDetail,
+    subscribeHostDetail,
+    unsubscribeHostDetail,
   };
 }

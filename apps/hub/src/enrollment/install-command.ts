@@ -1,8 +1,6 @@
 export type InstallationCommandConfig = {
   installPath: string;
-  installScriptUrl: string;
-  probeDownloadUrl?: string;
-  probeReleaseVersion?: string;
+  installScriptPath: string;
   publicHubUrl?: string;
 };
 
@@ -16,18 +14,15 @@ export type InstallCommandResult = {
   installCommand: string;
   installPath: string;
   installScriptUrl: string;
-  probeDownloadUrl?: string;
-  probeReleaseVersion?: string;
 };
 
-const defaultGitHubReleaseBaseUrl =
-  "https://github.com/YKDZ/enoki/releases/latest/download";
 const defaultInstallPath = "/usr/local/bin/enoki-probe";
+const defaultInstallScriptPath = "/api/probe/install.sh";
 
 export function createDefaultInstallationCommandConfig(): InstallationCommandConfig {
   return {
     installPath: defaultInstallPath,
-    installScriptUrl: `${defaultGitHubReleaseBaseUrl}/install-probe.sh`,
+    installScriptPath: defaultInstallScriptPath,
   };
 }
 
@@ -47,18 +42,14 @@ export function renderInstallCommand(
     variables.push(["ENOKI_INSTALL_PATH", config.installPath]);
   }
 
-  if (config.probeDownloadUrl) {
-    variables.push(["ENOKI_PROBE_DOWNLOAD_URL", config.probeDownloadUrl]);
-  } else if (config.probeReleaseVersion) {
-    variables.push(["ENOKI_PROBE_VERSION", config.probeReleaseVersion]);
-  }
+  const installScriptUrl = `${hubUrl}${config.installScriptPath}`;
 
   return {
     hubUrl,
     installCommand: [
       "curl",
       "-fsSL",
-      shellQuote(config.installScriptUrl),
+      shellQuote(installScriptUrl),
       "|",
       "sudo",
       "env",
@@ -66,9 +57,7 @@ export function renderInstallCommand(
       "bash",
     ].join(" "),
     installPath: config.installPath,
-    installScriptUrl: config.installScriptUrl,
-    probeDownloadUrl: config.probeDownloadUrl,
-    probeReleaseVersion: config.probeReleaseVersion,
+    installScriptUrl,
   };
 }
 

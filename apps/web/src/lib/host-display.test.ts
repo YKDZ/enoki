@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { hostStatusText, warningTitle } from "./managed-host-display";
+import { hostStatusText, warningTitle } from "./host-display";
 
-describe("Managed Host display text", () => {
+describe("Host display text", () => {
   it("renders Host Status values in Simplified Chinese", () => {
     expect(hostStatusText("online")).toBe("在线");
     expect(hostStatusText("stale")).toBe("上报延迟");

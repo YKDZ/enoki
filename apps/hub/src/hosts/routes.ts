@@ -3,21 +3,22 @@ import { Hono } from "hono";
 import type { AuditRepository } from "../database/audit.js";
 import type {
   HostStatusThresholds,
-  ManagedHostRepository,
-} from "../database/managed-hosts.js";
+  HostRepository,
+} from "../database/hosts.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 
-export type ManagedHostRouteServices = {
+export type HostRouteServices = {
   audit?: AuditRepository;
   hostStatus?: HostStatusThresholds;
-  managedHosts: ManagedHostRepository;
+  hosts: HostRepository;
   metrics?: MetricsRepository;
   now?: () => number;
   probeConfigurations?: ProbeConfigurationRepository;
 };
 
 const metricsWindows = {
+  "1m": 60 * 1000,
   "1h": 60 * 60 * 1000,
   "6h": 6 * 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
@@ -26,22 +27,22 @@ const metricsWindows = {
 
 type MetricsWindow = keyof typeof metricsWindows;
 
-export function createManagedHostRoutes(services: ManagedHostRouteServices) {
+export function createHostRoutes(services: HostRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
 
   routes.get("/:hostId", (context) => {
-    const managedHostId = numericHostId(context.req.param("hostId"));
-    if (!managedHostId) {
-      return hostMetadataError("managed_host_not_found", 404);
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId) {
+      return hostMetadataError("host_not_found", 404);
     }
 
-    const host = services.managedHosts.findActiveById(managedHostId);
+    const host = services.hosts.findActiveById(hostId);
     if (!host) {
-      return hostMetadataError("managed_host_not_found", 404);
+      return hostMetadataError("host_not_found", 404);
     }
 
-    const hostSummary = services.managedHosts
+    const hostSummary = services.hosts
       .listSummaries({
         latestMetricForHost: (hostId) =>
           services.metrics?.findLatestSample(hostId) ?? null,
@@ -57,10 +58,10 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
         },
         thresholds: services.hostStatus,
       })
-      .find((summary) => summary.id === managedHostId);
+      .find((summary) => summary.id === hostId);
 
     if (!hostSummary) {
-      return hostMetadataError("managed_host_not_found", 404);
+      return hostMetadataError("host_not_found", 404);
     }
 
     return context.json({
@@ -74,7 +75,7 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
         },
         inventory: parseInventory(host.inventoryJson),
         probeConfiguration: services.probeConfigurations?.getEffectiveForHost(
-          managedHostId,
+          hostId,
         ) ?? {
           configuration: null,
           mode: "inherit",
@@ -85,9 +86,9 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
   });
 
   routes.get("/:hostId/metrics", (context) => {
-    const managedHostId = numericHostId(context.req.param("hostId"));
-    if (!managedHostId || !services.managedHosts.exists(managedHostId)) {
-      return hostMetadataError("managed_host_not_found", 404);
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId || !services.hosts.exists(hostId)) {
+      return hostMetadataError("host_not_found", 404);
     }
 
     const window = metricsWindow(context.req.query("window"));
@@ -98,9 +99,7 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
     const toCollectedAtMs = now();
     const fromCollectedAtMs = toCollectedAtMs - metricsWindows[window];
     const effectiveConfiguration =
-      services.probeConfigurations?.getEffectiveForHost(
-        managedHostId,
-      ).configuration;
+      services.probeConfigurations?.getEffectiveForHost(hostId).configuration;
     const intervalSeconds =
       effectiveConfiguration?.metricsCollectionIntervalSeconds ?? 5;
 
@@ -110,7 +109,7 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
           services.metrics
             ?.findSamplesForHost({
               fromCollectedAtMs,
-              managedHostId,
+              hostId,
               toCollectedAtMs,
             })
             .map((sample) => ({
@@ -155,9 +154,9 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
   });
 
   routes.put("/:hostId/metadata", async (context) => {
-    const managedHostId = numericHostId(context.req.param("hostId"));
-    if (!managedHostId) {
-      return hostMetadataError("managed_host_not_found", 404);
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId) {
+      return hostMetadataError("host_not_found", 404);
     }
 
     const input = parseHostMetadata(await context.req.json());
@@ -165,18 +164,18 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
       return hostMetadataError("invalid_host_metadata");
     }
 
-    const host = services.managedHosts.updateMetadata(managedHostId, input);
+    const host = services.hosts.updateMetadata(hostId, input);
     if (!host) {
-      return hostMetadataError("managed_host_not_found", 404);
+      return hostMetadataError("host_not_found", 404);
     }
 
     services.audit?.record({
-      action: "managed_host.metadata.update",
+      action: "host.metadata.update",
       actor: "owner",
       occurredAtMs: now(),
       outcome: "success",
       subjectId: String(host.id),
-      subjectType: "managed_host",
+      subjectType: "host",
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
@@ -189,23 +188,23 @@ export function createManagedHostRoutes(services: ManagedHostRouteServices) {
   });
 
   routes.delete("/:hostId", (context) => {
-    const managedHostId = numericHostId(context.req.param("hostId"));
-    if (!managedHostId) {
-      return hostMetadataError("managed_host_not_found", 404);
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId) {
+      return hostMetadataError("host_not_found", 404);
     }
 
-    const host = services.managedHosts.softDelete(managedHostId, now());
+    const host = services.hosts.softDelete(hostId, now());
     if (!host) {
-      return hostMetadataError("managed_host_not_found", 404);
+      return hostMetadataError("host_not_found", 404);
     }
 
     services.audit?.record({
-      action: "managed_host.delete",
+      action: "host.delete",
       actor: "owner",
       occurredAtMs: now(),
       outcome: "success",
       subjectId: String(host.id),
-      subjectType: "managed_host",
+      subjectType: "host",
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 

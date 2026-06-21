@@ -21,11 +21,11 @@ export function formatBytes(bytes: number | null) {
 
   const gibibytes = bytes / 1024 ** 3;
   if (gibibytes >= 1) {
-    return `${formatNumber(gibibytes)} GiB`;
+    return `${formatNumber(gibibytes)} GB`;
   }
 
   const mebibytes = bytes / 1024 ** 2;
-  return `${formatNumber(mebibytes)} MiB`;
+  return `${formatNumber(mebibytes)} MB`;
 }
 
 export function formatByteUsage(

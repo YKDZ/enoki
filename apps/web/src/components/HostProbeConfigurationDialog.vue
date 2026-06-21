@@ -6,6 +6,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -17,14 +18,12 @@ import {
   metricToggleFields,
   type MetricToggleKey,
 } from "@/lib/probe-configuration";
-import type {
-  HostProbeConfigurationResponse,
-  ManagedHostDetail,
-} from "../types";
+
+import type { HostProbeConfigurationResponse, HostDetail } from "../types";
 
 const props = defineProps<{
   activeHostConfigurationId: number | null;
-  host: ManagedHostDetail;
+  host: HostDetail;
   hostConfigurationDraft: HostProbeConfigurationResponse | null;
   hostConfigurationError: string;
   isSavingHostConfiguration: boolean;
@@ -35,7 +34,10 @@ const emit = defineEmits<{
   saveHostConfiguration: [];
 }>();
 
-function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate") {
+function setMetricToggle(
+  key: MetricToggleKey,
+  value: boolean | "indeterminate",
+) {
   if (!props.hostConfigurationDraft) {
     return;
   }
@@ -58,6 +60,9 @@ function updateOpen(open: boolean) {
     <DialogContent class="sm:max-w-2xl">
       <DialogHeader>
         <DialogTitle>探针配置</DialogTitle>
+        <DialogDescription class="sr-only">
+          调整此主机的探针采集配置。
+        </DialogDescription>
       </DialogHeader>
 
       <form
@@ -79,7 +84,10 @@ function updateOpen(open: boolean) {
           </Label>
         </RadioGroup>
 
-        <div v-if="hostConfigurationDraft.mode === 'override'" class="grid gap-4">
+        <div
+          v-if="hostConfigurationDraft.mode === 'override'"
+          class="grid gap-4"
+        >
           <div class="grid gap-4 sm:grid-cols-2">
             <Label class="grid gap-2 text-sm font-medium">
               采集间隔
@@ -123,7 +131,11 @@ function updateOpen(open: boolean) {
           </fieldset>
         </div>
 
-        <p v-if="hostConfigurationError" class="text-sm text-red-600" role="alert">
+        <p
+          v-if="hostConfigurationError"
+          class="text-sm text-red-600"
+          role="alert"
+        >
           {{ hostConfigurationError }}
         </p>
 

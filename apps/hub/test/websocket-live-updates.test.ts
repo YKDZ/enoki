@@ -8,6 +8,7 @@ import WebSocket from "ws";
 
 import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { initializeHubDatabase } from "../src/database/index";
+import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
 
 const tempRoots: string[] = [];
@@ -325,6 +326,56 @@ describe("WebSocket live updates", () => {
     );
   });
 
+  it("accepts Node Buffer client messages when subscribing to detail samples", () => {
+    const liveUpdates = createLiveUpdateBroadcaster();
+    const sentMessages: unknown[] = [];
+    const socket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        sentMessages.push(JSON.parse(message) as unknown);
+      },
+    };
+
+    liveUpdates.addClient(socket as never, {
+      sessionId: "owner-session",
+    });
+    liveUpdates.handleClientMessage(
+      socket as never,
+      Buffer.from(
+        JSON.stringify({
+          hostId: 1,
+          type: "subscribe_host_detail",
+        }),
+      ) as never,
+    );
+    liveUpdates.broadcastDetailSample({
+      collectedAtMs: 1_725_000_009_500,
+      cpuCores: [],
+      cpuPercent: 42,
+      disks: [],
+      hostId: 1,
+      memoryTotalBytes: null,
+      memoryUsedBytes: null,
+      networkInterfaces: [],
+      receivedAtMs: 1_725_000_010_000,
+      sequence: 1,
+      uptimeSeconds: null,
+    });
+
+    expect(sentMessages).toEqual([
+      {
+        hostId: 1,
+        sample: expect.objectContaining({
+          cpuPercent: 42,
+          hostId: 1,
+          sequence: 1,
+        }),
+        type: "host_detail_sample",
+      },
+    ]);
+  });
+
   it("requires an Owner session for the browser WebSocket endpoint", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({ database });
@@ -366,7 +417,7 @@ describe("WebSocket live updates", () => {
     database.close();
   });
 
-  it("broadcasts a lightweight Managed Host summary after an accepted Probe report", async () => {
+  it("broadcasts a lightweight Host summary after an accepted Probe report", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({
       database,
@@ -382,8 +433,8 @@ describe("WebSocket live updates", () => {
     socket.send("not-json");
     socket.send(
       JSON.stringify({
-        managedHostId: "not-a-number",
-        type: "subscribe_managed_host_detail",
+        hostId: "not-a-number",
+        type: "subscribe_host_detail",
       }),
     );
     const summaryMessage = readWebSocketJson(socket);
@@ -413,14 +464,14 @@ describe("WebSocket live updates", () => {
           probeConfigurationError: false,
         },
       },
-      type: "managed_host_summary",
+      type: "host_summary",
     });
 
     await closeSocket(socket);
     database.close();
   });
 
-  it("sends detailed samples only for the subscribed Managed Host", async () => {
+  it("sends detailed samples only for the subscribed Host", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({
       database,
@@ -443,8 +494,8 @@ describe("WebSocket live updates", () => {
 
     socket.send(
       JSON.stringify({
-        managedHostId: 1,
-        type: "subscribe_managed_host_detail",
+        hostId: 1,
+        type: "subscribe_host_detail",
       }),
     );
     const hostOneMessages = collectWebSocketJson(socket);
@@ -459,10 +510,10 @@ describe("WebSocket live updates", () => {
         host: expect.objectContaining({
           id: 1,
         }),
-        type: "managed_host_summary",
+        type: "host_summary",
       }),
       {
-        managedHostId: 1,
+        hostId: 1,
         sample: {
           collectedAtMs: 1_725_000_009_500,
           cpuCores: [
@@ -481,7 +532,7 @@ describe("WebSocket live updates", () => {
               usedBytes: 1_536,
             },
           ],
-          managedHostId: 1,
+          hostId: 1,
           memoryTotalBytes: 2_147_483_648,
           memoryUsedBytes: 1_073_741_824,
           networkInterfaces: [
@@ -495,7 +546,7 @@ describe("WebSocket live updates", () => {
           sequence: 1,
           uptimeSeconds: 86_400,
         },
-        type: "managed_host_detail_sample",
+        type: "host_detail_sample",
       },
     ]);
 
@@ -511,14 +562,14 @@ describe("WebSocket live updates", () => {
         host: expect.objectContaining({
           id: 2,
         }),
-        type: "managed_host_summary",
+        type: "host_summary",
       }),
     ]);
 
     socket.send(
       JSON.stringify({
-        managedHostId: 1,
-        type: "unsubscribe_managed_host_detail",
+        hostId: 1,
+        type: "unsubscribe_host_detail",
       }),
     );
     const unsubscribedMessages = collectWebSocketJson(socket);
@@ -533,7 +584,7 @@ describe("WebSocket live updates", () => {
         host: expect.objectContaining({
           id: 1,
         }),
-        type: "managed_host_summary",
+        type: "host_summary",
       }),
     ]);
 

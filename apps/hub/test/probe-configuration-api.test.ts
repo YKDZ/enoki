@@ -132,7 +132,7 @@ describe("Probe Configuration API", () => {
     };
     expect(updated.configuration.version).not.toBe("default-v1");
 
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -231,7 +231,7 @@ describe("Probe Configuration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     await registerProbe(app, enrollmentToken);
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -261,7 +261,7 @@ describe("Probe Configuration API", () => {
 
     now += 1;
     const overrideResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/probe-configuration`,
+      `/api/web/hosts/${hostId}/probe-configuration`,
       {
         body: JSON.stringify({
           configuration: {
@@ -287,7 +287,7 @@ describe("Probe Configuration API", () => {
 
     now += 1;
     const inheritResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/probe-configuration`,
+      `/api/web/hosts/${hostId}/probe-configuration`,
       {
         body: JSON.stringify({
           mode: "inherit",
@@ -308,14 +308,14 @@ describe("Probe Configuration API", () => {
           actor: "owner",
           outcome: "success",
           subjectId: String(hostId),
-          subjectType: "managed_host",
+          subjectType: "host",
         }),
         expect.objectContaining({
           action: "probe_configuration.host.override",
           actor: "owner",
           outcome: "success",
           subjectId: String(hostId),
-          subjectType: "managed_host",
+          subjectType: "host",
         }),
         expect.objectContaining({
           action: "probe_configuration.global.update",
@@ -374,7 +374,7 @@ describe("Probe Configuration API", () => {
     database.close();
   });
 
-  it("lets a Managed Host override Probe Configuration and then inherit global defaults again", async () => {
+  it("lets a Host override Probe Configuration and then inherit global defaults again", async () => {
     const database = await createTemporaryDatabase();
     let now = 1_725_000_030_000;
     const app = createHubApp({
@@ -389,7 +389,7 @@ describe("Probe Configuration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registration = await registerProbe(app, enrollmentToken);
-    const hostsResponse = await app.request("/api/web/managed-hosts", {
+    const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -423,7 +423,7 @@ describe("Probe Configuration API", () => {
 
     now += 1;
     const overrideResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/probe-configuration`,
+      `/api/web/hosts/${hostId}/probe-configuration`,
       {
         body: JSON.stringify({
           configuration: {
@@ -493,7 +493,7 @@ describe("Probe Configuration API", () => {
     expect(probeConfiguration.collectUptime).toBe(false);
 
     const inheritResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/probe-configuration`,
+      `/api/web/hosts/${hostId}/probe-configuration`,
       {
         body: JSON.stringify({
           mode: "inherit",
@@ -517,7 +517,7 @@ describe("Probe Configuration API", () => {
     database.close();
   });
 
-  it("rejects host Probe Configuration overrides for unknown Managed Hosts", async () => {
+  it("rejects host Probe Configuration overrides for unknown Hosts", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -531,7 +531,7 @@ describe("Probe Configuration API", () => {
     const ownerSession = await loginOwner(app);
 
     const response = await app.request(
-      "/api/web/managed-hosts/999/probe-configuration",
+      "/api/web/hosts/999/probe-configuration",
       {
         body: JSON.stringify({
           configuration: {
@@ -556,7 +556,7 @@ describe("Probe Configuration API", () => {
 
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({
-      error: "managed_host_not_found",
+      error: "host_not_found",
     });
     expect(
       database.sqlite

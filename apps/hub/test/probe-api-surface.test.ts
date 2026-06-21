@@ -50,7 +50,7 @@ describe("Probe-only API surface", () => {
     await expect(app.request("/api/web/ws")).resolves.toMatchObject({
       status: 404,
     });
-    await expect(app.request("/managed-hosts/1")).resolves.toMatchObject({
+    await expect(app.request("/hosts/1")).resolves.toMatchObject({
       status: 404,
     });
 

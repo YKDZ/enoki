@@ -102,7 +102,7 @@ async function firstHostId(
   app: ReturnType<typeof createHubApp>,
   ownerSession: string,
 ) {
-  const response = await app.request("/api/web/managed-hosts", {
+  const response = await app.request("/api/web/hosts", {
     headers: {
       cookie: ownerSession,
     },
@@ -210,7 +210,7 @@ async function sendReport(
   expect(response.status).toBe(200);
 }
 
-describe("Managed Host detail API", () => {
+describe("Host detail API", () => {
   afterEach(async () => {
     await Promise.all(
       tempRoots
@@ -243,7 +243,7 @@ describe("Managed Host detail API", () => {
       sequence: 1,
     });
 
-    const overviewResponse = await app.request("/api/web/managed-hosts", {
+    const overviewResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
@@ -263,14 +263,11 @@ describe("Managed Host detail API", () => {
       ],
     });
 
-    const detailResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}`,
-      {
-        headers: {
-          cookie: ownerSession,
-        },
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
       },
-    );
+    });
 
     expect(detailResponse.status).toBe(200);
     await expect(detailResponse.json()).resolves.toEqual({
@@ -311,7 +308,7 @@ describe("Managed Host detail API", () => {
     });
 
     const historyResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metrics?window=1h`,
+      `/api/web/hosts/${hostId}/metrics?window=1h`,
       {
         headers: {
           cookie: ownerSession,
@@ -385,8 +382,25 @@ describe("Managed Host detail API", () => {
       },
     });
 
+    const oneMinuteHistoryResponse = await app.request(
+      `/api/web/hosts/${hostId}/metrics?window=1m`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+      },
+    );
+
+    expect(oneMinuteHistoryResponse.status).toBe(200);
+    await expect(oneMinuteHistoryResponse.json()).resolves.toEqual({
+      metrics: {
+        samples: [expect.objectContaining({ sequence: 1 })],
+        window: "1m",
+      },
+    });
+
     const invalidWindowResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}/metrics?window=2h`,
+      `/api/web/hosts/${hostId}/metrics?window=2h`,
       {
         headers: {
           cookie: ownerSession,
@@ -440,14 +454,11 @@ describe("Managed Host detail API", () => {
     });
     expect(reportResponse.status).toBe(200);
 
-    const detailResponse = await app.request(
-      `/api/web/managed-hosts/${hostId}`,
-      {
-        headers: {
-          cookie: ownerSession,
-        },
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
       },
-    );
+    });
 
     expect(detailResponse.status).toBe(200);
     const body = (await detailResponse.json()) as {

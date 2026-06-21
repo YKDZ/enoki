@@ -1,15 +1,11 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 
-import {
-  managedHosts,
-  type ManagedHostRow,
-  type NewManagedHostRow,
-} from "./schema.js";
+import { hosts, type HostRow, type NewHostRow } from "./schema.js";
 
-type ManagedHostDatabase = BetterSQLite3Database<typeof import("./schema.js")>;
+type HostDatabase = BetterSQLite3Database<typeof import("./schema.js")>;
 
-export type ManagedHostSummary = {
+export type HostSummary = {
   clockSkew: {
     detected: boolean;
     lastDeltaMs: number | null;
@@ -57,8 +53,8 @@ export type HostStatusThresholds = {
   staleAfterMs: number;
 };
 
-export type ManagedHostSummaryOptions = {
-  latestMetricForHost?: (managedHostId: number) => {
+export type HostSummaryOptions = {
+  latestMetricForHost?: (hostId: number) => {
     collectedAtMs: number;
     cpuPercent: number | null;
     diskTotalBytes: number | null;
@@ -74,19 +70,19 @@ export type ManagedHostSummaryOptions = {
     uptimeSeconds: number | null;
   } | null;
   nowMs?: number;
-  probeConfigurationForHost?: (managedHostId: number) => {
+  probeConfigurationForHost?: (hostId: number) => {
     mode: "inherit" | "override";
     version: string;
   };
   thresholds?: HostStatusThresholds;
 };
 
-export type ManagedHostRepository = {
-  create: (input: NewManagedHostRow) => ManagedHostRow;
+export type HostRepository = {
+  create: (input: NewHostRow) => HostRow;
   exists: (id: number) => boolean;
-  findActiveById: (id: number) => ManagedHostRow | null;
-  findByProbeSecretHash: (probeSecretHash: string) => ManagedHostRow | null;
-  listSummaries: (options?: ManagedHostSummaryOptions) => ManagedHostSummary[];
+  findActiveById: (id: number) => HostRow | null;
+  findByProbeSecretHash: (probeSecretHash: string) => HostRow | null;
+  listSummaries: (options?: HostSummaryOptions) => HostSummary[];
   recordReport: (
     id: number,
     input: {
@@ -112,8 +108,8 @@ export type ManagedHostRepository = {
       } | null;
       probeVersion?: string | null;
     },
-  ) => ManagedHostRow;
-  softDelete: (id: number, deletedAtMs: number) => ManagedHostRow | null;
+  ) => HostRow;
+  softDelete: (id: number, deletedAtMs: number) => HostRow | null;
   updateMetadata: (
     id: number,
     input: {
@@ -121,27 +117,25 @@ export type ManagedHostRepository = {
       description?: string;
       displayName?: string;
     },
-  ) => ManagedHostRow | null;
+  ) => HostRow | null;
 };
 
-export function createManagedHostRepository(
-  database: ManagedHostDatabase,
-): ManagedHostRepository {
+export function createHostRepository(database: HostDatabase): HostRepository {
   return {
     create(input) {
-      const row = database.insert(managedHosts).values(input).returning().get();
+      const row = database.insert(hosts).values(input).returning().get();
 
       if (!row) {
-        throw new Error("Failed to create Managed Host.");
+        throw new Error("Failed to create Host.");
       }
 
       return row;
     },
     exists(id) {
       const row = database
-        .select({ id: managedHosts.id })
-        .from(managedHosts)
-        .where(and(eq(managedHosts.id, id), isNull(managedHosts.deletedAtMs)))
+        .select({ id: hosts.id })
+        .from(hosts)
+        .where(and(eq(hosts.id, id), isNull(hosts.deletedAtMs)))
         .get();
 
       return Boolean(row);
@@ -150,8 +144,8 @@ export function createManagedHostRepository(
       return (
         database
           .select()
-          .from(managedHosts)
-          .where(and(eq(managedHosts.id, id), isNull(managedHosts.deletedAtMs)))
+          .from(hosts)
+          .where(and(eq(hosts.id, id), isNull(hosts.deletedAtMs)))
           .get() ?? null
       );
     },
@@ -159,11 +153,11 @@ export function createManagedHostRepository(
       return (
         database
           .select()
-          .from(managedHosts)
+          .from(hosts)
           .where(
             and(
-              eq(managedHosts.probeSecretHash, probeSecretHash),
-              isNull(managedHosts.deletedAtMs),
+              eq(hosts.probeSecretHash, probeSecretHash),
+              isNull(hosts.deletedAtMs),
             ),
           )
           .get() ?? null
@@ -175,8 +169,8 @@ export function createManagedHostRepository(
 
       return database
         .select()
-        .from(managedHosts)
-        .where(isNull(managedHosts.deletedAtMs))
+        .from(hosts)
+        .where(isNull(hosts.deletedAtMs))
         .all()
         .map((host) => {
           const latestMetric = options.latestMetricForHost?.(host.id) ?? null;
@@ -238,12 +232,12 @@ export function createManagedHostRepository(
     recordReport(id, input) {
       const current = database
         .select()
-        .from(managedHosts)
-        .where(eq(managedHosts.id, id))
+        .from(hosts)
+        .where(eq(hosts.id, id))
         .get();
 
       if (!current) {
-        throw new Error("Failed to update Managed Host report state.");
+        throw new Error("Failed to update Host report state.");
       }
 
       const values = {
@@ -287,14 +281,14 @@ export function createManagedHostRepository(
         probeVersion: input.probeVersion,
       };
       const row = database
-        .update(managedHosts)
+        .update(hosts)
         .set(values)
-        .where(eq(managedHosts.id, id))
+        .where(eq(hosts.id, id))
         .returning()
         .get();
 
       if (!row) {
-        throw new Error("Failed to update Managed Host report state.");
+        throw new Error("Failed to update Host report state.");
       }
 
       return row;
@@ -302,11 +296,11 @@ export function createManagedHostRepository(
     softDelete(id, deletedAtMs) {
       return (
         database
-          .update(managedHosts)
+          .update(hosts)
           .set({
             deletedAtMs,
           })
-          .where(and(eq(managedHosts.id, id), isNull(managedHosts.deletedAtMs)))
+          .where(and(eq(hosts.id, id), isNull(hosts.deletedAtMs)))
           .returning()
           .get() ?? null
       );
@@ -315,8 +309,8 @@ export function createManagedHostRepository(
       const current =
         database
           .select()
-          .from(managedHosts)
-          .where(and(eq(managedHosts.id, id), isNull(managedHosts.deletedAtMs)))
+          .from(hosts)
+          .where(and(eq(hosts.id, id), isNull(hosts.deletedAtMs)))
           .get() ?? null;
 
       if (!current) {
@@ -359,9 +353,9 @@ export function createManagedHostRepository(
       }
 
       const row = database
-        .update(managedHosts)
+        .update(hosts)
         .set(values)
-        .where(and(eq(managedHosts.id, id), isNull(managedHosts.deletedAtMs)))
+        .where(and(eq(hosts.id, id), isNull(hosts.deletedAtMs)))
         .returning()
         .get();
 
@@ -412,11 +406,11 @@ function formatBytes(bytes: number | null) {
 
   const gibibytes = bytes / 1024 ** 3;
   if (gibibytes >= 1) {
-    return `${formatNumber(gibibytes)} GiB`;
+    return `${formatNumber(gibibytes)} GB`;
   }
 
   const mebibytes = bytes / 1024 ** 2;
-  return `${formatNumber(mebibytes)} MiB`;
+  return `${formatNumber(mebibytes)} MB`;
 }
 
 function formatNumber(value: number) {

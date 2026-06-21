@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 
-import type { ManagedHostSummary } from "../types";
-import { applyManagedHostLiveSummary, useLiveUpdates } from "./useLiveUpdates";
+import type { HostSummary } from "../types";
+import { applyHostLiveSummary, useLiveUpdates } from "./useLiveUpdates";
 
-const existingHost: ManagedHostSummary = {
+const existingHost: HostSummary = {
   clockSkew: {
     detected: false,
     lastDeltaMs: null,
@@ -17,7 +17,7 @@ const existingHost: ManagedHostSummary = {
   id: 1,
   lastReportAtMs: null,
   latestMetrics: null,
-  memory: "2 GiB",
+  memory: "2 GB",
   probeConfiguration: {
     mode: "inherit",
     version: "default-v1",
@@ -68,7 +68,7 @@ const originalWebSocket = globalThis.WebSocket;
 const originalWindow = globalThis.window;
 let fakeSockets: FakeWebSocket[] = [];
 
-describe("live Managed Host summaries", () => {
+describe("live Host summaries", () => {
   afterEach(() => {
     vi.useRealTimers();
     globalThis.WebSocket = originalWebSocket;
@@ -77,7 +77,7 @@ describe("live Managed Host summaries", () => {
   });
 
   it("requests a typed host list reload when a live summary arrives for an unknown host", () => {
-    const result = applyManagedHostLiveSummary([existingHost], {
+    const result = applyHostLiveSummary([existingHost], {
       id: 2,
       lastSeenAtMs: 1_725_000_010_000,
       latestMetrics: null,
@@ -95,7 +95,7 @@ describe("live Managed Host summaries", () => {
   });
 
   it("reloads the typed host list when a WebSocket summary references an unknown host", async () => {
-    const hosts = ref<ManagedHostSummary[]>([existingHost]);
+    const hosts = ref<HostSummary[]>([existingHost]);
     let reloadCount = 0;
     const liveUpdates = useLiveUpdates({
       hosts,
@@ -128,12 +128,53 @@ describe("live Managed Host summaries", () => {
             probeConfigurationError: false,
           },
         },
-        type: "managed_host_summary",
+        type: "host_summary",
       }),
     );
 
     expect(reloadCount).toBe(1);
     expect(hosts.value.map((host) => host.id)).toEqual([1, 2]);
+  });
+
+  it("passes subscribed detail samples to the detail handler", async () => {
+    const hosts = ref<HostSummary[]>([existingHost]);
+    const detailSamples: unknown[] = [];
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {},
+      onDetailSample(sample) {
+        detailSamples.push(sample);
+      },
+    });
+
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        hostId: 1,
+        sample: {
+          collectedAtMs: 1_725_000_009_500,
+          cpuCores: [],
+          cpuPercent: 42,
+          disks: [],
+          hostId: 1,
+          memoryTotalBytes: null,
+          memoryUsedBytes: null,
+          networkInterfaces: [],
+          receivedAtMs: 1_725_000_010_000,
+          sequence: 1,
+          uptimeSeconds: null,
+        },
+        type: "host_detail_sample",
+      }),
+    );
+
+    expect(detailSamples).toEqual([
+      expect.objectContaining({
+        cpuPercent: 42,
+        hostId: 1,
+        sequence: 1,
+      }),
+    ]);
   });
 
   it("reconnects and refreshes HTTP state when the live socket closes", async () => {
@@ -146,7 +187,7 @@ describe("live Managed Host summaries", () => {
       },
     } as Window & typeof globalThis;
 
-    const hosts = ref<ManagedHostSummary[]>([existingHost]);
+    const hosts = ref<HostSummary[]>([existingHost]);
     let hostReloadCount = 0;
     let detailRecoveryCount = 0;
     const liveUpdates = useLiveUpdates({
@@ -162,15 +203,15 @@ describe("live Managed Host summaries", () => {
     });
 
     liveUpdates.connectLiveUpdates();
-    liveUpdates.subscribeManagedHostDetail(1);
+    liveUpdates.subscribeHostDetail(1);
     fakeSockets[0]?.emit("open");
 
     expect(fakeSockets).toHaveLength(1);
     expect(fakeSockets[0]?.url).toBe("wss://hub.example.test/api/web/ws");
     expect(fakeSockets[0]?.sent).toContain(
       JSON.stringify({
-        managedHostId: 1,
-        type: "subscribe_managed_host_detail",
+        hostId: 1,
+        type: "subscribe_host_detail",
       }),
     );
 
@@ -186,8 +227,8 @@ describe("live Managed Host summaries", () => {
     expect(fakeSockets).toHaveLength(2);
     expect(fakeSockets[1]?.sent).toContain(
       JSON.stringify({
-        managedHostId: 1,
-        type: "subscribe_managed_host_detail",
+        hostId: 1,
+        type: "subscribe_host_detail",
       }),
     );
 

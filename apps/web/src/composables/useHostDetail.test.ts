@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { reactive } from "vue";
 
-import { useManagedHostDetail } from "./useManagedHostDetail";
+import type { MetricsWindow } from "../types";
+import { useHostDetail } from "./useHostDetail";
 
-describe("Managed Host detail data", () => {
+describe("Host detail data", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -10,11 +12,11 @@ describe("Managed Host detail data", () => {
   it("loads detail and fixed-window history over HTTP and supports empty windows", async () => {
     const requestedPaths: string[] = [];
     vi.setSystemTime(new Date(1_725_000_100_000));
-    const detail = useManagedHostDetail(1, {
+    const detail = useHostDetail(1, {
       async fetchJson<T>(path: string) {
         requestedPaths.push(path);
 
-        if (path === "/api/web/managed-hosts/1") {
+        if (path === "/api/web/hosts/1") {
           return {
             host: {
               id: 1,
@@ -33,7 +35,7 @@ describe("Managed Host detail data", () => {
         return {
           metrics: {
             samples:
-              path === "/api/web/managed-hosts/1/metrics?window=6h"
+              path === "/api/web/hosts/1/metrics?window=6h"
                 ? []
                 : [
                     {
@@ -55,17 +57,22 @@ describe("Managed Host detail data", () => {
                       uptimeSeconds: null,
                     },
                   ],
-            window: path.endsWith("window=6h") ? "6h" : "1h",
+            window: path.endsWith("window=6h")
+              ? "6h"
+              : path.endsWith("window=1m")
+                ? "1m"
+                : "1h",
           },
         } as T;
       },
+      windowPreferences: createWindowPreferences(),
     });
 
     await detail.load();
 
     expect(requestedPaths).toEqual([
-      "/api/web/managed-hosts/1",
-      "/api/web/managed-hosts/1/metrics?window=1h",
+      "/api/web/hosts/1",
+      "/api/web/hosts/1/metrics?window=1h",
     ]);
     expect(detail.samples.value).toHaveLength(1);
     expect(detail.isEmpty.value).toBe(false);
@@ -76,9 +83,7 @@ describe("Managed Host detail data", () => {
 
     await detail.switchWindow("6h");
 
-    expect(requestedPaths.at(-1)).toBe(
-      "/api/web/managed-hosts/1/metrics?window=6h",
-    );
+    expect(requestedPaths.at(-1)).toBe("/api/web/hosts/1/metrics?window=6h");
     expect(detail.selectedWindow.value).toBe("6h");
     expect(detail.samples.value).toEqual([]);
     expect(detail.isEmpty.value).toBe(true);
@@ -86,12 +91,23 @@ describe("Managed Host detail data", () => {
       maxMs: 1_725_000_050_000,
       minMs: 1_725_000_050_000 - 6 * 60 * 60 * 1000,
     });
+
+    await detail.switchWindow("1m");
+
+    expect(requestedPaths.at(-1)).toBe("/api/web/hosts/1/metrics?window=1m");
+    expect(detail.selectedWindow.value).toBe("1m");
+    expect(detail.samples.value).toHaveLength(1);
+    expect(detail.isEmpty.value).toBe(false);
+    expect(detail.chartRange.value).toEqual({
+      maxMs: 1_725_000_000_000,
+      minMs: 1_725_000_000_000 - 60 * 1000,
+    });
   });
 
   it("appends WebSocket samples for the visible host and computes aggregate tail values", async () => {
-    const detail = useManagedHostDetail(1, {
+    const detail = useHostDetail(1, {
       async fetchJson<T>(path: string) {
-        if (path === "/api/web/managed-hosts/1") {
+        if (path === "/api/web/hosts/1") {
           return {
             host: {
               id: 1,
@@ -113,6 +129,7 @@ describe("Managed Host detail data", () => {
           },
         } as T;
       },
+      windowPreferences: createWindowPreferences(),
     });
 
     await detail.load();
@@ -134,7 +151,7 @@ describe("Managed Host detail data", () => {
           usedBytes: 6_000,
         },
       ],
-      managedHostId: 2,
+      hostId: 2,
       memoryTotalBytes: 10_000,
       memoryUsedBytes: 5_000,
       networkInterfaces: [
@@ -169,7 +186,7 @@ describe("Managed Host detail data", () => {
           usedBytes: 6_000,
         },
       ],
-      managedHostId: 1,
+      hostId: 1,
       memoryTotalBytes: 10_000,
       memoryUsedBytes: 5_000,
       networkInterfaces: [
@@ -203,13 +220,20 @@ describe("Managed Host detail data", () => {
         networkTxBytesDelta: 1_000,
       }),
     ]);
+    expect(detail.host.value?.latestMetrics).toEqual(
+      expect.objectContaining({
+        cpuPercent: 22,
+        memoryUsedBytes: 5_000,
+        networkRxBitsPerSecond: 1_600,
+      }),
+    );
   });
 
-  it("plays samples from the same report batch at the collection cadence", async () => {
+  it("plays live samples from the same report batch at the collection cadence", async () => {
     vi.useFakeTimers();
-    const detail = useManagedHostDetail(1, {
+    const detail = useHostDetail(1, {
       async fetchJson<T>(path: string) {
-        if (path === "/api/web/managed-hosts/1") {
+        if (path === "/api/web/hosts/1") {
           return {
             host: {
               id: 1,
@@ -231,6 +255,7 @@ describe("Managed Host detail data", () => {
           },
         } as T;
       },
+      windowPreferences: createWindowPreferences(),
     });
 
     await detail.load();
@@ -255,10 +280,110 @@ describe("Managed Host detail data", () => {
     ]);
   });
 
-  it("updates the current detail summary from live WebSocket summaries", async () => {
-    const detail = useManagedHostDetail(1, {
+  it("polls history and plays newly observed samples at the collection cadence", async () => {
+    vi.useFakeTimers();
+    let metricsRequestCount = 0;
+    const detail = useHostDetail(1, {
       async fetchJson<T>(path: string) {
-        if (path === "/api/web/managed-hosts/1") {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              id: 1,
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        metricsRequestCount += 1;
+        return {
+          metrics: {
+            samples:
+              metricsRequestCount === 1
+                ? [metricSample(1, 1_725_000_001_000)]
+                : [
+                    metricSample(1, 1_725_000_001_000),
+                    metricSample(2, 1_725_000_002_000),
+                    metricSample(3, 1_725_000_003_000),
+                  ],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([1]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([
+      1, 2,
+    ]);
+    expect(detail.host.value?.latestMetrics?.cpuPercent).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([
+      1, 2,
+    ]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([
+      1, 2, 3,
+    ]);
+  });
+
+  it("starts the visible chart range at the first real sample when the window has a leading gap", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              id: 1,
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 5,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [
+              metricSample(1, 1_725_000_003_000),
+              metricSample(2, 1_725_000_060_000),
+            ],
+            window: "1m",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences({
+        1: "1m",
+      }),
+    });
+
+    await detail.load();
+
+    expect(detail.chartRange.value).toEqual({
+      maxMs: 1_725_000_060_000,
+      minMs: 1_725_000_003_000,
+    });
+  });
+
+  it("updates the current detail summary from live WebSocket summaries", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
           return {
             host: {
               clockSkew: {
@@ -288,6 +413,7 @@ describe("Managed Host detail data", () => {
           },
         } as T;
       },
+      windowPreferences: createWindowPreferences(),
     });
 
     await detail.load();
@@ -322,11 +448,7 @@ describe("Managed Host detail data", () => {
           detected: true,
         }),
         lastReportAtMs: 1_725_000_020_000,
-        latestMetrics: expect.objectContaining({
-          cpuPercent: 44,
-          memoryUsedBytes: 12_000,
-          uptimeSeconds: 86_400,
-        }),
+        latestMetrics: null,
         status: "online",
         warnings: expect.arrayContaining([
           expect.objectContaining({
@@ -343,17 +465,53 @@ describe("Managed Host detail data", () => {
   });
 });
 
+function createWindowPreferences(
+  initialWindows: Record<string, MetricsWindow> = {},
+) {
+  const windowsByHostId = reactive({ ...initialWindows });
+
+  return {
+    selectedWindowForHost(hostId: number) {
+      return windowsByHostId[String(hostId)] ?? "1h";
+    },
+    setSelectedWindowForHost(hostId: number, window: MetricsWindow) {
+      windowsByHostId[String(hostId)] = window;
+    },
+  };
+}
+
 function liveSample(sequence: number, collectedAtMs: number) {
   return {
     collectedAtMs,
     cpuCores: [],
     cpuPercent: sequence,
     disks: [],
-    managedHostId: 1,
+    hostId: 1,
     memoryTotalBytes: 10_000,
     memoryUsedBytes: sequence * 1_000,
     networkInterfaces: [],
     receivedAtMs: 1_725_000_004_000,
+    sequence,
+    uptimeSeconds: sequence * 60,
+  };
+}
+
+function metricSample(sequence: number, collectedAtMs: number) {
+  return {
+    collectedAtMs,
+    cpuCores: [],
+    cpuPercent: sequence,
+    diskTotalBytes: null,
+    diskUsedBytes: null,
+    disks: [],
+    memoryTotalBytes: 10_000,
+    memoryUsedBytes: sequence * 1_000,
+    networkInterfaces: [],
+    networkRxBitsPerSecond: null,
+    networkRxBytesDelta: null,
+    networkTxBitsPerSecond: null,
+    networkTxBytesDelta: null,
+    receivedAtMs: collectedAtMs + 100,
     sequence,
     uptimeSeconds: sequence * 60,
   };

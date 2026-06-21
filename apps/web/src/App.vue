@@ -1,28 +1,35 @@
 <script setup lang="ts">
-import { LoaderCircle } from "@lucide/vue";
+import { LoaderCircle, Plus, Server, ServerCrash } from "@lucide/vue";
 import { useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-
-import { Card, CardContent } from "@/components/ui/card";
 
 import AppHeader from "./components/AppHeader.vue";
 import EnrollmentDialog from "./components/EnrollmentDialog.vue";
 import GlobalConfigurationPanel from "./components/GlobalConfigurationPanel.vue";
+import HostCard from "./components/HostCard.vue";
+import HostDetailPage from "./components/HostDetailPage.vue";
+import HostDetailSkeleton from "./components/HostDetailSkeleton.vue";
+import HostGridSkeleton from "./components/HostGridSkeleton.vue";
 import LoginPanel from "./components/LoginPanel.vue";
-import ManagedHostCard from "./components/ManagedHostCard.vue";
-import ManagedHostDetailPage from "./components/ManagedHostDetailPage.vue";
+import StateHero from "./components/StateHero.vue";
+import { Button } from "./components/ui/button";
+import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
-import { useManagedHostDetail } from "./composables/useManagedHostDetail";
 import { apiGet, saveConfiguration } from "./lib/api";
 import { shouldCreateEnrollmentOnOpen } from "./lib/enrollment-dialog-state";
+import {
+  hubUnavailableLoginError,
+  loginErrorForResponse,
+  type LoginErrorKind,
+} from "./lib/login-errors";
 import { configurationErrorText } from "./lib/probe-configuration";
 import type {
   EnrollmentResponse,
   HostMetadataDraft,
   HostProbeConfigurationResponse,
-  ManagedHostDetail,
-  ManagedHostSummary,
-  ManagedHostsResponse,
+  HostDetail,
+  HostSummary,
+  HostsResponse,
   ProbeConfiguration,
   SessionResponse,
 } from "./types";
@@ -31,13 +38,16 @@ const isCheckingSession = ref(true);
 const isAuthenticated = ref(false);
 const isSubmitting = ref(false);
 const isCreatingEnrollment = ref(false);
+const isLoadingHosts = ref(false);
 const isShowingEnrollmentDialog = ref(false);
 const isShowingGlobalConfiguration = ref(false);
 const isSavingGlobalConfiguration = ref(false);
 const isSavingHostConfiguration = ref(false);
 const password = ref("");
 const loginError = ref("");
-const hosts = ref<ManagedHostSummary[]>([]);
+const loginErrorKind = ref<LoginErrorKind>("");
+const hostListError = ref("");
+const hosts = ref<HostSummary[]>([]);
 const enrollment = ref<EnrollmentResponse | null>(null);
 const enrollmentError = ref("");
 const globalConfigurationDraft = ref<ProbeConfiguration | null>(null);
@@ -52,17 +62,17 @@ const hostMetadataOriginal = ref<HostMetadataDraft | null>(null);
 const hostMetadataError = ref("");
 const isSavingHostMetadata = ref(false);
 const deletingHostId = ref<number | null>(null);
-const activeDetailHostId = ref(routeManagedHostId());
+const activeDetailHostId = ref(routeHostId());
 const activeDetailHostIdForComposable = computed(
   () => activeDetailHostId.value ?? 0,
 );
-const detail = useManagedHostDetail(activeDetailHostIdForComposable);
+const detail = useHostDetail(activeDetailHostIdForComposable);
 
 const {
   connectLiveUpdates,
   disconnectLiveUpdates,
-  subscribeManagedHostDetail,
-  unsubscribeManagedHostDetail,
+  subscribeHostDetail,
+  unsubscribeHostDetail,
 } = useLiveUpdates({
   hosts,
   isAuthenticated,
@@ -87,7 +97,7 @@ onMounted(async () => {
       await loadHosts();
       connectLiveUpdates();
       if (activeDetailHostId.value) {
-        subscribeManagedHostDetail(activeDetailHostId.value);
+        subscribeHostDetail(activeDetailHostId.value);
         void detail.load();
       }
     }
@@ -106,6 +116,7 @@ useEventListener("popstate", syncRouteFromLocation);
 
 async function login() {
   loginError.value = "";
+  loginErrorKind.value = "";
   isSubmitting.value = true;
 
   try {
@@ -121,7 +132,9 @@ async function login() {
     });
 
     if (!response.ok) {
-      loginError.value = "管理员密码不正确，请稍后再试。";
+      const error = loginErrorForResponse(response.status);
+      loginError.value = error.message;
+      loginErrorKind.value = error.kind;
       return;
     }
 
@@ -130,11 +143,13 @@ async function login() {
     await loadHosts();
     connectLiveUpdates();
     if (activeDetailHostId.value) {
-      subscribeManagedHostDetail(activeDetailHostId.value);
+      subscribeHostDetail(activeDetailHostId.value);
       void detail.load();
     }
   } catch {
-    loginError.value = "无法连接 Hub，请检查服务是否正在运行。";
+    const error = hubUnavailableLoginError();
+    loginError.value = error.message;
+    loginErrorKind.value = error.kind;
   } finally {
     isSubmitting.value = false;
   }
@@ -161,16 +176,27 @@ async function logout() {
   hostMetadataDraft.value = null;
   hostMetadataOriginal.value = null;
   hostMetadataError.value = "";
+  hostListError.value = "";
   deletingHostId.value = null;
   activeDetailHostId.value = null;
   password.value = "";
+  loginErrorKind.value = "";
   isAuthenticated.value = false;
   window.history.pushState({}, "", "/");
 }
 
 async function loadHosts() {
-  const response = await apiGet<ManagedHostsResponse>("/api/web/managed-hosts");
-  hosts.value = response.hosts;
+  isLoadingHosts.value = true;
+  hostListError.value = "";
+
+  try {
+    const response = await apiGet<HostsResponse>("/api/web/hosts");
+    hosts.value = response.hosts;
+  } catch {
+    hostListError.value = "无法读取主机列表，请检查 Hub 是否正在运行。";
+  } finally {
+    isLoadingHosts.value = false;
+  }
 }
 
 async function createEnrollment() {
@@ -271,7 +297,7 @@ async function openHostConfiguration(hostId: number) {
 
   try {
     const response = await apiGet<HostProbeConfigurationResponse>(
-      `/api/web/managed-hosts/${hostId}/probe-configuration`,
+      `/api/web/hosts/${hostId}/probe-configuration`,
     );
     hostConfigurationDraft.value = {
       configuration: { ...response.configuration },
@@ -299,7 +325,7 @@ async function saveHostConfiguration() {
             mode: "override",
           };
     const response = await fetch(
-      `/api/web/managed-hosts/${activeHostConfigurationId.value}/probe-configuration`,
+      `/api/web/hosts/${activeHostConfigurationId.value}/probe-configuration`,
       {
         body: JSON.stringify(body),
         credentials: "same-origin",
@@ -331,7 +357,7 @@ async function saveHostConfiguration() {
 
 function openHostMetadata(
   host: Pick<
-    ManagedHostSummary | ManagedHostDetail,
+    HostSummary | HostDetail,
     "connectAddress" | "description" | "displayName" | "id"
   >,
 ) {
@@ -395,7 +421,7 @@ async function saveHostMetadata() {
     }
 
     const response = await fetch(
-      `/api/web/managed-hosts/${activeHostMetadataId.value}/metadata`,
+      `/api/web/hosts/${activeHostMetadataId.value}/metadata`,
       {
         body: JSON.stringify(metadataUpdate),
         credentials: "same-origin",
@@ -425,12 +451,12 @@ async function saveHostMetadata() {
 }
 
 async function deleteHost(
-  host: Pick<ManagedHostSummary | ManagedHostDetail, "displayName" | "id">,
+  host: Pick<HostSummary | HostDetail, "displayName" | "id">,
 ) {
   deletingHostId.value = host.id;
 
   try {
-    const response = await fetch(`/api/web/managed-hosts/${host.id}`, {
+    const response = await fetch(`/api/web/hosts/${host.id}`, {
       credentials: "same-origin",
       method: "DELETE",
     });
@@ -462,42 +488,36 @@ async function deleteHost(
 function openHostDetail(hostId: number) {
   activeDetailHostId.value = hostId;
   window.history.pushState({}, "", hostDetailPath(hostId));
-  subscribeManagedHostDetail(hostId);
+  subscribeHostDetail(hostId);
   void detail.load();
 }
 
 function navigateToOverview() {
   if (activeDetailHostId.value) {
-    unsubscribeManagedHostDetail(activeDetailHostId.value);
+    unsubscribeHostDetail(activeDetailHostId.value);
   }
   activeDetailHostId.value = null;
   window.history.pushState({}, "", "/");
 }
 
 function syncRouteFromLocation() {
-  const nextHostId = routeManagedHostId();
+  const nextHostId = routeHostId();
   if (activeDetailHostId.value && activeDetailHostId.value !== nextHostId) {
-    unsubscribeManagedHostDetail(activeDetailHostId.value);
+    unsubscribeHostDetail(activeDetailHostId.value);
   }
   activeDetailHostId.value = nextHostId;
   if (nextHostId) {
-    subscribeManagedHostDetail(nextHostId);
+    subscribeHostDetail(nextHostId);
     void detail.load();
   }
 }
 
-function routeManagedHostId() {
-  const match = window.location.pathname.match(
-    /^\/(?:hosts|managed-hosts)\/(\d+)$/,
-  );
+function routeHostId() {
+  const match = window.location.pathname.match(/^\/hosts\/(\d+)$/);
   const hostId = Number(match?.[1]);
 
   if (!Number.isInteger(hostId) || hostId <= 0) {
     return null;
-  }
-
-  if (window.location.pathname.startsWith("/managed-hosts/")) {
-    window.history.replaceState({}, "", hostDetailPath(hostId));
   }
 
   return hostId;
@@ -529,10 +549,11 @@ function hostDetailPath(hostId: number) {
 
     <section
       v-if="isCheckingSession"
-      class="mx-auto grid max-w-5xl place-items-center px-5 py-24"
+      class="mx-auto max-w-7xl px-6 py-8"
       aria-live="polite"
     >
-      <LoaderCircle class="text-primary size-8 animate-spin" />
+      <HostDetailSkeleton v-if="activeDetailHostId" />
+      <HostGridSkeleton v-else />
     </section>
 
     <LoginPanel
@@ -540,10 +561,11 @@ function hostDetailPath(hostId: number) {
       v-model:password="password"
       :is-submitting="isSubmitting"
       :login-error="loginError"
+      :login-error-kind="loginErrorKind"
       @login="login"
     />
 
-    <ManagedHostDetailPage
+    <HostDetailPage
       v-else-if="activeDetailHostId"
       :active-host-configuration-id="activeHostConfigurationId"
       :active-host-metadata-id="activeHostMetadataId"
@@ -573,17 +595,57 @@ function hostDetailPath(hostId: number) {
         @save="saveGlobalConfiguration"
       />
 
-      <Card
-        v-if="hosts.length === 0"
-        class="bg-card text-card-foreground border-slate-200"
+      <HostGridSkeleton v-if="isLoadingHosts && hosts.length === 0" />
+
+      <StateHero
+        v-else-if="hostListError"
+        :icon="ServerCrash"
+        tone="destructive"
+        title="无法加载主机"
+        :description="hostListError"
       >
-        <CardContent class="p-6">
-          <p class="text-muted-foreground text-sm">暂无主机。</p>
-        </CardContent>
-      </Card>
+        <template #action>
+          <Button type="button" @click="loadHosts">
+            <LoaderCircle
+              v-if="isLoadingHosts"
+              class="size-4 animate-spin"
+              aria-hidden="true"
+            />
+            重试
+          </Button>
+        </template>
+      </StateHero>
+
+      <StateHero
+        v-else-if="hosts.length === 0"
+        :icon="Server"
+        title="暂无主机"
+        description="创建部署链接后，在目标机器上安装并启动 Probe，主机会在首次上报后出现在这里。"
+      >
+        <template #action>
+          <Button
+            type="button"
+            :disabled="isCreatingEnrollment"
+            @click="openEnrollmentDialog"
+          >
+            <LoaderCircle
+              v-if="isCreatingEnrollment"
+              class="size-4 animate-spin"
+              aria-hidden="true"
+            />
+            <Plus v-else class="size-4" aria-hidden="true" />
+            添加主机
+          </Button>
+        </template>
+      </StateHero>
 
       <p
-        v-if="hosts.length > 0 && hostMetadataError && !activeHostMetadataId"
+        v-if="
+          !isLoadingHosts &&
+          hosts.length > 0 &&
+          hostMetadataError &&
+          !activeHostMetadataId
+        "
         class="mb-4 text-sm text-red-600"
         role="alert"
       >
@@ -591,10 +653,10 @@ function hostDetailPath(hostId: number) {
       </p>
 
       <div
-        v-if="hosts.length > 0"
+        v-if="!isLoadingHosts && hosts.length > 0"
         class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
       >
-        <ManagedHostCard
+        <HostCard
           v-for="host in hosts"
           :key="host.id"
           :host="host"

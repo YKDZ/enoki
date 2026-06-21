@@ -1,7 +1,7 @@
 # Enoki
 
 Enoki MVP 的生产部署路径是将 Hub 作为 Docker 容器运行。Probe 不通过
-Docker 部署；每台 Managed Host 上的 Probe 应直接安装为宿主机
+Docker 部署；每台 Host 上的 Probe 应直接安装为宿主机
 `systemd` 服务，这样它才能按宿主机视角采集系统状态，而不是受容器环境限制。
 
 ## Hub Docker 部署
@@ -147,8 +147,8 @@ pnpm smoke:mvp
 
 该脚本会构建 Web UI、Hub 和 Probe binary，启动一个临时 Hub，再使用真实
 `target/debug/enoki-probe` 完成注册和运行。脚本验证 Owner 登录、未登录禁止访问
-Managed Host 状态，并在已有 Managed Host 与 Metrics 后再次验证未登录请求仍无法
-读取业务状态。脚本还验证 Enrollment Token 与安装命令生成、Managed Host 出现在
+Host 状态，并在已有 Host 与 Metrics 后再次验证未登录请求仍无法
+读取业务状态。脚本还验证 Enrollment Token 与安装命令生成、Host 出现在
 Web UI、overview card 显示真实 Metrics、详情页渲染历史图表与实时尾部相关 DOM、
 hostname-derived Display Name、Inventory 网络数据、WebSocket overview/detail 更
 新、Owner 通过 Web UI 编辑 Probe Configuration、运行中 Probe 无需重启即可拉取并
@@ -202,7 +202,7 @@ sudo systemctl status enoki-probe
 sudo journalctl -u enoki-probe -f
 ```
 
-Hub 的 Managed Hosts 页面应出现该主机，详情页应持续更新 Inventory、Metrics 和
+Hub 的 Hosts 页面应出现该主机，详情页应持续更新 Inventory、Metrics 和
 实时尾部数据。
 
 ## CI 与发布
@@ -213,10 +213,11 @@ GitHub Actions 分为三个 workflow：
   format、lint、typecheck、test、protobuf 生成检查，Rust 系 `fmt`、`clippy`、
   `test`，并验证 Hub/Web 构建、Probe release 构建和 Hub Docker 镜像构建。
 - `Release Hub`：在推送 `hub-v*` tag 或手动输入版本号时运行。它执行 Node 系
-  检查、构建和测试，然后构建 Hub Docker 镜像并推送到 GHCR。
+  检查、构建和测试，下载同版本 Probe 发布资产打包进 Hub 镜像，然后推送到 GHCR。
 - `Release Probe`：在推送 `probe-v*` tag 或手动输入版本号时运行。它执行
-  protobuf 和 Rust 检查，然后构建 Probe 二进制包并发布到 GitHub Release。
-  `probe-v*` 只是发布触发 tag；下载地址和安装命令仍使用普通 `v*` 版本。
+  protobuf 和 Rust 检查，然后构建 Probe 二进制包、签名 Probe 资产 manifest，
+  并发布到 GitHub Release。Hub 镜像发布时会读取这些资产；主机安装 Probe 时只
+  需要访问 Hub API，不需要访问 GitHub。
 
 Probe 发布产物命名为：
 
@@ -226,6 +227,9 @@ enoki-probe-x86_64-unknown-linux-gnu.tar.gz.sha256
 enoki-probe-aarch64-unknown-linux-gnu.tar.gz
 enoki-probe-aarch64-unknown-linux-gnu.tar.gz.sha256
 install-probe.sh
+manifest.json
+manifest.json.sig
+signing-key.pem
 ```
 
 Hub 镜像发布到：

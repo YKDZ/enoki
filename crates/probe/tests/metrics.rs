@@ -167,7 +167,7 @@ fn disk_metrics_include_real_mounts_and_exclude_pseudo_runtime_and_duplicates() 
 }
 
 #[test]
-fn network_metrics_preserve_byte_counters_and_compute_deltas_per_interface() {
+fn network_metrics_exclude_loopback_and_compute_deltas_per_interface() {
     let previous = collect_network_metrics_from_proc_net_dev(
         [
             "Inter-|   Receive                                                |  Transmit",
@@ -210,10 +210,7 @@ fn network_metrics_preserve_byte_counters_and_compute_deltas_per_interface() {
                 )
             })
             .collect::<Vec<_>>(),
-        vec![
-            ("eth0", 9_000, 9_000, 4_000, 2_000),
-            ("lo", 1_500, 2_600, 500, 600),
-        ],
+        vec![("eth0", 9_000, 9_000, 4_000, 2_000),],
     );
 }
 

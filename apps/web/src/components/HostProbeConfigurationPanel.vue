@@ -11,14 +11,12 @@ import {
   metricToggleFields,
   type MetricToggleKey,
 } from "@/lib/probe-configuration";
-import type {
-  HostProbeConfigurationResponse,
-  ManagedHostDetail,
-} from "../types";
+
+import type { HostProbeConfigurationResponse, HostDetail } from "../types";
 
 const props = defineProps<{
   activeHostConfigurationId: number | null;
-  host: ManagedHostDetail;
+  host: HostDetail;
   hostConfigurationDraft: HostProbeConfigurationResponse | null;
   hostConfigurationError: string;
   isSavingHostConfiguration: boolean;
@@ -29,7 +27,10 @@ defineEmits<{
   saveHostConfiguration: [];
 }>();
 
-function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate") {
+function setMetricToggle(
+  key: MetricToggleKey,
+  value: boolean | "indeterminate",
+) {
   if (!props.hostConfigurationDraft) {
     return;
   }
@@ -73,7 +74,10 @@ function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate")
           </Label>
         </RadioGroup>
 
-        <div v-if="hostConfigurationDraft.mode === 'override'" class="grid gap-4">
+        <div
+          v-if="hostConfigurationDraft.mode === 'override'"
+          class="grid gap-4"
+        >
           <div class="grid gap-4 sm:grid-cols-2">
             <Label class="grid gap-2 text-sm font-medium">
               采集间隔
@@ -117,11 +121,19 @@ function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate")
           </fieldset>
         </div>
 
-        <p v-if="hostConfigurationError" class="text-sm text-red-600" role="alert">
+        <p
+          v-if="hostConfigurationError"
+          class="text-sm text-red-600"
+          role="alert"
+        >
           {{ hostConfigurationError }}
         </p>
 
-        <Button type="submit" class="w-fit" :disabled="isSavingHostConfiguration">
+        <Button
+          type="submit"
+          class="w-fit"
+          :disabled="isSavingHostConfiguration"
+        >
           <LoaderCircle
             v-if="isSavingHostConfiguration"
             class="size-4 animate-spin"
@@ -142,7 +154,8 @@ function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate")
           <dt class="text-muted-foreground">采集间隔</dt>
           <dd class="font-medium">
             {{
-              host.probeConfiguration.configuration.metricsCollectionIntervalSeconds
+              host.probeConfiguration.configuration
+                .metricsCollectionIntervalSeconds
             }}s
           </dd>
         </div>
@@ -150,7 +163,8 @@ function setMetricToggle(key: MetricToggleKey, value: boolean | "indeterminate")
           <dt class="text-muted-foreground">上报间隔</dt>
           <dd class="font-medium">
             {{
-              host.probeConfiguration.configuration.reportingBatchIntervalSeconds
+              host.probeConfiguration.configuration
+                .reportingBatchIntervalSeconds
             }}s
           </dd>
         </div>

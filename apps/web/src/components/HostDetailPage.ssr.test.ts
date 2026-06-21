@@ -1,11 +1,12 @@
 import { renderToString } from "@vue/server-renderer";
-import { createSSRApp, computed, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
+import { createSSRApp, computed, ref } from "vue";
 
-import type { useManagedHostDetail } from "@/composables/useManagedHostDetail";
-import ManagedHostDetailPage from "./ManagedHostDetailPage.vue";
+import type { useHostDetail } from "@/composables/useHostDetail";
 
-describe("Managed Host detail page", () => {
+import HostDetailPage from "./HostDetailPage.vue";
+
+describe("Host detail page", () => {
   it("renders warning copy separately from technical Probe error detail", async () => {
     const detail = {
       appendLiveSample: vi.fn(),
@@ -43,7 +44,7 @@ describe("Managed Host detail page", () => {
         },
         lastReportAtMs: 1_725_000_000_000,
         latestMetrics: null,
-        memory: "2 GiB",
+        memory: "2 GB",
         probeConfiguration: {
           configuration: {
             collectCpu: true,
@@ -97,10 +98,10 @@ describe("Managed Host detail page", () => {
       ]),
       selectedWindow: ref("1h"),
       switchWindow: vi.fn(),
-    } as unknown as ReturnType<typeof useManagedHostDetail>;
+    } as unknown as ReturnType<typeof useHostDetail>;
 
     const html = await renderToString(
-      createSSRApp(ManagedHostDetailPage, {
+      createSSRApp(HostDetailPage, {
         activeHostConfigurationId: null,
         activeHostMetadataId: null,
         deletingHostId: null,
@@ -115,15 +116,22 @@ describe("Managed Host detail page", () => {
     );
 
     expect(html).toContain("探针配置警告");
-    expect(html).toContain("1 GiB / 2 GiB");
+    expect(html).toContain("1 GB / 2 GB");
     expect(html).toContain("1 小时 1 分钟");
     expect(html).toContain("Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz");
     expect(html).toContain("生产数据库");
+    expect(html).toContain("概览");
+    expect(html).toContain("1 分钟");
+    expect(html).toContain("时间范围");
     expect(html).toContain("IP 地址");
     expect(html).toContain("操作系统");
-    expect(html).toContain("探针未能应用最新配置，请检查探针连通性或配置下发状态。");
+    expect(html).toContain(
+      "探针未能应用最新配置，请检查探针连通性或配置下发状态。",
+    );
     expect(html).not.toContain("技术详情");
-    expect(html).not.toContain("report request failed: 503 Service Unavailable");
+    expect(html).not.toContain(
+      "report request failed: 503 Service Unavailable",
+    );
     expect(html).toContain("主机资料");
     expect(html).toContain("配置");
     expect(html).toContain("在线");

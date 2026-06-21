@@ -1,17 +1,17 @@
 import * as v from "valibot";
 
-const managedHostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
+const hostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const nullableNumberSchema = v.nullable(v.number());
 const timestampMsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
 
 export const webSocketClientMessageSchema = v.variant("type", [
   v.object({
-    managedHostId: managedHostIdSchema,
-    type: v.literal("subscribe_managed_host_detail"),
+    hostId: hostIdSchema,
+    type: v.literal("subscribe_host_detail"),
   }),
   v.object({
-    managedHostId: managedHostIdSchema,
-    type: v.literal("unsubscribe_managed_host_detail"),
+    hostId: hostIdSchema,
+    type: v.literal("unsubscribe_host_detail"),
   }),
 ]);
 
@@ -19,8 +19,8 @@ export type WebSocketClientMessage = v.InferOutput<
   typeof webSocketClientMessageSchema
 >;
 
-export const managedHostLiveSummarySchema = v.object({
-  id: managedHostIdSchema,
+export const hostLiveSummarySchema = v.object({
+  id: hostIdSchema,
   lastSeenAtMs: v.nullable(timestampMsSchema),
   latestMetrics: v.nullable(
     v.object({
@@ -45,11 +45,9 @@ export const managedHostLiveSummarySchema = v.object({
   }),
 });
 
-export type ManagedHostLiveSummary = v.InferOutput<
-  typeof managedHostLiveSummarySchema
->;
+export type HostLiveSummary = v.InferOutput<typeof hostLiveSummarySchema>;
 
-export const managedHostDetailSampleSchema = v.object({
+export const hostDetailSampleSchema = v.object({
   collectedAtMs: timestampMsSchema,
   cpuCores: v.array(
     v.object({
@@ -67,7 +65,7 @@ export const managedHostDetailSampleSchema = v.object({
       usedBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
     }),
   ),
-  managedHostId: managedHostIdSchema,
+  hostId: hostIdSchema,
   memoryTotalBytes: nullableNumberSchema,
   memoryUsedBytes: nullableNumberSchema,
   networkInterfaces: v.array(
@@ -82,19 +80,17 @@ export const managedHostDetailSampleSchema = v.object({
   uptimeSeconds: nullableNumberSchema,
 });
 
-export type ManagedHostDetailSample = v.InferOutput<
-  typeof managedHostDetailSampleSchema
->;
+export type HostDetailSample = v.InferOutput<typeof hostDetailSampleSchema>;
 
 export const webSocketServerMessageSchema = v.variant("type", [
   v.object({
-    host: managedHostLiveSummarySchema,
-    type: v.literal("managed_host_summary"),
+    host: hostLiveSummarySchema,
+    type: v.literal("host_summary"),
   }),
   v.object({
-    managedHostId: managedHostIdSchema,
-    sample: managedHostDetailSampleSchema,
-    type: v.literal("managed_host_detail_sample"),
+    hostId: hostIdSchema,
+    sample: hostDetailSampleSchema,
+    type: v.literal("host_detail_sample"),
   }),
 ]);
 

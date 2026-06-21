@@ -342,6 +342,10 @@ fn collect_network_interfaces() -> Vec<NetworkInterfaceInventory> {
             let name = unsafe { CStr::from_ptr(ifaddr.ifa_name) }
                 .to_string_lossy()
                 .into_owned();
+            if name == "lo" || ifaddr.ifa_flags & libc::IFF_LOOPBACK as u32 != 0 {
+                cursor = ifaddr.ifa_next;
+                continue;
+            }
             if let Some(address) = socket_address(ifaddr.ifa_addr) {
                 addresses_by_name.entry(name).or_default().push(address);
             }

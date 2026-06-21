@@ -1,23 +1,23 @@
 import {
-  type ManagedHostDetailSample,
-  type ManagedHostLiveSummary,
+  type HostDetailSample,
+  type HostLiveSummary,
   parseWebSocketClientMessage,
   type WebSocketServerMessage,
 } from "@enoki/api-client/websocket";
 import type { WSContext, WSMessageReceive } from "hono/ws";
 
-import type { ManagedHostSummary } from "./database/managed-hosts.js";
+import type { HostSummary } from "./database/hosts.js";
 
 type LiveClient = {
-  detailManagedHostId: number | null;
+  detailHostId: number | null;
   sessionId: string;
   socket: WSContext;
 };
 
 export type LiveUpdateBroadcaster = {
   addClient: (socket: WSContext, options: { sessionId: string }) => void;
-  broadcastDetailSample: (sample: ManagedHostDetailSample) => void;
-  broadcastManagedHostSummary: (summary: ManagedHostLiveSummary) => void;
+  broadcastDetailSample: (sample: HostDetailSample) => void;
+  broadcastHostSummary: (summary: HostLiveSummary) => void;
   closeSession: (sessionId: string) => void;
   handleClientMessage: (socket: WSContext, message: WSMessageReceive) => void;
   removeClient: (socket: WSContext) => void;
@@ -29,28 +29,28 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
   return {
     addClient(socket, options) {
       clients.set(socket, {
-        detailManagedHostId: null,
+        detailHostId: null,
         sessionId: options.sessionId,
         socket,
       });
     },
     broadcastDetailSample(sample) {
       const message: WebSocketServerMessage = {
-        managedHostId: sample.managedHostId,
+        hostId: sample.hostId,
         sample,
-        type: "managed_host_detail_sample",
+        type: "host_detail_sample",
       };
 
       for (const client of clients.values()) {
-        if (client.detailManagedHostId === sample.managedHostId) {
+        if (client.detailHostId === sample.hostId) {
           sendJson(client.socket, message);
         }
       }
     },
-    broadcastManagedHostSummary(summary) {
+    broadcastHostSummary(summary) {
       const message: WebSocketServerMessage = {
         host: summary,
-        type: "managed_host_summary",
+        type: "host_summary",
       };
 
       for (const client of clients.values()) {
@@ -86,13 +86,13 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
         return;
       }
 
-      if (parsed.type === "subscribe_managed_host_detail") {
-        client.detailManagedHostId = parsed.managedHostId;
+      if (parsed.type === "subscribe_host_detail") {
+        client.detailHostId = parsed.hostId;
         return;
       }
 
-      if (client.detailManagedHostId === parsed.managedHostId) {
-        client.detailManagedHostId = null;
+      if (client.detailHostId === parsed.hostId) {
+        client.detailHostId = null;
       }
     },
     removeClient(socket) {
@@ -101,12 +101,12 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
   };
 }
 
-export function liveSummaryFromManagedHost(
-  host: ManagedHostSummary,
+export function liveSummaryFromHost(
+  host: HostSummary,
   options: {
     metricsCollectionIntervalSeconds: number;
   },
-): ManagedHostLiveSummary {
+): HostLiveSummary {
   return {
     id: host.id,
     lastSeenAtMs: host.lastReportAtMs,
@@ -169,6 +169,13 @@ function webSocketMessageText(message: WSMessageReceive) {
 
   if (message instanceof ArrayBuffer) {
     return new TextDecoder().decode(message);
+  }
+
+  if (ArrayBuffer.isView(message)) {
+    const view = message as ArrayBufferView<ArrayBuffer>;
+    return new TextDecoder().decode(
+      new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+    );
   }
 
   return null;

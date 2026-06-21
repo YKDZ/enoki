@@ -32,6 +32,7 @@ servers.push(
     installation: config.installation,
     liveUpdates,
     port,
+    probeAssets: config.probeAssets,
     trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
     webDistPath,
   }),

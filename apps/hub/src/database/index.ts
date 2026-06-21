@@ -11,10 +11,7 @@ import {
   createEnrollmentRepository,
   type EnrollmentRepository,
 } from "./enrollments.js";
-import {
-  createManagedHostRepository,
-  type ManagedHostRepository,
-} from "./managed-hosts.js";
+import { createHostRepository, type HostRepository } from "./hosts.js";
 import { createMetricsRepository, type MetricsRepository } from "./metrics.js";
 import {
   createProbeConfigurationRepository,
@@ -26,7 +23,7 @@ export type HubDatabase = {
   audit: AuditRepository;
   close: () => void;
   enrollments: EnrollmentRepository;
-  managedHosts: ManagedHostRepository;
+  hosts: HostRepository;
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   sqlite: Database.Database;
@@ -56,7 +53,7 @@ export function initializeHubDatabase(
       sqlite.close();
     },
     enrollments: createEnrollmentRepository(database),
-    managedHosts: createManagedHostRepository(database),
+    hosts: createHostRepository(database),
     metrics: createMetricsRepository(database),
     probeConfigurations: createProbeConfigurationRepository(database),
     sqlite,

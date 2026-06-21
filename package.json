@@ -1,11 +1,14 @@
 {
   "name": "enoki",
   "private": true,
-  "description": "Self-hosted Managed Host monitoring with a Hono Hub, Vue Web UI, and Rust Probe.",
+  "description": "Self-hosted Host monitoring with a Hono Hub, Vue Web UI, and Rust Probe.",
   "type": "module",
   "scripts": {
     "build": "turbo run build",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run proto:check && pnpm run rust:check",
+    "dev": "pnpm --filter @enoki/web dev",
+    "dev:hub": "pnpm --filter @enoki/hub build && NODE_ENV=development pnpm --filter @enoki/hub start",
+    "dev:probe": "node scripts/dev-probe.mjs",
     "docker:smoke": "bash scripts/smoke-hub-docker.sh",
     "format:check": "oxfmt --check .",
     "lint": "oxlint . --ignore-pattern '**/dist/**' --ignore-pattern '**/src/generated/**'",

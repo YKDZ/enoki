@@ -5,18 +5,19 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { HostMetadataDraft, ManagedHostDetail } from "../types";
+
+import type { HostMetadataDraft, HostDetail } from "../types";
 
 defineProps<{
   activeHostMetadataId: number | null;
-  host: ManagedHostDetail;
+  host: HostDetail;
   hostMetadataDraft: HostMetadataDraft | null;
   hostMetadataError: string;
   isSavingHostMetadata: boolean;
 }>();
 
 defineEmits<{
-  openHostMetadata: [host: ManagedHostDetail];
+  openHostMetadata: [host: HostDetail];
   saveHostMetadata: [];
 }>();
 </script>
@@ -54,11 +55,19 @@ defineEmits<{
         <div class="grid gap-4 sm:grid-cols-2">
           <Label class="grid gap-2 text-sm font-medium">
             显示名称
-            <Input v-model="hostMetadataDraft.displayName" type="text" required />
+            <Input
+              v-model="hostMetadataDraft.displayName"
+              type="text"
+              required
+            />
           </Label>
           <Label class="grid gap-2 text-sm font-medium">
             IP 地址
-            <Input v-model="hostMetadataDraft.connectAddress" type="text" required />
+            <Input
+              v-model="hostMetadataDraft.connectAddress"
+              type="text"
+              required
+            />
           </Label>
         </div>
 
@@ -79,11 +88,15 @@ defineEmits<{
       <dl v-else class="grid gap-3 text-sm">
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">显示名称</dt>
-          <dd class="text-right font-medium">{{ host.hostMetadata.displayName }}</dd>
+          <dd class="text-right font-medium">
+            {{ host.hostMetadata.displayName }}
+          </dd>
         </div>
         <div class="flex justify-between gap-4">
           <dt class="text-muted-foreground">IP 地址</dt>
-          <dd class="text-right font-medium">{{ host.hostMetadata.connectAddress }}</dd>
+          <dd class="text-right font-medium">
+            {{ host.hostMetadata.connectAddress }}
+          </dd>
         </div>
       </dl>
     </CardContent>

@@ -1,7 +1,14 @@
 <script setup lang="ts">
-import { useEventListener } from "@vueuse/core";
+import { useEventListener, useResizeObserver } from "@vueuse/core";
 import * as echarts from "echarts";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 
 import type { MetricSeries } from "@/lib/metrics-chart-data";
 
@@ -24,6 +31,8 @@ const props = defineProps<{
   valueFormatter?: (value: number) => string;
   xAxisMaxMs?: number;
   xAxisMinMs?: number;
+  yAxisMax?: number;
+  yAxisMin?: number;
   yAxisName?: string;
 }>();
 
@@ -33,6 +42,7 @@ const pointCount = computed(() =>
 );
 let chart: echarts.ECharts | null = null;
 let legendSelected: Record<string, boolean> = {};
+let resizeFrame: number | null = null;
 
 onMounted(async () => {
   await nextTick();
@@ -53,18 +63,27 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  if (resizeFrame !== null) {
+    cancelAnimationFrame(resizeFrame);
+    resizeFrame = null;
+  }
   chart?.dispose();
   chart = null;
 });
 
 useEventListener("resize", resizeChart);
+useResizeObserver(chartElement, scheduleResize);
 
 watch(
   () => [
+    props.emptyText,
     props.series,
     props.title,
+    props.valueFormatter,
     props.xAxisMaxMs,
     props.xAxisMinMs,
+    props.yAxisMax,
+    props.yAxisMin,
     props.yAxisName,
   ],
   () => {
@@ -72,6 +91,7 @@ watch(
   },
   {
     deep: true,
+    flush: "post",
   },
 );
 
@@ -83,96 +103,117 @@ function renderChart() {
   const formatter = props.valueFormatter ?? ((value: number) => String(value));
   const hasData = props.series.some((item) => item.points.length > 0);
   const theme = chartTheme();
-  const titleText = props.yAxisName ? `${props.title} ${props.yAxisName}` : props.title;
+  const titleText = props.yAxisName
+    ? `${props.title} ${props.yAxisName}`
+    : props.title;
 
-  chart.clear();
-  chart.setOption({
-    animation: false,
-    color: ["#34d399", "#60a5fa", "#f59e0b", "#f472b6", "#a78bfa", "#22d3ee"],
-    grid: {
-      bottom: 20,
-      left: 48,
-      right: 18,
-      top: 50,
-    },
-    legend: {
-      inactiveColor: theme.mutedForeground,
-      left: "center",
-      pageIconColor: theme.foreground,
-      pageTextStyle: {
-        color: theme.mutedForeground,
+  chart.setOption(
+    {
+      animation: false,
+      color: theme.chartColors,
+      grid: {
+        bottom: 20,
+        left: 48,
+        right: 18,
+        top: 50,
       },
-      textStyle: {
-        color: theme.label,
-        fontSize: 12,
+      legend: {
+        inactiveColor: theme.mutedForeground,
+        left: "center",
+        pageIconColor: theme.foreground,
+        pageTextStyle: {
+          color: theme.mutedForeground,
+        },
+        textStyle: {
+          color: theme.label,
+          fontSize: 12,
+        },
+        selected: legendSelected,
+        type: "scroll",
+        top: 0,
       },
-      selected: legendSelected,
-      type: "scroll",
-      top: 0,
-    },
-    series: props.series.map((item) => ({
-      data: chartSeriesPoints(item.points),
-      name: item.name,
-      showSymbol: false,
-      smooth: true,
-      type: "line",
-    })),
-    title: {
-      left: 0,
-      text: titleText,
-      textStyle: {
-        color: theme.label,
-        fontSize: 14,
-        fontWeight: 600,
-      },
-    },
-    tooltip: {
-      backgroundColor: theme.card,
-      borderColor: theme.border,
-      borderWidth: 1,
-      extraCssText:
-        "box-shadow: 0 12px 30px rgb(15 23 42 / 0.12); border-radius: 8px;",
-      formatter(params: TooltipParam | TooltipParam[]) {
-        return tooltipText(params, formatter);
-      },
-      textStyle: {
-        color: theme.foreground,
-        fontSize: 12,
-      },
-      trigger: "axis",
-    },
-    xAxis: {
-      axisLabel: {
-        show: false,
-      },
-      axisTick: {
-        show: false,
-      },
-      max: props.xAxisMaxMs,
-      min: props.xAxisMinMs,
-      type: "time",
-    },
-    yAxis: {
-      axisLabel: {
-        color: theme.mutedForeground,
-        formatter,
-      },
-      nameTextStyle: {
-        color: theme.mutedForeground,
-      },
-      splitLine: {
-        lineStyle: {
-          color: theme.border,
+      series: props.series.map((item) => ({
+        data: item.points,
+        name: item.name,
+        showSymbol: false,
+        smooth: true,
+        type: "line",
+      })),
+      title: {
+        left: 0,
+        text: titleText,
+        textStyle: {
+          color: theme.label,
+          fontSize: 14,
+          fontWeight: 600,
         },
       },
-      type: "value",
+      tooltip: {
+        backgroundColor: theme.card,
+        borderColor: theme.border,
+        borderWidth: 1,
+        extraCssText:
+          "box-shadow: 0 12px 30px rgb(15 23 42 / 0.12); border-radius: 8px;",
+        formatter(params: TooltipParam | TooltipParam[]) {
+          return tooltipText(params, formatter);
+        },
+        textStyle: {
+          color: theme.foreground,
+          fontSize: 12,
+        },
+        trigger: "axis",
+      },
+      xAxis: {
+        axisLabel: {
+          show: false,
+        },
+        axisTick: {
+          show: false,
+        },
+        max: props.xAxisMaxMs,
+        min: props.xAxisMinMs,
+        type: "time",
+      },
+      yAxis: {
+        axisLabel: {
+          color: theme.mutedForeground,
+          formatter,
+        },
+        nameTextStyle: {
+          color: theme.mutedForeground,
+        },
+        splitLine: {
+          lineStyle: {
+            color: theme.border,
+          },
+        },
+        max: props.yAxisMax,
+        min: props.yAxisMin,
+        type: "value",
+      },
+      ...emptyGraphicOption(hasData, theme),
     },
-    ...emptyGraphicOption(hasData, theme),
-  });
+    {
+      lazyUpdate: false,
+      notMerge: true,
+      silent: true,
+    },
+  );
 }
 
 function resizeChart() {
   chart?.resize();
+}
+
+function scheduleResize() {
+  if (resizeFrame !== null) {
+    return;
+  }
+
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = null;
+    resizeChart();
+  });
 }
 
 function legendSelectionFromEvent(
@@ -216,44 +257,20 @@ function emptyGraphicOption(
   };
 }
 
-function chartSeriesPoints(points: MetricSeries["points"]) {
-  const firstPoint = points[0];
-
-  if (
-    props.xAxisMinMs === undefined ||
-    props.xAxisMaxMs === undefined ||
-    !firstPoint ||
-    firstPoint[0] <= props.xAxisMinMs ||
-    firstPoint[0] - props.xAxisMinMs <= missingDataThresholdMs()
-  ) {
-    return points;
-  }
-
-  return [
-    [firstPoint[0], 0],
-    ...points,
-  ];
-}
-
-function missingDataThresholdMs() {
-  if (props.xAxisMinMs === undefined || props.xAxisMaxMs === undefined) {
-    return 0;
-  }
-
-  const rangeMs = Math.max(0, props.xAxisMaxMs - props.xAxisMinMs);
-
-  return Math.min(
-    5 * 60 * 1000,
-    Math.max(60 * 1000, rangeMs * 0.02),
-  );
-}
-
 function chartTheme() {
   const style = getComputedStyle(document.documentElement);
 
   return {
     border: cssColor(style, "--border", "#e5e7eb"),
     card: cssColor(style, "--card", "#ffffff"),
+    chartColors: [
+      cssColor(style, "--chart-1", "#34d399"),
+      cssColor(style, "--chart-2", "#60a5fa"),
+      cssColor(style, "--chart-3", "#f59e0b"),
+      cssColor(style, "--chart-4", "#f472b6"),
+      cssColor(style, "--chart-5", "#a78bfa"),
+      cssColor(style, "--metric-network-rx-fg", "#22d3ee"),
+    ],
     foreground: cssColor(style, "--foreground", "#111827"),
     label: cssColor(style, "--chart-label", "#374151"),
     mutedForeground: cssColor(style, "--muted-foreground", "#6b7280"),

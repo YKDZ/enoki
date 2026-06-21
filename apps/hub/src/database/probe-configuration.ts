@@ -22,11 +22,11 @@ export type HostProbeConfiguration = {
 };
 
 export type ProbeConfigurationRepository = {
-  clearHostOverride: (managedHostId: number) => HostProbeConfiguration;
+  clearHostOverride: (hostId: number) => HostProbeConfiguration;
   getGlobal: () => ProbeConfigurationRecord;
-  getEffectiveForHost: (managedHostId: number) => HostProbeConfiguration;
+  getEffectiveForHost: (hostId: number) => HostProbeConfiguration;
   updateHostOverride: (
-    managedHostId: number,
+    hostId: number,
     values: ProbeConfigurationValues,
     updatedAtMs: number,
   ) => HostProbeConfiguration;
@@ -40,24 +40,24 @@ export function createProbeConfigurationRepository(
   database: ProbeConfigurationDatabase,
 ): ProbeConfigurationRepository {
   return {
-    clearHostOverride(managedHostId) {
+    clearHostOverride(hostId) {
       database
         .delete(probeConfigurationHostOverrides)
-        .where(eq(probeConfigurationHostOverrides.managedHostId, managedHostId))
+        .where(eq(probeConfigurationHostOverrides.hostId, hostId))
         .run();
 
-      return this.getEffectiveForHost(managedHostId);
+      return this.getEffectiveForHost(hostId);
     },
     getGlobal() {
       return rowToConfiguration(
         database.select().from(probeConfigurationGlobalDefaults).get(),
       );
     },
-    getEffectiveForHost(managedHostId) {
+    getEffectiveForHost(hostId) {
       const override = database
         .select()
         .from(probeConfigurationHostOverrides)
-        .where(eq(probeConfigurationHostOverrides.managedHostId, managedHostId))
+        .where(eq(probeConfigurationHostOverrides.hostId, hostId))
         .get();
 
       if (override) {
@@ -101,12 +101,12 @@ export function createProbeConfigurationRepository(
 
       return configuration;
     },
-    updateHostOverride(managedHostId, values, updatedAtMs) {
-      const previous = this.getEffectiveForHost(managedHostId).configuration;
+    updateHostOverride(hostId, values, updatedAtMs) {
+      const previous = this.getEffectiveForHost(hostId).configuration;
       const configuration = {
         ...values,
         version: nextProbeConfigurationVersion(
-          `host-${managedHostId}`,
+          `host-${hostId}`,
           updatedAtMs,
           previous.version,
         ),
@@ -116,7 +116,7 @@ export function createProbeConfigurationRepository(
         .insert(probeConfigurationHostOverrides)
         .values({
           ...configuration,
-          managedHostId,
+          hostId,
           updatedAtMs,
         })
         .onConflictDoUpdate({
@@ -124,11 +124,11 @@ export function createProbeConfigurationRepository(
             ...configuration,
             updatedAtMs,
           },
-          target: probeConfigurationHostOverrides.managedHostId,
+          target: probeConfigurationHostOverrides.hostId,
         })
         .run();
 
-      return this.getEffectiveForHost(managedHostId);
+      return this.getEffectiveForHost(hostId);
     },
   };
 }

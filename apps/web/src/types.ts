@@ -2,7 +2,7 @@ export type SessionResponse = {
   authenticated: boolean;
 };
 
-export type ManagedHostSummary = {
+export type HostSummary = {
   clockSkew: {
     detected: boolean;
     lastDeltaMs: number | null;
@@ -38,8 +38,8 @@ export type ManagedHostSummary = {
   system: string;
 };
 
-export type ManagedHostsResponse = {
-  hosts: ManagedHostSummary[];
+export type HostsResponse = {
+  hosts: HostSummary[];
 };
 
 export type EnrollmentResponse = {
@@ -48,8 +48,6 @@ export type EnrollmentResponse = {
   hubUrl: string;
   installCommand: string;
   installPath: string;
-  probeDownloadUrl?: string;
-  probeReleaseVersion?: string;
 };
 
 export type ProbeConfiguration = {
@@ -75,7 +73,7 @@ export type HostMetadataDraft = {
   displayName: string;
 };
 
-export type ManagedHostMetricSample = {
+export type HostMetricSample = {
   collectedAtMs: number;
   cpuCores: Array<{
     name: string;
@@ -109,9 +107,9 @@ export type ManagedHostMetricSample = {
   uptimeSeconds: number | null;
 };
 
-export type MetricsWindow = "1h" | "6h" | "24h" | "7d";
+export type MetricsWindow = "1m" | "1h" | "6h" | "24h" | "7d";
 
-export type ManagedHostDetail = ManagedHostSummary & {
+export type HostDetail = HostSummary & {
   hostMetadata: {
     connectAddress: string;
     description: string;
@@ -128,13 +126,13 @@ export type ManagedHostDetail = ManagedHostSummary & {
   }>;
 };
 
-export type ManagedHostDetailResponse = {
-  host: ManagedHostDetail;
+export type HostDetailResponse = {
+  host: HostDetail;
 };
 
-export type ManagedHostMetricsResponse = {
+export type HostMetricsResponse = {
   metrics: {
-    samples: ManagedHostMetricSample[];
+    samples: HostMetricSample[];
     window: MetricsWindow;
   };
 };

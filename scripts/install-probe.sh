@@ -4,14 +4,12 @@ set -euo pipefail
 SERVICE_NAME="enoki-probe"
 SERVICE_USER="${ENOKI_SERVICE_USER:-enoki-probe}"
 SERVICE_GROUP="${ENOKI_SERVICE_GROUP:-enoki-probe}"
-PROBE_VERSION="${ENOKI_PROBE_VERSION:-}"
-GITHUB_RELEASE_BASE_URL="${ENOKI_GITHUB_RELEASE_BASE_URL:-https://github.com/YKDZ/enoki/releases/download}"
-GITHUB_LATEST_RELEASE_BASE_URL="${ENOKI_GITHUB_LATEST_RELEASE_BASE_URL:-https://github.com/YKDZ/enoki/releases/latest/download}"
 INSTALL_PATH="${ENOKI_INSTALL_PATH:-/usr/local/bin/enoki-probe}"
 CONFIG_PATH="${ENOKI_CONFIG_PATH:-/etc/enoki/probe-bootstrap.toml}"
 STATE_DIR="${ENOKI_STATE_DIR:-/var/lib/enoki-probe}"
 LOG_LEVEL="${ENOKI_LOG_LEVEL:-info}"
 TEST_ROOT="${ENOKI_TEST_ROOT:-}"
+EMBEDDED_PUBLIC_KEY_SHA256="__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__"
 
 fail() {
   echo "Enoki Probe install failed: $*" >&2
@@ -87,42 +85,80 @@ download_file() {
   local output="$2"
 
   command -v curl >/dev/null 2>&1 ||
-    fail "curl is required to download Probe release artifacts."
+    fail "curl is required to download Probe assets."
   curl -fsSL -o "$output" "$url"
 }
 
-download_urls() {
-  local target="$1"
-  local archive_url="${ENOKI_PROBE_DOWNLOAD_URL:-}"
-  local checksum_url="${ENOKI_PROBE_SHA256_URL:-}"
+hub_api_url() {
+  local path="$1"
+  printf '%s/%s\n' "${ENOKI_HUB_URL%/}" "${path#/}"
+}
 
-  if [ -z "$archive_url" ]; then
-    if [ -n "$PROBE_VERSION" ]; then
-      archive_url="${GITHUB_RELEASE_BASE_URL}/${PROBE_VERSION}/enoki-probe-${target}.tar.gz"
-    else
-      archive_url="${GITHUB_LATEST_RELEASE_BASE_URL}/enoki-probe-${target}.tar.gz"
-    fi
+validate_hub_url() {
+  case "$ENOKI_HUB_URL" in
+    https://*) return ;;
+    http://localhost* | http://127.0.0.1* | http://[::1]*) return ;;
+  esac
+
+  if [ -n "$TEST_ROOT" ] && [[ "$ENOKI_HUB_URL" = file://* ]]; then
+    return
   fi
 
-  if [ -z "$checksum_url" ]; then
-    checksum_url="${archive_url}.sha256"
+  fail "ENOKI_HUB_URL must use https, except localhost development URLs."
+}
+
+verify_manifest_signature() {
+  local manifest="$1"
+  local signature="$2"
+  local public_key="$3"
+
+  command -v openssl >/dev/null 2>&1 ||
+    fail "openssl is required to verify Probe asset signatures."
+  openssl dgst -sha256 -verify "$public_key" -signature "$signature" "$manifest" >/dev/null 2>&1 ||
+    fail "Probe asset manifest signature verification failed."
+}
+
+verify_public_key_trust() {
+  local public_key="$1"
+  local expected="${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
+  local actual
+
+  if [ -z "$expected" ] || [ "$expected" = "__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__" ]; then
+    fail "Probe installer does not include a trusted asset signing key fingerprint."
+  fi
+  if ! [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    fail "trusted Probe asset signing key fingerprint is not a valid sha256 value."
   fi
 
-  printf '%s\n%s\n' "$archive_url" "$checksum_url"
+  actual="$(sha256sum "$public_key" | awk '{print $1}')"
+  if [ "${actual,,}" != "${expected,,}" ]; then
+    fail "Probe asset signing key fingerprint verification failed."
+  fi
+}
+
+manifest_asset_field() {
+  local manifest="$1"
+  local target="$2"
+  local field="$3"
+  local line
+
+  line="$(tr -d '\n' <"$manifest" | grep -o "{[^{}]*\"target\"[[:space:]]*:[[:space:]]*\"$target\"[^{}]*}" | head -n 1 || true)"
+  if [ -z "$line" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$line" |
+    sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" |
+    head -n 1
 }
 
 verify_checksum() {
   local archive="$1"
-  local checksum_file="$2"
-  local expected="${ENOKI_PROBE_SHA256:-}"
+  local expected="$2"
   local actual
 
-  if [ -z "$expected" ]; then
-    expected="$(awk '{print $1; exit}' "$checksum_file")"
-  fi
-
   if ! [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]]; then
-    fail "downloaded Probe checksum is not a valid sha256 value."
+    fail "Probe asset manifest does not contain a valid sha256 value."
   fi
 
   actual="$(sha256sum "$archive" | awk '{print $1}')"
@@ -261,27 +297,46 @@ main() {
   local target
   local work_dir
   local archive
-  local checksum_file
+  local manifest_file
+  local manifest_signature_file
+  local public_key_file
+  local asset_file
+  local asset_sha256
   local archive_url
-  local checksum_url
 
   require_value "ENOKI_HUB_URL" "${ENOKI_HUB_URL:-}"
   require_value "ENOKI_ENROLLMENT_TOKEN" "${ENOKI_ENROLLMENT_TOKEN:-}"
+  validate_hub_url
   ensure_root
   ensure_systemd
   target="$(detect_target)"
   work_dir="$(mktemp -d)"
   archive="$work_dir/enoki-probe.tar.gz"
-  checksum_file="$work_dir/enoki-probe.tar.gz.sha256"
+  manifest_file="$work_dir/manifest.json"
+  manifest_signature_file="$work_dir/manifest.json.sig"
+  public_key_file="$work_dir/signing-key.pem"
   trap "rm -rf '$work_dir'" EXIT
 
-  mapfile -t urls < <(download_urls "$target")
-  archive_url="${urls[0]}"
-  checksum_url="${urls[1]}"
+  download_file "$(hub_api_url /api/probe/assets/manifest.json)" "$manifest_file"
+  download_file "$(hub_api_url /api/probe/assets/manifest.json.sig)" "$manifest_signature_file"
+  download_file "$(hub_api_url /api/probe/assets/signing-key.pem)" "$public_key_file"
+  verify_public_key_trust "$public_key_file"
+  verify_manifest_signature "$manifest_file" "$manifest_signature_file" "$public_key_file"
 
+  asset_file="$(manifest_asset_field "$manifest_file" "$target" file || true)"
+  asset_sha256="$(manifest_asset_field "$manifest_file" "$target" sha256 || true)"
+  if [ -z "$asset_file" ] || [ -z "$asset_sha256" ]; then
+    fail "no Probe asset found for $target in signed manifest."
+  fi
+  case "$asset_file" in
+    */* | *..* | -*)
+      fail "Probe asset manifest contains an invalid asset filename."
+      ;;
+  esac
+
+  archive_url="$(hub_api_url "/api/probe/assets/$asset_file")"
   download_file "$archive_url" "$archive"
-  download_file "$checksum_url" "$checksum_file"
-  verify_checksum "$archive" "$checksum_file"
+  verify_checksum "$archive" "$asset_sha256"
   ensure_service_user
   install_binary "$archive" "$work_dir"
   write_bootstrap_config

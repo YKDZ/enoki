@@ -84,7 +84,7 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         ProbeCommand::Help => concat!(
             "Enoki Probe\n",
             "\n",
-            "A lightweight host-side process that reports Managed Host ",
+            "A lightweight host-side process that reports Host ",
             "observations to the Hub over outbound HTTPS.\n",
             "\n",
             "Usage:\n",
@@ -99,7 +99,7 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "Probe registration performs network I/O and cannot be rendered.\n".to_string()
         }
         ProbeCommand::Run { .. } => {
-            "Probe runtime loop reports Managed Host observations to the Hub.\n".to_string()
+            "Probe runtime loop reports Host observations to the Hub.\n".to_string()
         }
         ProbeCommand::Version => format!("enoki-probe {}\n", crate::version::probe_version()),
     }

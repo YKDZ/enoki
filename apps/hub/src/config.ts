@@ -34,6 +34,11 @@ export type NetworkConfig = {
   trustForwardedProbeHeaders: boolean;
 };
 
+export type ProbeAssetConfig = {
+  assetDir: string;
+  installScriptPath: string;
+};
+
 export type HubRuntimeConfig = {
   auth: AuthConfig;
   clockSkew: ClockSkewConfig;
@@ -42,6 +47,7 @@ export type HubRuntimeConfig = {
   installation: InstallationCommandConfig;
   metrics: MetricsConfig;
   network: NetworkConfig;
+  probeAssets: ProbeAssetConfig;
 };
 
 const defaultDataRoot = "/data";
@@ -50,6 +56,7 @@ const defaultClockSkewThresholdSeconds = 300;
 const defaultHostStatusOfflineAfterSeconds = 90;
 const defaultHostStatusStaleAfterSeconds = 30;
 const defaultMetricsRetentionDays = 7;
+const defaultProbeAssetDir = "/app/probe-assets";
 
 export function createHubRuntimeConfigFromEnvironment(
   environment: HubEnvironment,
@@ -88,6 +95,15 @@ export function createHubRuntimeConfigFromEnvironment(
       trustForwardedProbeHeaders:
         environment.ENOKI_TRUSTED_PROXY_HEADERS === "true",
     },
+    probeAssets: {
+      assetDir: environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
+      installScriptPath:
+        environment.ENOKI_INSTALL_SCRIPT_PATH ??
+        path.join(
+          environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
+          "install-probe.sh",
+        ),
+    },
   };
 }
 
@@ -119,21 +135,10 @@ function createInstallationCommandConfigFromEnvironment(
   environment: HubEnvironment,
 ) {
   const defaults = createDefaultInstallationCommandConfig();
-  const probeReleaseVersion =
-    environment.ENOKI_PROBE_DOWNLOAD_URL === undefined
-      ? (environment.ENOKI_PROBE_RELEASE_VERSION ??
-        defaults.probeReleaseVersion)
-      : undefined;
 
   return {
     installPath: environment.ENOKI_PROBE_INSTALL_PATH ?? defaults.installPath,
-    installScriptUrl:
-      environment.ENOKI_INSTALL_SCRIPT_URL ??
-      (probeReleaseVersion
-        ? `https://github.com/YKDZ/enoki/releases/download/${probeReleaseVersion}/install-probe.sh`
-        : defaults.installScriptUrl),
-    probeDownloadUrl: environment.ENOKI_PROBE_DOWNLOAD_URL,
-    probeReleaseVersion,
+    installScriptPath: defaults.installScriptPath,
     publicHubUrl: environment.ENOKI_PUBLIC_HUB_URL,
   };
 }

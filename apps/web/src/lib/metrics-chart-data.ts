@@ -1,4 +1,4 @@
-import type { ManagedHostMetricSample } from "../types";
+import type { HostMetricSample } from "../types";
 
 export type ChartPoint = [number, number];
 
@@ -26,7 +26,7 @@ export type MetricsChartData = {
 };
 
 export function buildMetricsChartData(
-  samples: ManagedHostMetricSample[],
+  samples: HostMetricSample[],
 ): MetricsChartData {
   return {
     cpu: {
@@ -99,8 +99,8 @@ export function buildMetricsChartData(
 }
 
 function valuePoints(
-  samples: ManagedHostMetricSample[],
-  valueForSample: (sample: ManagedHostMetricSample) => number | null,
+  samples: HostMetricSample[],
+  valueForSample: (sample: HostMetricSample) => number | null,
 ): ChartPoint[] {
   return samples.flatMap((sample) => {
     const value = valueForSample(sample);
@@ -110,8 +110,8 @@ function valuePoints(
 }
 
 function entityPercentSeries<TEntity>(
-  samples: ManagedHostMetricSample[],
-  entitiesForSample: (sample: ManagedHostMetricSample) => TEntity[],
+  samples: HostMetricSample[],
+  entitiesForSample: (sample: HostMetricSample) => TEntity[],
   nameForEntity: (entity: TEntity) => string,
   valueForEntity: (entity: TEntity) => number | null,
 ): MetricSeries[] {

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { Cpu, Download, HardDrive, Upload } from "@lucide/vue";
+import { Download, HardDrive, Upload, EthernetPort } from "@lucide/vue";
 import { computed } from "vue";
 
 import { Progress } from "@/components/ui/progress";
 import { formatBitsPerSecond, formatBytes, formatPercent } from "@/lib/format";
 import type { MetricSeries } from "@/lib/metrics-chart-data";
-import type { ManagedHostMetricSample } from "../types";
+
+import type { HostMetricSample } from "../types";
 import MetricsChart from "./MetricsChart.vue";
 
 const cpuSparklineWindowMs = 60_000;
@@ -17,8 +18,9 @@ const props = defineProps<{
   cpuCoreSeries: MetricSeries[];
   cpuModel: string | null;
   inventory: Record<string, unknown> | null;
-  latestSample: ManagedHostMetricSample | null;
+  latestSample: HostMetricSample | null;
   panel: "cpu" | "disk" | "network";
+  samples: HostMetricSample[];
   xAxisMaxMs: number;
   xAxisMinMs: number;
 }>();
@@ -53,14 +55,53 @@ const diskRows = computed(() =>
   ),
 );
 
-const networkRows = computed(() =>
-  [...(props.latestSample?.networkInterfaces ?? [])].sort((left, right) =>
+const networkRows = computed(() => {
+  const latestByName = new Map(
+    (props.latestSample?.networkInterfaces ?? []).map((networkInterface) => [
+      networkInterface.name,
+      networkInterface,
+    ]),
+  );
+  const totalsByName = new Map<
+    string,
+    {
+      name: string;
+      rxBitsPerSecond: number | null;
+      rxWindowBytes: number;
+      txBitsPerSecond: number | null;
+      txWindowBytes: number;
+    }
+  >();
+  const sourceSamples = props.samples.length
+    ? props.samples
+    : props.latestSample
+      ? [props.latestSample]
+      : [];
+
+  for (const sample of sourceSamples) {
+    for (const networkInterface of sample.networkInterfaces) {
+      const totals = totalsByName.get(networkInterface.name) ?? {
+        name: networkInterface.name,
+        rxBitsPerSecond:
+          latestByName.get(networkInterface.name)?.rxBitsPerSecond ?? null,
+        rxWindowBytes: 0,
+        txBitsPerSecond:
+          latestByName.get(networkInterface.name)?.txBitsPerSecond ?? null,
+        txWindowBytes: 0,
+      };
+      totals.rxWindowBytes += networkInterface.rxBytesDelta;
+      totals.txWindowBytes += networkInterface.txBytesDelta;
+      totalsByName.set(networkInterface.name, totals);
+    }
+  }
+
+  return [...totalsByName.values()].sort((left, right) =>
     left.name.localeCompare(right.name, undefined, {
       numeric: true,
       sensitivity: "base",
     }),
-  ),
-);
+  );
+});
 
 function diskPercent(usedBytes: number, totalBytes: number) {
   if (totalBytes <= 0) {
@@ -149,16 +190,18 @@ function frequencyText(value: number) {
         class="grid gap-1"
         :title="`${core.name} ${formatPercent(core.latestPercent)}`"
       >
-        <div class="flex items-center justify-between gap-2 text-[11px] leading-none">
-          <span class="font-medium text-foreground">
+        <div
+          class="flex items-center justify-between gap-2 text-[11px] leading-none"
+        >
+          <span class="text-foreground font-medium">
             {{ core.name.replace("cpu", "CPU ") }}
           </span>
-          <span class="font-medium text-foreground">
+          <span class="text-foreground font-medium">
             {{ formatPercent(core.latestPercent) }}
           </span>
         </div>
         <svg
-          class="h-24 w-full border bg-background"
+          class="bg-background h-24 w-full border"
           viewBox="0 0 100 72"
           preserveAspectRatio="none"
         >
@@ -175,7 +218,7 @@ function frequencyText(value: number) {
             :points="core.points"
             fill="none"
             stroke="currentColor"
-            class="text-emerald-500"
+            class="text-[var(--metric-good)]"
             stroke-linecap="round"
             stroke-linejoin="round"
             stroke-width="1.8"
@@ -183,14 +226,14 @@ function frequencyText(value: number) {
         </svg>
       </div>
     </div>
-    <p v-else class="text-sm text-muted-foreground">暂无核心数据</p>
+    <p v-else class="text-muted-foreground text-sm">暂无核心数据</p>
     <div
-      class="grid min-w-0 gap-3 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-3"
+      class="text-muted-foreground grid min-w-0 gap-3 text-sm md:grid-cols-2 xl:grid-cols-3"
     >
       <div class="min-w-0">
         <p>CPU 型号</p>
         <p
-          class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal"
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
           :title="cpuModel ?? undefined"
         >
           {{ cpuModel || "暂无" }}
@@ -198,37 +241,49 @@ function frequencyText(value: number) {
       </div>
       <div class="min-w-0">
         <p>进程</p>
-        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
+        <p
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
+        >
           {{ inventoryText("processCount") }}
         </p>
       </div>
       <div class="min-w-0">
         <p>线程</p>
-        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
+        <p
+          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+        >
           {{ inventoryText("threadCount") }}
         </p>
       </div>
       <div class="min-w-0">
         <p>L3 缓存</p>
-        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
+        <p
+          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+        >
           {{ inventoryText("cpuCacheL3Bytes", formatBytes) }}
         </p>
       </div>
       <div class="min-w-0">
         <p>基准频率</p>
-        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
+        <p
+          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+        >
           {{ inventoryText("cpuBaseFrequencyMhz", frequencyText) }}
         </p>
       </div>
       <div class="min-w-0">
         <p>物理 CPU</p>
-        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
+        <p
+          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+        >
           {{ inventoryText("cpuPhysicalCount") }}
         </p>
       </div>
       <div class="min-w-0">
         <p>插槽</p>
-        <p class="mt-1 min-w-0 break-words font-medium text-foreground whitespace-normal">
+        <p
+          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+        >
           {{ inventoryText("cpuSocketCount") }}
         </p>
       </div>
@@ -244,20 +299,22 @@ function frequencyText(value: number) {
       title="磁盘趋势"
       :x-axis-max-ms="xAxisMaxMs"
       :x-axis-min-ms="xAxisMinMs"
+      :y-axis-max="100"
+      :y-axis-min="0"
       y-axis-name="%"
       :value-formatter="formatPercent"
     />
 
     <div class="rounded-md border p-4">
       <div class="mb-3 flex items-center gap-2 text-sm font-medium">
-        <HardDrive class="size-4 text-muted-foreground" />
+        <HardDrive class="text-muted-foreground size-4" />
         挂载点
       </div>
       <div v-if="diskRows.length" class="grid gap-4">
         <div v-for="disk in diskRows" :key="disk.mountPoint" class="grid gap-2">
           <div class="flex items-center justify-between gap-3 text-sm">
             <span class="truncate font-medium">{{ disk.mountPoint }}</span>
-            <span class="shrink-0 text-muted-foreground">
+            <span class="text-muted-foreground shrink-0">
               {{ formatBytes(disk.usedBytes) }} /
               {{ formatBytes(disk.totalBytes) }}
             </span>
@@ -269,7 +326,7 @@ function frequencyText(value: number) {
           />
         </div>
       </div>
-      <p v-else class="text-sm text-muted-foreground">暂无磁盘数据</p>
+      <p v-else class="text-muted-foreground text-sm">暂无磁盘数据</p>
     </div>
   </div>
 
@@ -285,7 +342,7 @@ function frequencyText(value: number) {
 
     <div class="rounded-md border p-4">
       <div class="mb-3 flex items-center gap-2 text-sm font-medium">
-        <Download class="size-4 text-muted-foreground" />
+        <EthernetPort class="text-muted-foreground size-4" />
         接口
       </div>
       <div v-if="networkRows.length" class="grid gap-4">
@@ -297,9 +354,9 @@ function frequencyText(value: number) {
           <div class="flex items-center justify-between gap-3 text-sm">
             <span class="font-medium">{{ networkInterface.name }}</span>
           </div>
-          <div class="grid gap-2 rounded-md bg-muted/40 p-3 text-sm">
+          <div class="bg-muted/40 grid gap-2 rounded-md p-3 text-sm">
             <div class="flex items-center justify-between gap-3">
-              <span class="flex items-center gap-2 text-muted-foreground">
+              <span class="text-muted-foreground flex items-center gap-2">
                 <Download class="size-3.5 text-sky-600" />
                 接收
               </span>
@@ -308,7 +365,16 @@ function frequencyText(value: number) {
               </span>
             </div>
             <div class="flex items-center justify-between gap-3">
-              <span class="flex items-center gap-2 text-muted-foreground">
+              <span class="text-muted-foreground flex items-center gap-2">
+                <Download class="size-3.5 text-sky-600" />
+                总接收
+              </span>
+              <span class="font-medium">
+                {{ formatBytes(networkInterface.rxWindowBytes) }}
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-muted-foreground flex items-center gap-2">
                 <Upload class="size-3.5 text-amber-600" />
                 发送
               </span>
@@ -316,10 +382,19 @@ function frequencyText(value: number) {
                 {{ formatBitsPerSecond(networkInterface.txBitsPerSecond) }}
               </span>
             </div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-muted-foreground flex items-center gap-2">
+                <Upload class="size-3.5 text-amber-600" />
+                总发送
+              </span>
+              <span class="font-medium">
+                {{ formatBytes(networkInterface.txWindowBytes) }}
+              </span>
+            </div>
           </div>
         </div>
       </div>
-      <p v-else class="text-sm text-muted-foreground">暂无网络数据</p>
+      <p v-else class="text-muted-foreground text-sm">暂无网络数据</p>
     </div>
   </div>
 </template>

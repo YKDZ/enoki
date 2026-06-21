@@ -1,11 +1,11 @@
 import { renderToString } from "@vue/server-renderer";
-import { createSSRApp } from "vue";
 import { describe, expect, it } from "vitest";
+import { createSSRApp } from "vue";
 
-import ManagedHostCard from "./ManagedHostCard.vue";
-import type { ManagedHostSummary } from "../types";
+import type { HostSummary } from "../types";
+import HostCard from "./HostCard.vue";
 
-const host: ManagedHostSummary = {
+const host: HostSummary = {
   clockSkew: {
     detected: true,
     lastDeltaMs: 60_000,
@@ -29,7 +29,7 @@ const host: ManagedHostSummary = {
     receivedAtMs: 1_725_000_000_000,
     uptimeSeconds: 3_600,
   },
-  memory: "2 GiB",
+  memory: "2 GB",
   probeConfiguration: {
     mode: "inherit",
     version: "default-v1",
@@ -39,22 +39,30 @@ const host: ManagedHostSummary = {
   system: "linux",
 };
 
-describe("Managed Host overview card", () => {
+describe("Host overview card", () => {
   it("renders a clickable summary card with translated status and metric bars", async () => {
     const html = await renderToString(
-      createSSRApp(ManagedHostCard, {
+      createSSRApp(HostCard, {
         host,
       }),
     );
 
     expect(html).toContain('role="button"');
+    expect(html).toContain("border-border");
+    expect(html).not.toContain("border-slate-200");
     expect(html).toContain("CPU");
     expect(html).toContain("内存");
-    expect(html).toContain("41 MiB / 100 MiB");
+    expect(html).toContain("41 MB / 100 MB");
+    expect(html).toContain("whitespace-nowrap");
+    expect(html).toContain("tabular-nums");
     expect(html).toContain("磁盘");
     expect(html).toContain("18.4 Mb/s");
     expect(html).toContain("在线");
     expect(html).toContain("生产数据库");
+    expect(html).toContain("lucide-server");
+    expect(html).toContain("lucide-cpu");
+    expect(html).toContain("lucide-memory-stick");
+    expect(html).toContain("lucide-hard-drive");
     expect(html).toContain("时钟偏移 60s");
     expect(html).not.toContain("最新 CPU");
     expect(html).not.toContain("最新上报");

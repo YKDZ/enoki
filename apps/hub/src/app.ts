@@ -4,19 +4,23 @@ import type { UpgradeWebSocket } from "hono/ws";
 import { type AuthConfig, type AuthEnvironment } from "./auth/config.js";
 import { createOwnerAuth } from "./auth/routes.js";
 import { createHubRuntimeConfigFromEnvironment } from "./config.js";
+import type { HostStatusThresholds } from "./database/hosts.js";
 import type { HubDatabase } from "./database/index.js";
-import type { HostStatusThresholds } from "./database/managed-hosts.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createEnrollmentRoutes } from "./enrollment/routes.js";
+import { createHostRoutes } from "./hosts/routes.js";
 import {
   createLiveUpdateBroadcaster,
   type LiveUpdateBroadcaster,
 } from "./live-updates.js";
-import { createManagedHostRoutes } from "./managed-hosts/routes.js";
 import {
   createHostProbeConfigurationRoutes,
   createProbeConfigurationRoutes,
 } from "./probe-configuration/routes.js";
+import {
+  createProbeAssetRoutes,
+  type ProbeAssetRouteOptions,
+} from "./probe/assets.js";
 import { createProbeRoutes } from "./probe/routes.js";
 import { createWebAssetHandler } from "./web-assets.js";
 
@@ -31,6 +35,7 @@ export type HubAppOptions = {
   clockSkewThresholdMs?: number;
   database?: HubDatabase;
   installation?: InstallationCommandConfig;
+  probeAssets?: ProbeAssetRouteOptions;
   hostStatus?: HostStatusThresholds;
   now?: () => number;
   trustForwardedProbeHeaders?: boolean;
@@ -70,6 +75,13 @@ export function createHubApp(options: HubAppOptions = {}) {
     ...options,
     liveUpdates: liveUpdates ?? undefined,
   });
+  app.route(
+    "/api/probe",
+    createProbeAssetRoutes({
+      assetDir: options.probeAssets?.assetDir,
+      installScriptPath: options.probeAssets?.installScriptPath,
+    }),
+  );
 
   if (auth) {
     app.route("/api/web/auth", auth.routes);
@@ -109,11 +121,11 @@ export function createHubApp(options: HubAppOptions = {}) {
         }),
       );
       app.route(
-        "/api/web/managed-hosts",
-        createManagedHostRoutes({
+        "/api/web/hosts",
+        createHostRoutes({
           audit: options.database.audit,
           hostStatus: options.hostStatus,
-          managedHosts: options.database.managedHosts,
+          hosts: options.database.hosts,
           metrics: options.database.metrics,
           now: options.now,
           probeConfigurations: options.database.probeConfigurations,
@@ -128,30 +140,29 @@ export function createHubApp(options: HubAppOptions = {}) {
         }),
       );
       app.route(
-        "/api/web/managed-hosts/:hostId/probe-configuration",
+        "/api/web/hosts/:hostId/probe-configuration",
         createHostProbeConfigurationRoutes({
           audit: options.database.audit,
-          managedHosts: options.database.managedHosts,
+          hosts: options.database.hosts,
           now: options.now,
           probeConfigurations: options.database.probeConfigurations,
         }),
       );
     }
-    app.get("/api/web/managed-hosts", (context) => {
+    app.get("/api/web/hosts", (context) => {
       const nowMs = options.now?.() ?? Date.now();
 
       return context.json({
         hosts:
-          options.database?.managedHosts
+          options.database?.hosts
             .listSummaries({
-              latestMetricForHost: (managedHostId) =>
-                options.database?.metrics.findLatestSample(managedHostId) ??
-                null,
+              latestMetricForHost: (hostId) =>
+                options.database?.metrics.findLatestSample(hostId) ?? null,
               nowMs,
-              probeConfigurationForHost: (managedHostId) => {
+              probeConfigurationForHost: (hostId) => {
                 const effective =
                   options.database?.probeConfigurations.getEffectiveForHost(
-                    managedHostId,
+                    hostId,
                   );
 
                 return {
@@ -243,7 +254,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
     "/api/probe",
     createProbeRoutes({
       enrollments: options.database.enrollments,
-      managedHosts: options.database.managedHosts,
+      hosts: options.database.hosts,
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,
       clockSkewThresholdMs: options.clockSkewThresholdMs,
