@@ -305,18 +305,34 @@ install_binary() {
 write_bootstrap_config() {
   local config_path_rooted
   local state_dir_rooted
+  local existing_config_path
+  local existing_probe_id
+  local existing_probe_secret
 
   config_path_rooted="$(rooted_path "$CONFIG_PATH")"
   state_dir_rooted="$(rooted_path "$STATE_DIR")"
+  existing_config_path="$(mktemp)"
+  if [ -f "$config_path_rooted" ]; then
+    cp "$config_path_rooted" "$existing_config_path"
+  fi
   mkdir -p "$(dirname "$config_path_rooted")" "$state_dir_rooted"
 
   {
     printf 'hub_url = '
     toml_string "$ENOKI_HUB_URL"
     printf '\n'
-    printf 'enrollment_token = '
-    toml_string "$ENOKI_ENROLLMENT_TOKEN"
-    printf '\n'
+
+    if can_reuse_existing_identity "$existing_config_path"; then
+      existing_probe_id="$(toml_string_value "$existing_config_path" probe_id)"
+      existing_probe_secret="$(toml_string_value "$existing_config_path" probe_secret)"
+      printf 'probe_id = "%s"\n' "$existing_probe_id"
+      printf 'probe_secret = "%s"\n' "$existing_probe_secret"
+    else
+      printf 'enrollment_token = '
+      toml_string "$ENOKI_ENROLLMENT_TOKEN"
+      printf '\n'
+    fi
+
     printf 'state_dir = '
     toml_string "$STATE_DIR"
     printf '\n'
@@ -336,7 +352,20 @@ write_bootstrap_config() {
     printf 'log_level = '
     toml_string "$LOG_LEVEL"
     printf '\n'
+
+    if can_reuse_existing_identity "$existing_config_path"; then
+      write_preserved_optional_string "$existing_config_path" probe_configuration_version
+      write_preserved_optional_raw "$existing_config_path" reporting_batch_interval_seconds
+      write_preserved_optional_raw "$existing_config_path" metrics_collection_interval_seconds
+      write_preserved_optional_raw "$existing_config_path" collect_cpu
+      write_preserved_optional_raw "$existing_config_path" collect_memory
+      write_preserved_optional_raw "$existing_config_path" collect_disk
+      write_preserved_optional_raw "$existing_config_path" collect_network
+      write_preserved_optional_raw "$existing_config_path" collect_load
+      write_preserved_optional_raw "$existing_config_path" collect_uptime
+    fi
   } >"$config_path_rooted"
+  rm -f "$existing_config_path"
   chmod 0600 "$config_path_rooted"
 
   if [ -z "$TEST_ROOT" ]; then
@@ -381,6 +410,77 @@ toml_string() {
   value="${value//\"/\\\"}"
 
   printf '"%s"' "$value"
+}
+
+toml_string_value() {
+  local file="$1"
+  local key="$2"
+
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+
+  sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*\"\\(.*\\)\"[[:space:]]*$/\\1/p" "$file" |
+    head -n 1
+}
+
+toml_raw_value() {
+  local file="$1"
+  local key="$2"
+
+  if [ ! -f "$file" ]; then
+    return 1
+  fi
+
+  sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*\\([^[:space:]].*\\)$/\\1/p" "$file" |
+    head -n 1
+}
+
+normalized_url() {
+  local value="$1"
+
+  printf '%s\n' "${value%/}"
+}
+
+can_reuse_existing_identity() {
+  local existing_config="$1"
+  local existing_hub_url
+  local existing_probe_id
+  local existing_probe_secret
+
+  existing_hub_url="$(toml_string_value "$existing_config" hub_url || true)"
+  existing_probe_id="$(toml_string_value "$existing_config" probe_id || true)"
+  existing_probe_secret="$(toml_string_value "$existing_config" probe_secret || true)"
+
+  if [ -z "$existing_hub_url" ] ||
+    [ -z "$existing_probe_id" ] ||
+    [ -z "$existing_probe_secret" ]; then
+    return 1
+  fi
+
+  [ "$(normalized_url "$existing_hub_url")" = "$(normalized_url "$ENOKI_HUB_URL")" ]
+}
+
+write_preserved_optional_string() {
+  local existing_config="$1"
+  local key="$2"
+  local value
+
+  value="$(toml_string_value "$existing_config" "$key" || true)"
+  if [ -n "$value" ]; then
+    printf '%s = "%s"\n' "$key" "$value"
+  fi
+}
+
+write_preserved_optional_raw() {
+  local existing_config="$1"
+  local key="$2"
+  local value
+
+  value="$(toml_raw_value "$existing_config" "$key" || true)"
+  if [ -n "$value" ]; then
+    printf '%s = %s\n' "$key" "$value"
+  fi
 }
 
 write_systemd_service() {
@@ -487,6 +587,7 @@ main() {
   download_file "$archive_url" "$archive"
   verify_checksum "$archive" "$asset_sha256"
   ensure_service_user
+  systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
   install_binary "$archive" "$work_dir"
   write_bootstrap_config
   write_install_metadata
@@ -494,7 +595,7 @@ main() {
   write_upgrader_sudoers
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}.service"
-  systemctl start "${SERVICE_NAME}.service"
+  systemctl restart "${SERVICE_NAME}.service"
 
   echo "Enoki Probe installed as ${SERVICE_NAME}.service."
 }
