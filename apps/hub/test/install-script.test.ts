@@ -235,6 +235,74 @@ describe("Probe systemd installer", () => {
     expect(result.stderr).toContain("run this installer as root");
   });
 
+  it("uninstalls the systemd service, files, state, and default service account", async () => {
+    const root = await createTempRoot("enoki-uninstall-root-");
+    const commands = await createCommandMocks(root, {
+      serviceGroupExists: true,
+      serviceUserExists: true,
+    });
+    await mkdir(path.join(root, "usr/local/bin"), { recursive: true });
+    await mkdir(path.join(root, "etc/enoki"), { recursive: true });
+    await mkdir(path.join(root, "etc/systemd/system"), { recursive: true });
+    await mkdir(path.join(root, "var/lib/enoki-probe"), { recursive: true });
+    await writeFile(path.join(root, "usr/local/bin/enoki-probe"), "probe");
+    await writeFile(
+      path.join(root, "etc/enoki/probe-bootstrap.toml"),
+      "config",
+    );
+    await writeFile(
+      path.join(root, "etc/systemd/system/enoki-probe.service"),
+      "service",
+    );
+    await writeFile(path.join(root, "var/lib/enoki-probe/state"), "state");
+
+    const result = await runInstaller({
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      ENOKI_UNINSTALL: "1",
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result).toEqual({
+      code: 0,
+      stderr: "",
+      stdout: "Enoki Probe uninstalled.\n",
+    });
+    await expect(
+      readFile(path.join(root, "usr/local/bin/enoki-probe"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/enoki/probe-bootstrap.toml"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(
+        path.join(root, "etc/systemd/system/enoki-probe.service"),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "var/lib/enoki-probe/state"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
+    ).resolves.toContain("stop enoki-probe.service");
+    await expect(
+      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
+    ).resolves.toContain("disable enoki-probe.service");
+    await expect(
+      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
+    ).resolves.toContain("daemon-reload");
+    await expect(
+      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
+    ).resolves.toContain("reset-failed enoki-probe.service");
+    await expect(
+      readFile(path.join(root, "tmp/userdel.log"), "utf8"),
+    ).resolves.toContain("enoki-probe");
+    await expect(
+      readFile(path.join(root, "tmp/groupdel.log"), "utf8"),
+    ).resolves.toContain("enoki-probe");
+  });
+
   it("rejects a Probe artifact when sha256 verification fails", async () => {
     const root = await createTempRoot("enoki-install-badsha-root-");
     const assets = await createProbeAssets(root, {
@@ -393,6 +461,8 @@ async function createCommandMocks(
     architecture?: string;
     assetDir?: string;
     currentUserId?: string;
+    serviceGroupExists?: boolean;
+    serviceUserExists?: boolean;
   } = {},
 ) {
   const bin = path.join(root, "mock-bin");
@@ -430,12 +500,22 @@ if [ "\${1:-}" = "-u" ] && [ "$#" -eq 1 ]; then
   echo ${options.currentUserId ?? "0"}
   exit 0
 fi
+if [ "\${1:-}" = "-u" ] && [ "\${2:-}" = "enoki-probe" ] && [ "$#" -eq 2 ]; then
+  ${options.serviceUserExists ? "echo 995\n  exit 0" : "exit 1"}
+fi
 exit 1
 `,
   );
   await writeExecutable(
     path.join(bin, "getent"),
     `#!/bin/sh
+if [ "\${1:-}" = "group" ] && [ "\${2:-}" = "enoki-probe" ]; then
+  ${
+    options.serviceGroupExists
+      ? 'echo "enoki-probe:x:995:"\n  exit 0'
+      : "exit 2"
+  }
+fi
 exit 2
 `,
   );
@@ -443,6 +523,12 @@ exit 2
     path.join(bin, "groupadd"),
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${path.join(root, "tmp/groupadd.log")}'
+`,
+  );
+  await writeExecutable(
+    path.join(bin, "groupdel"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> '${path.join(root, "tmp/groupdel.log")}'
 `,
   );
   await writeExecutable(
@@ -468,6 +554,12 @@ esac
     path.join(bin, "useradd"),
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${path.join(root, "tmp/useradd.log")}'
+`,
+  );
+  await writeExecutable(
+    path.join(bin, "userdel"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> '${path.join(root, "tmp/userdel.log")}'
 `,
   );
 

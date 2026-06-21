@@ -10,6 +10,8 @@ STATE_DIR="${ENOKI_STATE_DIR:-/var/lib/enoki-probe}"
 LOG_LEVEL="${ENOKI_LOG_LEVEL:-info}"
 TEST_ROOT="${ENOKI_TEST_ROOT:-}"
 EMBEDDED_PUBLIC_KEY_SHA256="__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__"
+DEFAULT_SERVICE_USER="enoki-probe"
+DEFAULT_SERVICE_GROUP="enoki-probe"
 
 fail() {
   echo "Enoki Probe install failed: $*" >&2
@@ -192,6 +194,60 @@ ensure_service_group() {
   groupadd --system "$SERVICE_GROUP"
 }
 
+remove_path() {
+  local path="$1"
+  local rooted
+
+  rooted="$(rooted_path "$path")"
+  rm -rf "$rooted"
+}
+
+remove_empty_dir() {
+  local path="$1"
+  local rooted
+
+  rooted="$(rooted_path "$path")"
+  rmdir "$rooted" >/dev/null 2>&1 || true
+}
+
+remove_service_account() {
+  if [ "$SERVICE_USER" = "$DEFAULT_SERVICE_USER" ] &&
+    id -u "$SERVICE_USER" >/dev/null 2>&1; then
+    userdel "$SERVICE_USER" >/dev/null 2>&1 || true
+  fi
+
+  if [ "$SERVICE_GROUP" = "$DEFAULT_SERVICE_GROUP" ] &&
+    getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+    groupdel "$SERVICE_GROUP" >/dev/null 2>&1 || true
+  fi
+}
+
+uninstall_probe() {
+  local service_path_rooted
+  local config_dir
+
+  ensure_root
+  ensure_systemd
+
+  systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+  systemctl disable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+
+  service_path_rooted="$(rooted_path "/etc/systemd/system/${SERVICE_NAME}.service")"
+  rm -f "$service_path_rooted"
+
+  systemctl daemon-reload
+  systemctl reset-failed "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
+
+  remove_path "$INSTALL_PATH"
+  remove_path "$CONFIG_PATH"
+  config_dir="$(dirname "$CONFIG_PATH")"
+  remove_empty_dir "$config_dir"
+  remove_path "$STATE_DIR"
+  remove_service_account
+
+  echo "Enoki Probe uninstalled."
+}
+
 install_binary() {
   local archive="$1"
   local work_dir="$2"
@@ -304,6 +360,11 @@ main() {
   local asset_file
   local asset_sha256
   local archive_url
+
+  if [ "${ENOKI_UNINSTALL:-}" = "1" ]; then
+    uninstall_probe
+    return
+  fi
 
   require_value "ENOKI_HUB_URL" "${ENOKI_HUB_URL:-}"
   require_value "ENOKI_ENROLLMENT_TOKEN" "${ENOKI_ENROLLMENT_TOKEN:-}"
