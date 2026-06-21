@@ -265,4 +265,34 @@ describe("Probe Upgrade Request lifecycle", () => {
       updatedAtMs: 1_725_000_030_000,
     });
   });
+
+  it("succeeds when Inventory reports a tag-prefixed Probe version", () => {
+    const running = {
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+      acceptedAtMs: 1_725_000_010_000,
+      runningAtMs: 1_725_000_020_000,
+      state: "running" as const,
+    };
+
+    expect(
+      succeedProbeUpgradeRequestFromInventory({
+        nowMs: 1_725_000_030_000,
+        operation: running,
+        probeVersion: "v0.2.0",
+      }),
+    ).toEqual({
+      ...running,
+      completedAtMs: 1_725_000_030_000,
+      failureCode: null,
+      failureMessage: null,
+      state: "succeeded",
+      updatedAtMs: 1_725_000_030_000,
+    });
+  });
 });

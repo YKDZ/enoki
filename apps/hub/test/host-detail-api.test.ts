@@ -838,6 +838,91 @@ describe("Host detail API", () => {
     database.close();
   });
 
+  it("marks an active Probe Upgrade Request succeeded when Host detail already has the target Probe version", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify(probeAssetManifest("v0.2.0")),
+    );
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_001_000,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    const hostId = await firstHostId(app, ownerSession);
+
+    const createResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    const created = (await createResponse.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    database.sqlite
+      .prepare(
+        "update probe_operations set state = 'running', running_at_ms = ?, updated_at_ms = ? where id = ?",
+      )
+      .run(
+        1_725_000_000_500,
+        1_725_000_000_500,
+        created.probeUpgradeRequest.id,
+      );
+    database.sqlite
+      .prepare("update managed_hosts set probe_version = ? where id = ?")
+      .run("v0.2.0", hostId);
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: {
+          createdAtMs: 1_725_000_001_000,
+          failure: null,
+          id: created.probeUpgradeRequest.id,
+          state: "succeeded",
+          targetProbeVersion: "0.2.0",
+          updatedAtMs: 1_725_000_001_000,
+        },
+      }),
+    });
+    expect(
+      database.probeOperations.findById(created.probeUpgradeRequest.id),
+    ).toEqual(
+      expect.objectContaining({
+        completedAtMs: 1_725_000_001_000,
+        failureCode: null,
+        state: "succeeded",
+      }),
+    );
+
+    database.close();
+  });
+
   it("persists accepted and running Probe Upgrade Request timeouts on observable routes", async () => {
     const database = await createTemporaryDatabase();
     const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));

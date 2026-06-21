@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { HostMetricSample } from "../types";
-import { buildMetricsChartData } from "./metrics-chart-data";
+import {
+  buildMetricsChartData,
+  extendSeriesToWindowStart,
+  type MetricSeries,
+} from "./metrics-chart-data";
 
 const samples: HostMetricSample[] = [
   {
@@ -101,5 +105,39 @@ describe("Metrics chart data", () => {
         points: [[1_725_000_000_000, 400]],
       },
     ]);
+  });
+
+  it("extends display series to the chart window start using the first known value", () => {
+    expect(
+      extendSeriesToWindowStart(
+        {
+          name: "使用率",
+          points: [
+            [1_725_000_030_000, 40],
+            [1_725_000_035_000, 45],
+          ],
+        },
+        1_725_000_000_000,
+      ),
+    ).toEqual({
+      name: "使用率",
+      points: [
+        [1_725_000_000_000, 40],
+        [1_725_000_030_000, 40],
+        [1_725_000_035_000, 45],
+      ],
+    });
+  });
+
+  it("keeps display series unchanged when they already reach the window start", () => {
+    const series: MetricSeries = {
+      name: "使用率",
+      points: [
+        [1_725_000_000_000, 40],
+        [1_725_000_035_000, 45],
+      ],
+    };
+
+    expect(extendSeriesToWindowStart(series, 1_725_000_000_000)).toBe(series);
   });
 });

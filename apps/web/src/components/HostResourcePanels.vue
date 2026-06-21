@@ -127,10 +127,16 @@ function latestPointValue(series: MetricSeries) {
 function sparklinePoints(points: MetricSeries["points"]) {
   const latestTime = points.at(-1)?.[0] ?? 0;
   const windowStart = latestTime - cpuSparklineWindowMs;
-  const sampledPoints = sampled(
-    points.filter(([time]) => time >= windowStart),
-    72,
-  );
+  const windowPoints = points.filter(([time]) => time >= windowStart);
+  const firstPoint = windowPoints[0];
+  const displayPoints =
+    firstPoint && firstPoint[0] > windowStart
+      ? [
+          [windowStart, firstPoint[1]] as MetricSeries["points"][number],
+          ...windowPoints,
+        ]
+      : windowPoints;
+  const sampledPoints = sampled(displayPoints, 72);
 
   if (sampledPoints.length === 0) {
     return "";

@@ -10,7 +10,10 @@ import {
   watch,
 } from "vue";
 
-import type { MetricSeries } from "@/lib/metrics-chart-data";
+import {
+  extendSeriesListToWindowStart,
+  type MetricSeries,
+} from "@/lib/metrics-chart-data";
 
 type TooltipParam = {
   axisValue?: number | string;
@@ -111,6 +114,10 @@ function renderChart() {
 
   const formatter = props.valueFormatter ?? ((value: number) => String(value));
   const hasData = props.series.some((item) => item.points.length > 0);
+  const displaySeries = extendSeriesListToWindowStart(
+    props.series,
+    props.xAxisMinMs,
+  );
   const theme = chartTheme();
   const titleText = props.yAxisName
     ? `${props.title} ${props.yAxisName}`
@@ -141,7 +148,7 @@ function renderChart() {
         type: "scroll",
         top: 0,
       },
-      series: props.series.map((item) => ({
+      series: displaySeries.map((item) => ({
         data: item.points,
         emphasis: {
           disabled: true,

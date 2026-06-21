@@ -19,6 +19,7 @@ import {
   createProbeUpgradeRequest,
   type ProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
+  succeedProbeUpgradeRequestFromInventory,
 } from "../probe/operation.js";
 
 export type HostRouteServices = {
@@ -94,13 +95,21 @@ export function createHostRoutes(services: HostRouteServices) {
           version: null,
         };
 
-    const timedOutOperation = failTimedOutActiveProbeUpgradeRequest({
+    const succeededOperation = succeedActiveProbeUpgradeRequestFromHost({
       hostId,
       nowMs: now(),
-      probeOperationTimeouts,
+      probeVersion: host.probeVersion,
       services,
-      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
+    const timedOutOperation = succeededOperation
+      ? null
+      : failTimedOutActiveProbeUpgradeRequest({
+          hostId,
+          nowMs: now(),
+          probeOperationTimeouts,
+          services,
+          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+        });
 
     return context.json({
       host: {
@@ -125,7 +134,8 @@ export function createHostRoutes(services: HostRouteServices) {
           probeVersion: host.probeVersion,
         }),
         probeUpgradeStatus: probeUpgradeStatus(
-          timedOutOperation ??
+          succeededOperation ??
+            timedOutOperation ??
             services.probeOperations?.findLatestForHost(hostId) ??
             null,
         ),
@@ -534,6 +544,33 @@ function failTimedOutActiveProbeUpgradeRequest(input: {
   });
 
   return persisted;
+}
+
+function succeedActiveProbeUpgradeRequestFromHost(input: {
+  hostId: number;
+  nowMs: number;
+  probeVersion: string | null | undefined;
+  services: HostRouteServices;
+}) {
+  const activeOperation =
+    input.services.probeOperations?.findActiveForHost(input.hostId) ?? null;
+  if (!activeOperation) {
+    return null;
+  }
+
+  const succeeded = succeedProbeUpgradeRequestFromInventory({
+    nowMs: input.nowMs,
+    operation: activeOperation,
+    probeVersion: input.probeVersion,
+  });
+  if (!succeeded) {
+    return null;
+  }
+
+  return (
+    input.services.probeOperations?.updateProbeUpgradeRequest(succeeded) ??
+    succeeded
+  );
 }
 
 function probeUpgradeStatus(operation: ProbeUpgradeRequest | null) {

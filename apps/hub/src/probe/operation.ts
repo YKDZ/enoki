@@ -247,7 +247,8 @@ export function succeedProbeUpgradeRequestFromInventory(input: {
 }): ProbeUpgradeRequest | null {
   if (
     !isActiveProbeOperation(input.operation) ||
-    input.probeVersion !== input.operation.targetProbeVersion
+    normalizeProbeVersion(input.probeVersion) !==
+      normalizeProbeVersion(input.operation.targetProbeVersion)
   ) {
     return null;
   }
@@ -311,6 +312,10 @@ export function isActiveProbeOperation(operation: ProbeUpgradeRequest) {
 
 function isSafeToSupersedeProbeOperation(operation: ProbeUpgradeRequest) {
   return operation.state === "pending" || operation.state === "accepted";
+}
+
+function normalizeProbeVersion(value: string | null | undefined) {
+  return typeof value === "string" ? value.trim().replace(/^v/, "") : "";
 }
 
 function newPendingProbeUpgradeRequest(input: {

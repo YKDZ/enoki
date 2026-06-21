@@ -98,6 +98,36 @@ export function buildMetricsChartData(
   };
 }
 
+export function extendSeriesToWindowStart(
+  series: MetricSeries,
+  windowStartMs: number | null | undefined,
+): MetricSeries {
+  if (
+    typeof windowStartMs !== "number" ||
+    !Number.isFinite(windowStartMs) ||
+    series.points.length === 0
+  ) {
+    return series;
+  }
+
+  const [firstTime, firstValue] = series.points[0] as ChartPoint;
+  if (firstTime <= windowStartMs) {
+    return series;
+  }
+
+  return {
+    ...series,
+    points: [[windowStartMs, firstValue], ...series.points],
+  };
+}
+
+export function extendSeriesListToWindowStart(
+  series: MetricSeries[],
+  windowStartMs: number | null | undefined,
+): MetricSeries[] {
+  return series.map((item) => extendSeriesToWindowStart(item, windowStartMs));
+}
+
 function valuePoints(
   samples: HostMetricSample[],
   valueForSample: (sample: HostMetricSample) => number | null,
