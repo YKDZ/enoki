@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { LoaderCircle, Plus, Server, ServerCrash } from "@lucide/vue";
-import { useEventListener } from "@vueuse/core";
+import { useColorMode, useEventListener } from "@vueuse/core";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import AppHeader from "./components/AppHeader.vue";
@@ -67,6 +67,26 @@ const activeDetailHostId = ref(routeHostId());
 const activeDetailHostIdForComposable = computed(
   () => activeDetailHostId.value ?? 0,
 );
+const themeMode = useColorMode({
+  initialValue: "auto",
+  modes: {
+    auto: "",
+    dark: "dark",
+    light: "",
+  },
+  storageKey: "enoki-theme-mode",
+});
+const sonnerTheme = computed(() => {
+  if (themeMode.store.value === "dark") {
+    return "dark";
+  }
+
+  if (themeMode.store.value === "light") {
+    return "light";
+  }
+
+  return "system";
+});
 const detail = useHostDetail(activeDetailHostIdForComposable, {
   onUnauthorized: requireLogin,
 });
@@ -603,7 +623,7 @@ function hostDetailPath(hostId: number) {
 
 <template>
   <main class="bg-background text-foreground min-h-screen">
-    <Toaster />
+    <Toaster :theme="sonnerTheme" />
     <AppHeader
       :is-authenticated="isAuthenticated"
       :is-creating-enrollment="isCreatingEnrollment"

@@ -12,11 +12,9 @@ export function shouldToastProbeUpgradeFailure(
     return false;
   }
 
-  if (status.id !== previousStatus?.id) {
-    return true;
+  if (!previousStatus || status.id !== previousStatus.id) {
+    return false;
   }
 
-  return Boolean(
-    previousStatus && activeProbeUpgradeStates.has(previousStatus.state),
-  );
+  return activeProbeUpgradeStates.has(previousStatus.state);
 }

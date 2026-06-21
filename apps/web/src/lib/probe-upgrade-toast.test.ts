@@ -48,4 +48,23 @@ describe("Probe upgrade failure toast", () => {
       false,
     );
   });
+
+  it("does not toast old failed operations on initial detail load", () => {
+    expect(
+      shouldToastProbeUpgradeFailure(
+        {
+          createdAtMs: 1_725_000_000_000,
+          failure: {
+            code: "running_timeout",
+            message: "升级超时。",
+          },
+          id: 9,
+          state: "failed",
+          targetProbeVersion: "0.2.0",
+          updatedAtMs: 1_725_000_900_000,
+        },
+        null,
+      ),
+    ).toBe(false);
+  });
 });
