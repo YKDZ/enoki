@@ -282,4 +282,108 @@ describe("Host detail page", () => {
     expect(html).not.toContain("将此主机的探针升级到 0.1.14");
     expect(html).not.toContain("确认升级");
   });
+
+  it("uses the current probe asset version when the last probe upgrade failed", async () => {
+    const detail = {
+      appendLiveSample: vi.fn(),
+      applyLiveSummary: vi.fn(),
+      chartRange: computed(() => ({
+        maxMs: 1_725_000_000_000,
+        minMs: 1_725_000_000_000 - 60 * 60 * 1000,
+      })),
+      createProbeUpgradeRequest: vi.fn(),
+      error: ref(""),
+      host: ref({
+        clockSkew: {
+          detected: false,
+          lastDeltaMs: null,
+        },
+        connectAddress: "10.0.0.10",
+        cpu: "2 cores",
+        cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+        description: "",
+        displayName: "managed-host-01",
+        hostMetadata: {
+          connectAddress: "10.0.0.10",
+          description: "",
+          displayName: "managed-host-01",
+          observedIp: "203.0.113.10",
+        },
+        id: 1,
+        inventory: {
+          architecture: "x86_64",
+          cpuCount: 2,
+          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+          hostname: "managed-host-01",
+          kernel: "6.8.0",
+          memoryTotalBytes: "2147483648",
+          os: "linux",
+        },
+        lastReportAtMs: 1_725_000_000_000,
+        latestMetrics: null,
+        memory: "2 GB",
+        probeConfiguration: {
+          configuration: {
+            collectCpu: true,
+            collectDisk: true,
+            collectLoad: true,
+            collectMemory: true,
+            collectNetwork: true,
+            collectUptime: true,
+            metricsCollectionIntervalSeconds: 5,
+            reportingBatchIntervalSeconds: 30,
+            version: "default-v1",
+          },
+          mode: "inherit",
+          version: "default-v1",
+        },
+        probeUpgradeEligibility: {
+          currentProbeAssetSetVersion: "0.1.16",
+          currentProbeVersion: "0.1.14",
+          isUpgradeable: true,
+          nonUpgradeableReason: null,
+        },
+        probeUpgradeStatus: {
+          createdAtMs: 1_725_000_000_000,
+          failure: {
+            code: "insufficient_privilege",
+            message: "sudo denied",
+          },
+          id: 9,
+          state: "failed",
+          targetProbeVersion: "0.1.15",
+          updatedAtMs: 1_725_000_100_000,
+        },
+        probeVersion: "0.1.14",
+        status: "online",
+        system: "linux",
+        warnings: [],
+      }),
+      isEmpty: computed(() => true),
+      isCreatingProbeUpgradeRequest: ref(false),
+      isLoading: ref(false),
+      load: vi.fn(),
+      samples: ref([]),
+      selectedWindow: ref("1h"),
+      switchWindow: vi.fn(),
+    } as unknown as ReturnType<typeof useHostDetail>;
+
+    const html = await renderToString(
+      createSSRApp(HostDetailPage, {
+        activeHostConfigurationId: null,
+        activeHostMetadataId: null,
+        deletingHostId: null,
+        detail,
+        hostConfigurationDraft: null,
+        hostConfigurationError: "",
+        hostMetadataDraft: null,
+        hostMetadataError: "",
+        isSavingHostConfiguration: false,
+        isSavingHostMetadata: false,
+      }),
+    );
+
+    expect(html).toContain("探针可升级到 0.1.16");
+    expect(html).not.toContain("探针可升级到 0.1.15");
+  });
 });

@@ -115,7 +115,9 @@ const isProbeUpgradeActive = computed(() =>
 );
 const probeUpgradeTargetVersion = computed(
   () =>
-    probeUpgradeStatus.value?.targetProbeVersion ??
+    (isProbeUpgradeActive.value
+      ? probeUpgradeStatus.value?.targetProbeVersion
+      : null) ??
     probeUpgradeEligibility.value?.currentProbeAssetSetVersion ??
     "",
 );
