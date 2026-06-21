@@ -1,5 +1,6 @@
 use enoki_probe::metrics::{
-    FilesystemCapacity, collect_cpu_metrics_from_proc_stat, collect_disk_metrics_from_mounts,
+    FilesystemCapacity, collect_cpu_metrics_from_proc_stat,
+    collect_default_route_interfaces_from_proc_routes, collect_disk_metrics_from_mounts,
     collect_load_metrics_from_proc_loadavg, collect_memory_metrics_from_proc_meminfo,
     collect_network_metrics_from_proc_net_dev, collect_uptime_seconds_from_proc_uptime,
 };
@@ -179,6 +180,7 @@ fn network_metrics_exclude_loopback_and_compute_deltas_per_interface() {
         .join("\n")
         .as_str(),
         None,
+        None,
     )
     .expect("previous network metrics parse");
 
@@ -192,6 +194,7 @@ fn network_metrics_exclude_loopback_and_compute_deltas_per_interface() {
         ]
         .join("\n")
         .as_str(),
+        None,
         Some(&previous.snapshot),
     )
     .expect("current network metrics parse");
@@ -211,6 +214,79 @@ fn network_metrics_exclude_loopback_and_compute_deltas_per_interface() {
             })
             .collect::<Vec<_>>(),
         vec![("eth0", 9_000, 9_000, 4_000, 2_000),],
+    );
+}
+
+#[test]
+fn network_metrics_keep_only_default_route_interfaces_when_known() {
+    let included_interfaces = collect_default_route_interfaces_from_proc_routes(
+        Some(
+            [
+                "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+                "docker0\t00000000\t010011AC\t0003\t0\t0\t200\t00000000\t0\t0\t0",
+                "eth0\t00000000\t010011AC\t0003\t0\t0\t0\t00000000\t0\t0\t0",
+                "br-app\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0",
+            ]
+            .join("\n")
+            .as_str(),
+        ),
+        None,
+    )
+    .expect("default route interfaces");
+
+    let current = collect_network_metrics_from_proc_net_dev(
+        [
+            "Inter-|   Receive                                                |  Transmit",
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed",
+            "  eth0: 9000 90 0 0 0 0 0 0 9000 90 0 0 0 0 0 0",
+            "docker0: 7000 70 0 0 0 0 0 0 8000 80 0 0 0 0 0 0",
+            "br-app: 6000 60 0 0 0 0 0 0 7000 70 0 0 0 0 0 0",
+            "veth1: 5000 50 0 0 0 0 0 0 6000 60 0 0 0 0 0 0",
+            "",
+        ]
+        .join("\n")
+        .as_str(),
+        Some(&included_interfaces),
+        None,
+    )
+    .expect("network metrics parse");
+
+    assert_eq!(
+        current
+            .interfaces
+            .iter()
+            .map(|interface| interface.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["eth0"],
+    );
+}
+
+#[test]
+fn default_route_interfaces_include_equal_metric_ipv4_and_ipv6_routes() {
+    let interfaces = collect_default_route_interfaces_from_proc_routes(
+        Some(
+            [
+                "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT",
+                "eth1\t00000000\t010011AC\t0003\t0\t0\t10\t00000000\t0\t0\t0",
+                "eth0\t00000000\t010011AC\t0003\t0\t0\t10\t00000000\t0\t0\t0",
+            ]
+            .join("\n")
+            .as_str(),
+        ),
+        Some(
+            [
+                "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 0000000a 00000001 00000000 00200200 wg0",
+                "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 ffffffff 00000001 00000000 00200200 lo",
+            ]
+            .join("\n")
+            .as_str(),
+        ),
+    )
+    .expect("default route interfaces");
+
+    assert_eq!(
+        interfaces.iter().map(String::as_str).collect::<Vec<_>>(),
+        vec!["eth0", "eth1", "wg0"],
     );
 }
 
