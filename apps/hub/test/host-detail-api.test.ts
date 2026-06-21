@@ -54,9 +54,11 @@ async function createEnrollmentToken(
 async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
+  input: { probeVersion?: string | null } = {},
 ) {
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
+  const probeVersion = input.probeVersion ?? "0.1.0";
   const response = await app.request("/api/probe/register", {
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
@@ -82,7 +84,7 @@ async function registerProbe(
             },
           ],
           os: "linux",
-          probeVersion: "0.1.0",
+          ...(input.probeVersion === null ? {} : { probeVersion }),
         },
       }),
     ).finish(),
@@ -96,6 +98,74 @@ async function registerProbe(
   return RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+}
+
+function probeAssetManifest(version?: unknown) {
+  return {
+    assets: [
+      {
+        file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+        sha256: "a".repeat(64),
+        target: "x86_64-unknown-linux-gnu",
+      },
+    ],
+    kind: "enoki-probe-assets",
+    signature: {
+      algorithm: "rsa-sha256",
+      file: "manifest.json.sig",
+    },
+    ...(version === undefined ? {} : { version }),
+  };
+}
+
+async function readHostProbeUpgradeEligibility(input: {
+  manifestVersion?: unknown;
+  probeVersion?: string | null;
+}) {
+  const database = await createTemporaryDatabase();
+  const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+  tempRoots.push(assetRoot);
+  const assetDir = path.join(assetRoot, "assets");
+  await mkdir(assetDir, { recursive: true });
+  await writeFile(
+    path.join(assetDir, "manifest.json"),
+    JSON.stringify(probeAssetManifest(input.manifestVersion)),
+  );
+  const app = createHubApp({
+    auth: {
+      failureDelayMs: 0,
+      ownerPassword: "correct horse battery staple",
+      sessionCookieName: "enoki_owner_session",
+    },
+    database,
+    probeAssets: {
+      assetDir,
+      installScriptPath: path.join(assetRoot, "install-probe.sh"),
+    },
+  });
+  const ownerSession = await loginOwner(app);
+  const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+  await registerProbe(app, enrollmentToken, {
+    probeVersion: input.probeVersion,
+  });
+  const hostId = await firstHostId(app, ownerSession);
+
+  const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+    headers: {
+      cookie: ownerSession,
+    },
+  });
+
+  expect(detailResponse.status).toBe(200);
+  const body = (await detailResponse.json()) as {
+    host: {
+      probeUpgradeEligibility: unknown;
+      probeVersion: string;
+    };
+  };
+
+  database.close();
+  return body.host.probeUpgradeEligibility;
 }
 
 async function firstHostId(
@@ -493,21 +563,7 @@ describe("Host detail API", () => {
     await mkdir(assetDir, { recursive: true });
     await writeFile(
       path.join(assetDir, "manifest.json"),
-      JSON.stringify({
-        assets: [
-          {
-            file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
-            sha256: "a".repeat(64),
-            target: "x86_64-unknown-linux-gnu",
-          },
-        ],
-        kind: "enoki-probe-assets",
-        signature: {
-          algorithm: "rsa-sha256",
-          file: "manifest.json.sig",
-        },
-        version: "v0.2.0",
-      }),
+      JSON.stringify(probeAssetManifest("v0.2.0")),
     );
     const app = createHubApp({
       auth: {
@@ -545,5 +601,54 @@ describe("Host detail API", () => {
     });
 
     database.close();
+  });
+
+  it("exposes stable non-upgradeable reasons for missing and malformed versions", async () => {
+    await expect(
+      readHostProbeUpgradeEligibility({
+        manifestVersion: "0.2.0",
+        probeVersion: null,
+      }),
+    ).resolves.toEqual({
+      currentProbeAssetSetVersion: "0.2.0",
+      currentProbeVersion: null,
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_version_missing",
+    });
+
+    await expect(
+      readHostProbeUpgradeEligibility({
+        manifestVersion: "0.2.0",
+        probeVersion: "01.2.3",
+      }),
+    ).resolves.toEqual({
+      currentProbeAssetSetVersion: "0.2.0",
+      currentProbeVersion: "01.2.3",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_version_malformed",
+    });
+
+    await expect(
+      readHostProbeUpgradeEligibility({
+        probeVersion: "0.1.0",
+      }),
+    ).resolves.toEqual({
+      currentProbeAssetSetVersion: null,
+      currentProbeVersion: "0.1.0",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_asset_set_version_missing",
+    });
+
+    await expect(
+      readHostProbeUpgradeEligibility({
+        manifestVersion: "01.2.3",
+        probeVersion: "0.1.0",
+      }),
+    ).resolves.toEqual({
+      currentProbeAssetSetVersion: null,
+      currentProbeVersion: "0.1.0",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_asset_set_version_malformed",
+    });
   });
 });

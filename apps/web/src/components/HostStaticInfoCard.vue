@@ -118,7 +118,7 @@ function probeVersionText(value: string | null) {
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-muted-foreground text-xs">当前 Probe</p>
+        <p class="text-muted-foreground text-xs">当前 Probe 版本</p>
         <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{
             probeVersionText(host.probeUpgradeEligibility.currentProbeVersion)
@@ -126,7 +126,9 @@ function probeVersionText(value: string | null) {
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-muted-foreground text-xs">Hub Probe Asset Set</p>
+        <p class="text-muted-foreground text-xs">
+          Hub 当前 Probe Asset Set 版本
+        </p>
         <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{
             probeVersionText(

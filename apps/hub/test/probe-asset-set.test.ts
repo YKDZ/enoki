@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateProbeUpgradeEligibility,
   probeAssetSetVersionFromManifest,
+  probeAssetSetVersionResultFromManifest,
 } from "../src/probe/asset-set.js";
 
 describe("Probe Asset Set upgrade eligibility", () => {
@@ -28,6 +29,27 @@ describe("Probe Asset Set upgrade eligibility", () => {
     ).toBe("1.4.0");
   });
 
+  it("distinguishes missing and malformed Probe Asset Set manifest versions", () => {
+    expect(probeAssetSetVersionResultFromManifest("{}")).toEqual({
+      nonUpgradeableReason: "probe_asset_set_version_missing",
+      version: null,
+    });
+
+    expect(
+      probeAssetSetVersionResultFromManifest(
+        JSON.stringify({ version: "01.2.3" }),
+      ),
+    ).toEqual({
+      nonUpgradeableReason: "probe_asset_set_version_malformed",
+      version: null,
+    });
+
+    expect(probeAssetSetVersionResultFromManifest("not json")).toEqual({
+      nonUpgradeableReason: "probe_asset_set_version_malformed",
+      version: null,
+    });
+  });
+
   it("marks lower valid Probe versions upgradeable", () => {
     expect(
       evaluateProbeUpgradeEligibility({
@@ -42,7 +64,7 @@ describe("Probe Asset Set upgrade eligibility", () => {
     });
   });
 
-  it("keeps equal, higher, missing, malformed, and development Probe versions non-upgradeable with stable reasons", () => {
+  it("keeps equal, higher, missing, malformed, development, and leading-zero Probe versions non-upgradeable with stable reasons", () => {
     expect(
       evaluateProbeUpgradeEligibility({
         probeAssetSetVersion: "1.4.0",
@@ -101,6 +123,48 @@ describe("Probe Asset Set upgrade eligibility", () => {
       currentProbeVersion: "1.4.1-dev",
       isUpgradeable: false,
       nonUpgradeableReason: "probe_version_development",
+    });
+
+    expect(
+      evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: "1.4.0",
+        probeVersion: "01.4.0",
+      }),
+    ).toEqual({
+      currentProbeAssetSetVersion: "1.4.0",
+      currentProbeVersion: "01.4.0",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_version_malformed",
+    });
+  });
+
+  it("uses a stable reason from the Probe Asset Set manifest read result", () => {
+    expect(
+      evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: null,
+        probeAssetSetVersionNonUpgradeableReason:
+          "probe_asset_set_version_missing",
+        probeVersion: "1.3.9",
+      }),
+    ).toEqual({
+      currentProbeAssetSetVersion: null,
+      currentProbeVersion: "1.3.9",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_asset_set_version_missing",
+    });
+
+    expect(
+      evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: null,
+        probeAssetSetVersionNonUpgradeableReason:
+          "probe_asset_set_version_malformed",
+        probeVersion: "1.3.9",
+      }),
+    ).toEqual({
+      currentProbeAssetSetVersion: null,
+      currentProbeVersion: "1.3.9",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_asset_set_version_malformed",
     });
   });
 });

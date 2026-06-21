@@ -106,20 +106,23 @@ describe("Host detail page", () => {
       switchWindow: vi.fn(),
     } as unknown as ReturnType<typeof useHostDetail>;
 
-    const html = await renderToString(
-      createSSRApp(HostDetailPage, {
-        activeHostConfigurationId: null,
-        activeHostMetadataId: null,
-        deletingHostId: null,
-        detail,
-        hostConfigurationDraft: null,
-        hostConfigurationError: "",
-        hostMetadataDraft: null,
-        hostMetadataError: "",
-        isSavingHostConfiguration: false,
-        isSavingHostMetadata: false,
-      }),
-    );
+    const renderDetailPage = () =>
+      renderToString(
+        createSSRApp(HostDetailPage, {
+          activeHostConfigurationId: null,
+          activeHostMetadataId: null,
+          deletingHostId: null,
+          detail,
+          hostConfigurationDraft: null,
+          hostConfigurationError: "",
+          hostMetadataDraft: null,
+          hostMetadataError: "",
+          isSavingHostConfiguration: false,
+          isSavingHostMetadata: false,
+        }),
+      );
+
+    const html = await renderDetailPage();
 
     expect(html).toContain("探针配置警告");
     expect(html).toContain("1 GB / 2 GB");
@@ -139,12 +142,34 @@ describe("Host detail page", () => {
       "report request failed: 503 Service Unavailable",
     );
     expect(html).toContain("主机资料");
-    expect(html).toContain("当前 Probe");
-    expect(html).toContain("Hub Probe Asset Set");
+    expect(html).toContain("当前 Probe 版本");
+    expect(html).toContain("Hub 当前 Probe Asset Set 版本");
     expect(html).toContain("0.1.0");
     expect(html).toContain("0.2.0");
     expect(html).toContain("Probe 可升级");
     expect(html).toContain("配置");
     expect(html).toContain("在线");
+
+    const currentHost = detail.host.value;
+    expect(currentHost).not.toBeNull();
+    if (!currentHost) {
+      throw new Error("Host detail fixture is missing a host.");
+    }
+
+    detail.host.value = {
+      ...currentHost,
+      probeUpgradeEligibility: {
+        currentProbeAssetSetVersion: "0.2.0",
+        currentProbeVersion: "0.2.0",
+        isUpgradeable: false,
+        nonUpgradeableReason: "probe_version_current",
+      },
+    };
+
+    const nonUpgradeableHtml = await renderDetailPage();
+
+    expect(nonUpgradeableHtml).toContain("Probe 升级");
+    expect(nonUpgradeableHtml).not.toContain("Probe 可升级");
+    expect(nonUpgradeableHtml).not.toContain("bg-red-500");
   });
 });

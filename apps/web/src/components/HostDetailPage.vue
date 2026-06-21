@@ -192,7 +192,7 @@ function isMetricsWindow(value: AcceptableValue): value is MetricsWindow {
             type="button"
             class="relative"
             disabled
-            title="Probe 升级资格"
+            title="Probe 升级"
           >
             <span
               v-if="probeUpgradeEligibility.isUpgradeable"

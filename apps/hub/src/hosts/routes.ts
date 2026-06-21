@@ -71,7 +71,10 @@ export function createHostRoutes(services: HostRouteServices) {
 
     const currentProbeAssetSetVersion = services.probeAssetDir
       ? await readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
-      : null;
+      : {
+          nonUpgradeableReason: "probe_asset_set_version_missing" as const,
+          version: null,
+        };
 
     return context.json({
       host: {
@@ -90,8 +93,10 @@ export function createHostRoutes(services: HostRouteServices) {
           mode: "inherit",
         },
         probeUpgradeEligibility: evaluateProbeUpgradeEligibility({
-          probeAssetSetVersion: currentProbeAssetSetVersion,
-          probeVersion: hostSummary.probeVersion,
+          probeAssetSetVersion: currentProbeAssetSetVersion.version,
+          probeAssetSetVersionNonUpgradeableReason:
+            currentProbeAssetSetVersion.nonUpgradeableReason,
+          probeVersion: host.probeVersion,
         }),
         warnings: warningList(host),
       },
