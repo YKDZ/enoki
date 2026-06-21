@@ -1859,6 +1859,8 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.IMetricSample>|null} [metrics] ProbeReportRequest metrics
              * @property {enoki.v1.IInventory|null} [inventory] ProbeReportRequest inventory
              * @property {enoki.v1.IProbeConfigurationError|null} [probeConfigurationError] ProbeReportRequest probeConfigurationError
+             * @property {Array.<enoki.v1.IProbeOperationAcknowledgement>|null} [operationAcknowledgements] ProbeReportRequest operationAcknowledgements
+             * @property {Array.<enoki.v1.IProbeOperationStatus>|null} [operationStatuses] ProbeReportRequest operationStatuses
              */
 
             /**
@@ -1871,6 +1873,8 @@ export const enoki = $root.enoki = (() => {
              */
             function ProbeReportRequest(properties) {
                 this.metrics = [];
+                this.operationAcknowledgements = [];
+                this.operationStatuses = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -1950,6 +1954,22 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.probeConfigurationError = null;
 
             /**
+             * ProbeReportRequest operationAcknowledgements.
+             * @member {Array.<enoki.v1.IProbeOperationAcknowledgement>} operationAcknowledgements
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.operationAcknowledgements = $util.emptyArray;
+
+            /**
+             * ProbeReportRequest operationStatuses.
+             * @member {Array.<enoki.v1.IProbeOperationStatus>} operationStatuses
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.operationStatuses = $util.emptyArray;
+
+            /**
              * Creates a new ProbeReportRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportRequest
@@ -1996,6 +2016,12 @@ export const enoki = $root.enoki = (() => {
                     $root.enoki.v1.Inventory.encode(message.inventory, writer.uint32(/* id 8, wireType 2 =*/66).fork(), q + 1).ldelim();
                 if (message.probeConfigurationError != null && Object.hasOwnProperty.call(message, "probeConfigurationError"))
                     $root.enoki.v1.ProbeConfigurationError.encode(message.probeConfigurationError, writer.uint32(/* id 9, wireType 2 =*/74).fork(), q + 1).ldelim();
+                if (message.operationAcknowledgements != null && message.operationAcknowledgements.length)
+                    for (let i = 0; i < message.operationAcknowledgements.length; ++i)
+                        $root.enoki.v1.ProbeOperationAcknowledgement.encode(message.operationAcknowledgements[i], writer.uint32(/* id 10, wireType 2 =*/82).fork(), q + 1).ldelim();
+                if (message.operationStatuses != null && message.operationStatuses.length)
+                    for (let i = 0; i < message.operationStatuses.length; ++i)
+                        $root.enoki.v1.ProbeOperationStatus.encode(message.operationStatuses[i], writer.uint32(/* id 11, wireType 2 =*/90).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -2074,6 +2100,18 @@ export const enoki = $root.enoki = (() => {
                             message.probeConfigurationError = $root.enoki.v1.ProbeConfigurationError.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
+                    case 10: {
+                            if (!(message.operationAcknowledgements && message.operationAcknowledgements.length))
+                                message.operationAcknowledgements = [];
+                            message.operationAcknowledgements.push($root.enoki.v1.ProbeOperationAcknowledgement.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 11: {
+                            if (!(message.operationStatuses && message.operationStatuses.length))
+                                message.operationStatuses = [];
+                            message.operationStatuses.push($root.enoki.v1.ProbeOperationStatus.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -2150,6 +2188,24 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "probeConfigurationError." + error;
                 }
+                if (message.operationAcknowledgements != null && Object.hasOwnProperty.call(message, "operationAcknowledgements")) {
+                    if (!Array.isArray(message.operationAcknowledgements))
+                        return "operationAcknowledgements: array expected";
+                    for (let i = 0; i < message.operationAcknowledgements.length; ++i) {
+                        let error = $root.enoki.v1.ProbeOperationAcknowledgement.verify(message.operationAcknowledgements[i], long + 1);
+                        if (error)
+                            return "operationAcknowledgements." + error;
+                    }
+                }
+                if (message.operationStatuses != null && Object.hasOwnProperty.call(message, "operationStatuses")) {
+                    if (!Array.isArray(message.operationStatuses))
+                        return "operationStatuses: array expected";
+                    for (let i = 0; i < message.operationStatuses.length; ++i) {
+                        let error = $root.enoki.v1.ProbeOperationStatus.verify(message.operationStatuses[i], long + 1);
+                        if (error)
+                            return "operationStatuses." + error;
+                    }
+                }
                 return null;
             };
 
@@ -2217,6 +2273,26 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeReportRequest.probeConfigurationError: object expected");
                     message.probeConfigurationError = $root.enoki.v1.ProbeConfigurationError.fromObject(object.probeConfigurationError, long + 1);
                 }
+                if (object.operationAcknowledgements) {
+                    if (!Array.isArray(object.operationAcknowledgements))
+                        throw TypeError(".enoki.v1.ProbeReportRequest.operationAcknowledgements: array expected");
+                    message.operationAcknowledgements = [];
+                    for (let i = 0; i < object.operationAcknowledgements.length; ++i) {
+                        if (!$util.isObject(object.operationAcknowledgements[i]))
+                            throw TypeError(".enoki.v1.ProbeReportRequest.operationAcknowledgements: object expected");
+                        message.operationAcknowledgements[i] = $root.enoki.v1.ProbeOperationAcknowledgement.fromObject(object.operationAcknowledgements[i], long + 1);
+                    }
+                }
+                if (object.operationStatuses) {
+                    if (!Array.isArray(object.operationStatuses))
+                        throw TypeError(".enoki.v1.ProbeReportRequest.operationStatuses: array expected");
+                    message.operationStatuses = [];
+                    for (let i = 0; i < object.operationStatuses.length; ++i) {
+                        if (!$util.isObject(object.operationStatuses[i]))
+                            throw TypeError(".enoki.v1.ProbeReportRequest.operationStatuses: object expected");
+                        message.operationStatuses[i] = $root.enoki.v1.ProbeOperationStatus.fromObject(object.operationStatuses[i], long + 1);
+                    }
+                }
                 return message;
             };
 
@@ -2237,8 +2313,11 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
-                if (options.arrays || options.defaults)
+                if (options.arrays || options.defaults) {
                     object.metrics = [];
+                    object.operationAcknowledgements = [];
+                    object.operationStatuses = [];
+                }
                 if (options.defaults) {
                     object.probeId = "";
                     object.bootId = "";
@@ -2288,6 +2367,16 @@ export const enoki = $root.enoki = (() => {
                     object.inventory = $root.enoki.v1.Inventory.toObject(message.inventory, options, q + 1);
                 if (message.probeConfigurationError != null && Object.hasOwnProperty.call(message, "probeConfigurationError"))
                     object.probeConfigurationError = $root.enoki.v1.ProbeConfigurationError.toObject(message.probeConfigurationError, options, q + 1);
+                if (message.operationAcknowledgements && message.operationAcknowledgements.length) {
+                    object.operationAcknowledgements = [];
+                    for (let j = 0; j < message.operationAcknowledgements.length; ++j)
+                        object.operationAcknowledgements[j] = $root.enoki.v1.ProbeOperationAcknowledgement.toObject(message.operationAcknowledgements[j], options, q + 1);
+                }
+                if (message.operationStatuses && message.operationStatuses.length) {
+                    object.operationStatuses = [];
+                    for (let j = 0; j < message.operationStatuses.length; ++j)
+                        object.operationStatuses[j] = $root.enoki.v1.ProbeOperationStatus.toObject(message.operationStatuses[j], options, q + 1);
+                }
                 return object;
             };
 
@@ -4607,6 +4696,7 @@ export const enoki = $root.enoki = (() => {
              * @property {Long|null} [serverTimeMs] ProbeReportResponse serverTimeMs
              * @property {string|null} [currentProbeConfigurationVersion] ProbeReportResponse currentProbeConfigurationVersion
              * @property {boolean|null} [inventoryNeeded] ProbeReportResponse inventoryNeeded
+             * @property {enoki.v1.IProbeOperation|null} [pendingOperation] ProbeReportResponse pendingOperation
              */
 
             /**
@@ -4657,6 +4747,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportResponse.prototype.inventoryNeeded = false;
 
             /**
+             * ProbeReportResponse pendingOperation.
+             * @member {enoki.v1.IProbeOperation|null|undefined} pendingOperation
+             * @memberof enoki.v1.ProbeReportResponse
+             * @instance
+             */
+            ProbeReportResponse.prototype.pendingOperation = null;
+
+            /**
              * Creates a new ProbeReportResponse instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportResponse
@@ -4692,6 +4790,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 3, wireType 2 =*/26).string(message.currentProbeConfigurationVersion);
                 if (message.inventoryNeeded != null && Object.hasOwnProperty.call(message, "inventoryNeeded"))
                     writer.uint32(/* id 4, wireType 0 =*/32).bool(message.inventoryNeeded);
+                if (message.pendingOperation != null && Object.hasOwnProperty.call(message, "pendingOperation"))
+                    $root.enoki.v1.ProbeOperation.encode(message.pendingOperation, writer.uint32(/* id 5, wireType 2 =*/42).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -4748,6 +4848,10 @@ export const enoki = $root.enoki = (() => {
                             message.inventoryNeeded = reader.bool();
                             break;
                         }
+                    case 5: {
+                            message.pendingOperation = $root.enoki.v1.ProbeOperation.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -4799,6 +4903,11 @@ export const enoki = $root.enoki = (() => {
                 if (message.inventoryNeeded != null && Object.hasOwnProperty.call(message, "inventoryNeeded"))
                     if (typeof message.inventoryNeeded !== "boolean")
                         return "inventoryNeeded: boolean expected";
+                if (message.pendingOperation != null && Object.hasOwnProperty.call(message, "pendingOperation")) {
+                    let error = $root.enoki.v1.ProbeOperation.verify(message.pendingOperation, long + 1);
+                    if (error)
+                        return "pendingOperation." + error;
+                }
                 return null;
             };
 
@@ -4842,6 +4951,11 @@ export const enoki = $root.enoki = (() => {
                     message.currentProbeConfigurationVersion = String(object.currentProbeConfigurationVersion);
                 if (object.inventoryNeeded != null)
                     message.inventoryNeeded = Boolean(object.inventoryNeeded);
+                if (object.pendingOperation != null) {
+                    if (!$util.isObject(object.pendingOperation))
+                        throw TypeError(".enoki.v1.ProbeReportResponse.pendingOperation: object expected");
+                    message.pendingOperation = $root.enoki.v1.ProbeOperation.fromObject(object.pendingOperation, long + 1);
+                }
                 return message;
             };
 
@@ -4875,6 +4989,7 @@ export const enoki = $root.enoki = (() => {
                         object.serverTimeMs = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
                     object.currentProbeConfigurationVersion = "";
                     object.inventoryNeeded = false;
+                    object.pendingOperation = null;
                 }
                 if (message.acceptedSequenceEnd != null && Object.hasOwnProperty.call(message, "acceptedSequenceEnd"))
                     if (typeof BigInt !== "undefined" && options.longs === BigInt)
@@ -4894,6 +5009,8 @@ export const enoki = $root.enoki = (() => {
                     object.currentProbeConfigurationVersion = message.currentProbeConfigurationVersion;
                 if (message.inventoryNeeded != null && Object.hasOwnProperty.call(message, "inventoryNeeded"))
                     object.inventoryNeeded = message.inventoryNeeded;
+                if (message.pendingOperation != null && Object.hasOwnProperty.call(message, "pendingOperation"))
+                    object.pendingOperation = $root.enoki.v1.ProbeOperation.toObject(message.pendingOperation, options, q + 1);
                 return object;
             };
 
@@ -4924,6 +5041,1509 @@ export const enoki = $root.enoki = (() => {
             };
 
             return ProbeReportResponse;
+        })();
+
+        v1.ProbeOperation = (function() {
+
+            /**
+             * Properties of a ProbeOperation.
+             * @memberof enoki.v1
+             * @interface IProbeOperation
+             * @property {string|null} [id] ProbeOperation id
+             * @property {enoki.v1.IProbeUpgradeOperation|null} [probeUpgrade] ProbeOperation probeUpgrade
+             */
+
+            /**
+             * Constructs a new ProbeOperation.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeOperation.
+             * @implements IProbeOperation
+             * @constructor
+             * @param {enoki.v1.IProbeOperation=} [properties] Properties to set
+             */
+            function ProbeOperation(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ProbeOperation id.
+             * @member {string} id
+             * @memberof enoki.v1.ProbeOperation
+             * @instance
+             */
+            ProbeOperation.prototype.id = "";
+
+            /**
+             * ProbeOperation probeUpgrade.
+             * @member {enoki.v1.IProbeUpgradeOperation|null|undefined} probeUpgrade
+             * @memberof enoki.v1.ProbeOperation
+             * @instance
+             */
+            ProbeOperation.prototype.probeUpgrade = null;
+
+            // OneOf field names bound to virtual getters and setters
+            let $oneOfFields;
+
+            /**
+             * ProbeOperation operation.
+             * @member {"probeUpgrade"|undefined} operation
+             * @memberof enoki.v1.ProbeOperation
+             * @instance
+             */
+            Object.defineProperty(ProbeOperation.prototype, "operation", {
+                get: $util.oneOfGetter($oneOfFields = ["probeUpgrade"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
+             * Creates a new ProbeOperation instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {enoki.v1.IProbeOperation=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeOperation} ProbeOperation instance
+             */
+            ProbeOperation.create = function create(properties) {
+                return new ProbeOperation(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeOperation message. Does not implicitly {@link enoki.v1.ProbeOperation.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {enoki.v1.IProbeOperation} message ProbeOperation message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperation.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.id != null && Object.hasOwnProperty.call(message, "id"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.id);
+                if (message.probeUpgrade != null && Object.hasOwnProperty.call(message, "probeUpgrade"))
+                    $root.enoki.v1.ProbeUpgradeOperation.encode(message.probeUpgrade, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeOperation message, length delimited. Does not implicitly {@link enoki.v1.ProbeOperation.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {enoki.v1.IProbeOperation} message ProbeOperation message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperation.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeOperation message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeOperation} ProbeOperation
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperation.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeOperation();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.id = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.probeUpgrade = $root.enoki.v1.ProbeUpgradeOperation.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeOperation message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeOperation} ProbeOperation
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperation.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeOperation message.
+             * @function verify
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeOperation.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                let properties = {};
+                if (message.id != null && Object.hasOwnProperty.call(message, "id"))
+                    if (!$util.isString(message.id))
+                        return "id: string expected";
+                if (message.probeUpgrade != null && Object.hasOwnProperty.call(message, "probeUpgrade")) {
+                    properties.operation = 1;
+                    {
+                        let error = $root.enoki.v1.ProbeUpgradeOperation.verify(message.probeUpgrade, long + 1);
+                        if (error)
+                            return "probeUpgrade." + error;
+                    }
+                }
+                return null;
+            };
+
+            /**
+             * Creates a ProbeOperation message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeOperation} ProbeOperation
+             */
+            ProbeOperation.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeOperation)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ProbeOperation: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ProbeOperation();
+                if (object.id != null)
+                    message.id = String(object.id);
+                if (object.probeUpgrade != null) {
+                    if (!$util.isObject(object.probeUpgrade))
+                        throw TypeError(".enoki.v1.ProbeOperation.probeUpgrade: object expected");
+                    message.probeUpgrade = $root.enoki.v1.ProbeUpgradeOperation.fromObject(object.probeUpgrade, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a ProbeOperation message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {enoki.v1.ProbeOperation} message ProbeOperation
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeOperation.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.id = "";
+                if (message.id != null && Object.hasOwnProperty.call(message, "id"))
+                    object.id = message.id;
+                if (message.probeUpgrade != null && Object.hasOwnProperty.call(message, "probeUpgrade")) {
+                    object.probeUpgrade = $root.enoki.v1.ProbeUpgradeOperation.toObject(message.probeUpgrade, options, q + 1);
+                    if (options.oneofs)
+                        object.operation = "probeUpgrade";
+                }
+                return object;
+            };
+
+            /**
+             * Converts this ProbeOperation to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeOperation
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeOperation.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeOperation
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeOperation
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeOperation.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeOperation";
+            };
+
+            return ProbeOperation;
+        })();
+
+        v1.ProbeUpgradeOperation = (function() {
+
+            /**
+             * Properties of a ProbeUpgradeOperation.
+             * @memberof enoki.v1
+             * @interface IProbeUpgradeOperation
+             * @property {string|null} [currentProbeVersion] ProbeUpgradeOperation currentProbeVersion
+             * @property {string|null} [targetProbeVersion] ProbeUpgradeOperation targetProbeVersion
+             */
+
+            /**
+             * Constructs a new ProbeUpgradeOperation.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeUpgradeOperation.
+             * @implements IProbeUpgradeOperation
+             * @constructor
+             * @param {enoki.v1.IProbeUpgradeOperation=} [properties] Properties to set
+             */
+            function ProbeUpgradeOperation(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ProbeUpgradeOperation currentProbeVersion.
+             * @member {string} currentProbeVersion
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             */
+            ProbeUpgradeOperation.prototype.currentProbeVersion = "";
+
+            /**
+             * ProbeUpgradeOperation targetProbeVersion.
+             * @member {string} targetProbeVersion
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             */
+            ProbeUpgradeOperation.prototype.targetProbeVersion = "";
+
+            /**
+             * Creates a new ProbeUpgradeOperation instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {enoki.v1.IProbeUpgradeOperation=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeUpgradeOperation} ProbeUpgradeOperation instance
+             */
+            ProbeUpgradeOperation.create = function create(properties) {
+                return new ProbeUpgradeOperation(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeUpgradeOperation message. Does not implicitly {@link enoki.v1.ProbeUpgradeOperation.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {enoki.v1.IProbeUpgradeOperation} message ProbeUpgradeOperation message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeUpgradeOperation.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.currentProbeVersion != null && Object.hasOwnProperty.call(message, "currentProbeVersion"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.currentProbeVersion);
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.targetProbeVersion);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeUpgradeOperation message, length delimited. Does not implicitly {@link enoki.v1.ProbeUpgradeOperation.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {enoki.v1.IProbeUpgradeOperation} message ProbeUpgradeOperation message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeUpgradeOperation.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeUpgradeOperation message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeUpgradeOperation} ProbeUpgradeOperation
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeUpgradeOperation.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeUpgradeOperation();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.currentProbeVersion = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.targetProbeVersion = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeUpgradeOperation message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeUpgradeOperation} ProbeUpgradeOperation
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeUpgradeOperation.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeUpgradeOperation message.
+             * @function verify
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeUpgradeOperation.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.currentProbeVersion != null && Object.hasOwnProperty.call(message, "currentProbeVersion"))
+                    if (!$util.isString(message.currentProbeVersion))
+                        return "currentProbeVersion: string expected";
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    if (!$util.isString(message.targetProbeVersion))
+                        return "targetProbeVersion: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a ProbeUpgradeOperation message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeUpgradeOperation} ProbeUpgradeOperation
+             */
+            ProbeUpgradeOperation.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeUpgradeOperation)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ProbeUpgradeOperation: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ProbeUpgradeOperation();
+                if (object.currentProbeVersion != null)
+                    message.currentProbeVersion = String(object.currentProbeVersion);
+                if (object.targetProbeVersion != null)
+                    message.targetProbeVersion = String(object.targetProbeVersion);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a ProbeUpgradeOperation message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {enoki.v1.ProbeUpgradeOperation} message ProbeUpgradeOperation
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeUpgradeOperation.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.currentProbeVersion = "";
+                    object.targetProbeVersion = "";
+                }
+                if (message.currentProbeVersion != null && Object.hasOwnProperty.call(message, "currentProbeVersion"))
+                    object.currentProbeVersion = message.currentProbeVersion;
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    object.targetProbeVersion = message.targetProbeVersion;
+                return object;
+            };
+
+            /**
+             * Converts this ProbeUpgradeOperation to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeUpgradeOperation.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeUpgradeOperation
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeUpgradeOperation.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeUpgradeOperation";
+            };
+
+            return ProbeUpgradeOperation;
+        })();
+
+        v1.ProbeOperationAcknowledgement = (function() {
+
+            /**
+             * Properties of a ProbeOperationAcknowledgement.
+             * @memberof enoki.v1
+             * @interface IProbeOperationAcknowledgement
+             * @property {string|null} [operationId] ProbeOperationAcknowledgement operationId
+             */
+
+            /**
+             * Constructs a new ProbeOperationAcknowledgement.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeOperationAcknowledgement.
+             * @implements IProbeOperationAcknowledgement
+             * @constructor
+             * @param {enoki.v1.IProbeOperationAcknowledgement=} [properties] Properties to set
+             */
+            function ProbeOperationAcknowledgement(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ProbeOperationAcknowledgement operationId.
+             * @member {string} operationId
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @instance
+             */
+            ProbeOperationAcknowledgement.prototype.operationId = "";
+
+            /**
+             * Creates a new ProbeOperationAcknowledgement instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {enoki.v1.IProbeOperationAcknowledgement=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeOperationAcknowledgement} ProbeOperationAcknowledgement instance
+             */
+            ProbeOperationAcknowledgement.create = function create(properties) {
+                return new ProbeOperationAcknowledgement(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeOperationAcknowledgement message. Does not implicitly {@link enoki.v1.ProbeOperationAcknowledgement.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {enoki.v1.IProbeOperationAcknowledgement} message ProbeOperationAcknowledgement message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationAcknowledgement.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.operationId != null && Object.hasOwnProperty.call(message, "operationId"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.operationId);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeOperationAcknowledgement message, length delimited. Does not implicitly {@link enoki.v1.ProbeOperationAcknowledgement.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {enoki.v1.IProbeOperationAcknowledgement} message ProbeOperationAcknowledgement message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationAcknowledgement.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeOperationAcknowledgement message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeOperationAcknowledgement} ProbeOperationAcknowledgement
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationAcknowledgement.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeOperationAcknowledgement();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.operationId = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeOperationAcknowledgement message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeOperationAcknowledgement} ProbeOperationAcknowledgement
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationAcknowledgement.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeOperationAcknowledgement message.
+             * @function verify
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeOperationAcknowledgement.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.operationId != null && Object.hasOwnProperty.call(message, "operationId"))
+                    if (!$util.isString(message.operationId))
+                        return "operationId: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a ProbeOperationAcknowledgement message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeOperationAcknowledgement} ProbeOperationAcknowledgement
+             */
+            ProbeOperationAcknowledgement.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeOperationAcknowledgement)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ProbeOperationAcknowledgement: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ProbeOperationAcknowledgement();
+                if (object.operationId != null)
+                    message.operationId = String(object.operationId);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a ProbeOperationAcknowledgement message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {enoki.v1.ProbeOperationAcknowledgement} message ProbeOperationAcknowledgement
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeOperationAcknowledgement.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.operationId = "";
+                if (message.operationId != null && Object.hasOwnProperty.call(message, "operationId"))
+                    object.operationId = message.operationId;
+                return object;
+            };
+
+            /**
+             * Converts this ProbeOperationAcknowledgement to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeOperationAcknowledgement.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeOperationAcknowledgement
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeOperationAcknowledgement
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeOperationAcknowledgement.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeOperationAcknowledgement";
+            };
+
+            return ProbeOperationAcknowledgement;
+        })();
+
+        v1.ProbeOperationStatus = (function() {
+
+            /**
+             * Properties of a ProbeOperationStatus.
+             * @memberof enoki.v1
+             * @interface IProbeOperationStatus
+             * @property {string|null} [operationId] ProbeOperationStatus operationId
+             * @property {enoki.v1.IProbeOperationRunning|null} [running] ProbeOperationStatus running
+             * @property {enoki.v1.IProbeOperationFailed|null} [failed] ProbeOperationStatus failed
+             */
+
+            /**
+             * Constructs a new ProbeOperationStatus.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeOperationStatus.
+             * @implements IProbeOperationStatus
+             * @constructor
+             * @param {enoki.v1.IProbeOperationStatus=} [properties] Properties to set
+             */
+            function ProbeOperationStatus(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ProbeOperationStatus operationId.
+             * @member {string} operationId
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @instance
+             */
+            ProbeOperationStatus.prototype.operationId = "";
+
+            /**
+             * ProbeOperationStatus running.
+             * @member {enoki.v1.IProbeOperationRunning|null|undefined} running
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @instance
+             */
+            ProbeOperationStatus.prototype.running = null;
+
+            /**
+             * ProbeOperationStatus failed.
+             * @member {enoki.v1.IProbeOperationFailed|null|undefined} failed
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @instance
+             */
+            ProbeOperationStatus.prototype.failed = null;
+
+            // OneOf field names bound to virtual getters and setters
+            let $oneOfFields;
+
+            /**
+             * ProbeOperationStatus status.
+             * @member {"running"|"failed"|undefined} status
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @instance
+             */
+            Object.defineProperty(ProbeOperationStatus.prototype, "status", {
+                get: $util.oneOfGetter($oneOfFields = ["running", "failed"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
+             * Creates a new ProbeOperationStatus instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {enoki.v1.IProbeOperationStatus=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeOperationStatus} ProbeOperationStatus instance
+             */
+            ProbeOperationStatus.create = function create(properties) {
+                return new ProbeOperationStatus(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeOperationStatus message. Does not implicitly {@link enoki.v1.ProbeOperationStatus.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {enoki.v1.IProbeOperationStatus} message ProbeOperationStatus message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationStatus.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.operationId != null && Object.hasOwnProperty.call(message, "operationId"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.operationId);
+                if (message.running != null && Object.hasOwnProperty.call(message, "running"))
+                    $root.enoki.v1.ProbeOperationRunning.encode(message.running, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
+                if (message.failed != null && Object.hasOwnProperty.call(message, "failed"))
+                    $root.enoki.v1.ProbeOperationFailed.encode(message.failed, writer.uint32(/* id 3, wireType 2 =*/26).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeOperationStatus message, length delimited. Does not implicitly {@link enoki.v1.ProbeOperationStatus.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {enoki.v1.IProbeOperationStatus} message ProbeOperationStatus message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationStatus.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeOperationStatus message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeOperationStatus} ProbeOperationStatus
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationStatus.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeOperationStatus();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.operationId = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.running = $root.enoki.v1.ProbeOperationRunning.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 3: {
+                            message.failed = $root.enoki.v1.ProbeOperationFailed.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeOperationStatus message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeOperationStatus} ProbeOperationStatus
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationStatus.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeOperationStatus message.
+             * @function verify
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeOperationStatus.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                let properties = {};
+                if (message.operationId != null && Object.hasOwnProperty.call(message, "operationId"))
+                    if (!$util.isString(message.operationId))
+                        return "operationId: string expected";
+                if (message.running != null && Object.hasOwnProperty.call(message, "running")) {
+                    properties.status = 1;
+                    {
+                        let error = $root.enoki.v1.ProbeOperationRunning.verify(message.running, long + 1);
+                        if (error)
+                            return "running." + error;
+                    }
+                }
+                if (message.failed != null && Object.hasOwnProperty.call(message, "failed")) {
+                    if (properties.status === 1)
+                        return "status: multiple values";
+                    properties.status = 1;
+                    {
+                        let error = $root.enoki.v1.ProbeOperationFailed.verify(message.failed, long + 1);
+                        if (error)
+                            return "failed." + error;
+                    }
+                }
+                return null;
+            };
+
+            /**
+             * Creates a ProbeOperationStatus message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeOperationStatus} ProbeOperationStatus
+             */
+            ProbeOperationStatus.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeOperationStatus)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ProbeOperationStatus: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ProbeOperationStatus();
+                if (object.operationId != null)
+                    message.operationId = String(object.operationId);
+                if (object.running != null) {
+                    if (!$util.isObject(object.running))
+                        throw TypeError(".enoki.v1.ProbeOperationStatus.running: object expected");
+                    message.running = $root.enoki.v1.ProbeOperationRunning.fromObject(object.running, long + 1);
+                }
+                if (object.failed != null) {
+                    if (!$util.isObject(object.failed))
+                        throw TypeError(".enoki.v1.ProbeOperationStatus.failed: object expected");
+                    message.failed = $root.enoki.v1.ProbeOperationFailed.fromObject(object.failed, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a ProbeOperationStatus message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {enoki.v1.ProbeOperationStatus} message ProbeOperationStatus
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeOperationStatus.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.operationId = "";
+                if (message.operationId != null && Object.hasOwnProperty.call(message, "operationId"))
+                    object.operationId = message.operationId;
+                if (message.running != null && Object.hasOwnProperty.call(message, "running")) {
+                    object.running = $root.enoki.v1.ProbeOperationRunning.toObject(message.running, options, q + 1);
+                    if (options.oneofs)
+                        object.status = "running";
+                }
+                if (message.failed != null && Object.hasOwnProperty.call(message, "failed")) {
+                    object.failed = $root.enoki.v1.ProbeOperationFailed.toObject(message.failed, options, q + 1);
+                    if (options.oneofs)
+                        object.status = "failed";
+                }
+                return object;
+            };
+
+            /**
+             * Converts this ProbeOperationStatus to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeOperationStatus.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeOperationStatus
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeOperationStatus
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeOperationStatus.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeOperationStatus";
+            };
+
+            return ProbeOperationStatus;
+        })();
+
+        v1.ProbeOperationRunning = (function() {
+
+            /**
+             * Properties of a ProbeOperationRunning.
+             * @memberof enoki.v1
+             * @interface IProbeOperationRunning
+             */
+
+            /**
+             * Constructs a new ProbeOperationRunning.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeOperationRunning.
+             * @implements IProbeOperationRunning
+             * @constructor
+             * @param {enoki.v1.IProbeOperationRunning=} [properties] Properties to set
+             */
+            function ProbeOperationRunning(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * Creates a new ProbeOperationRunning instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {enoki.v1.IProbeOperationRunning=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeOperationRunning} ProbeOperationRunning instance
+             */
+            ProbeOperationRunning.create = function create(properties) {
+                return new ProbeOperationRunning(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeOperationRunning message. Does not implicitly {@link enoki.v1.ProbeOperationRunning.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {enoki.v1.IProbeOperationRunning} message ProbeOperationRunning message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationRunning.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeOperationRunning message, length delimited. Does not implicitly {@link enoki.v1.ProbeOperationRunning.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {enoki.v1.IProbeOperationRunning} message ProbeOperationRunning message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationRunning.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeOperationRunning message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeOperationRunning} ProbeOperationRunning
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationRunning.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeOperationRunning();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeOperationRunning message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeOperationRunning} ProbeOperationRunning
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationRunning.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeOperationRunning message.
+             * @function verify
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeOperationRunning.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                return null;
+            };
+
+            /**
+             * Creates a ProbeOperationRunning message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeOperationRunning} ProbeOperationRunning
+             */
+            ProbeOperationRunning.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeOperationRunning)
+                    return object;
+                return new $root.enoki.v1.ProbeOperationRunning();
+            };
+
+            /**
+             * Creates a plain object from a ProbeOperationRunning message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {enoki.v1.ProbeOperationRunning} message ProbeOperationRunning
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeOperationRunning.toObject = function toObject() {
+                return {};
+            };
+
+            /**
+             * Converts this ProbeOperationRunning to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeOperationRunning.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeOperationRunning
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeOperationRunning
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeOperationRunning.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeOperationRunning";
+            };
+
+            return ProbeOperationRunning;
+        })();
+
+        v1.ProbeOperationFailed = (function() {
+
+            /**
+             * Properties of a ProbeOperationFailed.
+             * @memberof enoki.v1
+             * @interface IProbeOperationFailed
+             * @property {string|null} [errorCode] ProbeOperationFailed errorCode
+             * @property {string|null} [message] ProbeOperationFailed message
+             */
+
+            /**
+             * Constructs a new ProbeOperationFailed.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeOperationFailed.
+             * @implements IProbeOperationFailed
+             * @constructor
+             * @param {enoki.v1.IProbeOperationFailed=} [properties] Properties to set
+             */
+            function ProbeOperationFailed(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ProbeOperationFailed errorCode.
+             * @member {string} errorCode
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @instance
+             */
+            ProbeOperationFailed.prototype.errorCode = "";
+
+            /**
+             * ProbeOperationFailed message.
+             * @member {string} message
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @instance
+             */
+            ProbeOperationFailed.prototype.message = "";
+
+            /**
+             * Creates a new ProbeOperationFailed instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {enoki.v1.IProbeOperationFailed=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeOperationFailed} ProbeOperationFailed instance
+             */
+            ProbeOperationFailed.create = function create(properties) {
+                return new ProbeOperationFailed(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeOperationFailed message. Does not implicitly {@link enoki.v1.ProbeOperationFailed.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {enoki.v1.IProbeOperationFailed} message ProbeOperationFailed message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationFailed.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.errorCode != null && Object.hasOwnProperty.call(message, "errorCode"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.errorCode);
+                if (message.message != null && Object.hasOwnProperty.call(message, "message"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.message);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeOperationFailed message, length delimited. Does not implicitly {@link enoki.v1.ProbeOperationFailed.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {enoki.v1.IProbeOperationFailed} message ProbeOperationFailed message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeOperationFailed.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeOperationFailed message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeOperationFailed} ProbeOperationFailed
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationFailed.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeOperationFailed();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.errorCode = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.message = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeOperationFailed message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeOperationFailed} ProbeOperationFailed
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeOperationFailed.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeOperationFailed message.
+             * @function verify
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeOperationFailed.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.errorCode != null && Object.hasOwnProperty.call(message, "errorCode"))
+                    if (!$util.isString(message.errorCode))
+                        return "errorCode: string expected";
+                if (message.message != null && Object.hasOwnProperty.call(message, "message"))
+                    if (!$util.isString(message.message))
+                        return "message: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a ProbeOperationFailed message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeOperationFailed} ProbeOperationFailed
+             */
+            ProbeOperationFailed.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeOperationFailed)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ProbeOperationFailed: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ProbeOperationFailed();
+                if (object.errorCode != null)
+                    message.errorCode = String(object.errorCode);
+                if (object.message != null)
+                    message.message = String(object.message);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a ProbeOperationFailed message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {enoki.v1.ProbeOperationFailed} message ProbeOperationFailed
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeOperationFailed.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.errorCode = "";
+                    object.message = "";
+                }
+                if (message.errorCode != null && Object.hasOwnProperty.call(message, "errorCode"))
+                    object.errorCode = message.errorCode;
+                if (message.message != null && Object.hasOwnProperty.call(message, "message"))
+                    object.message = message.message;
+                return object;
+            };
+
+            /**
+             * Converts this ProbeOperationFailed to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeOperationFailed.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeOperationFailed
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeOperationFailed.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeOperationFailed";
+            };
+
+            return ProbeOperationFailed;
         })();
 
         v1.ProbeConfigurationRequest = (function() {

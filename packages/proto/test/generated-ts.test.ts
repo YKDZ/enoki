@@ -143,4 +143,58 @@ describe("generated Probe protocol TypeScript", () => {
     expect(decoded.serverTimeMs.toString()).toBe("1710000005000");
     expect(decoded.inventoryNeeded).toBe(false);
   });
+
+  it("encodes and decodes Probe Operation delivery and status reports", () => {
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+
+    const response = ReportResponse.decode(
+      ReportResponse.encode(
+        ReportResponse.create({
+          acceptedSequenceEnd: 8,
+          pendingOperation: {
+            id: "operation-01",
+            probeUpgrade: {
+              currentProbeVersion: "0.1.0",
+              targetProbeVersion: "0.2.0",
+            },
+          },
+          serverTimeMs: 1710000005000,
+        }),
+      ).finish(),
+    );
+
+    expect(response.pendingOperation?.id).toBe("operation-01");
+    expect(response.pendingOperation?.probeUpgrade?.targetProbeVersion).toBe(
+      "0.2.0",
+    );
+
+    const request = ReportRequest.decode(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-01",
+          operationAcknowledgements: [{ operationId: "operation-01" }],
+          operationStatuses: [
+            {
+              failed: {
+                errorCode: "unsupported_installation",
+                message: "systemd is unavailable",
+              },
+              operationId: "operation-01",
+            },
+          ],
+          probeId: "probe-01",
+          sequenceEnd: 1,
+          sequenceStart: 1,
+        }),
+      ).finish(),
+    );
+
+    expect(request.operationAcknowledgements[0]?.operationId).toBe(
+      "operation-01",
+    );
+    expect(request.operationStatuses[0]?.failed?.errorCode).toBe(
+      "unsupported_installation",
+    );
+  });
 });

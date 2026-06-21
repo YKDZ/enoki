@@ -13,12 +13,19 @@ import type {
 } from "../database/hosts.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
+import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import { hashSecret } from "../enrollment/routes.js";
 import {
   liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "./configuration.js";
+import {
+  acknowledgeProbeUpgradeRequest,
+  failReportedProbeUpgradeRequest,
+  startProbeUpgradeRequest,
+  type ProbeUpgradeRequest,
+} from "./operation.js";
 
 const RegistrationRequest = enoki.v1.ProbeRegistrationRequest;
 const RegistrationResponse = enoki.v1.ProbeRegistrationResponse;
@@ -36,6 +43,7 @@ export type ProbeRouteServices = {
   hosts: HostRepository;
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
+  probeOperations?: ProbeOperationRepository;
   clockSkewThresholdMs?: number;
   hostStatus?: HostStatusThresholds;
   liveUpdates?: LiveUpdateBroadcaster | null;
@@ -181,6 +189,18 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const reportReceivedAtMs = now();
+    const operationReportError = applyProbeOperationReports({
+      acknowledgements: request.operationAcknowledgements ?? [],
+      hostId: host.id,
+      nowMs: reportReceivedAtMs,
+      services,
+      statuses: request.operationStatuses ?? [],
+    });
+
+    if (operationReportError) {
+      return probeJsonError(operationReportError, 400);
+    }
+
     const inventoryJson = request.inventory
       ? serializeInventory(request.inventory)
       : host.inventoryJson;
@@ -333,6 +353,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         currentProbeConfigurationVersion:
           services.probeConfigurations.getEffectiveForHost(host.id)
             .configuration.version,
+        pendingOperation: pendingProbeOperationForHost(services, host.id),
         serverTimeMs: reportReceivedAtMs,
       }),
     ).finish();
@@ -374,6 +395,175 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   });
 
   return routes;
+}
+
+function pendingProbeOperationForHost(
+  services: ProbeRouteServices,
+  hostId: number,
+): enoki.v1.IProbeOperation | null {
+  const operation = services.probeOperations?.findActiveForHost(hostId);
+
+  if (!operation || operation.state !== "pending") {
+    return null;
+  }
+
+  return probeUpgradeOperationMessage(operation);
+}
+
+function probeUpgradeOperationMessage(
+  operation: ProbeUpgradeRequest,
+): enoki.v1.IProbeOperation {
+  return {
+    id: String(operation.id),
+    probeUpgrade: {
+      currentProbeVersion: operation.currentProbeVersion ?? "",
+      targetProbeVersion: operation.targetProbeVersion,
+    },
+  };
+}
+
+function applyProbeOperationReports(input: {
+  acknowledgements: enoki.v1.IProbeOperationAcknowledgement[];
+  hostId: number;
+  nowMs: number;
+  services: ProbeRouteServices;
+  statuses: enoki.v1.IProbeOperationStatus[];
+}): string | null {
+  if (
+    !input.services.probeOperations &&
+    (input.acknowledgements.length > 0 || input.statuses.length > 0)
+  ) {
+    return "malformed_probe_operation_acknowledgement";
+  }
+
+  for (const acknowledgement of input.acknowledgements) {
+    const operation = findReportableProbeOperation(
+      input.services,
+      input.hostId,
+      acknowledgement.operationId,
+    );
+
+    if (!operation) {
+      return "malformed_probe_operation_acknowledgement";
+    }
+
+    if (isClosedProbeOperation(operation)) {
+      continue;
+    }
+
+    const result = acknowledgeProbeUpgradeRequest({
+      nowMs: input.nowMs,
+      operation,
+    });
+
+    if (result.error) {
+      return "malformed_probe_operation_acknowledgement";
+    }
+
+    if (result.acknowledged !== operation) {
+      input.services.probeOperations?.updateProbeUpgradeRequest(
+        result.acknowledged,
+      );
+    }
+  }
+
+  for (const status of input.statuses) {
+    const operation = findReportableProbeOperation(
+      input.services,
+      input.hostId,
+      status.operationId,
+    );
+
+    if (!operation) {
+      return "malformed_probe_operation_status";
+    }
+
+    if (isClosedProbeOperation(operation)) {
+      continue;
+    }
+
+    const result = applyProbeOperationStatus(status, operation, input.nowMs);
+
+    if (result.error) {
+      return "malformed_probe_operation_status";
+    }
+
+    if (result.operation !== operation) {
+      input.services.probeOperations?.updateProbeUpgradeRequest(
+        result.operation,
+      );
+    }
+  }
+
+  return null;
+}
+
+function isClosedProbeOperation(operation: ProbeUpgradeRequest) {
+  return ["canceled", "failed", "succeeded", "superseded"].includes(
+    operation.state,
+  );
+}
+
+function findReportableProbeOperation(
+  services: ProbeRouteServices,
+  hostId: number,
+  operationId: string | null | undefined,
+) {
+  const id = parseProbeOperationId(operationId);
+
+  if (id === null) {
+    return null;
+  }
+
+  const active = services.probeOperations?.findActiveForHost(hostId);
+  if (active?.id === id) {
+    return active;
+  }
+
+  const operation = services.probeOperations?.findById(id);
+  if (
+    operation?.hostId === hostId &&
+    ["failed", "superseded", "canceled", "succeeded"].includes(operation.state)
+  ) {
+    return operation;
+  }
+
+  return null;
+}
+
+function applyProbeOperationStatus(
+  status: enoki.v1.IProbeOperationStatus,
+  operation: ProbeUpgradeRequest,
+  nowMs: number,
+) {
+  if (status.running && !status.failed) {
+    return startProbeUpgradeRequest({
+      nowMs,
+      operation,
+    });
+  }
+
+  if (status.failed && !status.running && status.failed.errorCode) {
+    return failReportedProbeUpgradeRequest({
+      code: status.failed.errorCode,
+      message: status.failed.message ?? "",
+      nowMs,
+      operation,
+    });
+  }
+
+  return {
+    error: "probe_operation_status_invalid" as const,
+    operation,
+  };
+}
+
+function parseProbeOperationId(operationId: string | null | undefined) {
+  if (!operationId || !/^[1-9]\d*$/.test(operationId)) {
+    return null;
+  }
+
+  return Number(operationId);
 }
 
 function broadcastHostSummary(

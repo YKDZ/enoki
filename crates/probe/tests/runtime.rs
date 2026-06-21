@@ -2,8 +2,10 @@ use std::{fs, time::Duration};
 
 use enoki_probe::{
     protocol::enoki::v1::{
-        ProbeConfigurationRequest, ProbeConfigurationResponse, ProbeRegistrationRequest,
-        ProbeRegistrationResponse, ProbeReportRequest, ProbeReportResponse,
+        ProbeConfigurationRequest, ProbeConfigurationResponse, ProbeOperation,
+        ProbeOperationStatus, ProbeRegistrationRequest, ProbeRegistrationResponse,
+        ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation, probe_operation::Operation,
+        probe_operation_status::Status,
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
@@ -145,6 +147,7 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_string(),
             inventory_needed: false,
+            pending_operation: None,
             server_time_ms: 1_725_000_000_000,
         }
         .encode_to_vec(),
@@ -218,6 +221,7 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "default-v1".to_string(),
                 inventory_needed: true,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -225,6 +229,7 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "default-v1".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -601,6 +606,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -620,6 +626,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -693,6 +700,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-bad".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -712,6 +720,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-bad".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -780,6 +789,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec()),
@@ -788,6 +798,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec()),
@@ -868,6 +879,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -876,6 +888,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
+                pending_operation: None,
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -970,6 +983,79 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
     );
 }
 
+#[test]
+fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    fs::write(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_secret = \"enk_probe_secret\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 5",
+            "reporting_batch_interval_seconds = 5",
+            "collect_cpu = false",
+            "collect_memory = false",
+            "collect_disk = false",
+            "collect_network = false",
+            "collect_load = false",
+            "collect_uptime = false",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write bootstrap config");
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response_with_operation("operation-01", "0.1.0", "0.2.0"),
+            report_response(2, false),
+            report_response(3, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(3),
+        },
+    )
+    .expect("Probe runtime reports operation status");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        reports[1].operation_acknowledgements[0].operation_id,
+        "operation-01"
+    );
+    assert!(matches!(
+        reports[1].operation_statuses[0].status,
+        Some(Status::Running(_))
+    ));
+    assert_eq!(
+        reports[2].operation_statuses[0].operation_id,
+        "operation-01"
+    );
+    assert!(matches!(
+        &reports[2].operation_statuses[0],
+        ProbeOperationStatus {
+            status: Some(Status::Failed(failed)),
+            ..
+        } if failed.error_code == "unsupported_installation"
+    ));
+}
+
 fn report_response(accepted_sequence_end: u64, inventory_needed: bool) -> Vec<u8> {
     report_response_with_version(accepted_sequence_end, inventory_needed, "default-v1")
 }
@@ -983,6 +1069,28 @@ fn report_response_with_version(
         accepted_sequence_end,
         current_probe_configuration_version: version.to_string(),
         inventory_needed,
+        pending_operation: None,
+        server_time_ms: 1_725_000_000_000,
+    }
+    .encode_to_vec()
+}
+
+fn report_response_with_operation(
+    operation_id: &str,
+    current_probe_version: &str,
+    target_probe_version: &str,
+) -> Vec<u8> {
+    ProbeReportResponse {
+        accepted_sequence_end: 1,
+        current_probe_configuration_version: "default-v1".to_string(),
+        inventory_needed: false,
+        pending_operation: Some(ProbeOperation {
+            id: operation_id.to_string(),
+            operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                current_probe_version: current_probe_version.to_string(),
+                target_probe_version: target_probe_version.to_string(),
+            })),
+        }),
         server_time_ms: 1_725_000_000_000,
     }
     .encode_to_vec()

@@ -1,6 +1,8 @@
 use enoki_probe::protocol::enoki::v1::{
-    Inventory, MetricSample, ProbeConfigurationResponse, ProbeRegistrationRequest,
-    ProbeReportRequest,
+    Inventory, MetricSample, ProbeConfigurationResponse, ProbeOperation,
+    ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationStatus,
+    ProbeRegistrationRequest, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
+    probe_operation::Operation, probe_operation_status::Status,
 };
 use prost::Message;
 
@@ -65,6 +67,8 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
                 ..MetricSample::default()
             },
         ],
+        operation_acknowledgements: Vec::new(),
+        operation_statuses: Vec::new(),
         probe_configuration_error: None,
         probe_configuration_version: "config-v1".to_string(),
         probe_id: "probe-01".to_string(),
@@ -80,6 +84,70 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
     assert_eq!(decoded.metrics[0].sequence, 7);
     assert_eq!(decoded.metrics[0].collected_at_ms, 1_710_000_000_000);
     assert_eq!(decoded.metrics[1].cpu_percent, Some(51.25));
+}
+
+#[test]
+fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
+    let response = ProbeReportResponse {
+        accepted_sequence_end: 8,
+        current_probe_configuration_version: "default-v1".to_string(),
+        inventory_needed: false,
+        pending_operation: Some(ProbeOperation {
+            id: "operation-01".to_string(),
+            operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                current_probe_version: "0.1.0".to_string(),
+                target_probe_version: "0.2.0".to_string(),
+            })),
+        }),
+        server_time_ms: 1_710_000_005_000,
+    };
+
+    let decoded_response = ProbeReportResponse::decode(response.encode_to_vec().as_slice())
+        .expect("generated Probe report response should decode");
+    let operation = decoded_response
+        .pending_operation
+        .expect("pending operation");
+    assert_eq!(operation.id, "operation-01");
+    assert!(matches!(
+        operation.operation,
+        Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+            target_probe_version,
+            ..
+        })) if target_probe_version == "0.2.0"
+    ));
+
+    let request = ProbeReportRequest {
+        boot_id: "boot-01".to_string(),
+        inventory: None,
+        inventory_hash: "inventory-hash".to_string(),
+        metrics: Vec::new(),
+        operation_acknowledgements: vec![ProbeOperationAcknowledgement {
+            operation_id: "operation-01".to_string(),
+        }],
+        operation_statuses: vec![ProbeOperationStatus {
+            operation_id: "operation-01".to_string(),
+            status: Some(Status::Failed(ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message: "systemd is unavailable".to_string(),
+            })),
+        }],
+        probe_configuration_error: None,
+        probe_configuration_version: "default-v1".to_string(),
+        probe_id: "probe-01".to_string(),
+        sequence_end: 1,
+        sequence_start: 1,
+    };
+
+    let decoded_request = ProbeReportRequest::decode(request.encode_to_vec().as_slice())
+        .expect("generated Probe report request should decode");
+    assert_eq!(
+        decoded_request.operation_acknowledgements[0].operation_id,
+        "operation-01"
+    );
+    assert!(matches!(
+        &decoded_request.operation_statuses[0].status,
+        Some(Status::Failed(failed)) if failed.error_code == "unsupported_installation"
+    ));
 }
 
 #[test]

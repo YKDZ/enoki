@@ -1,4 +1,4 @@
-use std::{error::Error, fmt, fs, io::Read, path::PathBuf, time::Duration};
+use std::{collections::HashSet, error::Error, fmt, fs, io::Read, path::PathBuf, time::Duration};
 
 use crate::registration::{
     HttpRegistrationTransport, ProbeRegistrationInput, RegistrationError, RegistrationTransport,
@@ -9,7 +9,9 @@ use crate::{
     metrics::{MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
         ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
-        ProbeReportRequest, ProbeReportResponse,
+        ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationRunning,
+        ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
+        probe_operation::Operation, probe_operation_status::Status,
     },
     report::{full_inventory_report, regular_report, startup_report},
 };
@@ -275,6 +277,8 @@ fn run_reporting_loop(
     let mut sequence = 1;
     let mut reports_sent = 0;
     let mut metrics_collector = MetricsCollector::default();
+    let mut operation_reports = ProbeOperationReportQueue::default();
+    let mut operation_runner = NoopProbeOperationRunner;
     let mut pending_report_body = None;
     let request = startup_report(
         probe_id,
@@ -297,6 +301,7 @@ fn run_reporting_loop(
         )?;
         active_configuration = outcome.active_configuration;
         pending_configuration_error = outcome.configuration_error;
+        operation_reports.observe_response(&response, &mut operation_runner);
     }
 
     if response.inventory_needed {
@@ -326,6 +331,7 @@ fn run_reporting_loop(
             )?;
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
+            operation_reports.observe_response(&response, &mut operation_runner);
         }
     }
 
@@ -351,6 +357,7 @@ fn run_reporting_loop(
                 metrics,
             );
             let request = with_configuration_error(request, pending_configuration_error.take());
+            let request = operation_reports.with_operation_reports(request);
 
             request.encode_to_vec()
         };
@@ -373,6 +380,7 @@ fn run_reporting_loop(
             )?;
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
+            operation_reports.observe_response(&response, &mut operation_runner);
         }
 
         if response.inventory_needed && !report_limit_reached(reports_sent, control) {
@@ -386,6 +394,7 @@ fn run_reporting_loop(
                 Vec::new(),
             );
             let request = with_configuration_error(request, pending_configuration_error.take());
+            let request = operation_reports.with_operation_reports(request);
             let request_body = request.encode_to_vec();
             let response = match post_report(transport, hub_url, probe_secret, request_body.clone())
             {
@@ -407,11 +416,83 @@ fn run_reporting_loop(
                 )?;
                 active_configuration = outcome.active_configuration;
                 pending_configuration_error = outcome.configuration_error;
+                operation_reports.observe_response(&response, &mut operation_runner);
             }
         }
     }
 
     Ok(())
+}
+
+trait ProbeOperationRunner {
+    fn run_probe_upgrade(&mut self, operation: &ProbeUpgradeOperation) -> ProbeOperationFailed;
+}
+
+struct NoopProbeOperationRunner;
+
+impl ProbeOperationRunner for NoopProbeOperationRunner {
+    fn run_probe_upgrade(&mut self, _operation: &ProbeUpgradeOperation) -> ProbeOperationFailed {
+        ProbeOperationFailed {
+            error_code: "unsupported_installation".to_string(),
+            message: "Probe Upgrader is not installed in this build.".to_string(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ProbeOperationReportQueue {
+    failed: Vec<(String, ProbeOperationFailed)>,
+    seen_operation_ids: HashSet<String>,
+    started: Vec<String>,
+}
+
+impl ProbeOperationReportQueue {
+    fn observe_response(
+        &mut self,
+        response: &ProbeReportResponse,
+        runner: &mut impl ProbeOperationRunner,
+    ) {
+        let Some(operation) = response.pending_operation.as_ref() else {
+            return;
+        };
+
+        if operation.id.is_empty() || !self.seen_operation_ids.insert(operation.id.clone()) {
+            return;
+        }
+
+        let Some(Operation::ProbeUpgrade(probe_upgrade)) = operation.operation.as_ref() else {
+            return;
+        };
+
+        let failed = runner.run_probe_upgrade(probe_upgrade);
+        self.started.push(operation.id.clone());
+        self.failed.push((operation.id.clone(), failed));
+    }
+
+    fn with_operation_reports(&mut self, mut request: ProbeReportRequest) -> ProbeReportRequest {
+        for operation_id in self.started.drain(..) {
+            request
+                .operation_acknowledgements
+                .push(ProbeOperationAcknowledgement {
+                    operation_id: operation_id.clone(),
+                });
+            request.operation_statuses.push(ProbeOperationStatus {
+                operation_id,
+                status: Some(Status::Running(ProbeOperationRunning {})),
+            });
+        }
+
+        if request.operation_statuses.is_empty() {
+            for (operation_id, failed) in self.failed.drain(..) {
+                request.operation_statuses.push(ProbeOperationStatus {
+                    operation_id,
+                    status: Some(Status::Failed(failed)),
+                });
+            }
+        }
+
+        request
+    }
 }
 
 fn report_limit_reached(reports_sent: usize, control: RunLoopControl) -> bool {

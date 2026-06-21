@@ -55,6 +55,8 @@ message ProbeReportRequest {
   repeated MetricSample metrics = 7;
   Inventory inventory = 8;
   ProbeConfigurationError probe_configuration_error = 9;
+  repeated ProbeOperationAcknowledgement operation_acknowledgements = 10;
+  repeated ProbeOperationStatus operation_statuses = 11;
 }
 
 message ProbeConfigurationError {
@@ -112,6 +114,40 @@ message ProbeReportResponse {
   int64 server_time_ms = 2;
   string current_probe_configuration_version = 3;
   bool inventory_needed = 4;
+  ProbeOperation pending_operation = 5;
+}
+
+message ProbeOperation {
+  string id = 1;
+
+  oneof operation {
+    ProbeUpgradeOperation probe_upgrade = 2;
+  }
+}
+
+message ProbeUpgradeOperation {
+  string current_probe_version = 1;
+  string target_probe_version = 2;
+}
+
+message ProbeOperationAcknowledgement {
+  string operation_id = 1;
+}
+
+message ProbeOperationStatus {
+  string operation_id = 1;
+
+  oneof status {
+    ProbeOperationRunning running = 2;
+    ProbeOperationFailed failed = 3;
+  }
+}
+
+message ProbeOperationRunning {}
+
+message ProbeOperationFailed {
+  string error_code = 1;
+  string message = 2;
 }
 
 message ProbeConfigurationRequest {

@@ -58,6 +58,7 @@ export type ProbeApiAppOptions = Pick<
   | "hostStatus"
   | "liveUpdates"
   | "now"
+  | "probeOperations"
   | "probeAssets"
   | "trustForwardedProbeHeaders"
 >;
@@ -273,6 +274,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       hosts: options.database.hosts,
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,
+      probeOperations: options.database.probeOperations,
       clockSkewThresholdMs: options.clockSkewThresholdMs,
       hostStatus: options.hostStatus,
       liveUpdates: options.liveUpdates ?? null,

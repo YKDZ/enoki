@@ -90,6 +90,12 @@ pub struct ProbeReportRequest {
     pub inventory: ::core::option::Option<Inventory>,
     #[prost(message, optional, tag = "9")]
     pub probe_configuration_error: ::core::option::Option<ProbeConfigurationError>,
+    #[prost(message, repeated, tag = "10")]
+    pub operation_acknowledgements: ::prost::alloc::vec::Vec<
+        ProbeOperationAcknowledgement,
+    >,
+    #[prost(message, repeated, tag = "11")]
+    pub operation_statuses: ::prost::alloc::vec::Vec<ProbeOperationStatus>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeConfigurationError {
@@ -186,6 +192,61 @@ pub struct ProbeReportResponse {
     pub current_probe_configuration_version: ::prost::alloc::string::String,
     #[prost(bool, tag = "4")]
     pub inventory_needed: bool,
+    #[prost(message, optional, tag = "5")]
+    pub pending_operation: ::core::option::Option<ProbeOperation>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeOperation {
+    #[prost(string, tag = "1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(oneof = "probe_operation::Operation", tags = "2")]
+    pub operation: ::core::option::Option<probe_operation::Operation>,
+}
+/// Nested message and enum types in `ProbeOperation`.
+pub mod probe_operation {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Operation {
+        #[prost(message, tag = "2")]
+        ProbeUpgrade(super::ProbeUpgradeOperation),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeUpgradeOperation {
+    #[prost(string, tag = "1")]
+    pub current_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub target_probe_version: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeOperationAcknowledgement {
+    #[prost(string, tag = "1")]
+    pub operation_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeOperationStatus {
+    #[prost(string, tag = "1")]
+    pub operation_id: ::prost::alloc::string::String,
+    #[prost(oneof = "probe_operation_status::Status", tags = "2, 3")]
+    pub status: ::core::option::Option<probe_operation_status::Status>,
+}
+/// Nested message and enum types in `ProbeOperationStatus`.
+pub mod probe_operation_status {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Status {
+        #[prost(message, tag = "2")]
+        Running(super::ProbeOperationRunning),
+        #[prost(message, tag = "3")]
+        Failed(super::ProbeOperationFailed),
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeOperationRunning {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeOperationFailed {
+    #[prost(string, tag = "1")]
+    pub error_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeConfigurationRequest {

@@ -136,6 +136,110 @@ export function cancelProbeUpgradeRequest(input: {
   };
 }
 
+export function acknowledgeProbeUpgradeRequest(input: {
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+}): {
+  acknowledged: ProbeUpgradeRequest;
+  error: "probe_operation_not_acknowledgeable" | null;
+} {
+  if (input.operation.state === "pending") {
+    return {
+      acknowledged: {
+        ...input.operation,
+        acceptedAtMs: input.operation.acceptedAtMs ?? input.nowMs,
+        state: "accepted",
+        updatedAtMs: input.nowMs,
+      },
+      error: null,
+    };
+  }
+
+  if (
+    input.operation.state === "accepted" ||
+    input.operation.state === "running"
+  ) {
+    return {
+      acknowledged: input.operation,
+      error: null,
+    };
+  }
+
+  return {
+    acknowledged: input.operation,
+    error: "probe_operation_not_acknowledgeable",
+  };
+}
+
+export function startProbeUpgradeRequest(input: {
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+}): {
+  error: "probe_operation_status_invalid" | null;
+  operation: ProbeUpgradeRequest;
+} {
+  if (input.operation.state === "accepted") {
+    return {
+      error: null,
+      operation: {
+        ...input.operation,
+        runningAtMs: input.operation.runningAtMs ?? input.nowMs,
+        state: "running",
+        updatedAtMs: input.nowMs,
+      },
+    };
+  }
+
+  if (input.operation.state === "running") {
+    return {
+      error: null,
+      operation: input.operation,
+    };
+  }
+
+  return {
+    error: "probe_operation_status_invalid",
+    operation: input.operation,
+  };
+}
+
+export function failReportedProbeUpgradeRequest(input: {
+  code: string;
+  message: string;
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+}): {
+  error: "probe_operation_status_invalid" | null;
+  operation: ProbeUpgradeRequest;
+} {
+  if (
+    input.operation.state === "accepted" ||
+    input.operation.state === "running"
+  ) {
+    return {
+      error: null,
+      operation: failProbeUpgradeRequest({
+        code: input.code,
+        message: input.message,
+        nowMs: input.nowMs,
+        operation: input.operation,
+      }),
+    };
+  }
+
+  if (input.operation.state === "failed") {
+    return {
+      error: null,
+      operation: input.operation,
+    };
+  }
+
+  return {
+    error: "probe_operation_status_invalid",
+    operation: input.operation,
+  };
+}
+
 export function acceptedTimedOutProbeUpgradeRequest(input: {
   acceptedTimeoutMs: number;
   nowMs: number;
