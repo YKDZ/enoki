@@ -32,7 +32,7 @@ describe("Probe systemd installer", () => {
     );
   });
 
-  it("installs a verified x86_64 GNU Probe release as a non-root systemd service", async () => {
+  it("installs a verified x86_64 musl Probe release as a non-root systemd service", async () => {
     const root = await createTempRoot("enoki-install-root-");
     const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, { assetDir: assets.dir });
@@ -241,11 +241,11 @@ describe("Probe systemd installer", () => {
     );
   });
 
-  it("selects the aarch64 GNU Probe artifact from a release version", async () => {
+  it("selects the aarch64 musl Probe artifact from a release version", async () => {
     const root = await createTempRoot("enoki-install-arm-root-");
     const assets = await createProbeAssets(
       root,
-      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
       "v0.2.0",
     );
     const commands = await createCommandMocks(root, {
@@ -273,7 +273,7 @@ describe("Probe systemd installer", () => {
     await expect(
       readFile(path.join(root, "tmp/curl.log"), "utf8"),
     ).resolves.toContain(
-      "https://hub.example/api/probe/assets/enoki-probe-aarch64-unknown-linux-gnu.tar.gz",
+      "https://hub.example/api/probe/assets/enoki-probe-aarch64-unknown-linux-musl.tar.gz",
     );
     await expect(
       readFile(
@@ -581,14 +581,14 @@ async function createProbeAssets(
         signature?: Buffer;
         target?: string;
         version?: string;
-      } = "x86_64-unknown-linux-gnu",
+      } = "x86_64-unknown-linux-musl",
   version = "v0.1.0",
 ) {
   const options =
     typeof targetOrOptions === "string"
       ? { target: targetOrOptions, version }
       : targetOrOptions;
-  const target = options.target ?? "x86_64-unknown-linux-gnu";
+  const target = options.target ?? "x86_64-unknown-linux-musl";
   const assetRoot = path.join(root, "hub-assets");
   const payloadRoot = path.join(root, "payload");
   await mkdir(assetRoot, { recursive: true });

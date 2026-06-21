@@ -936,8 +936,8 @@ fn host_probe_asset_target() -> Result<&'static str, ProbeUpgraderRunError> {
 
 fn probe_asset_target_for_arch(architecture: &str) -> Result<&'static str, ProbeUpgraderRunError> {
     match architecture {
-        "x86_64" => Ok("x86_64-unknown-linux-gnu"),
-        "aarch64" => Ok("aarch64-unknown-linux-gnu"),
+        "x86_64" => Ok("x86_64-unknown-linux-musl"),
+        "aarch64" => Ok("aarch64-unknown-linux-musl"),
         other => Err(ProbeUpgraderRunError::UnsupportedArchitecture(
             other.to_string(),
         )),
@@ -1835,11 +1835,11 @@ mod tests {
     fn probe_asset_target_supports_only_x86_64_and_aarch64() {
         assert_eq!(
             probe_asset_target_for_arch("x86_64").expect("x86 target"),
-            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
         );
         assert_eq!(
             probe_asset_target_for_arch("aarch64").expect("aarch64 target"),
-            "aarch64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
         );
         assert!(matches!(
             probe_asset_target_for_arch("riscv64"),

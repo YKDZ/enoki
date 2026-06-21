@@ -49,10 +49,10 @@ detect_target() {
 
   case "$(uname -m)" in
     x86_64 | amd64)
-      echo "x86_64-unknown-linux-gnu"
+      echo "x86_64-unknown-linux-musl"
       ;;
     aarch64 | arm64)
-      echo "aarch64-unknown-linux-gnu"
+      echo "aarch64-unknown-linux-musl"
       ;;
     *)
       fail "unsupported CPU architecture: $(uname -m). Supported: x86_64, aarch64."
