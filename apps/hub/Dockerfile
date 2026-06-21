@@ -9,6 +9,7 @@ WORKDIR /repo
 RUN corepack enable
 
 COPY . .
+RUN mkdir -p probe-assets
 
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm config set store-dir /pnpm/store && \
@@ -31,9 +32,10 @@ FROM installer AS builder
 
 COPY --from=prepare /repo/out/full/ ./
 COPY --from=prepare /repo/tsconfig.base.json ./tsconfig.base.json
+COPY --from=prepare /repo/scripts/install-probe.sh /app/default-install-probe.sh
+COPY --from=prepare /repo/probe-assets/ /app/probe-assets/
 RUN mkdir -p /app/probe-assets && \
-  cp scripts/install-probe.sh /app/probe-assets/install-probe.sh && \
-  if [ -d probe-assets ]; then cp -R probe-assets/. /app/probe-assets/; fi
+  if [ ! -f /app/probe-assets/install-probe.sh ]; then cp /app/default-install-probe.sh /app/probe-assets/install-probe.sh; fi
 
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
