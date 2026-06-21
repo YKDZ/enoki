@@ -241,6 +241,22 @@ function isMetricsWindow(value: AcceptableValue): value is MetricsWindow {
               </Select>
             </div>
 
+            <Alert v-if="detail.metricsError?.value" class="mb-4">
+              <AlertTriangle class="size-4" aria-hidden="true" />
+              <AlertTitle>历史指标暂时不可用</AlertTitle>
+              <AlertDescription class="flex flex-wrap items-center gap-3">
+                <span>{{ detail.metricsError?.value }}</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  @click="detail.switchWindow(detail.selectedWindow.value)"
+                >
+                  重试
+                </Button>
+              </AlertDescription>
+            </Alert>
+
             <TabsContent
               value="overview"
               class="mt-0 grid gap-4 lg:grid-cols-2"

@@ -43,6 +43,8 @@ const pointCount = computed(() =>
 let chart: echarts.ECharts | null = null;
 let legendSelected: Record<string, boolean> = {};
 let resizeFrame: number | null = null;
+let themeObserver: MutationObserver | null = null;
+let themeMediaQuery: MediaQueryList | null = null;
 
 onMounted(async () => {
   await nextTick();
@@ -60,12 +62,19 @@ onMounted(async () => {
     }
   });
   renderChart();
+  observeThemeChanges();
 });
 
 onBeforeUnmount(() => {
   if (resizeFrame !== null) {
     cancelAnimationFrame(resizeFrame);
     resizeFrame = null;
+  }
+  themeObserver?.disconnect();
+  themeObserver = null;
+  if (themeMediaQuery) {
+    themeMediaQuery.removeEventListener("change", renderChart);
+    themeMediaQuery = null;
   }
   chart?.dispose();
   chart = null;
@@ -134,6 +143,10 @@ function renderChart() {
       },
       series: props.series.map((item) => ({
         data: item.points,
+        emphasis: {
+          disabled: true,
+          focus: "none",
+        },
         name: item.name,
         showSymbol: false,
         smooth: true,
@@ -205,6 +218,19 @@ function resizeChart() {
   chart?.resize();
 }
 
+function observeThemeChanges() {
+  themeObserver = new MutationObserver(() => {
+    renderChart();
+  });
+  themeObserver.observe(document.documentElement, {
+    attributeFilter: ["class", "style"],
+    attributes: true,
+  });
+
+  themeMediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  themeMediaQuery.addEventListener("change", renderChart);
+}
+
 function scheduleResize() {
   if (resizeFrame !== null) {
     return;
@@ -264,12 +290,12 @@ function chartTheme() {
     border: cssColor(style, "--border", "#e5e7eb"),
     card: cssColor(style, "--card", "#ffffff"),
     chartColors: [
-      cssColor(style, "--chart-1", "#34d399"),
-      cssColor(style, "--chart-2", "#60a5fa"),
-      cssColor(style, "--chart-3", "#f59e0b"),
-      cssColor(style, "--chart-4", "#f472b6"),
-      cssColor(style, "--chart-5", "#a78bfa"),
-      cssColor(style, "--metric-network-rx-fg", "#22d3ee"),
+      cssColor(style, "--chart-line-1", "#2563eb"),
+      cssColor(style, "--chart-line-2", "#16a34a"),
+      cssColor(style, "--chart-line-3", "#d97706"),
+      cssColor(style, "--chart-line-4", "#db2777"),
+      cssColor(style, "--chart-line-5", "#7c3aed"),
+      cssColor(style, "--chart-line-6", "#0891b2"),
     ],
     foreground: cssColor(style, "--foreground", "#111827"),
     label: cssColor(style, "--chart-label", "#374151"),

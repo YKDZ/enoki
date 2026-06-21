@@ -47,6 +47,7 @@ export function useHostDetail(
   });
   const isLoading = ref(false);
   const error = ref("");
+  const metricsError = ref("");
   const isEmpty = computed(() => samples.value.length === 0);
   const chartRange = computed(() => {
     const endMs =
@@ -69,6 +70,7 @@ export function useHostDetail(
   let livePlaybackTimer: ReturnType<typeof setTimeout> | null = null;
   let metricsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let isRefreshingMetrics = false;
+  let activeLoad: Promise<void> | null = null;
   let pendingMetricSamples: HostMetricSample[] = [];
 
   onScopeDispose(() => {
@@ -77,6 +79,18 @@ export function useHostDetail(
   }, true);
 
   async function load() {
+    if (activeLoad) {
+      return activeLoad;
+    }
+
+    activeLoad = loadHostDetail().finally(() => {
+      activeLoad = null;
+    });
+
+    return activeLoad;
+  }
+
+  async function loadHostDetail() {
     if (!currentHostId()) {
       return;
     }
@@ -89,11 +103,19 @@ export function useHostDetail(
         `/api/web/hosts/${currentHostId()}`,
       );
       host.value = detailResponse.host;
-      await loadMetrics(selectedWindow.value, { mode: "replace" });
-      startMetricsRefreshLoop();
     } catch {
       error.value = "无法读取主机详情。";
+      return;
+    }
+
+    try {
+      await loadMetrics(selectedWindow.value, { mode: "replace" });
+    } catch {
+      metricsError.value = "无法读取历史指标，稍后会自动重试。";
+      samples.value = [];
+      clearLivePlayback();
     } finally {
+      startMetricsRefreshLoop();
       isLoading.value = false;
     }
   }
@@ -102,10 +124,9 @@ export function useHostDetail(
     window: MetricsWindow,
     options: { mode: "enqueue-new" | "replace" },
   ) {
-    const response = await fetchJson<HostMetricsResponse>(
-      `/api/web/hosts/${currentHostId()}/metrics?window=${window}`,
-    );
+    const response = await fetchMetrics(window);
     selectedWindow.value = response.metrics.window;
+    metricsError.value = "";
     if (options.mode === "replace") {
       samples.value = response.metrics.samples;
       clearLivePlayback();
@@ -128,7 +149,7 @@ export function useHostDetail(
       startMetricsRefreshLoop();
     } catch {
       selectedWindow.value = previousWindow;
-      error.value = "无法读取历史指标。";
+      metricsError.value = "无法读取历史指标，稍后会自动重试。";
       startMetricsRefreshLoop();
     } finally {
       isLoading.value = false;
@@ -216,6 +237,7 @@ export function useHostDetail(
     try {
       await loadMetrics(selectedWindow.value, { mode: "enqueue-new" });
     } catch {
+      metricsError.value = "无法刷新历史指标，稍后会自动重试。";
       // The live socket can still recover state; keep the observation loop alive.
     } finally {
       isRefreshingMetrics = false;
@@ -247,6 +269,21 @@ export function useHostDetail(
     if (metricsRefreshTimer !== null) {
       clearTimeout(metricsRefreshTimer);
       metricsRefreshTimer = null;
+    }
+  }
+
+  async function fetchMetrics(window: MetricsWindow) {
+    const path = `/api/web/hosts/${currentHostId()}/metrics?window=${window}`;
+
+    try {
+      return await fetchJson<HostMetricsResponse>(path);
+    } catch (error) {
+      if (!isTransientFetchError(error)) {
+        throw error;
+      }
+
+      await sleep(150);
+      return await fetchJson<HostMetricsResponse>(path);
     }
   }
 
@@ -319,6 +356,7 @@ export function useHostDetail(
     host,
     isEmpty,
     isLoading,
+    metricsError,
     load,
     samples,
     selectedWindow,
@@ -426,6 +464,25 @@ function sumNumbers(values: number[]) {
   return values.length
     ? values.reduce((total, value) => total + value, 0)
     : null;
+}
+
+function isTransientFetchError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error instanceof TypeError ||
+    error.message.includes("Failed to fetch") ||
+    error.message.includes("ERR_CONTENT_LENGTH_MISMATCH") ||
+    error.message.includes("Load failed")
+  );
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function bitsPerSecond(bytes: number | null, intervalSeconds: number) {

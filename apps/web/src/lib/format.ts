@@ -28,6 +28,22 @@ export function formatBytes(bytes: number | null) {
   return `${formatNumber(mebibytes)} MB`;
 }
 
+export function formatTrafficBytes(bytes: number | null) {
+  if (bytes === null) {
+    return "n/a";
+  }
+
+  if (bytes <= 0) {
+    return "0 KB";
+  }
+
+  if (bytes < 1024 ** 2) {
+    return `${formatNumber(bytes / 1024)} KB`;
+  }
+
+  return formatBytes(bytes);
+}
+
 export function formatByteUsage(
   usedBytes: number | null,
   totalBytes: number | null,

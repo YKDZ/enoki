@@ -229,6 +229,43 @@ describe("Host detail data", () => {
     );
   });
 
+  it("keeps the host detail visible when the metrics request fails", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              id: 1,
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 5,
+                  version: "default-v1",
+                },
+                mode: "inherit",
+              },
+            },
+          } as T;
+        }
+
+        throw new Error(`Request failed: ${path}`);
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+
+    expect(detail.host.value).toEqual(
+      expect.objectContaining({
+        id: 1,
+      }),
+    );
+    expect(detail.error.value).toBe("");
+    expect(detail.metricsError.value).toBe(
+      "无法读取历史指标，稍后会自动重试。",
+    );
+    expect(detail.samples.value).toEqual([]);
+  });
+
   it("plays live samples from the same report batch at the collection cadence", async () => {
     vi.useFakeTimers();
     const detail = useHostDetail(1, {

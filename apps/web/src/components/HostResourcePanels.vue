@@ -3,7 +3,12 @@ import { Download, HardDrive, Upload, EthernetPort } from "@lucide/vue";
 import { computed } from "vue";
 
 import { Progress } from "@/components/ui/progress";
-import { formatBitsPerSecond, formatBytes, formatPercent } from "@/lib/format";
+import {
+  formatBitsPerSecond,
+  formatBytes,
+  formatPercent,
+  formatTrafficBytes,
+} from "@/lib/format";
 import type { MetricSeries } from "@/lib/metrics-chart-data";
 
 import type { HostMetricSample } from "../types";
@@ -370,7 +375,7 @@ function frequencyText(value: number) {
                 总接收
               </span>
               <span class="font-medium">
-                {{ formatBytes(networkInterface.rxWindowBytes) }}
+                {{ formatTrafficBytes(networkInterface.rxWindowBytes) }}
               </span>
             </div>
             <div class="flex items-center justify-between gap-3">
@@ -388,7 +393,7 @@ function frequencyText(value: number) {
                 总发送
               </span>
               <span class="font-medium">
-                {{ formatBytes(networkInterface.txWindowBytes) }}
+                {{ formatTrafficBytes(networkInterface.txWindowBytes) }}
               </span>
             </div>
           </div>
