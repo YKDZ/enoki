@@ -73,6 +73,7 @@ export function useHostDetail(
   let metricsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   let isRefreshingMetrics = false;
   let activeLoad: Promise<void> | null = null;
+  let activeLoadHostId: number | null = null;
   let pendingMetricSamples: HostMetricSample[] = [];
 
   onScopeDispose(() => {
@@ -81,19 +82,34 @@ export function useHostDetail(
   }, true);
 
   async function load() {
-    if (activeLoad) {
+    const targetHostId = currentHostId();
+    if (!targetHostId) {
+      resetDetailState();
+      return;
+    }
+
+    if (host.value?.id !== targetHostId) {
+      resetDetailState();
+    }
+
+    if (activeLoad && activeLoadHostId === targetHostId) {
       return activeLoad;
     }
 
-    activeLoad = loadHostDetail().finally(() => {
-      activeLoad = null;
+    const loadPromise = loadHostDetail(targetHostId).finally(() => {
+      if (activeLoad === loadPromise) {
+        activeLoad = null;
+        activeLoadHostId = null;
+      }
     });
+    activeLoad = loadPromise;
+    activeLoadHostId = targetHostId;
 
     return activeLoad;
   }
 
-  async function loadHostDetail() {
-    if (!currentHostId()) {
+  async function loadHostDetail(targetHostId: number) {
+    if (!targetHostId || currentHostId() !== targetHostId) {
       return;
     }
 
@@ -101,8 +117,12 @@ export function useHostDetail(
     isLoading.value = true;
 
     try {
-      await refreshHostDetail();
+      await refreshHostDetail(targetHostId);
     } catch (caught) {
+      if (currentHostId() !== targetHostId) {
+        return;
+      }
+
       if (handleUnauthorized(caught)) {
         isLoading.value = false;
         return;
@@ -115,8 +135,16 @@ export function useHostDetail(
 
     let shouldRefreshMetrics = true;
     try {
-      await loadMetrics(selectedWindow.value, { mode: "replace" });
+      await loadMetrics(
+        selectedWindow.value,
+        { mode: "replace" },
+        targetHostId,
+      );
     } catch (caught) {
+      if (currentHostId() !== targetHostId) {
+        return;
+      }
+
       if (handleUnauthorized(caught)) {
         shouldRefreshMetrics = false;
         return;
@@ -129,15 +157,22 @@ export function useHostDetail(
       if (shouldRefreshMetrics) {
         startMetricsRefreshLoop();
       }
-      isLoading.value = false;
+      if (currentHostId() === targetHostId) {
+        isLoading.value = false;
+      }
     }
   }
 
   async function loadMetrics(
     window: MetricsWindow,
     options: { mode: "enqueue-new" | "replace" },
+    targetHostId = currentHostId(),
   ) {
-    const response = await fetchMetrics(window);
+    const response = await fetchMetrics(window, targetHostId);
+    if (currentHostId() !== targetHostId) {
+      return;
+    }
+
     selectedWindow.value = response.metrics.window;
     metricsError.value = "";
     if (options.mode === "replace") {
@@ -329,8 +364,8 @@ export function useHostDetail(
     }
   }
 
-  async function fetchMetrics(window: MetricsWindow) {
-    const path = `/api/web/hosts/${currentHostId()}/metrics?window=${window}`;
+  async function fetchMetrics(window: MetricsWindow, targetHostId: number) {
+    const path = `/api/web/hosts/${targetHostId}/metrics?window=${window}`;
 
     try {
       return await fetchJson<HostMetricsResponse>(path);
@@ -344,10 +379,14 @@ export function useHostDetail(
     }
   }
 
-  async function refreshHostDetail() {
+  async function refreshHostDetail(targetHostId = currentHostId()) {
     const detailResponse = await fetchJson<HostDetailResponse>(
-      `/api/web/hosts/${currentHostId()}`,
+      `/api/web/hosts/${targetHostId}`,
     );
+    if (currentHostId() !== targetHostId) {
+      return;
+    }
+
     host.value = detailResponse.host;
   }
 
@@ -418,6 +457,15 @@ export function useHostDetail(
 
   function currentHostId() {
     return unref(hostId);
+  }
+
+  function resetDetailState() {
+    host.value = null;
+    samples.value = [];
+    error.value = "";
+    metricsError.value = "";
+    clearLivePlayback();
+    clearMetricsRefreshTimer();
   }
 
   function handleUnauthorized(error: unknown) {

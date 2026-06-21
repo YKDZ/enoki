@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reactive } from "vue";
+import { reactive, ref } from "vue";
 
 import { ApiError } from "@/lib/api";
 
@@ -121,6 +121,98 @@ describe("Host detail data", () => {
     expect(onUnauthorized).toHaveBeenCalledOnce();
     expect(detail.error.value).toBe("");
     expect(detail.host.value).toBeNull();
+    expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("clears stale detail while loading a different host", async () => {
+    const activeHostId = ref(1);
+    const hostTwo = deferred<unknown>();
+    const detail = useHostDetail(activeHostId, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: hostDetail(1),
+          } as T;
+        }
+
+        if (path === "/api/web/hosts/2") {
+          return (await hostTwo.promise) as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(1, 1_725_000_000_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    expect(detail.host.value?.id).toBe(1);
+    expect(detail.samples.value).toHaveLength(1);
+
+    activeHostId.value = 2;
+    const load = detail.load();
+
+    expect(detail.host.value).toBeNull();
+    expect(detail.samples.value).toEqual([]);
+    expect(detail.isLoading.value).toBe(true);
+
+    hostTwo.resolve({
+      host: hostDetail(2),
+    });
+    await load;
+
+    expect(detail.host.value?.id).toBe(2);
+    expect(detail.samples.value).toHaveLength(1);
+    expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("keeps the current detail visible while refreshing the same host", async () => {
+    const hostRefresh = deferred<unknown>();
+    let hostRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          hostRequestCount += 1;
+          if (hostRequestCount === 2) {
+            return (await hostRefresh.promise) as T;
+          }
+
+          return {
+            host: hostDetail(1),
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(1, 1_725_000_000_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    expect(detail.host.value?.id).toBe(1);
+
+    const load = detail.load();
+
+    expect(detail.host.value?.id).toBe(1);
+    expect(detail.isLoading.value).toBe(true);
+
+    hostRefresh.resolve({
+      host: {
+        ...hostDetail(1),
+        displayName: "刷新后的主机",
+      },
+    });
+    await load;
+
+    expect(detail.host.value?.displayName).toBe("刷新后的主机");
     expect(detail.isLoading.value).toBe(false);
   });
 
@@ -687,6 +779,43 @@ function createWindowPreferences(
     setSelectedWindowForHost(hostId: number, window: MetricsWindow) {
       windowsByHostId[String(hostId)] = window;
     },
+  };
+}
+
+function hostDetail(id: number) {
+  return {
+    clockSkew: {
+      detected: false,
+      lastDeltaMs: null,
+    },
+    displayName: `主机 ${id}`,
+    id,
+    lastReportAtMs: null,
+    latestMetrics: null,
+    probeConfiguration: {
+      configuration: {
+        metricsCollectionIntervalSeconds: 5,
+        version: "default-v1",
+      },
+      mode: "inherit",
+    },
+    status: "online",
+    warnings: [],
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+
+  return {
+    promise,
+    reject,
+    resolve,
   };
 }
 
