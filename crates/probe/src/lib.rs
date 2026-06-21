@@ -5,4 +5,5 @@ pub mod protocol;
 pub mod registration;
 pub mod report;
 pub mod runtime;
+pub mod upgrader;
 pub mod version;

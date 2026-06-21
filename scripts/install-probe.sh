@@ -239,6 +239,7 @@ uninstall_probe() {
   systemctl reset-failed "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
 
   remove_path "$INSTALL_PATH"
+  remove_path /etc/sudoers.d/enoki-probe-upgrader
   remove_path "$CONFIG_PATH"
   config_dir="$(dirname "$CONFIG_PATH")"
   remove_empty_dir "$config_dir"
@@ -294,6 +295,10 @@ write_bootstrap_config() {
     printf 'state_dir = '
     toml_string "$STATE_DIR"
     printf '\n'
+    printf 'install_path = '
+    toml_string "$INSTALL_PATH"
+    printf '\n'
+    printf 'upgrader_launch = "systemd"\n'
     printf 'log_level = '
     toml_string "$LOG_LEVEL"
     printf '\n'
@@ -350,6 +355,21 @@ WantedBy=multi-user.target
 EOF
 }
 
+write_upgrader_sudoers() {
+  local sudoers_dir_rooted
+  local sudoers_path_rooted
+
+  sudoers_dir_rooted="$(rooted_path /etc/sudoers.d)"
+  sudoers_path_rooted="$sudoers_dir_rooted/enoki-probe-upgrader"
+  mkdir -p "$sudoers_dir_rooted"
+
+  cat >"$sudoers_path_rooted" <<EOF
+# Managed by Enoki Probe installer.
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-upgrader-* --property=Type=exec $(host_path "$INSTALL_PATH") internal-upgrader --config $(host_path "$CONFIG_PATH") --operation-id * --target-probe-version *
+EOF
+  chmod 0440 "$sudoers_path_rooted"
+}
+
 main() {
   local target
   local work_dir
@@ -403,6 +423,7 @@ main() {
   install_binary "$archive" "$work_dir"
   write_bootstrap_config
   write_systemd_service
+  write_upgrader_sudoers
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}.service"
   systemctl start "${SERVICE_NAME}.service"

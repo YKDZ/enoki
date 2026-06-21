@@ -59,6 +59,8 @@ describe("Probe systemd installer", () => {
         'hub_url = "https://hub.example"',
         'enrollment_token = "enk_enroll_test"',
         'state_dir = "/var/lib/enoki-probe"',
+        'install_path = "/usr/local/bin/enoki-probe"',
+        'upgrader_launch = "systemd"',
         'log_level = "info"',
         "",
       ].join("\n"),
@@ -75,6 +77,15 @@ describe("Probe systemd installer", () => {
         "utf8",
       ),
     ).resolves.toContain("Group=enoki-probe");
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).resolves.toBe(
+      [
+        "# Managed by Enoki Probe installer.",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader-* --property=Type=exec /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap.toml --operation-id * --target-probe-version *",
+        "",
+      ].join("\n"),
+    );
     await expect(
       readFile(path.join(root, "tmp/groupadd.log"), "utf8"),
     ).resolves.toEqual(expect.stringContaining("--system enoki-probe"));
@@ -192,6 +203,8 @@ describe("Probe systemd installer", () => {
         'hub_url = "https://hub.example"',
         'enrollment_token = "enk_\\"quoted\\"\\nsecret\\\\tail"',
         'state_dir = "/var/lib/enoki-probe"',
+        'install_path = "/usr/local/bin/enoki-probe"',
+        'upgrader_launch = "systemd"',
         'log_level = "info\\"\\nnext = \\"bad"',
         "",
       ].join("\n"),
@@ -243,6 +256,7 @@ describe("Probe systemd installer", () => {
     });
     await mkdir(path.join(root, "usr/local/bin"), { recursive: true });
     await mkdir(path.join(root, "etc/enoki"), { recursive: true });
+    await mkdir(path.join(root, "etc/sudoers.d"), { recursive: true });
     await mkdir(path.join(root, "etc/systemd/system"), { recursive: true });
     await mkdir(path.join(root, "var/lib/enoki-probe"), { recursive: true });
     await writeFile(path.join(root, "usr/local/bin/enoki-probe"), "probe");
@@ -253,6 +267,10 @@ describe("Probe systemd installer", () => {
     await writeFile(
       path.join(root, "etc/systemd/system/enoki-probe.service"),
       "service",
+    );
+    await writeFile(
+      path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
+      "sudoers",
     );
     await writeFile(path.join(root, "var/lib/enoki-probe/state"), "state");
 
@@ -279,6 +297,9 @@ describe("Probe systemd installer", () => {
         path.join(root, "etc/systemd/system/enoki-probe.service"),
         "utf8",
       ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(path.join(root, "var/lib/enoki-probe/state"), "utf8"),

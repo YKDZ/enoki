@@ -61,6 +61,29 @@ fn parses_probe_run_command_for_systemd_service_entrypoint() {
 }
 
 #[test]
+fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "internal-upgrader".to_string(),
+        "--config".to_string(),
+        "/etc/enoki/probe-bootstrap.toml".to_string(),
+        "--operation-id".to_string(),
+        "42".to_string(),
+        "--target-probe-version".to_string(),
+        "0.2.0".to_string(),
+    ]);
+
+    assert_eq!(
+        command,
+        ProbeCommand::InternalUpgrader {
+            bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
+            operation_id: "42".to_string(),
+            target_probe_version: "0.2.0".to_string(),
+        },
+    );
+}
+
+#[test]
 fn probe_run_command_fails_when_bootstrap_config_is_missing() {
     let temp = tempfile::tempdir().expect("temp dir");
     let missing_config_path = temp.path().join("missing.toml");

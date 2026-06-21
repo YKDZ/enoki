@@ -14,6 +14,10 @@ use crate::{
         probe_operation_status::Status,
     },
     report::{full_inventory_report, regular_report, startup_report},
+    upgrader::{
+        ProbeUpgraderLaunch, ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
+        launch_systemd_probe_upgrader,
+    },
 };
 use prost::Message;
 
@@ -278,7 +282,10 @@ fn run_reporting_loop(
     let mut reports_sent = 0;
     let mut metrics_collector = MetricsCollector::default();
     let mut operation_reports = ProbeOperationReportQueue::default();
-    let mut operation_runner = NoopProbeOperationRunner;
+    let mut operation_runner = InstalledProbeOperationRunner::from_bootstrap(
+        bootstrap_config,
+        input_bootstrap_path(bootstrap_config),
+    );
     let mut pending_report_body = None;
     let request = startup_report(
         probe_id,
@@ -424,6 +431,13 @@ fn run_reporting_loop(
     Ok(())
 }
 
+fn input_bootstrap_path(bootstrap_config: &BootstrapConfig) -> PathBuf {
+    bootstrap_config
+        .bootstrap_config_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/etc/enoki/probe-bootstrap.toml"))
+}
+
 struct ProbeUpgradeRunnerInput<'a> {
     stdin: &'a str,
     operation: ProbeUpgradeRunnerOperationMetadata<'a>,
@@ -435,24 +449,77 @@ struct ProbeUpgradeRunnerOperationMetadata<'a> {
     target_probe_version: &'a str,
 }
 
-trait ProbeOperationRunner {
-    fn run_probe_upgrade(&mut self, input: ProbeUpgradeRunnerInput<'_>) -> ProbeOperationFailed;
+enum ProbeUpgradeRunnerOutcome {
+    Launched,
+    Failed(ProbeOperationFailed),
 }
 
-struct NoopProbeOperationRunner;
+trait ProbeOperationRunner {
+    fn run_probe_upgrade(
+        &mut self,
+        input: ProbeUpgradeRunnerInput<'_>,
+    ) -> ProbeUpgradeRunnerOutcome;
+}
 
-impl ProbeOperationRunner for NoopProbeOperationRunner {
-    fn run_probe_upgrade(&mut self, input: ProbeUpgradeRunnerInput<'_>) -> ProbeOperationFailed {
-        let _ = (
-            input.operation.current_probe_version,
-            input.operation.operation_id,
-            input.operation.target_probe_version,
-            input.stdin,
-        );
+struct InstalledProbeOperationRunner {
+    bootstrap_config_path: PathBuf,
+    install_path: Option<PathBuf>,
+    launch: Option<String>,
+}
 
-        ProbeOperationFailed {
-            error_code: "unsupported_installation".to_string(),
-            message: "Probe Upgrader is not installed in this build.".to_string(),
+impl InstalledProbeOperationRunner {
+    fn from_bootstrap(bootstrap_config: &BootstrapConfig, bootstrap_config_path: PathBuf) -> Self {
+        Self {
+            bootstrap_config_path,
+            install_path: bootstrap_config.install_path.as_ref().map(PathBuf::from),
+            launch: bootstrap_config.upgrader_launch.clone(),
+        }
+    }
+}
+
+impl ProbeOperationRunner for InstalledProbeOperationRunner {
+    fn run_probe_upgrade(
+        &mut self,
+        input: ProbeUpgradeRunnerInput<'_>,
+    ) -> ProbeUpgradeRunnerOutcome {
+        let _ = input.operation.current_probe_version;
+        let Some(install_path) = self.install_path.clone() else {
+            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message: "Probe Upgrader launch is not configured.".to_string(),
+            });
+        };
+        if self.launch.as_deref() != Some("systemd") {
+            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message: "Probe Upgrader requires a systemd installation.".to_string(),
+            });
+        }
+
+        let mut runner = SystemProbeUpgraderCommandRunner;
+        match launch_systemd_probe_upgrader(
+            ProbeUpgraderLaunch {
+                bootstrap_config_path: self.bootstrap_config_path.clone(),
+                install_path,
+                operation_id: input.operation.operation_id.to_string(),
+                target_probe_version: input.operation.target_probe_version.to_string(),
+                token: input.stdin.to_string(),
+            },
+            &mut runner,
+        ) {
+            Ok(()) => ProbeUpgradeRunnerOutcome::Launched,
+            Err(ProbeUpgraderLaunchError::UnsupportedInstallation(message)) => {
+                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                    error_code: "unsupported_installation".to_string(),
+                    message,
+                })
+            }
+            Err(ProbeUpgraderLaunchError::InsufficientPrivilege(message)) => {
+                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                    error_code: "insufficient_privilege".to_string(),
+                    message,
+                })
+            }
         }
     }
 }
@@ -482,7 +549,7 @@ impl ProbeOperationReportQueue {
             return;
         };
 
-        let failed = runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
+        let outcome = runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
             stdin: &probe_upgrade.operation_token,
             operation: ProbeUpgradeRunnerOperationMetadata {
                 current_probe_version: &probe_upgrade.current_probe_version,
@@ -491,7 +558,9 @@ impl ProbeOperationReportQueue {
             },
         });
         self.started.push(operation.id.clone());
-        self.failed.push((operation.id.clone(), failed));
+        if let ProbeUpgradeRunnerOutcome::Failed(failed) = outcome {
+            self.failed.push((operation.id.clone(), failed));
+        }
     }
 
     fn with_operation_reports(&mut self, mut request: ProbeReportRequest) -> ProbeReportRequest {
@@ -729,6 +798,7 @@ impl ActiveProbeConfiguration {
 }
 
 struct BootstrapConfig {
+    bootstrap_config_path: Option<PathBuf>,
     collect_cpu: Option<bool>,
     collect_disk: Option<bool>,
     collect_load: Option<bool>,
@@ -737,11 +807,13 @@ struct BootstrapConfig {
     collect_uptime: Option<bool>,
     enrollment_token: Option<String>,
     hub_url: Option<String>,
+    install_path: Option<String>,
     metrics_collection_interval_seconds: Option<u64>,
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
     probe_secret: Option<String>,
     reporting_batch_interval_seconds: Option<u64>,
+    upgrader_launch: Option<String>,
 }
 
 impl BootstrapConfig {
@@ -776,6 +848,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         .map_err(|_| ProbeRunError::InvalidConfig("invalid TOML"))?;
 
     Ok(BootstrapConfig {
+        bootstrap_config_path: Some(path.clone()),
         collect_cpu: bool_value(&value, "collect_cpu")?,
         collect_disk: bool_value(&value, "collect_disk")?,
         collect_load: bool_value(&value, "collect_load")?,
@@ -784,6 +857,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         collect_uptime: bool_value(&value, "collect_uptime")?,
         enrollment_token: string_value(&value, "enrollment_token")?,
         hub_url: string_value(&value, "hub_url")?,
+        install_path: string_value(&value, "install_path")?,
         metrics_collection_interval_seconds: integer_value(
             &value,
             "metrics_collection_interval_seconds",
@@ -795,6 +869,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
             &value,
             "reporting_batch_interval_seconds",
         )?,
+        upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
 }
 
@@ -881,13 +956,14 @@ mod tests {
         observed_operation_id: Option<String>,
         observed_stdin: Option<String>,
         observed_target_probe_version: Option<String>,
+        outcome: Option<ProbeUpgradeRunnerOutcome>,
     }
 
     impl ProbeOperationRunner for RecordingOperationRunner {
         fn run_probe_upgrade(
             &mut self,
             input: ProbeUpgradeRunnerInput<'_>,
-        ) -> ProbeOperationFailed {
+        ) -> ProbeUpgradeRunnerOutcome {
             self.observed_current_probe_version =
                 Some(input.operation.current_probe_version.to_string());
             self.observed_operation_id = Some(input.operation.operation_id.to_string());
@@ -895,10 +971,12 @@ mod tests {
             self.observed_target_probe_version =
                 Some(input.operation.target_probe_version.to_string());
 
-            ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "not installed".to_string(),
-            }
+            self.outcome.take().unwrap_or_else(|| {
+                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                    error_code: "unsupported_installation".to_string(),
+                    message: "not installed".to_string(),
+                })
+            })
         }
     }
 
@@ -936,5 +1014,44 @@ mod tests {
             runner.observed_target_probe_version.as_deref(),
             Some("0.2.0")
         );
+    }
+
+    #[test]
+    fn probe_operation_report_queue_reports_insufficient_privilege_launch_failure() {
+        let mut queue = ProbeOperationReportQueue::default();
+        let mut runner = RecordingOperationRunner {
+            outcome: Some(ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "insufficient_privilege".to_string(),
+                message: "sudoers rule is missing".to_string(),
+            })),
+            ..RecordingOperationRunner::default()
+        };
+        let response = ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_string(),
+            inventory_needed: false,
+            pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                id: "operation-01".to_string(),
+                operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                    current_probe_version: "0.1.0".to_string(),
+                    operation_token: "operation-token-01".to_string(),
+                    target_probe_version: "0.2.0".to_string(),
+                })),
+            }),
+            server_time_ms: 1_725_000_000_000,
+        };
+
+        queue.observe_response(&response, &mut runner);
+        let _running_request = queue.with_operation_reports(ProbeReportRequest::default());
+        let request = queue.with_operation_reports(ProbeReportRequest::default());
+
+        assert!(matches!(
+            &request.operation_statuses[0],
+            ProbeOperationStatus {
+                status: Some(Status::Failed(failed)),
+                ..
+            } if failed.error_code == "insufficient_privilege"
+                && failed.message == "sudoers rule is missing"
+        ));
     }
 }
