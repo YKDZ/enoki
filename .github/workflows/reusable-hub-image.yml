@@ -1,0 +1,81 @@
+name: Reusable Hub Image
+
+on:
+  workflow_call:
+    inputs:
+      include-probe-assets:
+        description: Download release Probe assets before building the Hub image.
+        required: false
+        type: boolean
+        default: false
+      push-image:
+        description: Push the Hub image to GHCR.
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: Hub image version, for example v0.1.0 or ci.
+        required: true
+        type: string
+
+jobs:
+  hub-image:
+    name: Hub Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Login to GHCR
+        if: inputs.push-image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Download Probe assets for Hub distribution
+        if: inputs.include-probe-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p probe-assets
+          gh release download "$VERSION" \
+            --pattern 'enoki-probe-*.tar.gz' \
+            --pattern 'manifest.json' \
+            --pattern 'manifest.json.sig' \
+            --pattern 'signing-key.pem' \
+            --pattern 'install-probe.sh' \
+            --dir probe-assets
+
+          for required in manifest.json manifest.json.sig signing-key.pem install-probe.sh; do
+            if [ ! -f "probe-assets/$required" ]; then
+              echo "::error::Missing Probe release asset: $required"
+              exit 1
+            fi
+          done
+          if ! ls probe-assets/enoki-probe-*.tar.gz >/dev/null 2>&1; then
+            echo "::error::Missing Probe binary release assets."
+            exit 1
+          fi
+
+      - name: Build Hub image
+        if: ${{ !inputs.push-image }}
+        run: DOCKER_BUILDKIT=1 docker build -f apps/hub/Dockerfile -t "enoki-hub:${{ inputs.version }}" .
+
+      - name: Build and push Hub image
+        if: inputs.push-image
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/enoki-hub"
+          docker buildx create --use
+          docker buildx build \
+            -f apps/hub/Dockerfile \
+            --platform linux/amd64 \
+            --tag "${image}:${VERSION}" \
+            --tag "${image}:latest" \
+            --push \
+            .

@@ -1,0 +1,73 @@
+name: Reusable Publish Probe Release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version, for example v0.1.0.
+        required: true
+        type: string
+    secrets:
+      ENOKI_PROBE_ASSET_SIGNING_KEY_PEM:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish-probe-release:
+    name: Publish Probe release assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download Probe artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: enoki-probe-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create signed Probe asset manifest
+        env:
+          ENOKI_PROBE_ASSET_SIGNING_KEY_PEM: ${{ secrets.ENOKI_PROBE_ASSET_SIGNING_KEY_PEM }}
+          ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
+          ENOKI_PROBE_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -z "$ENOKI_PROBE_ASSET_SIGNING_KEY_PEM" ]; then
+            echo "::error::ENOKI_PROBE_ASSET_SIGNING_KEY_PEM secret is required."
+            exit 1
+          fi
+          if [ -z "$ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM" ]; then
+            echo "::error::ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM variable is required."
+            exit 1
+          fi
+
+          node scripts/create-probe-asset-manifest.mjs dist
+          printf '%s\n' "$ENOKI_PROBE_ASSET_SIGNING_KEY_PEM" > dist/signing-key-private.pem
+          printf '%s\n' "$ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM" > dist/signing-key.pem
+          openssl dgst -sha256 \
+            -sign dist/signing-key-private.pem \
+            -out dist/manifest.json.sig \
+            dist/manifest.json
+          rm dist/signing-key-private.pem
+          cp scripts/install-probe.sh dist/install-probe.sh
+          public_key_sha256="$(sha256sum dist/signing-key.pem | awk '{print $1}')"
+          sed -i "s/__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__/$public_key_sha256/g" dist/install-probe.sh
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.version }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --notes "Enoki $RELEASE_TAG"
+          fi
+
+          gh release upload "$RELEASE_TAG" dist/* --clobber

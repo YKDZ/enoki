@@ -16,127 +16,22 @@ concurrency:
 jobs:
   node-checks:
     name: Node checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Format check
-        run: pnpm run format:check
-
-      - name: Lint
-        run: pnpm run lint
-
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Test
-        run: pnpm run test
-
-      - name: Generated protobuf check
-        run: pnpm run proto:check
+    uses: ./.github/workflows/reusable-node-checks.yml
+    with:
+      run-build: true
 
   rust-checks:
     name: Rust checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
-
-      - name: Check Rust formatting
-        run: cargo fmt --all --check
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
-
-  build:
-    name: Build workspace
-    needs: [node-checks, rust-checks]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build Hub and Web
-        run: pnpm run build
-
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
-
-      - name: Build Probe
-        run: cargo build -p enoki-probe --release
+    uses: ./.github/workflows/reusable-rust-checks.yml
 
   probe-binaries:
-    name: Probe binary (${{ matrix.target }})
+    name: Probe binaries
     needs: rust-checks
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
-
-      - name: Build Probe
-        run: cargo build -p enoki-probe --release --target ${{ matrix.target }}
+    uses: ./.github/workflows/reusable-build-probe.yml
 
   hub-image:
     name: Hub Docker image
     needs: node-checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Build image
-        run: DOCKER_BUILDKIT=1 docker build -f apps/hub/Dockerfile -t enoki-hub:ci .
+    uses: ./.github/workflows/reusable-hub-image.yml
+    with:
+      version: ci

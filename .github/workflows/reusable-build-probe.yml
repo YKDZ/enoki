@@ -1,0 +1,65 @@
+name: Reusable Build Probe
+
+on:
+  workflow_call:
+    inputs:
+      package-artifacts:
+        description: Package and upload release artifacts after building.
+        required: false
+        type: boolean
+        default: false
+      version:
+        description: Probe version to embed, for example v0.1.0.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-probe:
+    name: Probe binary (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: Build Probe
+        env:
+          ENOKI_PROBE_VERSION: ${{ inputs.version }}
+        run: cargo build -p enoki-probe --release --target ${{ matrix.target }}
+
+      - name: Package Probe
+        if: inputs.package-artifacts
+        run: |
+          mkdir -p "dist/enoki-probe-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/enoki-probe" "dist/enoki-probe-${{ matrix.target }}/enoki-probe"
+          tar -C "dist/enoki-probe-${{ matrix.target }}" -czf "dist/enoki-probe-${{ matrix.target }}.tar.gz" enoki-probe
+          cd dist
+          sha256sum "enoki-probe-${{ matrix.target }}.tar.gz" > "enoki-probe-${{ matrix.target }}.tar.gz.sha256"
+
+      - name: Upload Probe artifact
+        if: inputs.package-artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: enoki-probe-${{ matrix.target }}
+          path: |
+            dist/enoki-probe-${{ matrix.target }}.tar.gz
+            dist/enoki-probe-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error

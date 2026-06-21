@@ -1,0 +1,54 @@
+name: Reusable Node checks
+
+on:
+  workflow_call:
+    inputs:
+      run-build:
+        description: Run the workspace build after typechecking.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  node-checks:
+    name: Node checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format
+        run: pnpm run format:check
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        if: inputs.run-build
+        run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Check protobuf outputs
+        run: pnpm run proto:check
