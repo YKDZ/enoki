@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -53,6 +53,37 @@ describe("Probe-only API surface", () => {
     await expect(app.request("/hosts/1")).resolves.toMatchObject({
       status: 404,
     });
+
+    database.close();
+  });
+
+  it("serves Probe installer assets from the probe-only API surface", async () => {
+    const database = await createTemporaryDatabase();
+    const root = await mkdtemp(path.join(os.tmpdir(), "enoki-probe-assets-"));
+    tempRoots.push(root);
+    const assetDir = path.join(root, "assets");
+    const installScriptPath = path.join(root, "install-probe.sh");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(installScriptPath, "#!/usr/bin/env bash\necho install\n");
+    await writeFile(path.join(assetDir, "manifest.json"), '{"assets":[]}');
+
+    const app = createProbeApiApp({
+      database,
+      probeAssets: {
+        assetDir,
+        installScriptPath,
+      },
+    });
+
+    const installResponse = await app.request("/api/probe/install.sh");
+    expect(installResponse.status).toBe(200);
+    await expect(installResponse.text()).resolves.toContain("echo install");
+
+    const manifestResponse = await app.request(
+      "/api/probe/assets/manifest.json",
+    );
+    expect(manifestResponse.status).toBe(200);
+    await expect(manifestResponse.text()).resolves.toContain('{"assets":[]}');
 
     database.close();
   });

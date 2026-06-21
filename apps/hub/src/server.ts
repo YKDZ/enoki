@@ -47,6 +47,7 @@ servers.push(
     hostStatus: config.hostStatus,
     liveUpdates,
     port: probePort,
+    probeAssets: config.probeAssets,
     trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
   }),
 );

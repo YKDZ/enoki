@@ -54,6 +54,7 @@ export type ProbeApiAppOptions = Pick<
   | "hostStatus"
   | "liveUpdates"
   | "now"
+  | "probeAssets"
   | "trustForwardedProbeHeaders"
 >;
 
@@ -212,6 +213,13 @@ export function createProbeApiApp(options: ProbeApiAppOptions = {}) {
   const app = options.app ?? new Hono();
 
   mountProbeApiSurface(app, options);
+  app.route(
+    "/api/probe",
+    createProbeAssetRoutes({
+      assetDir: options.probeAssets?.assetDir,
+      installScriptPath: options.probeAssets?.installScriptPath,
+    }),
+  );
 
   return app;
 }
