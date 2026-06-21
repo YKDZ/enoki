@@ -15,6 +15,7 @@ describe("Host detail page", () => {
         maxMs: 1_725_000_000_000,
         minMs: 1_725_000_000_000 - 60 * 60 * 1000,
       })),
+      createProbeUpgradeRequest: vi.fn(),
       error: ref(""),
       host: ref({
         clockSkew: {
@@ -66,6 +67,7 @@ describe("Host detail page", () => {
           isUpgradeable: true,
           nonUpgradeableReason: null,
         },
+        probeUpgradeStatus: null,
         probeVersion: "0.1.0",
         status: "online",
         system: "linux",
@@ -80,6 +82,7 @@ describe("Host detail page", () => {
         ],
       }),
       isEmpty: computed(() => true),
+      isCreatingProbeUpgradeRequest: ref(false),
       isLoading: ref(false),
       load: vi.fn(),
       samples: ref([
@@ -147,6 +150,8 @@ describe("Host detail page", () => {
     expect(html).toContain("0.1.0");
     expect(html).toContain("0.2.0");
     expect(html).toContain("Probe 可升级");
+    expect(html).toContain("确认 Probe 升级");
+    expect(html).toContain("将此 Host 的 Probe 升级到 0.2.0");
     expect(html).toContain("配置");
     expect(html).toContain("在线");
 
@@ -164,12 +169,22 @@ describe("Host detail page", () => {
         isUpgradeable: false,
         nonUpgradeableReason: "probe_version_current",
       },
+      probeUpgradeStatus: {
+        createdAtMs: 1_725_000_100_000,
+        failure: null,
+        id: 9,
+        state: "pending",
+        targetProbeVersion: "0.2.0",
+        updatedAtMs: 1_725_000_100_000,
+      },
     };
 
-    const nonUpgradeableHtml = await renderDetailPage();
+    const pendingHtml = await renderDetailPage();
 
-    expect(nonUpgradeableHtml).toContain("Probe 升级");
-    expect(nonUpgradeableHtml).not.toContain("Probe 可升级");
-    expect(nonUpgradeableHtml).not.toContain("bg-red-500");
+    expect(pendingHtml).toContain("Probe 升级中");
+    expect(pendingHtml).toContain("animate-spin");
+    expect(pendingHtml).not.toContain("Probe 可升级");
+    expect(pendingHtml).not.toContain("bg-red-500");
+    expect(pendingHtml).not.toContain("取消升级");
   });
 });

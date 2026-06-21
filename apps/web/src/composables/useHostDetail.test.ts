@@ -286,6 +286,74 @@ describe("Host detail data", () => {
     expect(detail.samples.value).toEqual([]);
   });
 
+  it("creates a Probe Upgrade Request and updates Host detail status", async () => {
+    const requestedPaths: Array<{ method: string; path: string }> = [];
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        requestedPaths.push({ method: "GET", path });
+
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              id: 1,
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 5,
+                  version: "default-v1",
+                },
+                mode: "inherit",
+              },
+              probeUpgradeStatus: null,
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [],
+            window: "1h",
+          },
+        } as T;
+      },
+      async mutateJson<T>(path: string, options: { method: string }) {
+        requestedPaths.push({ method: options.method, path });
+
+        return {
+          probeUpgradeRequest: {
+            createdAtMs: 1_725_000_000_000,
+            failure: null,
+            id: 9,
+            state: "pending",
+            targetProbeVersion: "0.2.0",
+            updatedAtMs: 1_725_000_000_000,
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await detail.createProbeUpgradeRequest();
+
+    expect(requestedPaths).toEqual([
+      { method: "GET", path: "/api/web/hosts/1" },
+      { method: "GET", path: "/api/web/hosts/1/metrics?window=1h" },
+      {
+        method: "POST",
+        path: "/api/web/hosts/1/probe-upgrade-requests",
+      },
+    ]);
+    expect(detail.host.value?.probeUpgradeStatus).toEqual({
+      createdAtMs: 1_725_000_000_000,
+      failure: null,
+      id: 9,
+      state: "pending",
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_000_000,
+    });
+    expect(detail.isCreatingProbeUpgradeRequest.value).toBe(false);
+  });
+
   it("plays live samples from the same report batch at the collection cadence", async () => {
     vi.useFakeTimers();
     const detail = useHostDetail(1, {

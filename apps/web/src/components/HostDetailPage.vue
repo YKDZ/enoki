@@ -1,11 +1,20 @@
 <script setup lang="ts">
 import { AlertTriangle, ArrowLeft, LoaderCircle, Settings } from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -13,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { toast } from "@/components/ui/sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { useHostDetail } from "@/composables/useHostDetail";
 import { formatBitsPerSecond, formatPercent } from "@/lib/format";
@@ -82,6 +92,7 @@ const windowOptions = [
 const windowValues = new Set<MetricsWindow>(
   windowOptions.map((option) => option.value),
 );
+const isProbeUpgradeDialogOpen = ref(false);
 
 const chartData = computed(() =>
   buildMetricsChartData(props.detail.samples.value),
@@ -94,10 +105,47 @@ const latestMetric = computed(
 const probeUpgradeEligibility = computed(
   () => host.value?.probeUpgradeEligibility ?? null,
 );
+const probeUpgradeStatus = computed(
+  () => host.value?.probeUpgradeStatus ?? null,
+);
+const isProbeUpgradeActive = computed(() =>
+  ["pending", "accepted", "running"].includes(
+    probeUpgradeStatus.value?.state ?? "",
+  ),
+);
+const probeUpgradeTargetVersion = computed(
+  () =>
+    probeUpgradeStatus.value?.targetProbeVersion ??
+    probeUpgradeEligibility.value?.currentProbeAssetSetVersion ??
+    "",
+);
+const canCreateProbeUpgradeRequest = computed(
+  () =>
+    Boolean(probeUpgradeEligibility.value?.isUpgradeable) &&
+    !isProbeUpgradeActive.value &&
+    !props.detail.isCreatingProbeUpgradeRequest.value,
+);
 
 onMounted(() => {
   void props.detail.load();
 });
+
+watch(
+  () => probeUpgradeStatus.value,
+  (status, previousStatus) => {
+    if (
+      status?.state !== "failed" ||
+      status.id === previousStatus?.id ||
+      !status.failure
+    ) {
+      return;
+    }
+
+    toast.error("Probe 升级失败", {
+      description: status.failure.message || status.failure.code,
+    });
+  },
+);
 
 function statusClass(status: string) {
   if (status === "online") {
@@ -121,6 +169,17 @@ function switchMetricsWindow(value: AcceptableValue) {
 
 function isMetricsWindow(value: AcceptableValue): value is MetricsWindow {
   return typeof value === "string" && windowValues.has(value as MetricsWindow);
+}
+
+async function createProbeUpgradeRequest() {
+  try {
+    await props.detail.createProbeUpgradeRequest();
+    isProbeUpgradeDialogOpen.value = false;
+  } catch {
+    toast.error("无法创建 Probe Upgrade Request", {
+      description: "请稍后重试。",
+    });
+  }
 }
 </script>
 
@@ -185,25 +244,83 @@ function isMetricsWindow(value: AcceptableValue): value is MetricsWindow {
         </div>
 
         <div class="flex items-center gap-2">
-          <Button
+          <Dialog
             v-if="probeUpgradeEligibility"
-            variant="outline"
-            size="sm"
-            type="button"
-            class="relative"
-            disabled
-            title="Probe 升级"
+            v-model:open="isProbeUpgradeDialogOpen"
           >
-            <span
-              v-if="probeUpgradeEligibility.isUpgradeable"
-              class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
-              aria-hidden="true"
-            />
-            <span v-if="probeUpgradeEligibility.isUpgradeable" class="sr-only">
-              Probe 可升级
-            </span>
-            Probe 升级
-          </Button>
+            <DialogTrigger as-child>
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                class="relative"
+                :disabled="!canCreateProbeUpgradeRequest"
+                title="Probe 升级"
+              >
+                <LoaderCircle
+                  v-if="
+                    isProbeUpgradeActive ||
+                    detail.isCreatingProbeUpgradeRequest.value
+                  "
+                  class="text-muted-foreground size-4 animate-spin"
+                  aria-hidden="true"
+                />
+                <span
+                  v-if="
+                    probeUpgradeEligibility.isUpgradeable &&
+                    !isProbeUpgradeActive
+                  "
+                  class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
+                  aria-hidden="true"
+                />
+                <span
+                  v-if="
+                    probeUpgradeEligibility.isUpgradeable &&
+                    !isProbeUpgradeActive
+                  "
+                  class="sr-only"
+                >
+                  Probe 可升级，确认 Probe 升级，将此 Host 的 Probe 升级到
+                  {{ probeUpgradeTargetVersion }}
+                </span>
+                {{
+                  isProbeUpgradeActive ||
+                  detail.isCreatingProbeUpgradeRequest.value
+                    ? "Probe 升级中"
+                    : "Probe 升级"
+                }}
+              </Button>
+            </DialogTrigger>
+            <DialogContent force-mount>
+              <DialogHeader>
+                <DialogTitle>确认 Probe 升级</DialogTitle>
+                <DialogDescription>
+                  将此 Host 的 Probe 升级到 {{ probeUpgradeTargetVersion }}。
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  @click="isProbeUpgradeDialogOpen = false"
+                >
+                  返回
+                </Button>
+                <Button
+                  type="button"
+                  :disabled="detail.isCreatingProbeUpgradeRequest.value"
+                  @click="createProbeUpgradeRequest"
+                >
+                  <LoaderCircle
+                    v-if="detail.isCreatingProbeUpgradeRequest.value"
+                    class="size-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                  确认升级
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
           <Button
             variant="outline"
             size="icon-sm"

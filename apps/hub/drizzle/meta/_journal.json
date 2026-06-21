@@ -92,6 +92,13 @@
       "when": 1781980000000,
       "tag": "0012_managed_host_description",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1781981000000,
+      "tag": "0013_probe_operations",
+      "breakpoints": true
     }
   ]
 }

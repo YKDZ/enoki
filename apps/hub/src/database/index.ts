@@ -17,6 +17,10 @@ import {
   createProbeConfigurationRepository,
   type ProbeConfigurationRepository,
 } from "./probe-configuration.js";
+import {
+  createProbeOperationRepository,
+  type ProbeOperationRepository,
+} from "./probe-operations.js";
 import * as schema from "./schema.js";
 
 export type HubDatabase = {
@@ -26,6 +30,7 @@ export type HubDatabase = {
   hosts: HostRepository;
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
+  probeOperations: ProbeOperationRepository;
   sqlite: Database.Database;
 };
 
@@ -56,6 +61,7 @@ export function initializeHubDatabase(
     hosts: createHostRepository(database),
     metrics: createMetricsRepository(database),
     probeConfigurations: createProbeConfigurationRepository(database),
+    probeOperations: createProbeOperationRepository(database),
     sqlite,
   };
 }

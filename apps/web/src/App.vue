@@ -13,6 +13,7 @@ import HostGridSkeleton from "./components/HostGridSkeleton.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
+import { Toaster } from "./components/ui/sonner";
 import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
 import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
@@ -602,6 +603,7 @@ function hostDetailPath(hostId: number) {
 
 <template>
   <main class="bg-background text-foreground min-h-screen">
+    <Toaster />
     <AppHeader
       :is-authenticated="isAuthenticated"
       :is-creating-enrollment="isCreatingEnrollment"

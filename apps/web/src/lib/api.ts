@@ -22,6 +22,33 @@ export async function apiGet<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+export async function apiMutate<T>(
+  path: string,
+  options: { body?: unknown; method: "DELETE" | "POST" | "PUT" },
+): Promise<T> {
+  const response = await fetch(path, {
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    credentials: "same-origin",
+    headers:
+      options.body === undefined
+        ? undefined
+        : {
+            "content-type": "application/json",
+          },
+    method: options.method,
+  });
+
+  if (!response.ok) {
+    throw new ApiError(
+      ((await response.json()) as { error?: string }).error ??
+        `Request failed: ${response.status}`,
+      response.status,
+    );
+  }
+
+  return (await response.json()) as T;
+}
+
 export async function saveConfiguration(
   path: string,
   configuration: ProbeConfiguration,

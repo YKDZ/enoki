@@ -39,6 +39,11 @@ export type ProbeAssetConfig = {
   installScriptPath: string;
 };
 
+export type ProbeOperationConfig = {
+  acceptedTimeoutMs: number;
+  runningTimeoutMs: number;
+};
+
 export type HubRuntimeConfig = {
   auth: AuthConfig;
   clockSkew: ClockSkewConfig;
@@ -48,6 +53,7 @@ export type HubRuntimeConfig = {
   metrics: MetricsConfig;
   network: NetworkConfig;
   probeAssets: ProbeAssetConfig;
+  probeOperations: ProbeOperationConfig;
 };
 
 const defaultDataRoot = "/data";
@@ -57,6 +63,8 @@ const defaultHostStatusOfflineAfterSeconds = 90;
 const defaultHostStatusStaleAfterSeconds = 30;
 const defaultMetricsRetentionDays = 7;
 const defaultProbeAssetDir = "/app/probe-assets";
+const defaultProbeOperationAcceptedTimeoutSeconds = 5 * 60;
+const defaultProbeOperationRunningTimeoutSeconds = 15 * 60;
 
 export function createHubRuntimeConfigFromEnvironment(
   environment: HubEnvironment,
@@ -103,6 +111,20 @@ export function createHubRuntimeConfigFromEnvironment(
           environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
           "install-probe.sh",
         ),
+    },
+    probeOperations: {
+      acceptedTimeoutMs:
+        readPositiveInteger(
+          environment.ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS,
+          defaultProbeOperationAcceptedTimeoutSeconds,
+          "ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS",
+        ) * 1000,
+      runningTimeoutMs:
+        readPositiveInteger(
+          environment.ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS,
+          defaultProbeOperationRunningTimeoutSeconds,
+          "ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS",
+        ) * 1000,
     },
   };
 }

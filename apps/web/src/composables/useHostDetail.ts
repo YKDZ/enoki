@@ -4,7 +4,7 @@ import type {
 } from "@enoki/api-client/websocket";
 import { computed, onScopeDispose, ref, unref, type MaybeRef } from "vue";
 
-import { apiGet, isUnauthorizedError } from "@/lib/api";
+import { apiGet, apiMutate, isUnauthorizedError } from "@/lib/api";
 import {
   useHostMetricsWindowStore,
   type HostMetricsWindowPreferences,
@@ -19,6 +19,10 @@ import type {
 } from "../types";
 
 type FetchJson = <T>(path: string) => Promise<T>;
+type MutateJson = <T>(
+  path: string,
+  options: { body?: unknown; method: "DELETE" | "POST" | "PUT" },
+) => Promise<T>;
 
 const metricsWindowDurationsMs: Record<MetricsWindow, number> = {
   "1m": 60 * 1000,
@@ -32,11 +36,13 @@ export function useHostDetail(
   hostId: MaybeRef<number>,
   options: {
     fetchJson?: FetchJson;
+    mutateJson?: MutateJson;
     onUnauthorized?: () => void;
     windowPreferences?: HostMetricsWindowPreferences;
   } = {},
 ) {
   const fetchJson = options.fetchJson ?? apiGet;
+  const mutateJson = options.mutateJson ?? apiMutate;
   const windowPreferences =
     options.windowPreferences ?? useHostMetricsWindowStore();
   const host = ref<HostDetail | null>(null);
@@ -47,6 +53,7 @@ export function useHostDetail(
       windowPreferences.setSelectedWindowForHost(currentHostId(), window),
   });
   const isLoading = ref(false);
+  const isCreatingProbeUpgradeRequest = ref(false);
   const error = ref("");
   const metricsError = ref("");
   const isEmpty = computed(() => samples.value.length === 0);
@@ -166,6 +173,37 @@ export function useHostDetail(
       startMetricsRefreshLoop();
     } finally {
       isLoading.value = false;
+    }
+  }
+
+  async function createProbeUpgradeRequest() {
+    if (!currentHostId() || isCreatingProbeUpgradeRequest.value) {
+      return;
+    }
+
+    isCreatingProbeUpgradeRequest.value = true;
+
+    try {
+      const response = await mutateJson<{
+        probeUpgradeRequest: NonNullable<HostDetail["probeUpgradeStatus"]>;
+      }>(`/api/web/hosts/${currentHostId()}/probe-upgrade-requests`, {
+        method: "POST",
+      });
+
+      if (host.value) {
+        host.value = {
+          ...host.value,
+          probeUpgradeStatus: response.probeUpgradeRequest,
+        };
+      }
+    } catch (caught) {
+      if (handleUnauthorized(caught)) {
+        return;
+      }
+
+      throw caught;
+    } finally {
+      isCreatingProbeUpgradeRequest.value = false;
     }
   }
 
@@ -384,8 +422,10 @@ export function useHostDetail(
     appendLiveSample,
     applyLiveSummary,
     chartRange,
+    createProbeUpgradeRequest,
     error,
     host,
+    isCreatingProbeUpgradeRequest,
     isEmpty,
     isLoading,
     metricsError,

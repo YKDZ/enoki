@@ -132,6 +132,24 @@ export type HostDetail = HostSummary & {
       | "probe_version_newer"
       | null;
   };
+  probeUpgradeStatus: {
+    createdAtMs: number;
+    failure: {
+      code: string;
+      message: string;
+    } | null;
+    id: number;
+    state:
+      | "pending"
+      | "accepted"
+      | "running"
+      | "succeeded"
+      | "failed"
+      | "superseded"
+      | "canceled";
+    targetProbeVersion: string;
+    updatedAtMs: number;
+  } | null;
   warnings: Array<{
     code: string;
     message: string;

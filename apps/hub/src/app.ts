@@ -131,6 +131,7 @@ export function createHubApp(options: HubAppOptions = {}) {
           now: options.now,
           probeAssetDir: options.probeAssets?.assetDir,
           probeConfigurations: options.database.probeConfigurations,
+          probeOperations: options.database.probeOperations,
         }),
       );
       app.route(

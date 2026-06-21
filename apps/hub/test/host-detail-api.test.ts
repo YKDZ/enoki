@@ -603,6 +603,315 @@ describe("Host detail API", () => {
     database.close();
   });
 
+  it("lets the Owner create a Probe Upgrade Request and exposes status on Host detail", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify(probeAssetManifest("v0.2.0")),
+    );
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    const hostId = await firstHostId(app, ownerSession);
+
+    const unauthenticatedResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        method: "POST",
+      },
+    );
+    expect(unauthenticatedResponse.status).toBe(401);
+
+    const createResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+
+    expect(createResponse.status).toBe(201);
+    const createdBody = (await createResponse.json()) as {
+      probeUpgradeRequest: {
+        createdAtMs: number;
+        failure: null;
+        id: number;
+        state: string;
+        targetProbeVersion: string;
+        updatedAtMs: number;
+      };
+    };
+    expect(createdBody).toEqual({
+      probeUpgradeRequest: {
+        createdAtMs: 1_725_000_000_000,
+        failure: null,
+        id: expect.any(Number),
+        state: "pending",
+        targetProbeVersion: "0.2.0",
+        updatedAtMs: 1_725_000_000_000,
+      },
+    });
+
+    const duplicateResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    expect(duplicateResponse.status).toBe(200);
+    await expect(duplicateResponse.json()).resolves.toEqual({
+      probeUpgradeRequest: {
+        createdAtMs: 1_725_000_000_000,
+        failure: null,
+        id: createdBody.probeUpgradeRequest.id,
+        state: "pending",
+        targetProbeVersion: "0.2.0",
+        updatedAtMs: 1_725_000_000_000,
+      },
+    });
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: {
+          createdAtMs: 1_725_000_000_000,
+          failure: null,
+          id: expect.any(Number),
+          state: "pending",
+          targetProbeVersion: "0.2.0",
+          updatedAtMs: 1_725_000_000_000,
+        },
+      }),
+    });
+    database.sqlite
+      .prepare(
+        "update probe_operations set state = 'failed', failure_code = ?, failure_message = ?, completed_at_ms = ?, updated_at_ms = ? where id = (select id from probe_operations where managed_host_id = ? order by id desc limit 1)",
+      )
+      .run(
+        "unsupported_installation",
+        "当前安装方式不支持 Probe 升级。",
+        1_725_000_001_000,
+        1_725_000_001_000,
+        hostId,
+      );
+
+    const failedDetailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+
+    expect(failedDetailResponse.status).toBe(200);
+    await expect(failedDetailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: {
+          createdAtMs: 1_725_000_000_000,
+          failure: {
+            code: "unsupported_installation",
+            message: "当前安装方式不支持 Probe 升级。",
+          },
+          id: expect.any(Number),
+          state: "failed",
+          targetProbeVersion: "0.2.0",
+          updatedAtMs: 1_725_000_001_000,
+        },
+      }),
+    });
+    expect(database.audit.recent(10)).toContainEqual(
+      expect.objectContaining({
+        action: "probe_upgrade_request.create",
+        actor: "owner",
+        outcome: "success",
+        subjectId: expect.any(String),
+        subjectType: "probe_upgrade_request",
+      }),
+    );
+
+    database.close();
+  });
+
+  it("rejects Probe Upgrade Request creation for non-upgradeable Hosts with stable error codes", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify(probeAssetManifest("v0.2.0")),
+    );
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.2.0" });
+    const hostId = await firstHostId(app, ownerSession);
+
+    const response = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "host_not_upgradeable",
+      reason: "probe_version_current",
+    });
+
+    database.close();
+  });
+
+  it("supports backend cancel for pending Probe Upgrade Requests only", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify(probeAssetManifest("v0.2.0")),
+    );
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    const hostId = await firstHostId(app, ownerSession);
+
+    const createResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    const created = (await createResponse.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+
+    const cancelResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests/${created.probeUpgradeRequest.id}`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "DELETE",
+      },
+    );
+
+    expect(cancelResponse.status).toBe(200);
+    await expect(cancelResponse.json()).resolves.toEqual({
+      probeUpgradeRequest: {
+        createdAtMs: 1_725_000_000_000,
+        failure: null,
+        id: created.probeUpgradeRequest.id,
+        state: "canceled",
+        targetProbeVersion: "0.2.0",
+        updatedAtMs: 1_725_000_000_000,
+      },
+    });
+
+    const secondCreateResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    const secondCreated = (await secondCreateResponse.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    database.sqlite
+      .prepare(
+        "update probe_operations set state = 'accepted', accepted_at_ms = ? where id = ?",
+      )
+      .run(1_725_000_000_500, secondCreated.probeUpgradeRequest.id);
+
+    const rejectedCancelResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests/${secondCreated.probeUpgradeRequest.id}`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "DELETE",
+      },
+    );
+
+    expect(rejectedCancelResponse.status).toBe(409);
+    await expect(rejectedCancelResponse.json()).resolves.toEqual({
+      error: "probe_upgrade_request_not_cancelable",
+    });
+    expect(database.audit.recent(10)).toContainEqual(
+      expect.objectContaining({
+        action: "probe_upgrade_request.cancel",
+        actor: "owner",
+        outcome: "success",
+        subjectId: String(created.probeUpgradeRequest.id),
+        subjectType: "probe_upgrade_request",
+      }),
+    );
+
+    database.close();
+  });
+
   it("exposes stable non-upgradeable reasons for missing and malformed versions", async () => {
     await expect(
       readHostProbeUpgradeEligibility({

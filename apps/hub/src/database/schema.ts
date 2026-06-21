@@ -97,6 +97,27 @@ export const hosts = sqliteTable(
 export type HostRow = typeof hosts.$inferSelect;
 export type NewHostRow = typeof hosts.$inferInsert;
 
+export const probeOperations = sqliteTable("probe_operations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  managedHostId: integer("managed_host_id").notNull(),
+  kind: text("kind").notNull(),
+  state: text("state").notNull(),
+  currentProbeVersion: text("current_probe_version"),
+  targetProbeVersion: text("target_probe_version").notNull(),
+  failureCode: text("failure_code"),
+  failureMessage: text("failure_message"),
+  createdAtMs: integer("created_at_ms").notNull(),
+  updatedAtMs: integer("updated_at_ms").notNull(),
+  acceptedAtMs: integer("accepted_at_ms"),
+  runningAtMs: integer("running_at_ms"),
+  completedAtMs: integer("completed_at_ms"),
+  supersededAtMs: integer("superseded_at_ms"),
+  canceledAtMs: integer("canceled_at_ms"),
+});
+
+export type ProbeOperationRow = typeof probeOperations.$inferSelect;
+export type NewProbeOperationRow = typeof probeOperations.$inferInsert;
+
 export const reportObservations = sqliteTable(
   "report_observations",
   {

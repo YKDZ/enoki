@@ -24,6 +24,10 @@ describe("Hub runtime configuration", () => {
     });
     expect(config.metrics.retentionDays).toBe(7);
     expect(config.network.trustForwardedProbeHeaders).toBe(false);
+    expect(config.probeOperations).toEqual({
+      acceptedTimeoutMs: 300_000,
+      runningTimeoutMs: 900_000,
+    });
   });
 
   it("allows deployment configuration to override persistence and Metrics retention", () => {
@@ -35,6 +39,8 @@ describe("Hub runtime configuration", () => {
       ENOKI_HOST_STATUS_STALE_AFTER_SECONDS: "10",
       ENOKI_METRICS_RETENTION_DAYS: "14",
       ENOKI_PROBE_ASSET_DIR: "/opt/enoki/assets",
+      ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS: "60",
+      ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS: "600",
       ENOKI_PROBE_INSTALL_PATH: "/opt/enoki/bin/enoki-probe",
       ENOKI_PUBLIC_HUB_URL: "https://hub.example",
       ENOKI_SQLITE_PATH: "/tmp/custom-enoki.db",
@@ -60,6 +66,10 @@ describe("Hub runtime configuration", () => {
     });
     expect(config.metrics.retentionDays).toBe(14);
     expect(config.network.trustForwardedProbeHeaders).toBe(true);
+    expect(config.probeOperations).toEqual({
+      acceptedTimeoutMs: 60_000,
+      runningTimeoutMs: 600_000,
+    });
   });
 
   it("rejects Host Status thresholds where offline is not after stale", () => {

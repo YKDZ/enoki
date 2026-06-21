@@ -7,10 +7,16 @@ import type {
 } from "../database/hosts.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
+import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import {
   evaluateProbeUpgradeEligibility,
   readProbeAssetSetVersionFromDirectory,
 } from "../probe/asset-set.js";
+import {
+  cancelProbeUpgradeRequest,
+  createProbeUpgradeRequest,
+  type ProbeUpgradeRequest,
+} from "../probe/operation.js";
 
 export type HostRouteServices = {
   audit?: AuditRepository;
@@ -20,6 +26,7 @@ export type HostRouteServices = {
   now?: () => number;
   probeAssetDir?: string;
   probeConfigurations?: ProbeConfigurationRepository;
+  probeOperations?: ProbeOperationRepository;
 };
 
 const metricsWindows = {
@@ -98,8 +105,159 @@ export function createHostRoutes(services: HostRouteServices) {
             currentProbeAssetSetVersion.nonUpgradeableReason,
           probeVersion: host.probeVersion,
         }),
+        probeUpgradeStatus: probeUpgradeStatus(
+          services.probeOperations?.findLatestForHost(hostId) ?? null,
+        ),
         warnings: warningList(host),
       },
+    });
+  });
+
+  routes.post("/:hostId/probe-upgrade-requests", async (context) => {
+    const hostId = numericHostId(context.req.param("hostId"));
+    if (!hostId) {
+      return hostMetadataError("host_not_found", 404);
+    }
+
+    if (!services.probeOperations) {
+      return hostMetadataError("probe_operations_unavailable", 503);
+    }
+
+    const host = services.hosts.findActiveById(hostId);
+    if (!host) {
+      return hostMetadataError("host_not_found", 404);
+    }
+
+    const currentProbeAssetSetVersion = services.probeAssetDir
+      ? await readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
+      : {
+          nonUpgradeableReason: "probe_asset_set_version_missing" as const,
+          version: null,
+        };
+    const eligibility = evaluateProbeUpgradeEligibility({
+      probeAssetSetVersion: currentProbeAssetSetVersion.version,
+      probeAssetSetVersionNonUpgradeableReason:
+        currentProbeAssetSetVersion.nonUpgradeableReason,
+      probeVersion: host.probeVersion,
+    });
+
+    if (
+      !eligibility.isUpgradeable ||
+      !eligibility.currentProbeAssetSetVersion
+    ) {
+      return context.json(
+        {
+          error: "host_not_upgradeable",
+          reason: eligibility.nonUpgradeableReason,
+        },
+        409,
+      );
+    }
+
+    const activeOperation = services.probeOperations.findActiveForHost(hostId);
+    const result = createProbeUpgradeRequest({
+      activeOperation,
+      currentProbeVersion: eligibility.currentProbeVersion,
+      hostId,
+      nowMs: now(),
+      targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+    });
+    const isDuplicate = result.events.length === 0 && result.operation.id;
+    let operation = result.operation;
+
+    for (const event of result.events) {
+      if (event.action === "superseded") {
+        const superseded = services.probeOperations.updateProbeUpgradeRequest(
+          event.operation,
+        );
+        services.audit?.record({
+          action: "probe_upgrade_request.supersede",
+          actor: "owner",
+          details: {
+            hostId,
+            targetProbeVersion: superseded.targetProbeVersion,
+          },
+          occurredAtMs: now(),
+          outcome: "success",
+          subjectId: String(superseded.id),
+          subjectType: "probe_upgrade_request",
+          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+        });
+      }
+
+      if (event.action === "created") {
+        operation = services.probeOperations.createProbeUpgradeRequest(
+          event.operation,
+        );
+        services.audit?.record({
+          action: "probe_upgrade_request.create",
+          actor: "owner",
+          details: {
+            hostId,
+            targetProbeVersion: operation.targetProbeVersion,
+          },
+          occurredAtMs: now(),
+          outcome: "success",
+          subjectId: String(operation.id),
+          subjectType: "probe_upgrade_request",
+          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+        });
+      }
+    }
+
+    return context.json(
+      {
+        probeUpgradeRequest: probeUpgradeStatus(operation),
+      },
+      isDuplicate ? 200 : 201,
+    );
+  });
+
+  routes.delete("/:hostId/probe-upgrade-requests/:operationId", (context) => {
+    const hostId = numericHostId(context.req.param("hostId"));
+    const operationId = numericHostId(context.req.param("operationId"));
+    if (!hostId || !operationId) {
+      return hostMetadataError("probe_upgrade_request_not_found", 404);
+    }
+
+    const operation = services.probeOperations?.findById(operationId) ?? null;
+    if (!operation || operation.hostId !== hostId) {
+      return hostMetadataError("probe_upgrade_request_not_found", 404);
+    }
+
+    const result = cancelProbeUpgradeRequest({
+      nowMs: now(),
+      operation,
+    });
+
+    if (result.error || !result.canceled) {
+      return context.json(
+        {
+          error: result.error,
+        },
+        409,
+      );
+    }
+
+    const canceled =
+      services.probeOperations?.updateProbeUpgradeRequest(result.canceled) ??
+      result.canceled;
+    services.audit?.record({
+      action: "probe_upgrade_request.cancel",
+      actor: "owner",
+      details: {
+        hostId,
+        targetProbeVersion: canceled.targetProbeVersion,
+      },
+      occurredAtMs: now(),
+      outcome: "success",
+      subjectId: String(canceled.id),
+      subjectType: "probe_upgrade_request",
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
+
+    return context.json({
+      probeUpgradeRequest: probeUpgradeStatus(canceled),
     });
   });
 
@@ -283,13 +441,33 @@ function stringValue(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function hostMetadataError(error: string, status: 400 | 404 = 400) {
+function hostMetadataError(error: string, status: 400 | 404 | 503 = 400) {
   return new Response(JSON.stringify({ error }), {
     headers: {
       "content-type": "application/json",
     },
     status,
   });
+}
+
+function probeUpgradeStatus(operation: ProbeUpgradeRequest | null) {
+  if (!operation) {
+    return null;
+  }
+
+  return {
+    createdAtMs: operation.createdAtMs,
+    failure: operation.failureCode
+      ? {
+          code: operation.failureCode,
+          message: operation.failureMessage ?? "",
+        }
+      : null,
+    id: operation.id,
+    state: operation.state,
+    targetProbeVersion: operation.targetProbeVersion,
+    updatedAtMs: operation.updatedAtMs,
+  };
 }
 
 function numericHostId(value: string | undefined) {
