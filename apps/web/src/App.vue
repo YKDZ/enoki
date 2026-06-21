@@ -15,7 +15,7 @@ import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
 import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
-import { apiGet, saveConfiguration } from "./lib/api";
+import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
 import { shouldCreateEnrollmentOnOpen } from "./lib/enrollment-dialog-state";
 import {
   hubUnavailableLoginError,
@@ -66,7 +66,9 @@ const activeDetailHostId = ref(routeHostId());
 const activeDetailHostIdForComposable = computed(
   () => activeDetailHostId.value ?? 0,
 );
-const detail = useHostDetail(activeDetailHostIdForComposable);
+const detail = useHostDetail(activeDetailHostIdForComposable, {
+  onUnauthorized: requireLogin,
+});
 
 const {
   connectLiveUpdates,
@@ -185,6 +187,44 @@ async function logout() {
   window.history.pushState({}, "", "/");
 }
 
+function requireLogin() {
+  disconnectLiveUpdates();
+  isAuthenticated.value = false;
+  loginError.value = "";
+  loginErrorKind.value = "";
+  hostListError.value = "";
+  enrollmentError.value = "";
+  globalConfigurationError.value = "";
+  hostConfigurationError.value = "";
+  hostMetadataError.value = "";
+  isShowingEnrollmentDialog.value = false;
+  isShowingGlobalConfiguration.value = false;
+  activeHostConfigurationId.value = null;
+  hostConfigurationDraft.value = null;
+  activeHostMetadataId.value = null;
+  hostMetadataDraft.value = null;
+  hostMetadataOriginal.value = null;
+  deletingHostId.value = null;
+}
+
+function handleUnauthorizedError(error: unknown) {
+  if (!isUnauthorizedError(error)) {
+    return false;
+  }
+
+  requireLogin();
+  return true;
+}
+
+function handleUnauthorizedResponse(response: Response) {
+  if (response.status !== 401) {
+    return false;
+  }
+
+  requireLogin();
+  return true;
+}
+
 async function loadHosts() {
   isLoadingHosts.value = true;
   hostListError.value = "";
@@ -192,7 +232,11 @@ async function loadHosts() {
   try {
     const response = await apiGet<HostsResponse>("/api/web/hosts");
     hosts.value = response.hosts;
-  } catch {
+  } catch (error) {
+    if (handleUnauthorizedError(error)) {
+      return;
+    }
+
     hostListError.value = "无法读取主机列表，请检查 Hub 是否正在运行。";
   } finally {
     isLoadingHosts.value = false;
@@ -209,6 +253,10 @@ async function createEnrollment() {
       credentials: "same-origin",
       method: "POST",
     });
+
+    if (handleUnauthorizedResponse(response)) {
+      return;
+    }
 
     if (!response.ok) {
       enrollmentError.value = "无法创建注册令牌，请稍后再试。";
@@ -255,7 +303,11 @@ async function loadGlobalConfiguration() {
       "/api/web/probe-configuration",
     );
     globalConfigurationDraft.value = { ...response.configuration };
-  } catch {
+  } catch (error) {
+    if (handleUnauthorizedError(error)) {
+      return;
+    }
+
     globalConfigurationError.value = "无法读取全局探针配置。";
   }
 }
@@ -278,6 +330,10 @@ async function saveGlobalConfiguration() {
     globalConfigurationMessage.value = "全局探针配置已保存。";
     await loadHosts();
   } catch (error) {
+    if (handleUnauthorizedError(error)) {
+      return;
+    }
+
     globalConfigurationError.value = configurationErrorText(error);
   } finally {
     isSavingGlobalConfiguration.value = false;
@@ -303,7 +359,11 @@ async function openHostConfiguration(hostId: number) {
       configuration: { ...response.configuration },
       mode: response.mode,
     };
-  } catch {
+  } catch (error) {
+    if (handleUnauthorizedError(error)) {
+      return;
+    }
+
     hostConfigurationError.value = "无法读取此主机的探针配置。";
   }
 }
@@ -335,6 +395,10 @@ async function saveHostConfiguration() {
         method: "PUT",
       },
     );
+
+    if (handleUnauthorizedResponse(response)) {
+      return;
+    }
 
     if (!response.ok) {
       throw new Error(((await response.json()) as { error?: string }).error);
@@ -432,6 +496,10 @@ async function saveHostMetadata() {
       },
     );
 
+    if (handleUnauthorizedResponse(response)) {
+      return;
+    }
+
     if (!response.ok) {
       throw new Error(((await response.json()) as { error?: string }).error);
     }
@@ -460,6 +528,10 @@ async function deleteHost(
       credentials: "same-origin",
       method: "DELETE",
     });
+
+    if (handleUnauthorizedResponse(response)) {
+      return;
+    }
 
     if (!response.ok) {
       throw new Error("delete_failed");
@@ -598,7 +670,7 @@ function hostDetailPath(hostId: number) {
       <HostGridSkeleton v-if="isLoadingHosts && hosts.length === 0" />
 
       <StateHero
-        v-else-if="hostListError"
+        v-else-if="hostListError && hosts.length === 0"
         :icon="ServerCrash"
         tone="destructive"
         title="无法加载主机"
@@ -638,6 +710,14 @@ function hostDetailPath(hostId: number) {
           </Button>
         </template>
       </StateHero>
+
+      <p
+        v-if="!isLoadingHosts && hosts.length > 0 && hostListError"
+        class="mb-4 text-sm text-red-600"
+        role="alert"
+      >
+        {{ hostListError }}
+      </p>
 
       <p
         v-if="

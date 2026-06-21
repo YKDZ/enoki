@@ -1,7 +1,5 @@
 <script setup lang="ts">
-import { Check, Copy, LoaderCircle, X } from "@lucide/vue";
-import { useClipboard, useTimeoutFn } from "@vueuse/core";
-import { computed, ref, watch } from "vue";
+import { LoaderCircle } from "@lucide/vue";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -26,72 +24,6 @@ defineEmits<{
   createEnrollment: [];
   "update:open": [open: boolean];
 }>();
-
-const installCommand = computed(() => props.enrollment?.installCommand ?? "");
-const copyStatus = ref<"idle" | "success" | "error">("idle");
-const { copied, copy, isSupported } = useClipboard({
-  copiedDuring: 2_000,
-  source: installCommand,
-});
-const { start: clearCopyError } = useTimeoutFn(
-  () => {
-    if (copyStatus.value === "error") {
-      copyStatus.value = "idle";
-    }
-  },
-  2_000,
-  { immediate: false },
-);
-const copyButtonClass = computed(() => {
-  if (copyStatus.value === "success") {
-    return "border-green-200 text-green-700 hover:bg-green-50 hover:text-green-800";
-  }
-
-  if (copyStatus.value === "error") {
-    return "border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800";
-  }
-
-  return "";
-});
-const copyButtonLabel = computed(() => {
-  if (copyStatus.value === "success") {
-    return "已复制";
-  }
-
-  if (copyStatus.value === "error") {
-    return "复制失败";
-  }
-
-  return "复制";
-});
-
-watch(copied, (value) => {
-  if (!value && copyStatus.value === "success") {
-    copyStatus.value = "idle";
-  }
-});
-
-watch(installCommand, () => {
-  copyStatus.value = "idle";
-});
-
-async function copyInstallCommand() {
-  if (!installCommand.value) {
-    return;
-  }
-
-  try {
-    if (!isSupported.value) {
-      throw new Error("clipboard_not_supported");
-    }
-
-    await copy();
-    copyStatus.value = "success";
-  } catch {
-    copyStatus.value = "error";
-    clearCopyError();
-  }
-}
 </script>
 
 <template>
@@ -100,7 +32,7 @@ async function copyInstallCommand() {
       <DialogHeader>
         <DialogTitle>添加主机</DialogTitle>
         <DialogDescription class="sr-only">
-          生成并复制用于部署探针的一次性安装命令。
+          生成用于部署探针的一次性安装命令。
         </DialogDescription>
       </DialogHeader>
 
@@ -123,31 +55,9 @@ async function copyInstallCommand() {
         </div>
 
         <template v-else-if="enrollment">
-          <div class="flex items-center justify-between gap-3">
-            <p class="text-muted-foreground text-sm">
-              {{ new Date(enrollment.expiresAtMs).toLocaleString() }} 过期
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              type="button"
-              :class="copyButtonClass"
-              @click="copyInstallCommand"
-            >
-              <Check
-                v-if="copyStatus === 'success'"
-                class="size-4"
-                aria-hidden="true"
-              />
-              <X
-                v-else-if="copyStatus === 'error'"
-                class="size-4"
-                aria-hidden="true"
-              />
-              <Copy v-else class="size-4" aria-hidden="true" />
-              {{ copyButtonLabel }}
-            </Button>
-          </div>
+          <p class="text-muted-foreground text-sm">
+            {{ new Date(enrollment.expiresAtMs).toLocaleString() }} 过期
+          </p>
 
           <dl class="grid gap-3 text-sm sm:grid-cols-3">
             <div>
@@ -157,10 +67,6 @@ async function copyInstallCommand() {
               </dd>
             </div>
             <div>
-              <dt class="text-muted-foreground">探针版本</dt>
-              <dd class="mt-1">由 Hub 分发</dd>
-            </div>
-            <div>
               <dt class="text-muted-foreground">安装路径</dt>
               <dd class="mt-1 break-all">
                 {{ enrollment.installPath }}
@@ -168,11 +74,9 @@ async function copyInstallCommand() {
             </div>
           </dl>
 
-          <code
-            class="bg-muted block max-h-56 overflow-auto rounded-md border px-3 py-2 text-sm leading-6 whitespace-pre-wrap"
-          >
-            {{ enrollment.installCommand }}
-          </code>
+          <pre
+            class="max-h-72 overflow-auto bg-black p-4 font-mono text-xs leading-5 whitespace-pre-wrap text-white"
+          ><code>{{ enrollment.installCommand }}</code></pre>
         </template>
 
         <div v-else class="text-muted-foreground text-sm">暂无安装命令。</div>

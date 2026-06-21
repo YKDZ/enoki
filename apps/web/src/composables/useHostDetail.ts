@@ -4,7 +4,7 @@ import type {
 } from "@enoki/api-client/websocket";
 import { computed, onScopeDispose, ref, unref, type MaybeRef } from "vue";
 
-import { apiGet } from "@/lib/api";
+import { apiGet, isUnauthorizedError } from "@/lib/api";
 import {
   useHostMetricsWindowStore,
   type HostMetricsWindowPreferences,
@@ -32,6 +32,7 @@ export function useHostDetail(
   hostId: MaybeRef<number>,
   options: {
     fetchJson?: FetchJson;
+    onUnauthorized?: () => void;
     windowPreferences?: HostMetricsWindowPreferences;
   } = {},
 ) {
@@ -103,19 +104,33 @@ export function useHostDetail(
         `/api/web/hosts/${currentHostId()}`,
       );
       host.value = detailResponse.host;
-    } catch {
+    } catch (caught) {
+      if (handleUnauthorized(caught)) {
+        isLoading.value = false;
+        return;
+      }
+
       error.value = "无法读取主机详情。";
+      isLoading.value = false;
       return;
     }
 
+    let shouldRefreshMetrics = true;
     try {
       await loadMetrics(selectedWindow.value, { mode: "replace" });
-    } catch {
+    } catch (caught) {
+      if (handleUnauthorized(caught)) {
+        shouldRefreshMetrics = false;
+        return;
+      }
+
       metricsError.value = "无法读取历史指标，稍后会自动重试。";
       samples.value = [];
       clearLivePlayback();
     } finally {
-      startMetricsRefreshLoop();
+      if (shouldRefreshMetrics) {
+        startMetricsRefreshLoop();
+      }
       isLoading.value = false;
     }
   }
@@ -147,7 +162,11 @@ export function useHostDetail(
     try {
       await loadMetrics(window, { mode: "replace" });
       startMetricsRefreshLoop();
-    } catch {
+    } catch (caught) {
+      if (handleUnauthorized(caught)) {
+        return;
+      }
+
       selectedWindow.value = previousWindow;
       metricsError.value = "无法读取历史指标，稍后会自动重试。";
       startMetricsRefreshLoop();
@@ -234,14 +253,22 @@ export function useHostDetail(
     }
 
     isRefreshingMetrics = true;
+    let shouldScheduleNextRefresh = true;
     try {
       await loadMetrics(selectedWindow.value, { mode: "enqueue-new" });
-    } catch {
+    } catch (caught) {
+      if (handleUnauthorized(caught)) {
+        shouldScheduleNextRefresh = false;
+        return;
+      }
+
       metricsError.value = "无法刷新历史指标，稍后会自动重试。";
       // The live socket can still recover state; keep the observation loop alive.
     } finally {
       isRefreshingMetrics = false;
-      scheduleMetricsRefresh();
+      if (shouldScheduleNextRefresh) {
+        scheduleMetricsRefresh();
+      }
     }
   }
 
@@ -277,9 +304,9 @@ export function useHostDetail(
 
     try {
       return await fetchJson<HostMetricsResponse>(path);
-    } catch (error) {
-      if (!isTransientFetchError(error)) {
-        throw error;
+    } catch (caught) {
+      if (!isTransientFetchError(caught)) {
+        throw caught;
       }
 
       await sleep(150);
@@ -346,6 +373,17 @@ export function useHostDetail(
 
   function currentHostId() {
     return unref(hostId);
+  }
+
+  function handleUnauthorized(error: unknown) {
+    if (!isUnauthorizedError(error)) {
+      return false;
+    }
+
+    clearLivePlayback();
+    clearMetricsRefreshTimer();
+    options.onUnauthorized?.();
+    return true;
   }
 
   return {

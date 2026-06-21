@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { reactive } from "vue";
 
+import { ApiError } from "@/lib/api";
+
 import type { MetricsWindow } from "../types";
 import { useHostDetail } from "./useHostDetail";
 
@@ -102,6 +104,24 @@ describe("Host detail data", () => {
       maxMs: 1_725_000_000_000,
       minMs: 1_725_000_000_000 - 60 * 1000,
     });
+  });
+
+  it("delegates unauthorized detail loads without showing a detail error", async () => {
+    const onUnauthorized = vi.fn();
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(_path: string): Promise<T> {
+        throw new ApiError("Request failed: 401", 401);
+      },
+      onUnauthorized,
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+
+    expect(onUnauthorized).toHaveBeenCalledOnce();
+    expect(detail.error.value).toBe("");
+    expect(detail.host.value).toBeNull();
+    expect(detail.isLoading.value).toBe(false);
   });
 
   it("appends WebSocket samples for the visible host and computes aggregate tail values", async () => {
