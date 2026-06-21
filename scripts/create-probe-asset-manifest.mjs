@@ -4,12 +4,14 @@ import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const distDir = process.argv[2] ?? "dist";
-const version =
+const rawVersion =
   process.env.ENOKI_PROBE_VERSION ?? process.env.RELEASE_TAG ?? "";
 
-if (!version) {
+if (!rawVersion) {
   throw new Error("ENOKI_PROBE_VERSION or RELEASE_TAG is required.");
 }
+
+const version = normalizedProbeAssetVersion(rawVersion);
 
 const files = await readdir(distDir);
 const assets = [];
@@ -50,3 +52,18 @@ await writeFile(
     2,
   )}\n`,
 );
+
+function normalizedProbeAssetVersion(value) {
+  const version = value.trim();
+  const match = /^v?((0|[1-9]\d*)[.](0|[1-9]\d*)[.](0|[1-9]\d*))$/.exec(
+    version,
+  );
+
+  if (!match) {
+    throw new Error(
+      `ENOKI_PROBE_VERSION or RELEASE_TAG must be a semantic version like v0.1.0: ${value}`,
+    );
+  }
+
+  return match[1];
+}

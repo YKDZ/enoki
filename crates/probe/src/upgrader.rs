@@ -556,7 +556,9 @@ fn execute_probe_upgrade(
 
     let manifest: ProbeAssetManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|_| ProbeUpgraderRunError::InvalidManifest("invalid JSON"))?;
-    if manifest.version != operation.target_probe_version {
+    if normalized_probe_version(&manifest.version)
+        != normalized_probe_version(&operation.target_probe_version)
+    {
         return Err(ProbeUpgraderRunError::TargetMismatch);
     }
     if manifest.signature.algorithm != "rsa-sha256"
@@ -588,6 +590,10 @@ fn execute_probe_upgrade(
         .map_err(|error| ProbeUpgraderRunError::PostReplacementRestartFailure(error.to_string()))?;
 
     Ok(())
+}
+
+fn normalized_probe_version(value: &str) -> &str {
+    value.strip_prefix('v').unwrap_or(value)
 }
 
 fn validate_bootstrap_config_matches_trusted_install_metadata(
@@ -1626,6 +1632,20 @@ mod tests {
             "old probe"
         );
         assert!(systemd.restarted.is_empty());
+    }
+
+    #[test]
+    fn internal_probe_upgrader_accepts_tag_prefixed_manifest_version() {
+        let assets = signed_assets("v0.2.0", "new probe", None);
+        let public_key_sha256 = assets.public_key_sha256.clone();
+        let (result, install_path, systemd) = run_upgrade_with_assets(assets, public_key_sha256);
+
+        assert_eq!(result.error_code, None);
+        assert_eq!(
+            fs::read_to_string(install_path).expect("binary"),
+            "new probe"
+        );
+        assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
     }
 
     #[test]

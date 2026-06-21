@@ -14,7 +14,7 @@
     "lint": "oxlint . --ignore-pattern '**/dist/**' --ignore-pattern '**/src/generated/**'",
     "proto:check": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
-    "test": "turbo run test",
+    "test": "vitest run scripts/*.test.mjs && turbo run test",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
