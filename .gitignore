@@ -3,6 +3,9 @@ node_modules
 .pnpm-store
 target
 dist
+test-results
+playwright-report
+blob-report
 
 .agents
 AGENTS.md

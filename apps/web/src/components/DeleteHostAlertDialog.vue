@@ -48,9 +48,8 @@ defineEmits<{
       <AlertDialogHeader>
         <AlertDialogTitle>删除主机</AlertDialogTitle>
         <AlertDialogDescription>
-          删除后，Hub 会隐藏此主机的记录、历史指标和详情页，并使当前探针
-          身份失效。目标主机上的探针服务和二进制文件不会被远程卸载；
-          如不再需要采集，请在目标主机上停止并卸载探针。
+          删除后，Hub
+          会隐藏此主机的记录、历史指标和详情页，并使当前探针身份失效。目标主机上的探针服务和二进制文件不会被远程卸载；如不再需要采集，请在目标主机上停止并卸载探针。
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>

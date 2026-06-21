@@ -9,21 +9,20 @@
     "dev": "pnpm --filter @enoki/web dev",
     "dev:hub": "pnpm --filter @enoki/hub build && NODE_ENV=development pnpm --filter @enoki/hub start",
     "dev:probe": "node scripts/dev-probe.mjs",
-    "docker:smoke": "bash scripts/smoke-hub-docker.sh",
+    "e2e": "playwright test",
     "format:check": "oxfmt --check .",
     "lint": "oxlint . --ignore-pattern '**/dist/**' --ignore-pattern '**/src/generated/**'",
     "proto:check": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
-    "smoke:mvp": "node scripts/smoke-mvp.mjs",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.0",
     "@types/node": "^24.0.10",
     "oxfmt": "^0.55.0",
     "oxlint": "^1.70.0",
     "oxlint-tsgolint": "^0.23.0",
-    "playwright": "^1.61.0",
     "turbo": "^2.5.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"
