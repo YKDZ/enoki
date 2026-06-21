@@ -105,6 +105,13 @@ const latestSample = computed(() => props.detail.samples.value.at(-1) ?? null);
 const latestMetric = computed(
   () => latestSample.value ?? host.value?.latestMetrics ?? null,
 );
+const chartStartContinuityGapMs = computed(() => {
+  const intervalSeconds =
+    host.value?.probeConfiguration.configuration
+      .metricsCollectionIntervalSeconds ?? 5;
+
+  return Math.max(3_000, intervalSeconds * 3_000 + 1_000);
+});
 const probeUpgradeEligibility = computed(
   () => host.value?.probeUpgradeEligibility ?? null,
 );
@@ -418,6 +425,7 @@ async function createProbeUpgradeRequest() {
                 title="CPU"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
                 :y-axis-max="100"
                 :y-axis-min="0"
                 y-axis-name="%"
@@ -428,6 +436,7 @@ async function createProbeUpgradeRequest() {
                 title="内存"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
                 :y-axis-max="100"
                 :y-axis-min="0"
                 y-axis-name="%"
@@ -438,6 +447,7 @@ async function createProbeUpgradeRequest() {
                 title="磁盘"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
                 :y-axis-max="100"
                 :y-axis-min="0"
                 y-axis-name="%"
@@ -448,6 +458,7 @@ async function createProbeUpgradeRequest() {
                 title="网络吞吐量"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
                 y-axis-name="b/s"
                 :value-formatter="formatBitsPerSecond"
               />
@@ -464,6 +475,7 @@ async function createProbeUpgradeRequest() {
                 :samples="detail.samples.value"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
               />
             </TabsContent>
             <TabsContent value="disk" class="mt-0">
@@ -478,6 +490,7 @@ async function createProbeUpgradeRequest() {
                 :samples="detail.samples.value"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
               />
             </TabsContent>
             <TabsContent value="network" class="mt-0">
@@ -492,6 +505,7 @@ async function createProbeUpgradeRequest() {
                 :samples="detail.samples.value"
                 :x-axis-max-ms="detail.chartRange.value.maxMs"
                 :x-axis-min-ms="detail.chartRange.value.minMs"
+                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
               />
             </TabsContent>
           </Tabs>

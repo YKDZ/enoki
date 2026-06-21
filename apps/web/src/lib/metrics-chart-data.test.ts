@@ -4,6 +4,7 @@ import type { HostMetricSample } from "../types";
 import {
   buildMetricsChartData,
   extendSeriesToWindowStart,
+  linePointsForWindow,
   type MetricSeries,
 } from "./metrics-chart-data";
 
@@ -129,6 +130,43 @@ describe("Metrics chart data", () => {
     });
   });
 
+  it("extends display series only across a continuous start gap", () => {
+    expect(
+      extendSeriesToWindowStart(
+        {
+          name: "使用率",
+          points: [
+            [1_725_000_005_000, 40],
+            [1_725_000_010_000, 45],
+          ],
+        },
+        1_725_000_000_000,
+        6_000,
+      ),
+    ).toEqual({
+      name: "使用率",
+      points: [
+        [1_725_000_000_000, 40],
+        [1_725_000_005_000, 40],
+        [1_725_000_010_000, 45],
+      ],
+    });
+  });
+
+  it("leaves the chart start empty when the first point is after a missing-data gap", () => {
+    const series: MetricSeries = {
+      name: "使用率",
+      points: [
+        [1_725_000_030_000, 0],
+        [1_725_000_035_000, 45],
+      ],
+    };
+
+    expect(extendSeriesToWindowStart(series, 1_725_000_000_000, 10_000)).toBe(
+      series,
+    );
+  });
+
   it("keeps display series unchanged when they already reach the window start", () => {
     const series: MetricSeries = {
       name: "使用率",
@@ -139,5 +177,45 @@ describe("Metrics chart data", () => {
     };
 
     expect(extendSeriesToWindowStart(series, 1_725_000_000_000)).toBe(series);
+  });
+
+  it("returns windowed line points without filling missing-data gaps", () => {
+    expect(
+      linePointsForWindow(
+        [
+          [1_725_000_000_000, 10],
+          [1_725_000_030_000, 20],
+          [1_725_000_035_000, 30],
+        ],
+        {
+          maxStartGapMs: 9_000,
+          windowEndMs: 1_725_000_040_000,
+          windowStartMs: 1_725_000_020_000,
+        },
+      ),
+    ).toEqual([
+      [1_725_000_030_000, 20],
+      [1_725_000_035_000, 30],
+    ]);
+  });
+
+  it("fills the line window start across a continuous sampling gap", () => {
+    expect(
+      linePointsForWindow(
+        [
+          [1_725_000_022_000, 20],
+          [1_725_000_025_000, 30],
+        ],
+        {
+          maxStartGapMs: 3_000,
+          windowEndMs: 1_725_000_030_000,
+          windowStartMs: 1_725_000_020_000,
+        },
+      ),
+    ).toEqual([
+      [1_725_000_020_000, 20],
+      [1_725_000_022_000, 20],
+      [1_725_000_025_000, 30],
+    ]);
   });
 });

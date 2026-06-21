@@ -58,6 +58,7 @@ describe("Host resource panels", () => {
         samples: [cpuSample],
         xAxisMaxMs: 1_725_000_000_000,
         xAxisMinMs: 1_725_000_000_000 - 60_000,
+        xAxisStartContinuityGapMs: 4_000,
       }),
     );
 
@@ -122,6 +123,7 @@ describe("Host resource panels", () => {
         samples: [sample, nextSample],
         xAxisMaxMs: 1_725_000_000_000,
         xAxisMinMs: 1_725_000_000_000 - 60_000,
+        xAxisStartContinuityGapMs: 4_000,
       }),
     );
 

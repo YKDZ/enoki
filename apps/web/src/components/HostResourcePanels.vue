@@ -13,9 +13,9 @@ import type { MetricSeries } from "@/lib/metrics-chart-data";
 
 import type { HostMetricSample } from "../types";
 import MetricsChart from "./MetricsChart.vue";
+import SparklineChart from "./SparklineChart.vue";
 
 const cpuSparklineWindowMs = 60_000;
-const cpuSparklineHeight = 70;
 
 const props = defineProps<{
   aggregateDiskSeries: MetricSeries;
@@ -28,6 +28,7 @@ const props = defineProps<{
   samples: HostMetricSample[];
   xAxisMaxMs: number;
   xAxisMinMs: number;
+  xAxisStartContinuityGapMs: number;
 }>();
 
 const cpuCoreRows = computed(() => {
@@ -42,7 +43,8 @@ const cpuCoreRows = computed(() => {
     .map((series) => ({
       latestPercent: latestByName.get(series.name) ?? latestPointValue(series),
       name: series.name,
-      points: sparklinePoints(series.points),
+      points: series.points,
+      windowEndMs: series.points.at(-1)?.[0] ?? 0,
     }))
     .sort((left, right) =>
       left.name.localeCompare(right.name, undefined, {
@@ -116,56 +118,12 @@ function diskPercent(usedBytes: number, totalBytes: number) {
   return (usedBytes / totalBytes) * 100;
 }
 
-function boundedPercent(value: number | null | undefined) {
-  return Math.min(100, Math.max(0, value ?? 0));
-}
-
 function latestPointValue(series: MetricSeries) {
   return series.points.at(-1)?.[1] ?? 0;
 }
 
-function sparklinePoints(points: MetricSeries["points"]) {
-  const latestTime = points.at(-1)?.[0] ?? 0;
-  const windowStart = latestTime - cpuSparklineWindowMs;
-  const windowPoints = points.filter(([time]) => time >= windowStart);
-  const firstPoint = windowPoints[0];
-  const displayPoints =
-    firstPoint && firstPoint[0] > windowStart
-      ? [
-          [windowStart, firstPoint[1]] as MetricSeries["points"][number],
-          ...windowPoints,
-        ]
-      : windowPoints;
-  const sampledPoints = sampled(displayPoints, 72);
-
-  if (sampledPoints.length === 0) {
-    return "";
-  }
-
-  return sampledPoints
-    .map(([time, value]) => {
-      const x = ((time - windowStart) / cpuSparklineWindowMs) * 100;
-
-      return `${x.toFixed(1)},${pointY(value)}`;
-    })
-    .join(" ");
-}
-
-function pointY(value: number) {
-  return (cpuSparklineHeight - boundedPercent(value) * 0.68).toFixed(1);
-}
-
-function sampled<T>(items: T[], maxItems: number) {
-  if (items.length <= maxItems) {
-    return items;
-  }
-
-  const step = (items.length - 1) / (maxItems - 1);
-
-  return Array.from(
-    { length: maxItems },
-    (_, index) => items[Math.round(index * step)] as T,
-  );
+function boundedPercent(value: number | null | undefined) {
+  return Math.min(100, Math.max(0, value ?? 0));
 }
 
 function inventoryNumber(key: string) {
@@ -211,30 +169,12 @@ function frequencyText(value: number) {
             {{ formatPercent(core.latestPercent) }}
           </span>
         </div>
-        <svg
-          class="bg-background h-24 w-full border"
-          viewBox="0 0 100 72"
-          preserveAspectRatio="none"
-        >
-          <path
-            d="M 0 70 H 100"
-            fill="none"
-            stroke="currentColor"
-            class="text-muted"
-            stroke-width="1"
-            shape-rendering="crispEdges"
-          />
-          <polyline
-            v-if="core.points"
-            :points="core.points"
-            fill="none"
-            stroke="currentColor"
-            class="text-[var(--metric-good)]"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            stroke-width="1.8"
-          />
-        </svg>
+        <SparklineChart
+          :points="core.points"
+          :window-end-ms="core.windowEndMs"
+          :window-start-ms="core.windowEndMs - cpuSparklineWindowMs"
+          :max-start-gap-ms="xAxisStartContinuityGapMs"
+        />
       </div>
     </div>
     <p v-else class="text-muted-foreground text-sm">暂无核心数据</p>
@@ -310,6 +250,7 @@ function frequencyText(value: number) {
       title="磁盘趋势"
       :x-axis-max-ms="xAxisMaxMs"
       :x-axis-min-ms="xAxisMinMs"
+      :x-axis-start-continuity-gap-ms="xAxisStartContinuityGapMs"
       :y-axis-max="100"
       :y-axis-min="0"
       y-axis-name="%"
@@ -347,6 +288,7 @@ function frequencyText(value: number) {
       title="吞吐量"
       :x-axis-max-ms="xAxisMaxMs"
       :x-axis-min-ms="xAxisMinMs"
+      :x-axis-start-continuity-gap-ms="xAxisStartContinuityGapMs"
       y-axis-name="b/s"
       :value-formatter="formatBitsPerSecond"
     />

@@ -34,6 +34,7 @@ const props = defineProps<{
   valueFormatter?: (value: number) => string;
   xAxisMaxMs?: number;
   xAxisMinMs?: number;
+  xAxisStartContinuityGapMs?: number;
   yAxisMax?: number;
   yAxisMin?: number;
   yAxisName?: string;
@@ -94,6 +95,7 @@ watch(
     props.valueFormatter,
     props.xAxisMaxMs,
     props.xAxisMinMs,
+    props.xAxisStartContinuityGapMs,
     props.yAxisMax,
     props.yAxisMin,
     props.yAxisName,
@@ -117,6 +119,7 @@ function renderChart() {
   const displaySeries = extendSeriesListToWindowStart(
     props.series,
     props.xAxisMinMs,
+    props.xAxisStartContinuityGapMs,
   );
   const theme = chartTheme();
   const titleText = props.yAxisName
