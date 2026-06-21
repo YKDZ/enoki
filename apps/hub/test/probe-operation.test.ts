@@ -5,6 +5,7 @@ import {
   cancelProbeUpgradeRequest,
   createProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
+  succeedProbeUpgradeRequestFromInventory,
 } from "../src/probe/operation";
 
 describe("Probe Upgrade Request lifecycle", () => {
@@ -225,6 +226,43 @@ describe("Probe Upgrade Request lifecycle", () => {
         "Probe started the upgrade but did not report the target version in time.",
       state: "failed",
       updatedAtMs: 1_725_000_920_000,
+    });
+  });
+
+  it("succeeds only when Inventory reports the target Probe version", () => {
+    const running = {
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+      acceptedAtMs: 1_725_000_010_000,
+      runningAtMs: 1_725_000_020_000,
+      state: "running" as const,
+    };
+
+    expect(
+      succeedProbeUpgradeRequestFromInventory({
+        nowMs: 1_725_000_030_000,
+        operation: running,
+        probeVersion: "0.1.0",
+      }),
+    ).toBeNull();
+    expect(
+      succeedProbeUpgradeRequestFromInventory({
+        nowMs: 1_725_000_030_000,
+        operation: running,
+        probeVersion: "0.2.0",
+      }),
+    ).toEqual({
+      ...running,
+      completedAtMs: 1_725_000_030_000,
+      failureCode: null,
+      failureMessage: null,
+      state: "succeeded",
+      updatedAtMs: 1_725_000_030_000,
     });
   });
 });

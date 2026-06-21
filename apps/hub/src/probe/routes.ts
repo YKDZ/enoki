@@ -29,6 +29,7 @@ import {
   acknowledgeProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
   startProbeUpgradeRequest,
+  succeedProbeUpgradeRequestFromInventory,
   type ProbeUpgradeRequest,
 } from "./operation.js";
 
@@ -256,6 +257,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           }
         : null,
       probeVersion: request.inventory?.probeVersion || undefined,
+    });
+    markProbeUpgradeSucceededFromInventory({
+      hostId: host.id,
+      nowMs: reportReceivedAtMs,
+      probeVersion: request.inventory?.probeVersion,
+      services,
     });
 
     const samplesBySequence = new Map(
@@ -732,6 +739,34 @@ function applyProbeOperationStatus(
     error: "probe_operation_status_invalid" as const,
     operation,
   };
+}
+
+function markProbeUpgradeSucceededFromInventory(input: {
+  hostId: number;
+  nowMs: number;
+  probeVersion: string | null | undefined;
+  services: ProbeRouteServices;
+}) {
+  if (!input.probeVersion) {
+    return;
+  }
+
+  const active = input.services.probeOperations?.findActiveForHost(
+    input.hostId,
+  );
+  if (!active) {
+    return;
+  }
+
+  const succeeded = succeedProbeUpgradeRequestFromInventory({
+    nowMs: input.nowMs,
+    operation: active,
+    probeVersion: input.probeVersion,
+  });
+
+  if (succeeded) {
+    input.services.probeOperations?.updateProbeUpgradeRequest(succeeded);
+  }
 }
 
 function parseProbeOperationId(operationId: string | null | undefined) {

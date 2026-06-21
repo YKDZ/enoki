@@ -77,7 +77,10 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
             "hub_url = \"https://hub.example\"",
             "enrollment_token = \"enk_enroll_secret\"",
             "state_dir = \"/var/lib/enoki-probe\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
             "install_path = \"/usr/local/bin/enoki-probe\"",
+            "service_name = \"enoki-probe\"",
+            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
             "upgrader_launch = \"systemd\"",
             "log_level = \"debug\"",
             "",
@@ -121,7 +124,16 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     let bootstrap_config =
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
     assert!(bootstrap_config.contains("state_dir = \"/var/lib/enoki-probe\""));
+    assert!(
+        bootstrap_config.contains(
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\""
+        )
+    );
     assert!(bootstrap_config.contains("install_path = \"/usr/local/bin/enoki-probe\""));
+    assert!(bootstrap_config.contains("service_name = \"enoki-probe\""));
+    assert!(bootstrap_config.contains(
+        "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+    ));
     assert!(bootstrap_config.contains("upgrader_launch = \"systemd\""));
     assert!(bootstrap_config.contains("log_level = \"debug\""));
     assert!(!bootstrap_config.contains("enrollment_token"));

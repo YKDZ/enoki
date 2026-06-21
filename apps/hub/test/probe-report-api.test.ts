@@ -452,6 +452,98 @@ describe("Probe report API", () => {
     );
   });
 
+  it("marks a Probe Upgrade Request succeeded only after Inventory reports the target version", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+
+    const running = await app.request("/api/probe/report", {
+      body: ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-after-upgrade",
+          operationAcknowledgements: [{ operationId: String(operation.id) }],
+          operationStatuses: [
+            {
+              operationId: String(operation.id),
+              running: {},
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+        }),
+      ).finish(),
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    expect(running.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({
+        state: "running",
+      }),
+    );
+
+    const targetInventory = await app.request("/api/probe/report", {
+      body: ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-after-upgrade",
+          inventory: {
+            architecture: "x86_64",
+            cpuCount: 2,
+            hostname: "managed-host-01",
+            kernel: "6.8.0",
+            memoryTotalBytes: 2_147_483_648,
+            os: "linux",
+            probeVersion: "0.2.0",
+          },
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+        }),
+      ).finish(),
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    expect(targetInventory.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({
+        completedAtMs: 1_725_000_010_000,
+        state: "succeeded",
+      }),
+    );
+  });
+
   it("rejects malformed Probe Operation acknowledgements and statuses with stable errors", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

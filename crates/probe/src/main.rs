@@ -3,8 +3,8 @@ use enoki_probe::{
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{ProbeRunInput, run_loop_control_from_environment, run_probe_with_loop_control},
     upgrader::{
-        HttpProbeUpgraderValidationTransport, ProbeUpgraderRunInput,
-        format_probe_upgrader_noop_result, run_probe_upgrader,
+        HttpProbeUpgraderValidationTransport, ProbeUpgraderRunInput, format_probe_upgrader_result,
+        run_probe_upgrader,
     },
 };
 use std::io::Read;
@@ -36,7 +36,7 @@ fn main() {
                 &mut transport,
             ) {
                 Ok(result) => {
-                    println!("{}", format_probe_upgrader_noop_result(&result));
+                    println!("{}", format_probe_upgrader_result(&result));
                 }
                 Err(error) => {
                     eprintln!("Probe Upgrader failed: {error}");

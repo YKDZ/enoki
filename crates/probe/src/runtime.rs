@@ -17,7 +17,7 @@ use crate::{
     upgrader::{
         ProbeUpgraderCommandOutput, ProbeUpgraderLaunch, ProbeUpgraderLaunchError,
         SystemProbeUpgraderCommandRunner, launch_systemd_probe_upgrader,
-        parse_probe_upgrader_noop_result,
+        parse_probe_upgrader_result,
     },
 };
 use prost::Message;
@@ -312,6 +312,7 @@ fn run_reporting_loop(
         .unwrap_or("");
     let inventory = collect_local_inventory();
     let boot_id = new_boot_id();
+    let local_operation_statuses = read_local_operation_statuses(bootstrap_config);
     let mut active_configuration =
         ActiveProbeConfiguration::from_bootstrap(bootstrap_config, probe_configuration_version);
     let mut pending_configuration_error = None;
@@ -320,7 +321,7 @@ fn run_reporting_loop(
     let mut metrics_collector = MetricsCollector::default();
     let mut operation_reports = ProbeOperationReportQueue::default();
     let mut pending_report_body = None;
-    let request = startup_report(
+    let mut request = startup_report(
         probe_id,
         &boot_id,
         sequence,
@@ -328,6 +329,14 @@ fn run_reporting_loop(
         inventory.clone(),
         Vec::new(),
     );
+    for status in &local_operation_statuses {
+        request
+            .operation_acknowledgements
+            .push(ProbeOperationAcknowledgement {
+                operation_id: status.operation_id.clone(),
+            });
+    }
+    request.operation_statuses = local_operation_statuses;
     let response = post_report(transport, hub_url, probe_secret, request.encode_to_vec())?;
     reports_sent += 1;
     if !report_limit_reached(reports_sent, control) {
@@ -547,11 +556,14 @@ fn probe_upgrade_outcome_from_launch_result(
     result: Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError>,
 ) -> ProbeUpgradeRunnerOutcome {
     match result {
-        Ok(output) => match parse_probe_upgrader_noop_result(&output.stdout) {
+        Ok(output) => match parse_probe_upgrader_result(&output.stdout) {
+            Some(result) if result.status == "running" => ProbeUpgradeRunnerOutcome::Running,
             Some(result) if result.status == "failed" => {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                    error_code: result.error_code,
-                    message: "Probe Upgrader completed the fake no-op path.".to_string(),
+                    error_code: result
+                        .error_code
+                        .unwrap_or_else(|| "probe_upgrader_failed".to_string()),
+                    message: result.message.unwrap_or_default(),
                 })
             }
             _ => ProbeUpgradeRunnerOutcome::Running,
@@ -639,21 +651,12 @@ mod operation_report_tests {
     use super::*;
 
     #[test]
-    fn successful_fake_launch_reports_noop_failure_without_running_first() {
-        let outcome =
-            probe_upgrade_outcome_from_launch_result(Ok(ProbeUpgraderCommandOutput {
-                stdout:
-                    "Probe Upgrader no-op result: operation=operation-01 status=failed error_code=probe_upgrader_noop\n"
-                        .to_string(),
-            }));
+    fn successful_upgrader_launch_reports_running() {
+        let outcome = probe_upgrade_outcome_from_launch_result(Ok(ProbeUpgraderCommandOutput {
+            stdout: "Probe Upgrader result: operation=operation-01 status=running\n".to_string(),
+        }));
 
-        assert!(matches!(
-            outcome,
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                ref error_code,
-                ..
-            }) if error_code == "probe_upgrader_noop"
-        ));
+        assert!(matches!(outcome, ProbeUpgradeRunnerOutcome::Running));
     }
 
     #[test]
@@ -955,10 +958,12 @@ struct BootstrapConfig {
     hub_url: Option<String>,
     install_path: Option<String>,
     metrics_collection_interval_seconds: Option<u64>,
+    operation_status_path: Option<String>,
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
     probe_secret: Option<String>,
     reporting_batch_interval_seconds: Option<u64>,
+    state_dir: Option<String>,
     upgrader_launch: Option<String>,
 }
 
@@ -1008,6 +1013,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
             &value,
             "metrics_collection_interval_seconds",
         )?,
+        operation_status_path: string_value(&value, "operation_status_path")?,
         probe_configuration_version: string_value(&value, "probe_configuration_version")?,
         probe_id: string_value(&value, "probe_id")?,
         probe_secret: string_value(&value, "probe_secret")?,
@@ -1015,8 +1021,58 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
             &value,
             "reporting_batch_interval_seconds",
         )?,
+        state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
+}
+
+fn read_local_operation_statuses(bootstrap_config: &BootstrapConfig) -> Vec<ProbeOperationStatus> {
+    let Some(path) = local_operation_status_path(bootstrap_config) else {
+        return Vec::new();
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = contents.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(operation_id) = local_status_string(&value, "operation_id") else {
+        return Vec::new();
+    };
+    let Some(status) = local_status_string(&value, "status") else {
+        return Vec::new();
+    };
+
+    match status.as_str() {
+        "running" => vec![ProbeOperationStatus {
+            operation_id,
+            status: Some(Status::Running(ProbeOperationRunning {})),
+        }],
+        "failed" => vec![ProbeOperationStatus {
+            operation_id,
+            status: Some(Status::Failed(ProbeOperationFailed {
+                error_code: local_status_string(&value, "error_code")
+                    .unwrap_or_else(|| "probe_upgrader_failed".to_string()),
+                message: local_status_string(&value, "message").unwrap_or_default(),
+            })),
+        }],
+        _ => Vec::new(),
+    }
+}
+
+fn local_operation_status_path(bootstrap_config: &BootstrapConfig) -> Option<PathBuf> {
+    if let Some(path) = bootstrap_config.operation_status_path.as_ref() {
+        return Some(PathBuf::from(path));
+    }
+
+    bootstrap_config
+        .state_dir
+        .as_ref()
+        .map(|state_dir| PathBuf::from(state_dir).join("probe-operation-status.toml"))
+}
+
+fn local_status_string(value: &toml::Value, key: &str) -> Option<String> {
+    value.get(key)?.as_str().map(ToString::to_string)
 }
 
 fn default_reporting_batch_interval_seconds() -> u64 {

@@ -311,8 +311,17 @@ write_bootstrap_config() {
     printf 'state_dir = '
     toml_string "$STATE_DIR"
     printf '\n'
+    printf 'operation_status_path = '
+    toml_string "${STATE_DIR}/probe-operation-status.toml"
+    printf '\n'
     printf 'install_path = '
     toml_string "$INSTALL_PATH"
+    printf '\n'
+    printf 'service_name = '
+    toml_string "$SERVICE_NAME"
+    printf '\n'
+    printf 'probe_asset_public_key_sha256 = '
+    toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
     printf '\n'
     printf 'upgrader_launch = "systemd"\n'
     printf 'log_level = '

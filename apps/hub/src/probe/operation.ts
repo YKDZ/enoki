@@ -240,6 +240,28 @@ export function failReportedProbeUpgradeRequest(input: {
   };
 }
 
+export function succeedProbeUpgradeRequestFromInventory(input: {
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+  probeVersion: string | null | undefined;
+}): ProbeUpgradeRequest | null {
+  if (
+    !isActiveProbeOperation(input.operation) ||
+    input.probeVersion !== input.operation.targetProbeVersion
+  ) {
+    return null;
+  }
+
+  return {
+    ...input.operation,
+    completedAtMs: input.nowMs,
+    failureCode: null,
+    failureMessage: null,
+    state: "succeeded",
+    updatedAtMs: input.nowMs,
+  };
+}
+
 export function acceptedTimedOutProbeUpgradeRequest(input: {
   acceptedTimeoutMs: number;
   nowMs: number;

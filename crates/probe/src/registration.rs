@@ -191,6 +191,9 @@ struct BootstrapConfig<'a> {
 struct InstallerOwnedFields {
     install_path: Option<String>,
     log_level: Option<String>,
+    operation_status_path: Option<String>,
+    probe_asset_public_key_sha256: Option<String>,
+    service_name: Option<String>,
     state_dir: Option<String>,
     upgrader_launch: Option<String>,
 }
@@ -210,6 +213,9 @@ fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, Regi
     Ok(InstallerOwnedFields {
         install_path: string_value(&value, "install_path")?,
         log_level: string_value(&value, "log_level")?,
+        operation_status_path: string_value(&value, "operation_status_path")?,
+        probe_asset_public_key_sha256: string_value(&value, "probe_asset_public_key_sha256")?,
+        service_name: string_value(&value, "service_name")?,
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
@@ -246,8 +252,29 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
     );
     push_optional_string(
         &mut output,
+        "operation_status_path",
+        config
+            .installer_owned_fields
+            .operation_status_path
+            .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
         "install_path",
         config.installer_owned_fields.install_path.as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "service_name",
+        config.installer_owned_fields.service_name.as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "probe_asset_public_key_sha256",
+        config
+            .installer_owned_fields
+            .probe_asset_public_key_sha256
+            .as_deref(),
     );
     push_optional_string(
         &mut output,
