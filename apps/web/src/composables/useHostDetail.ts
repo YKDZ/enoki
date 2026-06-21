@@ -116,14 +116,23 @@ export function useHostDetail(
     error.value = "";
     isLoading.value = true;
 
-    try {
-      await refreshHostDetail(targetHostId);
-    } catch (caught) {
+    const detailRequest = refreshHostDetail(targetHostId);
+    const metricsRequest = loadMetrics(
+      selectedWindow.value,
+      { mode: "replace" },
+      targetHostId,
+    );
+    const [detailResult, metricsResult] = await Promise.allSettled([
+      detailRequest,
+      metricsRequest,
+    ]);
+
+    if (detailResult.status === "rejected") {
       if (currentHostId() !== targetHostId) {
         return;
       }
 
-      if (handleUnauthorized(caught)) {
+      if (handleUnauthorized(detailResult.reason)) {
         isLoading.value = false;
         return;
       }
@@ -134,32 +143,28 @@ export function useHostDetail(
     }
 
     let shouldRefreshMetrics = true;
-    try {
-      await loadMetrics(
-        selectedWindow.value,
-        { mode: "replace" },
-        targetHostId,
-      );
-    } catch (caught) {
+
+    if (metricsResult.status === "rejected") {
       if (currentHostId() !== targetHostId) {
         return;
       }
 
-      if (handleUnauthorized(caught)) {
+      if (handleUnauthorized(metricsResult.reason)) {
         shouldRefreshMetrics = false;
+        isLoading.value = false;
         return;
       }
 
       metricsError.value = "无法读取历史指标，稍后会自动重试。";
       samples.value = [];
       clearLivePlayback();
-    } finally {
-      if (shouldRefreshMetrics) {
-        startMetricsRefreshLoop();
-      }
-      if (currentHostId() === targetHostId) {
-        isLoading.value = false;
-      }
+    }
+
+    if (shouldRefreshMetrics) {
+      startMetricsRefreshLoop();
+    }
+    if (currentHostId() === targetHostId) {
+      isLoading.value = false;
     }
   }
 
@@ -228,6 +233,8 @@ export function useHostDetail(
           probeUpgradeStatus: response.probeUpgradeRequest,
         };
       }
+
+      return response.probeUpgradeRequest;
     } catch (caught) {
       if (handleUnauthorized(caught)) {
         return;
@@ -237,6 +244,14 @@ export function useHostDetail(
     } finally {
       isCreatingProbeUpgradeRequest.value = false;
     }
+  }
+
+  function applyHostDetail(nextHost: HostDetail) {
+    if (currentHostId() !== nextHost.id) {
+      return;
+    }
+
+    host.value = nextHost;
   }
 
   function appendLiveSample(sample: HostDetailSample) {
@@ -464,6 +479,7 @@ export function useHostDetail(
     samples.value = [];
     error.value = "";
     metricsError.value = "";
+    isRefreshingMetrics = false;
     clearLivePlayback();
     clearMetricsRefreshTimer();
   }
@@ -481,6 +497,7 @@ export function useHostDetail(
 
   return {
     appendLiveSample,
+    applyHostDetail,
     applyLiveSummary,
     chartRange,
     createProbeUpgradeRequest,

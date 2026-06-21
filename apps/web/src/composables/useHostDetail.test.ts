@@ -170,6 +170,45 @@ describe("Host detail data", () => {
     expect(detail.isLoading.value).toBe(false);
   });
 
+  it("starts the first metrics request immediately when entering a host detail", async () => {
+    const requestedPaths: string[] = [];
+    const hostOne = deferred<unknown>();
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        requestedPaths.push(path);
+
+        if (path === "/api/web/hosts/1") {
+          return (await hostOne.promise) as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(1, 1_725_000_000_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    const load = detail.load();
+    await Promise.resolve();
+
+    expect(requestedPaths).toEqual([
+      "/api/web/hosts/1",
+      "/api/web/hosts/1/metrics?window=1h",
+    ]);
+
+    hostOne.resolve({
+      host: hostDetail(1),
+    });
+    await load;
+
+    expect(detail.host.value?.id).toBe(1);
+    expect(detail.samples.value).toHaveLength(1);
+    expect(detail.isLoading.value).toBe(false);
+  });
+
   it("keeps the current detail visible while refreshing the same host", async () => {
     const hostRefresh = deferred<unknown>();
     let hostRequestCount = 0;

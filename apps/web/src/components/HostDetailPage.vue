@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { AlertTriangle, ArrowLeft, LoaderCircle, Settings } from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -27,10 +27,6 @@ import type { useHostDetail } from "@/composables/useHostDetail";
 import { formatBitsPerSecond, formatPercent } from "@/lib/format";
 import { hostStatusText, warningTitle } from "@/lib/host-display";
 import { buildMetricsChartData } from "@/lib/metrics-chart-data";
-import {
-  shouldToastProbeUpgradeFailure,
-  shouldToastProbeUpgradeSuccess,
-} from "@/lib/probe-upgrade-toast";
 
 import type {
   HostMetadataDraft,
@@ -66,6 +62,10 @@ const emit = defineEmits<{
   deleteHost: [host: HostDetail];
   openHostConfiguration: [hostId: number];
   openHostMetadata: [host: HostDetail];
+  probeUpgradeRequested: [
+    hostId: number,
+    status: NonNullable<HostDetail["probeUpgradeStatus"]>,
+  ];
   saveHostConfiguration: [];
   saveHostMetadata: [];
 }>();
@@ -148,31 +148,6 @@ onMounted(() => {
   void props.detail.load();
 });
 
-watch(
-  () => probeUpgradeStatus.value,
-  (status, previousStatus) => {
-    if (shouldToastProbeUpgradeSuccess(status, previousStatus)) {
-      isProbeUpgradeDialogOpen.value = false;
-      toast.success("探针升级完成");
-      return;
-    }
-
-    if (!shouldToastProbeUpgradeFailure(status, previousStatus)) {
-      return;
-    }
-
-    const failure = status?.failure;
-    if (!failure) {
-      return;
-    }
-
-    isProbeUpgradeDialogOpen.value = false;
-    toast.error("探针升级失败", {
-      description: failure.message || failure.code,
-    });
-  },
-);
-
 function statusClass(status: string) {
   if (status === "online") {
     return "border-[var(--status-online-border)] bg-[var(--status-online-bg)] text-[var(--status-online-fg)]";
@@ -199,8 +174,11 @@ function isMetricsWindow(value: AcceptableValue): value is MetricsWindow {
 
 async function createProbeUpgradeRequest() {
   try {
-    await props.detail.createProbeUpgradeRequest();
+    const status = await props.detail.createProbeUpgradeRequest();
     isProbeUpgradeDialogOpen.value = false;
+    if (host.value && status) {
+      emit("probeUpgradeRequested", host.value.id, status);
+    }
   } catch {
     toast.error("无法创建探针升级请求", {
       description: "请稍后重试。",

@@ -13,9 +13,10 @@ import HostGridSkeleton from "./components/HostGridSkeleton.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
-import { Toaster } from "./components/ui/sonner";
+import { Toaster, toast } from "./components/ui/sonner";
 import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
+import { useProbeUpgradeMonitor } from "./composables/useProbeUpgradeMonitor";
 import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
 import { shouldCreateEnrollmentOnOpen } from "./lib/enrollment-dialog-state";
 import {
@@ -88,6 +89,20 @@ const sonnerTheme = computed(() => {
   return "system";
 });
 const detail = useHostDetail(activeDetailHostIdForComposable, {
+  onUnauthorized: requireLogin,
+});
+const probeUpgradeMonitor = useProbeUpgradeMonitor({
+  onFailure(failure) {
+    toast.error("探针升级失败", {
+      description: failure.message || failure.code,
+    });
+  },
+  onHostDetail(host) {
+    detail.applyHostDetail(host);
+  },
+  onSuccess() {
+    toast.success("探针升级完成");
+  },
   onUnauthorized: requireLogin,
 });
 
@@ -579,10 +594,20 @@ async function deleteHost(
 }
 
 function openHostDetail(hostId: number) {
+  if (activeDetailHostId.value && activeDetailHostId.value !== hostId) {
+    unsubscribeHostDetail(activeDetailHostId.value);
+  }
   activeDetailHostId.value = hostId;
   window.history.pushState({}, "", hostDetailPath(hostId));
   subscribeHostDetail(hostId);
   void detail.load();
+}
+
+function trackProbeUpgradeRequest(
+  hostId: number,
+  status: NonNullable<HostDetail["probeUpgradeStatus"]>,
+) {
+  probeUpgradeMonitor.track(hostId, status);
 }
 
 function navigateToOverview() {
@@ -675,6 +700,7 @@ function hostDetailPath(hostId: number) {
       @delete-host="deleteHost"
       @open-host-configuration="openHostConfiguration"
       @open-host-metadata="openHostMetadata"
+      @probe-upgrade-requested="trackProbeUpgradeRequest"
       @save-host-configuration="saveHostConfiguration"
       @save-host-metadata="saveHostMetadata"
     />
