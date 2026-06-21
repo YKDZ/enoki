@@ -32,7 +32,7 @@ describe("Probe systemd installer", () => {
     );
   });
 
-  it("installs a verified x86_64 musl Probe release as a non-root systemd service", async () => {
+  it("installs a verified x86_64 GNU Probe release on glibc Linux as a non-root systemd service", async () => {
     const root = await createTempRoot("enoki-install-root-");
     const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, { assetDir: assets.dir });
@@ -241,7 +241,7 @@ describe("Probe systemd installer", () => {
     );
   });
 
-  it("selects the aarch64 musl Probe artifact from a release version", async () => {
+  it("selects the aarch64 musl Probe artifact on musl Linux from a release version", async () => {
     const root = await createTempRoot("enoki-install-arm-root-");
     const assets = await createProbeAssets(
       root,
@@ -251,6 +251,7 @@ describe("Probe systemd installer", () => {
     const commands = await createCommandMocks(root, {
       architecture: "aarch64",
       assetDir: assets.dir,
+      libc: "musl",
     });
 
     const result = await runInstaller({
@@ -581,14 +582,14 @@ async function createProbeAssets(
         signature?: Buffer;
         target?: string;
         version?: string;
-      } = "x86_64-unknown-linux-musl",
+      } = "x86_64-unknown-linux-gnu",
   version = "v0.1.0",
 ) {
   const options =
     typeof targetOrOptions === "string"
       ? { target: targetOrOptions, version }
       : targetOrOptions;
-  const target = options.target ?? "x86_64-unknown-linux-musl";
+  const target = options.target ?? "x86_64-unknown-linux-gnu";
   const assetRoot = path.join(root, "hub-assets");
   const payloadRoot = path.join(root, "payload");
   await mkdir(assetRoot, { recursive: true });
@@ -657,6 +658,7 @@ async function createCommandMocks(
     architecture?: string;
     assetDir?: string;
     currentUserId?: string;
+    libc?: "gnu" | "musl" | "unknown";
     serviceGroupExists?: boolean;
     serviceUserExists?: boolean;
   } = {},
@@ -703,6 +705,15 @@ exit 1
 `,
   );
   await writeExecutable(
+    path.join(bin, "getconf"),
+    `#!/bin/sh
+if [ "\${1:-}" = "GNU_LIBC_VERSION" ] && [ "$#" -eq 1 ]; then
+  ${options.libc === "musl" || options.libc === "unknown" ? "exit 1" : "echo glibc 2.39\n  exit 0"}
+fi
+exit 1
+`,
+  );
+  await writeExecutable(
     path.join(bin, "getent"),
     `#!/bin/sh
 if [ "\${1:-}" = "group" ] && [ "\${2:-}" = "enoki-probe" ]; then
@@ -725,6 +736,16 @@ printf '%s\\n' "$*" >> '${path.join(root, "tmp/groupadd.log")}'
     path.join(bin, "groupdel"),
     `#!/bin/sh
 printf '%s\\n' "$*" >> '${path.join(root, "tmp/groupdel.log")}'
+`,
+  );
+  await writeExecutable(
+    path.join(bin, "ldd"),
+    `#!/bin/sh
+if [ "\${1:-}" = "--version" ]; then
+  ${options.libc === "musl" ? 'echo "musl libc (x86_64)"' : 'echo "ldd (GNU libc) 2.39"'}
+  exit 0
+fi
+exit 1
 `,
   );
   await writeExecutable(

@@ -42,22 +42,49 @@ host_path() {
   printf '%s\n' "$1"
 }
 
+detect_linux_abi() {
+  if command -v getconf >/dev/null 2>&1 &&
+    getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+    echo "gnu"
+    return
+  fi
+
+  if command -v ldd >/dev/null 2>&1 &&
+    ldd --version 2>&1 | grep -qi "musl"; then
+    echo "musl"
+    return
+  fi
+
+  if ls /lib/ld-musl-*.so.1 /usr/lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+    echo "musl"
+    return
+  fi
+
+  echo "gnu"
+}
+
 detect_target() {
+  local arch
+  local abi
+
   if [ "$(uname -s)" != "Linux" ]; then
     fail "only Linux hosts are supported."
   fi
 
+  abi="$(detect_linux_abi)"
   case "$(uname -m)" in
     x86_64 | amd64)
-      echo "x86_64-unknown-linux-musl"
+      arch="x86_64"
       ;;
     aarch64 | arm64)
-      echo "aarch64-unknown-linux-musl"
+      arch="aarch64"
       ;;
     *)
       fail "unsupported CPU architecture: $(uname -m). Supported: x86_64, aarch64."
       ;;
   esac
+
+  echo "${arch}-unknown-linux-${abi}"
 }
 
 ensure_systemd() {
