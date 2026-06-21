@@ -429,22 +429,57 @@ function applyProbeOperationReports(input: {
   services: ProbeRouteServices;
   statuses: enoki.v1.IProbeOperationStatus[];
 }): string | null {
+  const plan = planProbeOperationReportApplication(input);
+
+  if (plan.error) {
+    return plan.error;
+  }
+
+  for (const operation of plan.operations) {
+    input.services.probeOperations?.updateProbeUpgradeRequest(operation);
+  }
+
+  return null;
+}
+
+function planProbeOperationReportApplication(input: {
+  acknowledgements: enoki.v1.IProbeOperationAcknowledgement[];
+  hostId: number;
+  nowMs: number;
+  services: ProbeRouteServices;
+  statuses: enoki.v1.IProbeOperationStatus[];
+}):
+  | { error: string; operations: [] }
+  | {
+      error: null;
+      operations: ProbeUpgradeRequest[];
+    } {
   if (
     !input.services.probeOperations &&
     (input.acknowledgements.length > 0 || input.statuses.length > 0)
   ) {
-    return "malformed_probe_operation_acknowledgement";
+    return {
+      error: "malformed_probe_operation_acknowledgement",
+      operations: [],
+    };
   }
+
+  const stagedOperations = new Map<number, ProbeUpgradeRequest>();
+  const operationsToUpdate = new Map<number, ProbeUpgradeRequest>();
 
   for (const acknowledgement of input.acknowledgements) {
     const operation = findReportableProbeOperation(
       input.services,
       input.hostId,
       acknowledgement.operationId,
+      stagedOperations,
     );
 
     if (!operation) {
-      return "malformed_probe_operation_acknowledgement";
+      return {
+        error: "malformed_probe_operation_acknowledgement",
+        operations: [],
+      };
     }
 
     if (isClosedProbeOperation(operation)) {
@@ -457,12 +492,17 @@ function applyProbeOperationReports(input: {
     });
 
     if (result.error) {
-      return "malformed_probe_operation_acknowledgement";
+      return {
+        error: "malformed_probe_operation_acknowledgement",
+        operations: [],
+      };
     }
 
     if (result.acknowledged !== operation) {
-      input.services.probeOperations?.updateProbeUpgradeRequest(
+      stageProbeOperationUpdate(
         result.acknowledged,
+        stagedOperations,
+        operationsToUpdate,
       );
     }
   }
@@ -472,10 +512,14 @@ function applyProbeOperationReports(input: {
       input.services,
       input.hostId,
       status.operationId,
+      stagedOperations,
     );
 
     if (!operation) {
-      return "malformed_probe_operation_status";
+      return {
+        error: "malformed_probe_operation_status",
+        operations: [],
+      };
     }
 
     if (isClosedProbeOperation(operation)) {
@@ -485,17 +529,38 @@ function applyProbeOperationReports(input: {
     const result = applyProbeOperationStatus(status, operation, input.nowMs);
 
     if (result.error) {
-      return "malformed_probe_operation_status";
+      return {
+        error: "malformed_probe_operation_status",
+        operations: [],
+      };
     }
 
     if (result.operation !== operation) {
-      input.services.probeOperations?.updateProbeUpgradeRequest(
+      stageProbeOperationUpdate(
         result.operation,
+        stagedOperations,
+        operationsToUpdate,
       );
     }
   }
 
-  return null;
+  return {
+    error: null,
+    operations: [...operationsToUpdate.values()],
+  };
+}
+
+function stageProbeOperationUpdate(
+  operation: ProbeUpgradeRequest,
+  stagedOperations: Map<number, ProbeUpgradeRequest>,
+  operationsToUpdate: Map<number, ProbeUpgradeRequest>,
+) {
+  if (operation.id === null) {
+    return;
+  }
+
+  stagedOperations.set(operation.id, operation);
+  operationsToUpdate.set(operation.id, operation);
 }
 
 function isClosedProbeOperation(operation: ProbeUpgradeRequest) {
@@ -508,11 +573,17 @@ function findReportableProbeOperation(
   services: ProbeRouteServices,
   hostId: number,
   operationId: string | null | undefined,
+  stagedOperations?: Map<number, ProbeUpgradeRequest>,
 ) {
   const id = parseProbeOperationId(operationId);
 
   if (id === null) {
     return null;
+  }
+
+  const stagedOperation = stagedOperations?.get(id);
+  if (stagedOperation) {
+    return stagedOperation;
   }
 
   const active = services.probeOperations?.findActiveForHost(hostId);
