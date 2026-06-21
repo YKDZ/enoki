@@ -182,12 +182,6 @@ validate_upgrader_sudoers_paths() {
   done
 }
 
-sudoers_regex_literal() {
-  local value="$1"
-
-  printf '%s\n' "$value" | sed 's/[][(){}.^$*+?|\\]/\\&/g'
-}
-
 ensure_service_user() {
   ensure_service_group
 
@@ -519,19 +513,17 @@ write_upgrader_sudoers() {
   local sudoers_path_rooted
   local install_path_host
   local config_path_host
-  local args_regex
 
   validate_upgrader_sudoers_paths
   sudoers_dir_rooted="$(rooted_path /etc/sudoers.d)"
   sudoers_path_rooted="$sudoers_dir_rooted/enoki-probe-upgrader"
   install_path_host="$(host_path "$INSTALL_PATH")"
   config_path_host="$(host_path "$CONFIG_PATH")"
-  args_regex="^--collect --pipe --wait --unit=$(sudoers_regex_literal "$SERVICE_NAME")-upgrader --property=Type=exec -- $(sudoers_regex_literal "$install_path_host") internal-upgrader --config $(sudoers_regex_literal "$config_path_host")$"
   mkdir -p "$sudoers_dir_rooted"
 
   cat >"$sudoers_path_rooted" <<EOF
 # Managed by Enoki Probe installer.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run ${args_regex}
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-upgrader --property=Type=exec -- ${install_path_host} internal-upgrader --config ${config_path_host}
 EOF
   chmod 0440 "$sudoers_path_rooted"
 }

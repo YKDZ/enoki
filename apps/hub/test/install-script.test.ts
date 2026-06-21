@@ -99,7 +99,7 @@ describe("Probe systemd installer", () => {
     ).resolves.toBe(
       [
         "# Managed by Enoki Probe installer.",
-        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run ^--collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap\\.toml$",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap.toml",
         "",
       ].join("\n"),
     );
@@ -110,9 +110,11 @@ describe("Probe systemd installer", () => {
     expect(sudoers).not.toContain("*");
     expect(sudoers).not.toContain("--operation-id");
     expect(sudoers).not.toContain("--target-probe-version");
-    expect(sudoers).toContain("^--collect");
-    expect(sudoers).toContain("\\.toml$");
+    expect(sudoers).toContain("--collect");
     expect(sudoers).toContain(" -- /usr/local/bin/enoki-probe ");
+    await expect(
+      validateSudoers(path.join(root, "etc/sudoers.d/enoki-probe-upgrader")),
+    ).resolves.toBe(true);
     await expect(
       readFile(path.join(root, "tmp/groupadd.log"), "utf8"),
     ).resolves.toEqual(expect.stringContaining("--system enoki-probe"));
@@ -804,4 +806,14 @@ async function spawnProcess(command: string, args: string[]) {
   if (code !== 0) {
     throw new Error(`${command} failed with code ${code}`);
   }
+}
+
+async function validateSudoers(filePath: string) {
+  const child = spawn("visudo", ["-c", "-f", filePath]);
+  const code = await new Promise<number | null>((resolve) => {
+    child.on("error", () => resolve(null));
+    child.on("close", resolve);
+  });
+
+  return code === 0;
 }
