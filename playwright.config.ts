@@ -56,6 +56,7 @@ export default defineConfig({
     command: [
       `rm -rf ${shellQuote(dataDir)}`,
       `mkdir -p ${shellQuote(dataDir)}`,
+      "pnpm --filter @enoki/api-client build",
       "pnpm --filter @enoki/web build",
       "pnpm --filter @enoki/hub build",
       `${environmentPrefix(hubEnvironment)} pnpm --filter @enoki/hub start`,
