@@ -91,6 +91,9 @@ const latestSample = computed(() => props.detail.samples.value.at(-1) ?? null);
 const latestMetric = computed(
   () => latestSample.value ?? host.value?.latestMetrics ?? null,
 );
+const probeUpgradeEligibility = computed(
+  () => host.value?.probeUpgradeEligibility ?? null,
+);
 
 onMounted(() => {
   void props.detail.load();
@@ -182,6 +185,25 @@ function isMetricsWindow(value: AcceptableValue): value is MetricsWindow {
         </div>
 
         <div class="flex items-center gap-2">
+          <Button
+            v-if="probeUpgradeEligibility"
+            variant="outline"
+            size="sm"
+            type="button"
+            class="relative"
+            disabled
+            title="Probe 升级资格"
+          >
+            <span
+              v-if="probeUpgradeEligibility.isUpgradeable"
+              class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
+              aria-hidden="true"
+            />
+            <span v-if="probeUpgradeEligibility.isUpgradeable" class="sr-only">
+              Probe 可升级
+            </span>
+            Probe 升级
+          </Button>
           <Button
             variant="outline"
             size="icon-sm"

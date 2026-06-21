@@ -60,6 +60,12 @@ describe("Host detail page", () => {
           mode: "inherit",
           version: "default-v1",
         },
+        probeUpgradeEligibility: {
+          currentProbeAssetSetVersion: "0.2.0",
+          currentProbeVersion: "0.1.0",
+          isUpgradeable: true,
+          nonUpgradeableReason: null,
+        },
         probeVersion: "0.1.0",
         status: "online",
         system: "linux",
@@ -133,6 +139,11 @@ describe("Host detail page", () => {
       "report request failed: 503 Service Unavailable",
     );
     expect(html).toContain("主机资料");
+    expect(html).toContain("当前 Probe");
+    expect(html).toContain("Hub Probe Asset Set");
+    expect(html).toContain("0.1.0");
+    expect(html).toContain("0.2.0");
+    expect(html).toContain("Probe 可升级");
     expect(html).toContain("配置");
     expect(html).toContain("在线");
   });

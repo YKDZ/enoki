@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -481,6 +481,68 @@ describe("Host detail API", () => {
       }),
     ]);
     expect(body.host.warnings[0]?.message).not.toContain("503");
+
+    database.close();
+  });
+
+  it("exposes Host Probe Upgrade eligibility from the Hub Probe Asset Set manifest", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify({
+        assets: [
+          {
+            file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+            sha256: "a".repeat(64),
+            target: "x86_64-unknown-linux-gnu",
+          },
+        ],
+        kind: "enoki-probe-assets",
+        signature: {
+          algorithm: "rsa-sha256",
+          file: "manifest.json.sig",
+        },
+        version: "v0.2.0",
+      }),
+    );
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeEligibility: {
+          currentProbeAssetSetVersion: "0.2.0",
+          currentProbeVersion: "0.1.0",
+          isUpgradeable: true,
+          nonUpgradeableReason: null,
+        },
+      }),
+    });
 
     database.close();
   });

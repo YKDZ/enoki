@@ -38,6 +38,10 @@ function cpuCoreCount(host: HostDetail) {
 
   return value > 0 ? `${value} 核心` : "核心数暂无";
 }
+
+function probeVersionText(value: string | null) {
+  return value?.trim() || "暂无";
+}
 </script>
 
 <template>
@@ -111,6 +115,24 @@ function cpuCoreCount(host: HostDetail) {
         <p class="text-muted-foreground text-xs">架构</p>
         <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
           {{ inventoryText(host, "architecture") }}
+        </p>
+      </div>
+      <div class="min-w-0 rounded-md border p-3">
+        <p class="text-muted-foreground text-xs">当前 Probe</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+          {{
+            probeVersionText(host.probeUpgradeEligibility.currentProbeVersion)
+          }}
+        </p>
+      </div>
+      <div class="min-w-0 rounded-md border p-3">
+        <p class="text-muted-foreground text-xs">Hub Probe Asset Set</p>
+        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+          {{
+            probeVersionText(
+              host.probeUpgradeEligibility.currentProbeAssetSetVersion,
+            )
+          }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">

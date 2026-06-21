@@ -7,6 +7,10 @@ import type {
 } from "../database/hosts.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
+import {
+  evaluateProbeUpgradeEligibility,
+  readProbeAssetSetVersionFromDirectory,
+} from "../probe/asset-set.js";
 
 export type HostRouteServices = {
   audit?: AuditRepository;
@@ -14,6 +18,7 @@ export type HostRouteServices = {
   hosts: HostRepository;
   metrics?: MetricsRepository;
   now?: () => number;
+  probeAssetDir?: string;
   probeConfigurations?: ProbeConfigurationRepository;
 };
 
@@ -31,7 +36,7 @@ export function createHostRoutes(services: HostRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
 
-  routes.get("/:hostId", (context) => {
+  routes.get("/:hostId", async (context) => {
     const hostId = numericHostId(context.req.param("hostId"));
     if (!hostId) {
       return hostMetadataError("host_not_found", 404);
@@ -64,6 +69,10 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
+    const currentProbeAssetSetVersion = services.probeAssetDir
+      ? await readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
+      : null;
+
     return context.json({
       host: {
         ...hostSummary,
@@ -80,6 +89,10 @@ export function createHostRoutes(services: HostRouteServices) {
           configuration: null,
           mode: "inherit",
         },
+        probeUpgradeEligibility: evaluateProbeUpgradeEligibility({
+          probeAssetSetVersion: currentProbeAssetSetVersion,
+          probeVersion: hostSummary.probeVersion,
+        }),
         warnings: warningList(host),
       },
     });

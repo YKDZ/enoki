@@ -129,6 +129,7 @@ export function createHubApp(options: HubAppOptions = {}) {
           hosts: options.database.hosts,
           metrics: options.database.metrics,
           now: options.now,
+          probeAssetDir: options.probeAssets?.assetDir,
           probeConfigurations: options.database.probeConfigurations,
         }),
       );

@@ -118,6 +118,20 @@ export type HostDetail = HostSummary & {
   };
   inventory: Record<string, unknown> | null;
   probeConfiguration: HostProbeConfigurationResponse;
+  probeUpgradeEligibility: {
+    currentProbeAssetSetVersion: string | null;
+    currentProbeVersion: string | null;
+    isUpgradeable: boolean;
+    nonUpgradeableReason:
+      | "probe_asset_set_version_missing"
+      | "probe_asset_set_version_malformed"
+      | "probe_version_missing"
+      | "probe_version_malformed"
+      | "probe_version_development"
+      | "probe_version_current"
+      | "probe_version_newer"
+      | null;
+  };
   warnings: Array<{
     code: string;
     message: string;
