@@ -267,6 +267,75 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
 }
 
 #[test]
+fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let status_path = temp.path().join("probe-operation-status.toml");
+    fs::write(
+        &status_path,
+        [
+            "operation_id = \"42\"",
+            "target_probe_version = \"0.2.0\"",
+            "status = \"failed\"",
+            "error_code = \"post_replacement_restart_failure\"",
+            "message = \"Probe binary was replaced, but restart failed\"",
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write operation status");
+    fs::write(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_secret = \"enk_probe_secret\"",
+            "probe_configuration_version = \"default-v1\"",
+            &format!("operation_status_path = \"{}\"", status_path.display()),
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("write bootstrap config");
+    let mut transport = RecordingProbeTransport {
+        response: ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_string(),
+            inventory_needed: false,
+            pending_operation: None,
+            server_time_ms: 1_725_000_000_000,
+        }
+        .encode_to_vec(),
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(1),
+        },
+    )
+    .expect("startup report succeeds");
+
+    let request = ProbeReportRequest::decode(transport.observed_report_bodies[0].as_slice())
+        .expect("report request decodes");
+    assert!(matches!(
+        &request.operation_statuses[0],
+        enoki_probe::protocol::enoki::v1::ProbeOperationStatus {
+            operation_id,
+            status: Some(Status::Failed(failed)),
+        } if operation_id == "42"
+            && failed.error_code == "post_replacement_restart_failure"
+            && failed.message == "Probe binary was replaced, but restart failed"
+    ));
+}
+
+#[test]
 fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");

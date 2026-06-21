@@ -6,6 +6,8 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -68,6 +70,23 @@ describe("Probe systemd installer", () => {
         "",
       ].join("\n"),
     );
+    await expect(
+      readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
+    ).resolves.toBe(
+      [
+        'install_path = "/usr/local/bin/enoki-probe"',
+        'state_dir = "/var/lib/enoki-probe"',
+        'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
+        'service_name = "enoki-probe"',
+        `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
+        "",
+      ].join("\n"),
+    );
+    await expect(
+      stat(path.join(root, "etc/enoki/probe-install.toml")).then(
+        (metadata) => metadata.mode & 0o777,
+      ),
+    ).resolves.toBe(0o644);
     await expect(
       readFile(
         path.join(root, "etc/systemd/system/enoki-probe.service"),
@@ -145,6 +164,9 @@ describe("Probe systemd installer", () => {
     await expect(
       readFile(path.join(root, "opt/enoki/bin/enoki-probe"), "utf8"),
     ).resolves.toBe("#!/bin/sh\necho probe\n");
+    await expect(
+      readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
+    ).resolves.toContain('install_path = "/opt/enoki/bin/enoki-probe"');
     await expect(
       readFile(path.join(root, "tmp/curl.log"), "utf8"),
     ).resolves.toContain(
@@ -288,6 +310,10 @@ describe("Probe systemd installer", () => {
       path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
       "sudoers",
     );
+    await writeFile(
+      path.join(root, "etc/enoki/probe-install.toml"),
+      "metadata",
+    );
     await writeFile(path.join(root, "var/lib/enoki-probe/state"), "state");
 
     const result = await runInstaller({
@@ -316,6 +342,9 @@ describe("Probe systemd installer", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(path.join(root, "var/lib/enoki-probe/state"), "utf8"),
@@ -406,6 +435,28 @@ describe("Probe systemd installer", () => {
       "Probe asset signing key fingerprint verification failed",
     );
   });
+
+  it("rejects Probe release archives that contain a symlink payload", async () => {
+    const root = await createTempRoot("enoki-install-symlink-archive-root-");
+    const assets = await createProbeAssets(root, {
+      archiveEntry: "symlink",
+    });
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "Probe release archive did not contain an enoki-probe binary",
+    );
+  });
 });
 
 async function createTempRoot(prefix: string) {
@@ -422,6 +473,7 @@ async function createProbeAssets(
   targetOrOptions:
     | string
     | {
+        archiveEntry?: "regular" | "symlink";
         sha256?: string;
         signature?: Buffer;
         target?: string;
@@ -439,8 +491,12 @@ async function createProbeAssets(
   await mkdir(assetRoot, { recursive: true });
   await mkdir(payloadRoot, { recursive: true });
   const binaryPath = path.join(payloadRoot, "enoki-probe");
-  await writeFile(binaryPath, "#!/bin/sh\necho probe\n");
-  await chmod(binaryPath, 0o755);
+  if (options.archiveEntry === "symlink") {
+    await symlink("/tmp/enoki-probe", binaryPath);
+  } else {
+    await writeFile(binaryPath, "#!/bin/sh\necho probe\n");
+    await chmod(binaryPath, 0o755);
+  }
 
   const archivePath = path.join(assetRoot, `enoki-probe-${target}.tar.gz`);
   await spawnProcess("tar", [

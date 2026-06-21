@@ -65,6 +65,10 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     assert!(bootstrap_config.contains("probe_secret = \"enk_probe_secret\""));
     assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
+    assert!(!bootstrap_config.contains("install_path"));
+    assert!(!bootstrap_config.contains("operation_status_path"));
+    assert!(!bootstrap_config.contains("service_name"));
+    assert!(!bootstrap_config.contains("probe_asset_public_key_sha256"));
 }
 
 #[test]

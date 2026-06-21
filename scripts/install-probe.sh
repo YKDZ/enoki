@@ -6,6 +6,7 @@ SERVICE_USER="${ENOKI_SERVICE_USER:-enoki-probe}"
 SERVICE_GROUP="${ENOKI_SERVICE_GROUP:-enoki-probe}"
 INSTALL_PATH="${ENOKI_INSTALL_PATH:-/usr/local/bin/enoki-probe}"
 CONFIG_PATH="${ENOKI_CONFIG_PATH:-/etc/enoki/probe-bootstrap.toml}"
+INSTALL_METADATA_PATH="/etc/enoki/probe-install.toml"
 STATE_DIR="${ENOKI_STATE_DIR:-/var/lib/enoki-probe}"
 LOG_LEVEL="${ENOKI_LOG_LEVEL:-info}"
 TEST_ROOT="${ENOKI_TEST_ROOT:-}"
@@ -256,6 +257,7 @@ uninstall_probe() {
 
   remove_path "$INSTALL_PATH"
   remove_path /etc/sudoers.d/enoki-probe-upgrader
+  remove_path "$INSTALL_METADATA_PATH"
   remove_path "$CONFIG_PATH"
   config_dir="$(dirname "$CONFIG_PATH")"
   remove_empty_dir "$config_dir"
@@ -268,28 +270,35 @@ uninstall_probe() {
 install_binary() {
   local archive="$1"
   local work_dir="$2"
-  local extract_dir="$work_dir/extract"
-  local source_binary
   local install_path_rooted
   local install_dir_rooted
+  local entry_names
+  local entry_count
+  local entry_name
+  local entry_type
 
-  mkdir -p "$extract_dir"
-  tar -xzf "$archive" -C "$extract_dir"
-
-  if [ -f "$extract_dir/enoki-probe" ]; then
-    source_binary="$extract_dir/enoki-probe"
-  else
-    source_binary="$(find "$extract_dir" -type f -name enoki-probe | head -n 1)"
+  entry_names="$(tar -tzf "$archive")" ||
+    fail "Probe release archive could not be listed."
+  entry_count="$(printf '%s\n' "$entry_names" | sed '/^$/d' | wc -l | tr -d ' ')"
+  entry_name="$(printf '%s\n' "$entry_names" | sed '/^$/d' | head -n 1)"
+  if [ "$entry_count" != "1" ]; then
+    fail "Probe release archive must contain exactly one enoki-probe binary."
   fi
-
-  if [ -z "$source_binary" ] || [ ! -f "$source_binary" ]; then
+  case "$entry_name" in
+    enoki-probe | ./enoki-probe) ;;
+    *)
+      fail "Probe release archive did not contain an enoki-probe binary."
+      ;;
+  esac
+  entry_type="$(tar -tvzf "$archive" "$entry_name" | head -n 1 | cut -c1)"
+  if [ "$entry_type" != "-" ]; then
     fail "Probe release archive did not contain an enoki-probe binary."
   fi
 
   install_path_rooted="$(rooted_path "$INSTALL_PATH")"
   install_dir_rooted="$(dirname "$install_path_rooted")"
   mkdir -p "$install_dir_rooted"
-  cp "$source_binary" "$install_path_rooted"
+  tar -xOf "$archive" "$entry_name" >"$install_path_rooted"
   chmod 0755 "$install_path_rooted"
 }
 
@@ -334,6 +343,32 @@ write_bootstrap_config() {
     chown -R "$SERVICE_USER:$SERVICE_GROUP" "$state_dir_rooted"
     chown "$SERVICE_USER:$SERVICE_GROUP" "$config_path_rooted"
   fi
+}
+
+write_install_metadata() {
+  local metadata_path_rooted
+
+  metadata_path_rooted="$(rooted_path "$INSTALL_METADATA_PATH")"
+  mkdir -p "$(dirname "$metadata_path_rooted")"
+
+  {
+    printf 'install_path = '
+    toml_string "$INSTALL_PATH"
+    printf '\n'
+    printf 'state_dir = '
+    toml_string "$STATE_DIR"
+    printf '\n'
+    printf 'operation_status_path = '
+    toml_string "${STATE_DIR}/probe-operation-status.toml"
+    printf '\n'
+    printf 'service_name = '
+    toml_string "$SERVICE_NAME"
+    printf '\n'
+    printf 'probe_asset_public_key_sha256 = '
+    toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
+    printf '\n'
+  } >"$metadata_path_rooted"
+  chmod 0644 "$metadata_path_rooted"
 }
 
 toml_string() {
@@ -454,6 +489,7 @@ main() {
   ensure_service_user
   install_binary "$archive" "$work_dir"
   write_bootstrap_config
+  write_install_metadata
   write_systemd_service
   write_upgrader_sudoers
   systemctl daemon-reload
