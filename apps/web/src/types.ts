@@ -15,10 +15,18 @@ export type HostSummary = {
   id: number;
   lastReportAtMs: number | null;
   latestMetrics: {
+    batteryPercent?: number | null;
+    batteryState?: string | null;
     collectedAtMs: number;
+    cpuIdlePercent?: number | null;
+    cpuIowaitPercent?: number | null;
     cpuPercent: number | null;
+    cpuStealPercent?: number | null;
+    cpuSystemPercent?: number | null;
+    cpuUserPercent?: number | null;
     diskTotalBytes?: number | null;
     diskUsedBytes?: number | null;
+    memoryCacheBytes?: number | null;
     memoryTotalBytes?: number | null;
     memoryUsedBytes: number | null;
     networkRxBitsPerSecond?: number | null;
@@ -26,6 +34,9 @@ export type HostSummary = {
     networkTxBitsPerSecond?: number | null;
     networkTxBytesDelta?: number | null;
     receivedAtMs: number;
+    swapTotalBytes?: number | null;
+    swapUsedBytes?: number | null;
+    temperatureCelsius?: number | null;
     uptimeSeconds: number | null;
   } | null;
   memory: string;
@@ -74,21 +85,35 @@ export type HostMetadataDraft = {
 };
 
 export type HostMetricSample = {
+  batteryPercent?: number | null;
+  batteryState?: string | null;
   collectedAtMs: number;
   cpuCores: Array<{
     name: string;
     usagePercent: number;
   }>;
+  cpuIdlePercent?: number | null;
+  cpuIowaitPercent?: number | null;
   cpuPercent: number | null;
+  cpuStealPercent?: number | null;
+  cpuSystemPercent?: number | null;
+  cpuUserPercent?: number | null;
   diskTotalBytes: number | null;
   diskUsedBytes: number | null;
   disks: Array<{
     availableBytes: number;
     filesystemType: string;
+    ioUtilizationPercent?: number | null;
     mountPoint: string;
+    readAwaitMs?: number | null;
+    readBytesDelta?: number;
     totalBytes: number;
     usedBytes: number;
+    weightedIoPercent?: number | null;
+    writeAwaitMs?: number | null;
+    writeBytesDelta?: number;
   }>;
+  memoryCacheBytes?: number | null;
   memoryTotalBytes: number | null;
   memoryUsedBytes: number | null;
   networkInterfaces: Array<{
@@ -104,6 +129,9 @@ export type HostMetricSample = {
   networkTxBytesDelta: number | null;
   receivedAtMs: number;
   sequence: number;
+  swapTotalBytes?: number | null;
+  swapUsedBytes?: number | null;
+  temperatureCelsius?: number | null;
   uptimeSeconds: number | null;
 };
 

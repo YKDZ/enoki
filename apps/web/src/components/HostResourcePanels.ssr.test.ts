@@ -33,6 +33,7 @@ describe("Host resource panels", () => {
   it("renders CPU inventory details below the core charts", async () => {
     const html = await renderToString(
       createSSRApp(HostResourcePanels, {
+        aggregateDiskIoSeries: [],
         aggregateDiskSeries: {
           name: "磁盘",
           points: [],
@@ -110,6 +111,7 @@ describe("Host resource panels", () => {
 
     const html = await renderToString(
       createSSRApp(HostResourcePanels, {
+        aggregateDiskIoSeries: [],
         aggregateDiskSeries: {
           name: "磁盘",
           points: [],

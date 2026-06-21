@@ -19,6 +19,7 @@ const cpuSparklineWindowMs = 60_000;
 
 const props = defineProps<{
   aggregateDiskSeries: MetricSeries;
+  aggregateDiskIoSeries: MetricSeries[];
   aggregateNetworkSeries: MetricSeries[];
   cpuCoreSeries: MetricSeries[];
   cpuModel: string | null;
@@ -61,6 +62,14 @@ const diskRows = computed(() =>
       diskPercent(left.usedBytes, left.totalBytes),
   ),
 );
+
+const cpuBreakdownRows = computed<Array<[string, number | null]>>(() => [
+  ["用户", props.latestSample?.cpuUserPercent ?? null],
+  ["系统", props.latestSample?.cpuSystemPercent ?? null],
+  ["等待", props.latestSample?.cpuIowaitPercent ?? null],
+  ["抢占", props.latestSample?.cpuStealPercent ?? null],
+  ["空闲", props.latestSample?.cpuIdlePercent ?? null],
+]);
 
 const networkRows = computed(() => {
   const latestByName = new Map(
@@ -145,6 +154,10 @@ function inventoryText(key: string, formatter?: (value: number) => string) {
 function frequencyText(value: number) {
   return `${value} MHz`;
 }
+
+function formatMilliseconds(value: number | null) {
+  return value === null ? "n/a" : `${value.toFixed(1)} ms`;
+}
 </script>
 
 <template>
@@ -178,6 +191,18 @@ function frequencyText(value: number) {
       </div>
     </div>
     <p v-else class="text-muted-foreground text-sm">暂无核心数据</p>
+    <div
+      class="grid gap-2 rounded-md border p-3 text-sm sm:grid-cols-2 lg:grid-cols-5"
+    >
+      <div
+        v-for="[label, value] in cpuBreakdownRows"
+        :key="label"
+        class="min-w-0"
+      >
+        <p class="text-muted-foreground text-xs">{{ label }}</p>
+        <p class="font-medium">{{ formatPercent(value) }}</p>
+      </div>
+    </div>
     <div
       class="text-muted-foreground grid min-w-0 gap-3 text-sm md:grid-cols-2 xl:grid-cols-3"
     >
@@ -245,17 +270,28 @@ function frequencyText(value: number) {
     v-else-if="panel === 'disk'"
     class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]"
   >
-    <MetricsChart
-      :series="[aggregateDiskSeries]"
-      title="磁盘趋势"
-      :x-axis-max-ms="xAxisMaxMs"
-      :x-axis-min-ms="xAxisMinMs"
-      :x-axis-start-continuity-gap-ms="xAxisStartContinuityGapMs"
-      :y-axis-max="100"
-      :y-axis-min="0"
-      y-axis-name="%"
-      :value-formatter="formatPercent"
-    />
+    <div class="grid gap-4">
+      <MetricsChart
+        :series="[aggregateDiskSeries]"
+        title="磁盘使用率"
+        :x-axis-max-ms="xAxisMaxMs"
+        :x-axis-min-ms="xAxisMinMs"
+        :x-axis-start-continuity-gap-ms="xAxisStartContinuityGapMs"
+        :y-axis-max="100"
+        :y-axis-min="0"
+        y-axis-name="%"
+        :value-formatter="formatPercent"
+      />
+      <MetricsChart
+        :series="aggregateDiskIoSeries"
+        title="磁盘 I/O"
+        :x-axis-max-ms="xAxisMaxMs"
+        :x-axis-min-ms="xAxisMinMs"
+        :x-axis-start-continuity-gap-ms="xAxisStartContinuityGapMs"
+        y-axis-name="B"
+        :value-formatter="formatTrafficBytes"
+      />
+    </div>
 
     <div class="rounded-md border p-4">
       <div class="mb-3 flex items-center gap-2 text-sm font-medium">
@@ -276,6 +312,33 @@ function frequencyText(value: number) {
               boundedPercent(diskPercent(disk.usedBytes, disk.totalBytes))
             "
           />
+          <div class="bg-muted/40 grid gap-2 rounded-md p-3 text-xs">
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-muted-foreground">读取</span>
+              <span class="font-medium">
+                {{ formatTrafficBytes(disk.readBytesDelta ?? null) }}
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-muted-foreground">写入</span>
+              <span class="font-medium">
+                {{ formatTrafficBytes(disk.writeBytesDelta ?? null) }}
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-muted-foreground">等待</span>
+              <span class="font-medium">
+                {{ formatMilliseconds(disk.readAwaitMs ?? null) }} /
+                {{ formatMilliseconds(disk.writeAwaitMs ?? null) }}
+              </span>
+            </div>
+            <div class="flex items-center justify-between gap-3">
+              <span class="text-muted-foreground">I/O</span>
+              <span class="font-medium">
+                {{ formatPercent(disk.ioUtilizationPercent ?? null) }}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
       <p v-else class="text-muted-foreground text-sm">暂无磁盘数据</p>

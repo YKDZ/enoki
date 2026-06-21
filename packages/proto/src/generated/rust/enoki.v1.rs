@@ -132,6 +132,28 @@ pub struct MetricSample {
     pub cpu_cores: ::prost::alloc::vec::Vec<CpuCoreMetric>,
     #[prost(uint64, optional, tag = "12")]
     pub memory_total_bytes: ::core::option::Option<u64>,
+    #[prost(double, optional, tag = "13")]
+    pub cpu_user_percent: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "14")]
+    pub cpu_system_percent: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "15")]
+    pub cpu_iowait_percent: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "16")]
+    pub cpu_steal_percent: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "17")]
+    pub cpu_idle_percent: ::core::option::Option<f64>,
+    #[prost(uint64, optional, tag = "18")]
+    pub memory_cache_bytes: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "19")]
+    pub swap_total_bytes: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "20")]
+    pub swap_used_bytes: ::core::option::Option<u64>,
+    #[prost(double, optional, tag = "21")]
+    pub temperature_celsius: ::core::option::Option<f64>,
+    #[prost(uint32, optional, tag = "22")]
+    pub battery_percent: ::core::option::Option<u32>,
+    #[prost(string, optional, tag = "23")]
+    pub battery_state: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuCoreMetric {
@@ -156,7 +178,7 @@ pub struct CpuCoreMetric {
     #[prost(double, tag = "10")]
     pub usage_percent: f64,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DiskUsageMetric {
     #[prost(string, tag = "1")]
     pub mount_point: ::prost::alloc::string::String,
@@ -168,6 +190,18 @@ pub struct DiskUsageMetric {
     pub used_bytes: u64,
     #[prost(uint64, tag = "5")]
     pub available_bytes: u64,
+    #[prost(uint64, tag = "6")]
+    pub read_bytes_delta: u64,
+    #[prost(uint64, tag = "7")]
+    pub write_bytes_delta: u64,
+    #[prost(double, optional, tag = "8")]
+    pub io_utilization_percent: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "9")]
+    pub read_await_ms: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "10")]
+    pub write_await_ms: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "11")]
+    pub weighted_io_percent: ::core::option::Option<f64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NetworkInterfaceMetric {

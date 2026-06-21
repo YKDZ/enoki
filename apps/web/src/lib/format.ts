@@ -100,6 +100,14 @@ export function formatDuration(seconds: number | null | undefined) {
   return `${minutes} 分钟`;
 }
 
+export function formatTemperature(celsius: number | null) {
+  if (celsius === null) {
+    return "n/a";
+  }
+
+  return `${formatNumber(celsius)} °C`;
+}
+
 function formatNumber(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }

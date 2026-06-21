@@ -444,6 +444,7 @@ async function createProbeUpgradeRequest() {
             <TabsContent value="cpu" class="mt-0">
               <HostResourcePanels
                 panel="cpu"
+                :aggregate-disk-io-series="chartData.disk.aggregateIoBytes"
                 :aggregate-disk-series="chartData.disk.aggregateUsedPercent"
                 :aggregate-network-series="chartData.network.aggregate"
                 :cpu-core-series="chartData.cpu.cores"
@@ -459,6 +460,7 @@ async function createProbeUpgradeRequest() {
             <TabsContent value="disk" class="mt-0">
               <HostResourcePanels
                 panel="disk"
+                :aggregate-disk-io-series="chartData.disk.aggregateIoBytes"
                 :aggregate-disk-series="chartData.disk.aggregateUsedPercent"
                 :aggregate-network-series="chartData.network.aggregate"
                 :cpu-core-series="chartData.cpu.cores"
@@ -474,6 +476,7 @@ async function createProbeUpgradeRequest() {
             <TabsContent value="network" class="mt-0">
               <HostResourcePanels
                 panel="network"
+                :aggregate-disk-io-series="chartData.disk.aggregateIoBytes"
                 :aggregate-disk-series="chartData.disk.aggregateUsedPercent"
                 :aggregate-network-series="chartData.network.aggregate"
                 :cpu-core-series="chartData.cpu.cores"

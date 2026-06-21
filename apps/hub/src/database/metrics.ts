@@ -28,12 +28,23 @@ export type RawMetricSampleInput = {
     user: number;
   }>;
   cpuPercent?: number | null;
+  cpuUserPercent?: number | null;
+  cpuSystemPercent?: number | null;
+  cpuIowaitPercent?: number | null;
+  cpuStealPercent?: number | null;
+  cpuIdlePercent?: number | null;
   disks?: Array<{
     availableBytes: number;
     filesystemType: string;
+    ioUtilizationPercent?: number | null;
     mountPoint: string;
+    readAwaitMs?: number | null;
+    readBytesDelta: number;
     totalBytes: number;
     usedBytes: number;
+    weightedIoPercent?: number | null;
+    writeAwaitMs?: number | null;
+    writeBytesDelta: number;
   }>;
   diskTotalBytes?: number | null;
   diskUsedBytes?: number | null;
@@ -41,6 +52,9 @@ export type RawMetricSampleInput = {
   load5?: number | null;
   load15?: number | null;
   hostId: number;
+  batteryPercent?: number | null;
+  batteryState?: string | null;
+  memoryCacheBytes?: number | null;
   memoryTotalBytes?: number | null;
   memoryUsedBytes?: number | null;
   networkInterfaces?: Array<{
@@ -55,6 +69,9 @@ export type RawMetricSampleInput = {
   probeId: string;
   receivedAtMs: number;
   sequence: number;
+  swapTotalBytes?: number | null;
+  swapUsedBytes?: number | null;
+  temperatureCelsius?: number | null;
   uptimeSeconds?: number | null;
 };
 
@@ -74,9 +91,15 @@ export type MetricHistorySample = MetricSampleRow & {
   disks: Array<{
     availableBytes: number;
     filesystemType: string;
+    ioUtilizationPercent: number | null;
     mountPoint: string;
+    readAwaitMs: number | null;
+    readBytesDelta: number;
     totalBytes: number;
     usedBytes: number;
+    weightedIoPercent: number | null;
+    writeAwaitMs: number | null;
+    writeBytesDelta: number;
   }>;
   networkInterfaces: Array<{
     name: string;
@@ -142,9 +165,15 @@ export function createMetricsRepository(
         Array<{
           availableBytes: number;
           filesystemType: string;
+          ioUtilizationPercent: number | null;
           mountPoint: string;
+          readAwaitMs: number | null;
+          readBytesDelta: number;
           totalBytes: number;
           usedBytes: number;
+          weightedIoPercent: number | null;
+          writeAwaitMs: number | null;
+          writeBytesDelta: number;
         }>
       >();
       const interfacesBySample = new Map<
@@ -180,9 +209,15 @@ export function createMetricsRepository(
         disks.push({
           availableBytes: disk.availableBytes,
           filesystemType: disk.filesystemType,
+          ioUtilizationPercent: disk.ioUtilizationPercent,
           mountPoint: disk.mountPoint,
+          readAwaitMs: disk.readAwaitMs,
+          readBytesDelta: disk.readBytesDelta,
           totalBytes: disk.totalBytes,
           usedBytes: disk.usedBytes,
+          weightedIoPercent: disk.weightedIoPercent,
+          writeAwaitMs: disk.writeAwaitMs,
+          writeBytesDelta: disk.writeBytesDelta,
         });
         disksBySample.set(disk.metricSampleId, disks);
       }
@@ -241,13 +276,21 @@ export function createMetricsRepository(
         .values({
           bootId: input.bootId,
           collectedAtMs: input.collectedAtMs,
+          batteryPercent: input.batteryPercent ?? null,
+          batteryState: input.batteryState ?? null,
+          cpuIdlePercent: input.cpuIdlePercent ?? null,
+          cpuIowaitPercent: input.cpuIowaitPercent ?? null,
           cpuPercent: input.cpuPercent ?? null,
+          cpuStealPercent: input.cpuStealPercent ?? null,
+          cpuSystemPercent: input.cpuSystemPercent ?? null,
+          cpuUserPercent: input.cpuUserPercent ?? null,
           diskTotalBytes: input.diskTotalBytes ?? null,
           diskUsedBytes: input.diskUsedBytes ?? null,
           load1: input.load1 ?? null,
           load5: input.load5 ?? null,
           load15: input.load15 ?? null,
           hostId: input.hostId,
+          memoryCacheBytes: input.memoryCacheBytes ?? null,
           memoryTotalBytes: input.memoryTotalBytes ?? null,
           memoryUsedBytes: input.memoryUsedBytes ?? null,
           networkRxBytesDelta: input.networkRxBytesDelta ?? null,
@@ -255,6 +298,9 @@ export function createMetricsRepository(
           probeId: input.probeId,
           receivedAtMs: input.receivedAtMs,
           sequence: input.sequence,
+          swapTotalBytes: input.swapTotalBytes ?? null,
+          swapUsedBytes: input.swapUsedBytes ?? null,
+          temperatureCelsius: input.temperatureCelsius ?? null,
           uptimeSeconds: input.uptimeSeconds ?? null,
         })
         .onConflictDoNothing({
@@ -299,10 +345,16 @@ export function createMetricsRepository(
             input.disks.map((disk) => ({
               availableBytes: disk.availableBytes,
               filesystemType: disk.filesystemType,
+              ioUtilizationPercent: disk.ioUtilizationPercent ?? null,
               metricSampleId: sample.id,
               mountPoint: disk.mountPoint,
+              readAwaitMs: disk.readAwaitMs ?? null,
+              readBytesDelta: disk.readBytesDelta,
               totalBytes: disk.totalBytes,
               usedBytes: disk.usedBytes,
+              weightedIoPercent: disk.weightedIoPercent ?? null,
+              writeAwaitMs: disk.writeAwaitMs ?? null,
+              writeBytesDelta: disk.writeBytesDelta,
             })),
           )
           .run();

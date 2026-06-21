@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::CString,
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,12 +16,16 @@ const EXCLUDED_FILESYSTEMS: &[&str] = &[
 #[derive(Debug)]
 pub struct CpuMetrics {
     pub aggregate_percent: f64,
+    pub breakdown: CpuBreakdownMetrics,
     pub cores: Vec<CpuCoreMetric>,
     pub snapshot: CpuCounterSnapshot,
 }
 
 #[derive(Debug)]
 pub struct MemoryMetrics {
+    pub cache_bytes: u64,
+    pub swap_total_bytes: u64,
+    pub swap_used_bytes: u64,
     pub total_bytes: u64,
     pub used_bytes: u64,
 }
@@ -47,6 +51,21 @@ pub struct NetworkCounterSnapshot {
 pub struct NetworkMetrics {
     pub interfaces: Vec<NetworkInterfaceMetric>,
     pub snapshot: NetworkCounterSnapshot,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DiskCounterSnapshot {
+    collected_at_ms: i64,
+    counters_by_name: BTreeMap<String, DiskCounters>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CpuBreakdownMetrics {
+    pub idle_percent: f64,
+    pub iowait_percent: f64,
+    pub steal_percent: f64,
+    pub system_percent: f64,
+    pub user_percent: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +110,7 @@ impl MetricsCollectionConfig {
 #[derive(Default)]
 pub struct MetricsCollector {
     previous_cpu: Option<CpuCounterSnapshot>,
+    previous_disk: Option<DiskCounterSnapshot>,
     previous_network: Option<NetworkCounterSnapshot>,
 }
 
@@ -121,16 +141,28 @@ impl MetricsCollector {
                 .and_then(|contents| collect_uptime_seconds_from_proc_uptime(&contents))
         });
         let disks = if config.collect_disk {
-            fs::read_to_string("/proc/mounts")
+            let disk_counters = fs::read_to_string("/proc/diskstats")
+                .ok()
+                .and_then(|contents| collect_disk_counters_from_proc_diskstats(&contents));
+            let disks = fs::read_to_string("/proc/mounts")
                 .map(|contents| {
-                    collect_disk_metrics_from_mounts(&contents, |mount_point| {
-                        filesystem_capacity(mount_point)
-                    })
+                    collect_disk_metrics_from_mounts(
+                        &contents,
+                        |mount_point| filesystem_capacity(mount_point),
+                        disk_counters.as_ref(),
+                        self.previous_disk.as_ref(),
+                    )
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            if let Some(snapshot) = disk_counters {
+                self.previous_disk = Some(snapshot);
+            }
+            disks
         } else {
             Vec::new()
         };
+        let temperature_celsius = collect_temperature_celsius_from_sysfs("/sys/class/hwmon");
+        let battery = collect_battery_metrics_from_sysfs("/sys/class/power_supply");
         let network_interfaces = if config.collect_network {
             let network = fs::read_to_string("/proc/net/dev")
                 .ok()
@@ -171,14 +203,25 @@ impl MetricsCollector {
                 .map(|metrics| metrics.cores.clone())
                 .unwrap_or_default(),
             cpu_percent: cpu.as_ref().map(|metrics| metrics.aggregate_percent),
+            cpu_idle_percent: cpu.as_ref().map(|metrics| metrics.breakdown.idle_percent),
+            cpu_iowait_percent: cpu.as_ref().map(|metrics| metrics.breakdown.iowait_percent),
+            cpu_steal_percent: cpu.as_ref().map(|metrics| metrics.breakdown.steal_percent),
+            cpu_system_percent: cpu.as_ref().map(|metrics| metrics.breakdown.system_percent),
+            cpu_user_percent: cpu.as_ref().map(|metrics| metrics.breakdown.user_percent),
             disks,
             load_1: load.as_ref().map(|metrics| metrics.one),
             load_5: load.as_ref().map(|metrics| metrics.five),
             load_15: load.as_ref().map(|metrics| metrics.fifteen),
+            battery_percent: battery.as_ref().map(|metrics| metrics.percent),
+            battery_state: battery.as_ref().map(|metrics| metrics.state.clone()),
+            memory_cache_bytes: memory.as_ref().map(|metrics| metrics.cache_bytes),
             memory_total_bytes: memory.as_ref().map(|metrics| metrics.total_bytes),
             memory_used_bytes: memory.as_ref().map(|metrics| metrics.used_bytes),
             network_interfaces,
             sequence,
+            swap_total_bytes: memory.as_ref().map(|metrics| metrics.swap_total_bytes),
+            swap_used_bytes: memory.as_ref().map(|metrics| metrics.swap_used_bytes),
+            temperature_celsius,
             uptime_seconds: uptime_seconds.flatten(),
         }
     }
@@ -214,6 +257,7 @@ pub fn collect_cpu_metrics_from_proc_stat(
 
     Some(CpuMetrics {
         aggregate_percent: aggregate.usage_percent_since(aggregate_previous),
+        breakdown: aggregate.breakdown_since(aggregate_previous),
         cores,
         snapshot: CpuCounterSnapshot { counters_by_name },
     })
@@ -222,8 +266,32 @@ pub fn collect_cpu_metrics_from_proc_stat(
 pub fn collect_memory_metrics_from_proc_meminfo(contents: &str) -> Option<MemoryMetrics> {
     let total_bytes = meminfo_kilobytes(contents, "MemTotal:")?.saturating_mul(1024);
     let available_bytes = meminfo_kilobytes(contents, "MemAvailable:")?.saturating_mul(1024);
+    let buffers_bytes = meminfo_kilobytes(contents, "Buffers:")
+        .unwrap_or(0)
+        .saturating_mul(1024);
+    let cached_bytes = meminfo_kilobytes(contents, "Cached:")
+        .unwrap_or(0)
+        .saturating_mul(1024);
+    let sreclaimable_bytes = meminfo_kilobytes(contents, "SReclaimable:")
+        .unwrap_or(0)
+        .saturating_mul(1024);
+    let shmem_bytes = meminfo_kilobytes(contents, "Shmem:")
+        .unwrap_or(0)
+        .saturating_mul(1024);
+    let swap_total_bytes = meminfo_kilobytes(contents, "SwapTotal:")
+        .unwrap_or(0)
+        .saturating_mul(1024);
+    let swap_free_bytes = meminfo_kilobytes(contents, "SwapFree:")
+        .unwrap_or(0)
+        .saturating_mul(1024);
 
     Some(MemoryMetrics {
+        cache_bytes: buffers_bytes
+            .saturating_add(cached_bytes)
+            .saturating_add(sreclaimable_bytes)
+            .saturating_sub(shmem_bytes),
+        swap_total_bytes,
+        swap_used_bytes: swap_total_bytes.saturating_sub(swap_free_bytes),
         total_bytes,
         used_bytes: total_bytes.saturating_sub(available_bytes),
     })
@@ -245,9 +313,81 @@ pub fn collect_uptime_seconds_from_proc_uptime(contents: &str) -> Option<u64> {
     uptime_seconds.is_finite().then_some(uptime_seconds as u64)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatteryMetrics {
+    pub percent: u32,
+    pub state: String,
+}
+
+pub fn collect_temperature_celsius_from_sysfs(root: impl AsRef<Path>) -> Option<f64> {
+    let mut highest: Option<f64> = None;
+    let entries = fs::read_dir(root).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let sensor_name = read_trimmed(path.join("name")).unwrap_or_default();
+        for temperature_path in glob_numbered_files(&path, "temp", "_input") {
+            let Some(raw) =
+                read_trimmed(temperature_path).and_then(|value| value.parse::<f64>().ok())
+            else {
+                continue;
+            };
+            let celsius = if raw > 1_000.0 { raw / 1_000.0 } else { raw };
+            if !(0.0..200.0).contains(&celsius) {
+                continue;
+            }
+            if !sensor_name.is_empty()
+                && sensor_name.contains("nvme")
+                && highest.is_some_and(|current| current >= celsius)
+            {
+                continue;
+            }
+            highest = Some(highest.map_or(celsius, |current| current.max(celsius)));
+        }
+    }
+
+    highest
+}
+
+pub fn collect_battery_metrics_from_sysfs(root: impl AsRef<Path>) -> Option<BatteryMetrics> {
+    let mut best: Option<BatteryMetrics> = None;
+    let entries = fs::read_dir(root).ok()?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if read_trimmed(path.join("type")).as_deref() != Some("Battery") {
+            continue;
+        }
+        let Some(percent) = read_trimmed(path.join("capacity"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value <= 100)
+        else {
+            continue;
+        };
+        let state = read_trimmed(path.join("status")).unwrap_or_else(|| "Unknown".to_string());
+        let metrics = BatteryMetrics { percent, state };
+        if best
+            .as_ref()
+            .is_none_or(|current| metrics.percent > current.percent)
+        {
+            best = Some(metrics);
+        }
+    }
+
+    best
+}
+
 pub fn collect_disk_metrics_from_mounts(
     contents: &str,
     capacity_for_mount: impl Fn(&str) -> Option<FilesystemCapacity>,
+    current_counters: Option<&DiskCounterSnapshot>,
+    previous_counters: Option<&DiskCounterSnapshot>,
 ) -> Vec<DiskUsageMetric> {
     let mut disks_by_mount_point = BTreeMap::new();
     let mut seen_filesystems = BTreeSet::new();
@@ -274,19 +414,53 @@ pub fn collect_disk_metrics_from_mounts(
         }
 
         seen_filesystems.insert(filesystem_identity);
+        let counters = current_counters.and_then(|snapshot| {
+            snapshot
+                .counters_by_name
+                .get(block_device_name(&mount.source)?.as_str())
+        });
+        let previous = counters.and_then(|counters| {
+            previous_counters.and_then(|snapshot| {
+                snapshot
+                    .counters_by_name
+                    .get(counters.name.as_str())
+                    .map(|previous| (snapshot.collected_at_ms, previous))
+            })
+        });
+        let io = counters.map(|counters| counters.io_since(current_counters, previous));
+
         disks_by_mount_point.insert(
             mount.mount_point.clone(),
             DiskUsageMetric {
                 available_bytes: capacity.available_bytes,
                 filesystem_type: mount.filesystem_type,
+                io_utilization_percent: io.map(|io| io.io_utilization_percent),
                 mount_point: mount.mount_point,
+                read_await_ms: io.map(|io| io.read_await_ms),
+                read_bytes_delta: io.map(|io| io.read_bytes_delta).unwrap_or(0),
                 total_bytes: capacity.total_bytes,
                 used_bytes: capacity.total_bytes.saturating_sub(capacity.free_bytes),
+                weighted_io_percent: io.map(|io| io.weighted_io_percent),
+                write_await_ms: io.map(|io| io.write_await_ms),
+                write_bytes_delta: io.map(|io| io.write_bytes_delta).unwrap_or(0),
             },
         );
     }
 
     disks_by_mount_point.into_values().collect()
+}
+
+pub fn collect_disk_counters_from_proc_diskstats(contents: &str) -> Option<DiskCounterSnapshot> {
+    let counters_by_name = contents
+        .lines()
+        .filter_map(parse_diskstats_line)
+        .map(|counters| (counters.name.clone(), counters))
+        .collect::<BTreeMap<_, _>>();
+
+    (!counters_by_name.is_empty()).then_some(DiskCounterSnapshot {
+        collected_at_ms: unix_time_millis(),
+        counters_by_name,
+    })
 }
 
 pub fn collect_network_metrics_from_proc_net_dev(
@@ -449,6 +623,31 @@ fn meminfo_kilobytes(contents: &str, key: &str) -> Option<u64> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
+fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn glob_numbered_files(root: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
+    let mut paths = fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+
+            name.starts_with(prefix) && name.ends_with(suffix)
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
 fn parse_mount(line: &str) -> Option<MountEntry> {
     let mut parts = line.split_whitespace();
     let source = unescape_mount_value(parts.next()?);
@@ -506,6 +705,111 @@ struct MountEntry {
     filesystem_type: String,
     mount_point: String,
     source: String,
+}
+
+fn block_device_name(source: &str) -> Option<String> {
+    if !source.starts_with("/dev/") {
+        return None;
+    }
+
+    let name = Path::new(source).file_name()?.to_str()?.trim();
+    (!name.is_empty()).then_some(name.to_string())
+}
+
+#[derive(Clone, Debug)]
+pub struct DiskCounters {
+    name: String,
+    read_bytes: u64,
+    read_count: u64,
+    read_time_ms: u64,
+    write_bytes: u64,
+    write_count: u64,
+    write_time_ms: u64,
+    io_time_ms: u64,
+    weighted_io_time_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DiskIoMetrics {
+    io_utilization_percent: f64,
+    read_await_ms: f64,
+    read_bytes_delta: u64,
+    weighted_io_percent: f64,
+    write_await_ms: f64,
+    write_bytes_delta: u64,
+}
+
+impl DiskCounters {
+    fn io_since(
+        &self,
+        current_snapshot: Option<&DiskCounterSnapshot>,
+        previous: Option<(i64, &DiskCounters)>,
+    ) -> DiskIoMetrics {
+        let (Some(current_snapshot), Some((previous_collected_at_ms, previous))) =
+            (current_snapshot, previous)
+        else {
+            return DiskIoMetrics::default();
+        };
+        let elapsed_ms =
+            (current_snapshot.collected_at_ms - previous_collected_at_ms).max(0) as u64;
+
+        let read_count_delta = self.read_count.saturating_sub(previous.read_count);
+        let write_count_delta = self.write_count.saturating_sub(previous.write_count);
+
+        DiskIoMetrics {
+            io_utilization_percent: percent_from_delta(
+                self.io_time_ms.saturating_sub(previous.io_time_ms),
+                elapsed_ms,
+            ),
+            read_await_ms: average_ms(
+                self.read_time_ms.saturating_sub(previous.read_time_ms),
+                read_count_delta,
+            ),
+            read_bytes_delta: self.read_bytes.saturating_sub(previous.read_bytes),
+            weighted_io_percent: percent_from_delta(
+                self.weighted_io_time_ms
+                    .saturating_sub(previous.weighted_io_time_ms),
+                elapsed_ms,
+            ),
+            write_await_ms: average_ms(
+                self.write_time_ms.saturating_sub(previous.write_time_ms),
+                write_count_delta,
+            ),
+            write_bytes_delta: self.write_bytes.saturating_sub(previous.write_bytes),
+        }
+    }
+}
+
+fn average_ms(total_ms: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total_ms as f64 / count as f64
+    }
+}
+
+fn percent_from_delta(value: u64, total: u64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (value as f64 / total as f64) * 100.0
+    }
+}
+
+fn parse_diskstats_line(line: &str) -> Option<DiskCounters> {
+    let columns = line.split_whitespace().collect::<Vec<_>>();
+
+    Some(DiskCounters {
+        name: columns.get(2)?.to_string(),
+        read_count: columns.get(3)?.parse().ok()?,
+        read_bytes: columns.get(5)?.parse::<u64>().ok()?.saturating_mul(512),
+        read_time_ms: columns.get(6)?.parse().ok()?,
+        write_count: columns.get(7)?.parse().ok()?,
+        write_bytes: columns.get(9)?.parse::<u64>().ok()?.saturating_mul(512),
+        write_time_ms: columns.get(10)?.parse().ok()?,
+        io_time_ms: columns.get(12)?.parse().ok()?,
+        weighted_io_time_ms: columns.get(13)?.parse().ok()?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -596,7 +900,33 @@ impl CpuCounters {
         let Some(previous) = previous else {
             return 0.0;
         };
-        let delta = CpuCounterDelta {
+        let delta = self.delta_since(previous);
+
+        delta.usage_percent()
+    }
+
+    fn breakdown_since(&self, previous: Option<&CpuCounters>) -> CpuBreakdownMetrics {
+        let Some(previous) = previous else {
+            return CpuBreakdownMetrics::default();
+        };
+        let delta = self.delta_since(previous);
+
+        CpuBreakdownMetrics {
+            idle_percent: delta.percent(delta.idle),
+            iowait_percent: delta.percent(delta.iowait),
+            steal_percent: delta.percent(delta.steal),
+            system_percent: delta.percent(
+                delta
+                    .system
+                    .saturating_add(delta.irq)
+                    .saturating_add(delta.softirq),
+            ),
+            user_percent: delta.percent(delta.user.saturating_add(delta.nice)),
+        }
+    }
+
+    fn delta_since(&self, previous: &CpuCounters) -> CpuCounterDelta {
+        CpuCounterDelta {
             user: self.user.saturating_sub(previous.user),
             nice: self.nice.saturating_sub(previous.nice),
             system: self.system.saturating_sub(previous.system),
@@ -605,9 +935,7 @@ impl CpuCounters {
             irq: self.irq.saturating_sub(previous.irq),
             softirq: self.softirq.saturating_sub(previous.softirq),
             steal: self.steal.saturating_sub(previous.steal),
-        };
-
-        delta.usage_percent()
+        }
     }
 }
 
@@ -638,6 +966,27 @@ impl CpuCounterDelta {
             0.0
         } else {
             (non_idle as f64 / total as f64) * 100.0
+        }
+    }
+
+    fn total(&self) -> u64 {
+        self.user
+            .saturating_add(self.nice)
+            .saturating_add(self.system)
+            .saturating_add(self.idle)
+            .saturating_add(self.iowait)
+            .saturating_add(self.irq)
+            .saturating_add(self.softirq)
+            .saturating_add(self.steal)
+    }
+
+    fn percent(&self, value: u64) -> f64 {
+        let total = self.total();
+
+        if total == 0 {
+            0.0
+        } else {
+            (value as f64 / total as f64) * 100.0
         }
     }
 }

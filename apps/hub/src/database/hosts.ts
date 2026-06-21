@@ -19,17 +19,28 @@ export type HostSummary = {
   lastReportAtMs: number | null;
   latestMetrics: {
     collectedAtMs: number;
+    batteryPercent: number | null;
+    batteryState: string | null;
+    cpuIdlePercent: number | null;
+    cpuIowaitPercent: number | null;
     cpuPercent: number | null;
+    cpuStealPercent: number | null;
+    cpuSystemPercent: number | null;
+    cpuUserPercent: number | null;
     diskTotalBytes: number | null;
     diskUsedBytes: number | null;
     load1: number | null;
     load5: number | null;
     load15: number | null;
+    memoryCacheBytes: number | null;
     memoryTotalBytes: number | null;
     memoryUsedBytes: number | null;
     networkRxBytesDelta: number | null;
     networkTxBytesDelta: number | null;
     receivedAtMs: number;
+    swapTotalBytes: number | null;
+    swapUsedBytes: number | null;
+    temperatureCelsius: number | null;
     uptimeSeconds: number | null;
   } | null;
   memory: string;
@@ -56,17 +67,28 @@ export type HostStatusThresholds = {
 export type HostSummaryOptions = {
   latestMetricForHost?: (hostId: number) => {
     collectedAtMs: number;
+    batteryPercent: number | null;
+    batteryState: string | null;
+    cpuIdlePercent: number | null;
+    cpuIowaitPercent: number | null;
     cpuPercent: number | null;
+    cpuStealPercent: number | null;
+    cpuSystemPercent: number | null;
+    cpuUserPercent: number | null;
     diskTotalBytes: number | null;
     diskUsedBytes: number | null;
     load1: number | null;
     load5: number | null;
     load15: number | null;
+    memoryCacheBytes: number | null;
     memoryTotalBytes: number | null;
     memoryUsedBytes: number | null;
     networkRxBytesDelta: number | null;
     networkTxBytesDelta: number | null;
     receivedAtMs: number;
+    swapTotalBytes: number | null;
+    swapUsedBytes: number | null;
+    temperatureCelsius: number | null;
     uptimeSeconds: number | null;
   } | null;
   nowMs?: number;
@@ -190,17 +212,28 @@ export function createHostRepository(database: HostDatabase): HostRepository {
             latestMetrics: latestMetric
               ? {
                   collectedAtMs: latestMetric.collectedAtMs,
+                  batteryPercent: latestMetric.batteryPercent,
+                  batteryState: latestMetric.batteryState,
+                  cpuIdlePercent: latestMetric.cpuIdlePercent,
+                  cpuIowaitPercent: latestMetric.cpuIowaitPercent,
                   cpuPercent: latestMetric.cpuPercent,
+                  cpuStealPercent: latestMetric.cpuStealPercent,
+                  cpuSystemPercent: latestMetric.cpuSystemPercent,
+                  cpuUserPercent: latestMetric.cpuUserPercent,
                   diskTotalBytes: latestMetric.diskTotalBytes,
                   diskUsedBytes: latestMetric.diskUsedBytes,
                   load1: latestMetric.load1,
                   load5: latestMetric.load5,
                   load15: latestMetric.load15,
+                  memoryCacheBytes: latestMetric.memoryCacheBytes,
                   memoryTotalBytes: latestMetric.memoryTotalBytes,
                   memoryUsedBytes: latestMetric.memoryUsedBytes,
                   networkRxBytesDelta: latestMetric.networkRxBytesDelta,
                   networkTxBytesDelta: latestMetric.networkTxBytesDelta,
                   receivedAtMs: latestMetric.receivedAtMs,
+                  swapTotalBytes: latestMetric.swapTotalBytes,
+                  swapUsedBytes: latestMetric.swapUsedBytes,
+                  temperatureCelsius: latestMetric.temperatureCelsius,
                   uptimeSeconds: latestMetric.uptimeSeconds,
                 }
               : null,

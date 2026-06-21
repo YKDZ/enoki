@@ -112,10 +112,18 @@ export function liveSummaryFromHost(
     lastSeenAtMs: host.lastReportAtMs,
     latestMetrics: host.latestMetrics
       ? {
+          batteryPercent: host.latestMetrics.batteryPercent,
+          batteryState: host.latestMetrics.batteryState,
           collectedAtMs: host.latestMetrics.collectedAtMs,
+          cpuIdlePercent: host.latestMetrics.cpuIdlePercent,
+          cpuIowaitPercent: host.latestMetrics.cpuIowaitPercent,
           cpuPercent: host.latestMetrics.cpuPercent,
+          cpuStealPercent: host.latestMetrics.cpuStealPercent,
+          cpuSystemPercent: host.latestMetrics.cpuSystemPercent,
+          cpuUserPercent: host.latestMetrics.cpuUserPercent,
           diskTotalBytes: host.latestMetrics.diskTotalBytes,
           diskUsedBytes: host.latestMetrics.diskUsedBytes,
+          memoryCacheBytes: host.latestMetrics.memoryCacheBytes,
           memoryTotalBytes: host.latestMetrics.memoryTotalBytes,
           memoryUsedBytes: host.latestMetrics.memoryUsedBytes,
           networkRxBitsPerSecond: bitsPerSecond(
@@ -129,6 +137,9 @@ export function liveSummaryFromHost(
           ),
           networkTxBytesDelta: host.latestMetrics.networkTxBytesDelta,
           receivedAtMs: host.latestMetrics.receivedAtMs,
+          swapTotalBytes: host.latestMetrics.swapTotalBytes,
+          swapUsedBytes: host.latestMetrics.swapUsedBytes,
+          temperatureCelsius: host.latestMetrics.temperatureCelsius,
           uptimeSeconds: host.latestMetrics.uptimeSeconds,
         }
       : null,

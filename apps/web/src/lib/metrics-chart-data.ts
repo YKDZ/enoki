@@ -14,6 +14,7 @@ export type MetricsChartData = {
   };
   disk: {
     aggregateUsedPercent: MetricSeries;
+    aggregateIoBytes: MetricSeries[];
     mounts: MetricSeries[];
   };
   memory: {
@@ -48,6 +49,26 @@ export function buildMetricsChartData(
           percent(sample.diskUsedBytes, sample.diskTotalBytes),
         ),
       },
+      aggregateIoBytes: [
+        {
+          name: "读取",
+          points: valuePoints(samples, (sample) =>
+            sumEntityValues(
+              sample.disks,
+              (disk) => disk.readBytesDelta ?? null,
+            ),
+          ),
+        },
+        {
+          name: "写入",
+          points: valuePoints(samples, (sample) =>
+            sumEntityValues(
+              sample.disks,
+              (disk) => disk.writeBytesDelta ?? null,
+            ),
+          ),
+        },
+      ],
       mounts: entityPercentSeries(
         samples,
         (sample) => sample.disks,
@@ -96,6 +117,20 @@ export function buildMetricsChartData(
       ],
     },
   };
+}
+
+function sumEntityValues<TEntity>(
+  entities: TEntity[],
+  valueForEntity: (entity: TEntity) => number | null,
+) {
+  if (entities.length === 0) {
+    return null;
+  }
+
+  return entities.reduce(
+    (total, entity) => total + (valueForEntity(entity) ?? 0),
+    0,
+  );
 }
 
 export function extendSeriesToWindowStart(

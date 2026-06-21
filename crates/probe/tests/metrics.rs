@@ -1,8 +1,9 @@
 use enoki_probe::metrics::{
-    FilesystemCapacity, collect_cpu_metrics_from_proc_stat,
-    collect_default_route_interfaces_from_proc_routes, collect_disk_metrics_from_mounts,
-    collect_load_metrics_from_proc_loadavg, collect_memory_metrics_from_proc_meminfo,
-    collect_network_metrics_from_proc_net_dev, collect_uptime_seconds_from_proc_uptime,
+    FilesystemCapacity, collect_battery_metrics_from_sysfs, collect_cpu_metrics_from_proc_stat,
+    collect_default_route_interfaces_from_proc_routes, collect_disk_counters_from_proc_diskstats,
+    collect_disk_metrics_from_mounts, collect_load_metrics_from_proc_loadavg,
+    collect_memory_metrics_from_proc_meminfo, collect_network_metrics_from_proc_net_dev,
+    collect_temperature_celsius_from_sysfs, collect_uptime_seconds_from_proc_uptime,
 };
 
 #[test]
@@ -34,6 +35,9 @@ fn cpu_metrics_compute_usage_from_counter_deltas() {
         .expect("current cpu metrics parse");
 
     assert_close(metrics.aggregate_percent, 20.0);
+    assert_close(metrics.breakdown.user_percent, 15.0);
+    assert_close(metrics.breakdown.system_percent, 5.0);
+    assert_close(metrics.breakdown.idle_percent, 80.0);
     assert_eq!(
         metrics
             .cores
@@ -84,6 +88,11 @@ fn memory_load_and_uptime_metrics_parse_linux_host_sources() {
         "MemFree:          128000 kB",
         "MemAvailable:    1536000 kB",
         "Buffers:           64000 kB",
+        "Cached:           256000 kB",
+        "SReclaimable:      32000 kB",
+        "Shmem:             16000 kB",
+        "SwapTotal:       1024000 kB",
+        "SwapFree:         768000 kB",
         "",
     ]
     .join("\n");
@@ -96,6 +105,9 @@ fn memory_load_and_uptime_metrics_parse_linux_host_sources() {
 
     assert_eq!(memory.total_bytes, 2_097_152_000);
     assert_eq!(memory.used_bytes, 524_288_000);
+    assert_eq!(memory.cache_bytes, 344_064_000);
+    assert_eq!(memory.swap_total_bytes, 1_048_576_000);
+    assert_eq!(memory.swap_used_bytes, 262_144_000);
     assert_close(load.one, 0.12);
     assert_close(load.five, 0.34);
     assert_close(load.fifteen, 0.56);
@@ -118,34 +130,39 @@ fn disk_metrics_include_real_mounts_and_exclude_pseudo_runtime_and_duplicates() 
     ]
     .join("\n");
 
-    let disks = collect_disk_metrics_from_mounts(&mounts, |mount_point| match mount_point {
-        "/" => Some(FilesystemCapacity {
-            available_bytes: 300,
-            free_bytes: 250,
-            total_bytes: 1_000,
-        }),
-        "/srv/data" => Some(FilesystemCapacity {
-            available_bytes: 1_000,
-            free_bytes: 900,
-            total_bytes: 4_000,
-        }),
-        "/srv/data-bind" => Some(FilesystemCapacity {
-            available_bytes: 1_100,
-            free_bytes: 950,
-            total_bytes: 4_000,
-        }),
-        "/mnt/empty" => Some(FilesystemCapacity {
-            available_bytes: 0,
-            free_bytes: 0,
-            total_bytes: 0,
-        }),
-        "/media/My Disk" => Some(FilesystemCapacity {
-            available_bytes: 2_000,
-            free_bytes: 1_500,
-            total_bytes: 5_000,
-        }),
-        _ => None,
-    });
+    let disks = collect_disk_metrics_from_mounts(
+        &mounts,
+        |mount_point| match mount_point {
+            "/" => Some(FilesystemCapacity {
+                available_bytes: 300,
+                free_bytes: 250,
+                total_bytes: 1_000,
+            }),
+            "/srv/data" => Some(FilesystemCapacity {
+                available_bytes: 1_000,
+                free_bytes: 900,
+                total_bytes: 4_000,
+            }),
+            "/srv/data-bind" => Some(FilesystemCapacity {
+                available_bytes: 1_100,
+                free_bytes: 950,
+                total_bytes: 4_000,
+            }),
+            "/mnt/empty" => Some(FilesystemCapacity {
+                available_bytes: 0,
+                free_bytes: 0,
+                total_bytes: 0,
+            }),
+            "/media/My Disk" => Some(FilesystemCapacity {
+                available_bytes: 2_000,
+                free_bytes: 1_500,
+                total_bytes: 5_000,
+            }),
+            _ => None,
+        },
+        None,
+        None,
+    );
 
     assert_eq!(
         disks
@@ -165,6 +182,39 @@ fn disk_metrics_include_real_mounts_and_exclude_pseudo_runtime_and_duplicates() 
             ("/srv/data", "xfs", 3_100, 4_000),
         ],
     );
+}
+
+#[test]
+fn disk_metrics_include_io_deltas_when_diskstats_match_mount_source() {
+    let previous = collect_disk_counters_from_proc_diskstats(
+        " 253 0 vda1 10 0 20 40 30 0 50 60 0 70 80 0 0 0 0\n",
+    )
+    .expect("previous diskstats");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let current = collect_disk_counters_from_proc_diskstats(
+        " 253 0 vda1 15 0 28 50 34 0 58 72 0 78 90 0 0 0 0\n",
+    )
+    .expect("current diskstats");
+
+    let disks = collect_disk_metrics_from_mounts(
+        "/dev/vda1 / ext4 rw,relatime 0 0\n",
+        |_| {
+            Some(FilesystemCapacity {
+                available_bytes: 300,
+                free_bytes: 250,
+                total_bytes: 1_000,
+            })
+        },
+        Some(&current),
+        Some(&previous),
+    );
+
+    assert_eq!(disks.len(), 1);
+    assert_eq!(disks[0].read_bytes_delta, 8 * 512);
+    assert_eq!(disks[0].write_bytes_delta, 8 * 512);
+    assert_close(disks[0].read_await_ms.unwrap_or_default(), 2.0);
+    assert_close(disks[0].write_await_ms.unwrap_or_default(), 3.0);
+    assert!(disks[0].io_utilization_percent.unwrap_or_default() >= 0.0);
 }
 
 #[test]
@@ -259,6 +309,31 @@ fn network_metrics_keep_only_default_route_interfaces_when_known() {
             .collect::<Vec<_>>(),
         vec!["eth0"],
     );
+}
+
+#[test]
+fn temperature_and_battery_metrics_parse_linux_sysfs() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let hwmon = tempdir.path().join("hwmon0");
+    std::fs::create_dir(&hwmon).expect("hwmon dir");
+    std::fs::write(hwmon.join("name"), "coretemp\n").expect("sensor name");
+    std::fs::write(hwmon.join("temp1_input"), "42000\n").expect("temperature");
+
+    assert_close(
+        collect_temperature_celsius_from_sysfs(tempdir.path()).expect("temperature"),
+        42.0,
+    );
+
+    let powerdir = tempfile::tempdir().expect("power dir");
+    let battery = powerdir.path().join("BAT0");
+    std::fs::create_dir(&battery).expect("battery dir");
+    std::fs::write(battery.join("type"), "Battery\n").expect("battery type");
+    std::fs::write(battery.join("capacity"), "87\n").expect("battery capacity");
+    std::fs::write(battery.join("status"), "Discharging\n").expect("battery status");
+
+    let metrics = collect_battery_metrics_from_sysfs(powerdir.path()).expect("battery");
+    assert_eq!(metrics.percent, 87);
+    assert_eq!(metrics.state, "Discharging");
 }
 
 #[test]

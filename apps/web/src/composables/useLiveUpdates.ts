@@ -33,10 +33,18 @@ export function applyHostLiveSummary(
       lastReportAtMs: summary.lastSeenAtMs,
       latestMetrics: summary.latestMetrics
         ? {
+            batteryPercent: summary.latestMetrics.batteryPercent,
+            batteryState: summary.latestMetrics.batteryState,
             collectedAtMs: summary.latestMetrics.collectedAtMs,
+            cpuIdlePercent: summary.latestMetrics.cpuIdlePercent,
+            cpuIowaitPercent: summary.latestMetrics.cpuIowaitPercent,
             cpuPercent: summary.latestMetrics.cpuPercent,
+            cpuStealPercent: summary.latestMetrics.cpuStealPercent,
+            cpuSystemPercent: summary.latestMetrics.cpuSystemPercent,
+            cpuUserPercent: summary.latestMetrics.cpuUserPercent,
             diskTotalBytes: summary.latestMetrics.diskTotalBytes,
             diskUsedBytes: summary.latestMetrics.diskUsedBytes,
+            memoryCacheBytes: summary.latestMetrics.memoryCacheBytes,
             memoryTotalBytes: summary.latestMetrics.memoryTotalBytes,
             memoryUsedBytes: summary.latestMetrics.memoryUsedBytes,
             networkRxBitsPerSecond:
@@ -46,6 +54,9 @@ export function applyHostLiveSummary(
               summary.latestMetrics.networkTxBitsPerSecond,
             networkTxBytesDelta: summary.latestMetrics.networkTxBytesDelta,
             receivedAtMs: summary.latestMetrics.receivedAtMs,
+            swapTotalBytes: summary.latestMetrics.swapTotalBytes,
+            swapUsedBytes: summary.latestMetrics.swapUsedBytes,
+            temperatureCelsius: summary.latestMetrics.temperatureCelsius,
             uptimeSeconds: summary.latestMetrics.uptimeSeconds,
           }
         : null,

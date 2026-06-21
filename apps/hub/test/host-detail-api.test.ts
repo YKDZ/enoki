@@ -391,6 +391,8 @@ describe("Host detail API", () => {
       metrics: {
         samples: [
           {
+            batteryPercent: null,
+            batteryState: null,
             collectedAtMs: 1_725_000_004_500,
             cpuCores: [
               {
@@ -402,25 +404,43 @@ describe("Host detail API", () => {
                 usagePercent: 34.5,
               },
             ],
+            cpuIdlePercent: null,
+            cpuIowaitPercent: null,
             cpuPercent: 33.5,
+            cpuStealPercent: null,
+            cpuSystemPercent: null,
+            cpuUserPercent: null,
             diskTotalBytes: 30_000,
             diskUsedBytes: 24_000,
             disks: [
               {
                 availableBytes: 4_000,
                 filesystemType: "ext4",
+                ioUtilizationPercent: null,
                 mountPoint: "/",
+                readAwaitMs: null,
+                readBytesDelta: 0,
                 totalBytes: 20_000,
                 usedBytes: 16_000,
+                weightedIoPercent: null,
+                writeAwaitMs: null,
+                writeBytesDelta: 0,
               },
               {
                 availableBytes: 2_000,
                 filesystemType: "xfs",
+                ioUtilizationPercent: null,
                 mountPoint: "/data",
+                readAwaitMs: null,
+                readBytesDelta: 0,
                 totalBytes: 10_000,
                 usedBytes: 8_000,
+                weightedIoPercent: null,
+                writeAwaitMs: null,
+                writeBytesDelta: 0,
               },
             ],
+            memoryCacheBytes: null,
             memoryTotalBytes: 8_589_934_592,
             memoryUsedBytes: 4_294_967_296,
             networkInterfaces: [
@@ -445,6 +465,9 @@ describe("Host detail API", () => {
             networkTxBytesDelta: 1_500,
             receivedAtMs: 1_725_000_005_000,
             sequence: 1,
+            swapTotalBytes: null,
+            swapUsedBytes: null,
+            temperatureCelsius: null,
             uptimeSeconds: 3600,
           },
         ],

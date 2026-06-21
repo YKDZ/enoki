@@ -933,6 +933,39 @@ export namespace enoki {
 
             /** MetricSample memoryTotalBytes */
             memoryTotalBytes?: (Long|null);
+
+            /** MetricSample cpuUserPercent */
+            cpuUserPercent?: (number|null);
+
+            /** MetricSample cpuSystemPercent */
+            cpuSystemPercent?: (number|null);
+
+            /** MetricSample cpuIowaitPercent */
+            cpuIowaitPercent?: (number|null);
+
+            /** MetricSample cpuStealPercent */
+            cpuStealPercent?: (number|null);
+
+            /** MetricSample cpuIdlePercent */
+            cpuIdlePercent?: (number|null);
+
+            /** MetricSample memoryCacheBytes */
+            memoryCacheBytes?: (Long|null);
+
+            /** MetricSample swapTotalBytes */
+            swapTotalBytes?: (Long|null);
+
+            /** MetricSample swapUsedBytes */
+            swapUsedBytes?: (Long|null);
+
+            /** MetricSample temperatureCelsius */
+            temperatureCelsius?: (number|null);
+
+            /** MetricSample batteryPercent */
+            batteryPercent?: (number|null);
+
+            /** MetricSample batteryState */
+            batteryState?: (string|null);
         }
 
         /** Represents a MetricSample. */
@@ -979,6 +1012,39 @@ export namespace enoki {
 
             /** MetricSample memoryTotalBytes. */
             public memoryTotalBytes?: (Long|null);
+
+            /** MetricSample cpuUserPercent. */
+            public cpuUserPercent?: (number|null);
+
+            /** MetricSample cpuSystemPercent. */
+            public cpuSystemPercent?: (number|null);
+
+            /** MetricSample cpuIowaitPercent. */
+            public cpuIowaitPercent?: (number|null);
+
+            /** MetricSample cpuStealPercent. */
+            public cpuStealPercent?: (number|null);
+
+            /** MetricSample cpuIdlePercent. */
+            public cpuIdlePercent?: (number|null);
+
+            /** MetricSample memoryCacheBytes. */
+            public memoryCacheBytes?: (Long|null);
+
+            /** MetricSample swapTotalBytes. */
+            public swapTotalBytes?: (Long|null);
+
+            /** MetricSample swapUsedBytes. */
+            public swapUsedBytes?: (Long|null);
+
+            /** MetricSample temperatureCelsius. */
+            public temperatureCelsius?: (number|null);
+
+            /** MetricSample batteryPercent. */
+            public batteryPercent?: (number|null);
+
+            /** MetricSample batteryState. */
+            public batteryState?: (string|null);
 
             /**
              * Creates a new MetricSample instance using the specified properties.
@@ -1226,6 +1292,24 @@ export namespace enoki {
 
             /** DiskUsageMetric availableBytes */
             availableBytes?: (Long|null);
+
+            /** DiskUsageMetric readBytesDelta */
+            readBytesDelta?: (Long|null);
+
+            /** DiskUsageMetric writeBytesDelta */
+            writeBytesDelta?: (Long|null);
+
+            /** DiskUsageMetric ioUtilizationPercent */
+            ioUtilizationPercent?: (number|null);
+
+            /** DiskUsageMetric readAwaitMs */
+            readAwaitMs?: (number|null);
+
+            /** DiskUsageMetric writeAwaitMs */
+            writeAwaitMs?: (number|null);
+
+            /** DiskUsageMetric weightedIoPercent */
+            weightedIoPercent?: (number|null);
         }
 
         /** Represents a DiskUsageMetric. */
@@ -1251,6 +1335,24 @@ export namespace enoki {
 
             /** DiskUsageMetric availableBytes. */
             public availableBytes: Long;
+
+            /** DiskUsageMetric readBytesDelta. */
+            public readBytesDelta: Long;
+
+            /** DiskUsageMetric writeBytesDelta. */
+            public writeBytesDelta: Long;
+
+            /** DiskUsageMetric ioUtilizationPercent. */
+            public ioUtilizationPercent?: (number|null);
+
+            /** DiskUsageMetric readAwaitMs. */
+            public readAwaitMs?: (number|null);
+
+            /** DiskUsageMetric writeAwaitMs. */
+            public writeAwaitMs?: (number|null);
+
+            /** DiskUsageMetric weightedIoPercent. */
+            public weightedIoPercent?: (number|null);
 
             /**
              * Creates a new DiskUsageMetric instance using the specified properties.

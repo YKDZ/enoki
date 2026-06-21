@@ -2701,6 +2701,17 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.INetworkInterfaceMetric>|null} [networkInterfaces] MetricSample networkInterfaces
              * @property {Array.<enoki.v1.ICpuCoreMetric>|null} [cpuCores] MetricSample cpuCores
              * @property {Long|null} [memoryTotalBytes] MetricSample memoryTotalBytes
+             * @property {number|null} [cpuUserPercent] MetricSample cpuUserPercent
+             * @property {number|null} [cpuSystemPercent] MetricSample cpuSystemPercent
+             * @property {number|null} [cpuIowaitPercent] MetricSample cpuIowaitPercent
+             * @property {number|null} [cpuStealPercent] MetricSample cpuStealPercent
+             * @property {number|null} [cpuIdlePercent] MetricSample cpuIdlePercent
+             * @property {Long|null} [memoryCacheBytes] MetricSample memoryCacheBytes
+             * @property {Long|null} [swapTotalBytes] MetricSample swapTotalBytes
+             * @property {Long|null} [swapUsedBytes] MetricSample swapUsedBytes
+             * @property {number|null} [temperatureCelsius] MetricSample temperatureCelsius
+             * @property {number|null} [batteryPercent] MetricSample batteryPercent
+             * @property {string|null} [batteryState] MetricSample batteryState
              */
 
             /**
@@ -2817,6 +2828,94 @@ export const enoki = $root.enoki = (() => {
              */
             MetricSample.prototype.memoryTotalBytes = null;
 
+            /**
+             * MetricSample cpuUserPercent.
+             * @member {number|null|undefined} cpuUserPercent
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.cpuUserPercent = null;
+
+            /**
+             * MetricSample cpuSystemPercent.
+             * @member {number|null|undefined} cpuSystemPercent
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.cpuSystemPercent = null;
+
+            /**
+             * MetricSample cpuIowaitPercent.
+             * @member {number|null|undefined} cpuIowaitPercent
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.cpuIowaitPercent = null;
+
+            /**
+             * MetricSample cpuStealPercent.
+             * @member {number|null|undefined} cpuStealPercent
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.cpuStealPercent = null;
+
+            /**
+             * MetricSample cpuIdlePercent.
+             * @member {number|null|undefined} cpuIdlePercent
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.cpuIdlePercent = null;
+
+            /**
+             * MetricSample memoryCacheBytes.
+             * @member {Long|null|undefined} memoryCacheBytes
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.memoryCacheBytes = null;
+
+            /**
+             * MetricSample swapTotalBytes.
+             * @member {Long|null|undefined} swapTotalBytes
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.swapTotalBytes = null;
+
+            /**
+             * MetricSample swapUsedBytes.
+             * @member {Long|null|undefined} swapUsedBytes
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.swapUsedBytes = null;
+
+            /**
+             * MetricSample temperatureCelsius.
+             * @member {number|null|undefined} temperatureCelsius
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.temperatureCelsius = null;
+
+            /**
+             * MetricSample batteryPercent.
+             * @member {number|null|undefined} batteryPercent
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.batteryPercent = null;
+
+            /**
+             * MetricSample batteryState.
+             * @member {string|null|undefined} batteryState
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.batteryState = null;
+
             // OneOf field names bound to virtual getters and setters
             let $oneOfFields;
 
@@ -2859,6 +2958,72 @@ export const enoki = $root.enoki = (() => {
             // Virtual OneOf for proto3 optional field
             Object.defineProperty(MetricSample.prototype, "_memoryTotalBytes", {
                 get: $util.oneOfGetter($oneOfFields = ["memoryTotalBytes"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_cpuUserPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["cpuUserPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_cpuSystemPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["cpuSystemPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_cpuIowaitPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["cpuIowaitPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_cpuStealPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["cpuStealPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_cpuIdlePercent", {
+                get: $util.oneOfGetter($oneOfFields = ["cpuIdlePercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_memoryCacheBytes", {
+                get: $util.oneOfGetter($oneOfFields = ["memoryCacheBytes"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_swapTotalBytes", {
+                get: $util.oneOfGetter($oneOfFields = ["swapTotalBytes"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_swapUsedBytes", {
+                get: $util.oneOfGetter($oneOfFields = ["swapUsedBytes"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_temperatureCelsius", {
+                get: $util.oneOfGetter($oneOfFields = ["temperatureCelsius"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_batteryPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["batteryPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(MetricSample.prototype, "_batteryState", {
+                get: $util.oneOfGetter($oneOfFields = ["batteryState"]),
                 set: $util.oneOfSetter($oneOfFields)
             });
 
@@ -2917,6 +3082,28 @@ export const enoki = $root.enoki = (() => {
                         $root.enoki.v1.CpuCoreMetric.encode(message.cpuCores[i], writer.uint32(/* id 11, wireType 2 =*/90).fork(), q + 1).ldelim();
                 if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
                     writer.uint32(/* id 12, wireType 0 =*/96).uint64(message.memoryTotalBytes);
+                if (message.cpuUserPercent != null && Object.hasOwnProperty.call(message, "cpuUserPercent"))
+                    writer.uint32(/* id 13, wireType 1 =*/105).double(message.cpuUserPercent);
+                if (message.cpuSystemPercent != null && Object.hasOwnProperty.call(message, "cpuSystemPercent"))
+                    writer.uint32(/* id 14, wireType 1 =*/113).double(message.cpuSystemPercent);
+                if (message.cpuIowaitPercent != null && Object.hasOwnProperty.call(message, "cpuIowaitPercent"))
+                    writer.uint32(/* id 15, wireType 1 =*/121).double(message.cpuIowaitPercent);
+                if (message.cpuStealPercent != null && Object.hasOwnProperty.call(message, "cpuStealPercent"))
+                    writer.uint32(/* id 16, wireType 1 =*/129).double(message.cpuStealPercent);
+                if (message.cpuIdlePercent != null && Object.hasOwnProperty.call(message, "cpuIdlePercent"))
+                    writer.uint32(/* id 17, wireType 1 =*/137).double(message.cpuIdlePercent);
+                if (message.memoryCacheBytes != null && Object.hasOwnProperty.call(message, "memoryCacheBytes"))
+                    writer.uint32(/* id 18, wireType 0 =*/144).uint64(message.memoryCacheBytes);
+                if (message.swapTotalBytes != null && Object.hasOwnProperty.call(message, "swapTotalBytes"))
+                    writer.uint32(/* id 19, wireType 0 =*/152).uint64(message.swapTotalBytes);
+                if (message.swapUsedBytes != null && Object.hasOwnProperty.call(message, "swapUsedBytes"))
+                    writer.uint32(/* id 20, wireType 0 =*/160).uint64(message.swapUsedBytes);
+                if (message.temperatureCelsius != null && Object.hasOwnProperty.call(message, "temperatureCelsius"))
+                    writer.uint32(/* id 21, wireType 1 =*/169).double(message.temperatureCelsius);
+                if (message.batteryPercent != null && Object.hasOwnProperty.call(message, "batteryPercent"))
+                    writer.uint32(/* id 22, wireType 0 =*/176).uint32(message.batteryPercent);
+                if (message.batteryState != null && Object.hasOwnProperty.call(message, "batteryState"))
+                    writer.uint32(/* id 23, wireType 2 =*/186).string(message.batteryState);
                 return writer;
             };
 
@@ -3009,6 +3196,50 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 12: {
                             message.memoryTotalBytes = reader.uint64();
+                            break;
+                        }
+                    case 13: {
+                            message.cpuUserPercent = reader.double();
+                            break;
+                        }
+                    case 14: {
+                            message.cpuSystemPercent = reader.double();
+                            break;
+                        }
+                    case 15: {
+                            message.cpuIowaitPercent = reader.double();
+                            break;
+                        }
+                    case 16: {
+                            message.cpuStealPercent = reader.double();
+                            break;
+                        }
+                    case 17: {
+                            message.cpuIdlePercent = reader.double();
+                            break;
+                        }
+                    case 18: {
+                            message.memoryCacheBytes = reader.uint64();
+                            break;
+                        }
+                    case 19: {
+                            message.swapTotalBytes = reader.uint64();
+                            break;
+                        }
+                    case 20: {
+                            message.swapUsedBytes = reader.uint64();
+                            break;
+                        }
+                    case 21: {
+                            message.temperatureCelsius = reader.double();
+                            break;
+                        }
+                    case 22: {
+                            message.batteryPercent = reader.uint32();
+                            break;
+                        }
+                    case 23: {
+                            message.batteryState = reader.string();
                             break;
                         }
                     default:
@@ -3119,6 +3350,61 @@ export const enoki = $root.enoki = (() => {
                     if (!$util.isInteger(message.memoryTotalBytes) && !(message.memoryTotalBytes && $util.isInteger(message.memoryTotalBytes.low) && $util.isInteger(message.memoryTotalBytes.high)))
                         return "memoryTotalBytes: integer|Long expected";
                 }
+                if (message.cpuUserPercent != null && Object.hasOwnProperty.call(message, "cpuUserPercent")) {
+                    properties._cpuUserPercent = 1;
+                    if (typeof message.cpuUserPercent !== "number")
+                        return "cpuUserPercent: number expected";
+                }
+                if (message.cpuSystemPercent != null && Object.hasOwnProperty.call(message, "cpuSystemPercent")) {
+                    properties._cpuSystemPercent = 1;
+                    if (typeof message.cpuSystemPercent !== "number")
+                        return "cpuSystemPercent: number expected";
+                }
+                if (message.cpuIowaitPercent != null && Object.hasOwnProperty.call(message, "cpuIowaitPercent")) {
+                    properties._cpuIowaitPercent = 1;
+                    if (typeof message.cpuIowaitPercent !== "number")
+                        return "cpuIowaitPercent: number expected";
+                }
+                if (message.cpuStealPercent != null && Object.hasOwnProperty.call(message, "cpuStealPercent")) {
+                    properties._cpuStealPercent = 1;
+                    if (typeof message.cpuStealPercent !== "number")
+                        return "cpuStealPercent: number expected";
+                }
+                if (message.cpuIdlePercent != null && Object.hasOwnProperty.call(message, "cpuIdlePercent")) {
+                    properties._cpuIdlePercent = 1;
+                    if (typeof message.cpuIdlePercent !== "number")
+                        return "cpuIdlePercent: number expected";
+                }
+                if (message.memoryCacheBytes != null && Object.hasOwnProperty.call(message, "memoryCacheBytes")) {
+                    properties._memoryCacheBytes = 1;
+                    if (!$util.isInteger(message.memoryCacheBytes) && !(message.memoryCacheBytes && $util.isInteger(message.memoryCacheBytes.low) && $util.isInteger(message.memoryCacheBytes.high)))
+                        return "memoryCacheBytes: integer|Long expected";
+                }
+                if (message.swapTotalBytes != null && Object.hasOwnProperty.call(message, "swapTotalBytes")) {
+                    properties._swapTotalBytes = 1;
+                    if (!$util.isInteger(message.swapTotalBytes) && !(message.swapTotalBytes && $util.isInteger(message.swapTotalBytes.low) && $util.isInteger(message.swapTotalBytes.high)))
+                        return "swapTotalBytes: integer|Long expected";
+                }
+                if (message.swapUsedBytes != null && Object.hasOwnProperty.call(message, "swapUsedBytes")) {
+                    properties._swapUsedBytes = 1;
+                    if (!$util.isInteger(message.swapUsedBytes) && !(message.swapUsedBytes && $util.isInteger(message.swapUsedBytes.low) && $util.isInteger(message.swapUsedBytes.high)))
+                        return "swapUsedBytes: integer|Long expected";
+                }
+                if (message.temperatureCelsius != null && Object.hasOwnProperty.call(message, "temperatureCelsius")) {
+                    properties._temperatureCelsius = 1;
+                    if (typeof message.temperatureCelsius !== "number")
+                        return "temperatureCelsius: number expected";
+                }
+                if (message.batteryPercent != null && Object.hasOwnProperty.call(message, "batteryPercent")) {
+                    properties._batteryPercent = 1;
+                    if (!$util.isInteger(message.batteryPercent))
+                        return "batteryPercent: integer expected";
+                }
+                if (message.batteryState != null && Object.hasOwnProperty.call(message, "batteryState")) {
+                    properties._batteryState = 1;
+                    if (!$util.isString(message.batteryState))
+                        return "batteryState: string expected";
+                }
                 return null;
             };
 
@@ -3223,6 +3509,49 @@ export const enoki = $root.enoki = (() => {
                         message.memoryTotalBytes = object.memoryTotalBytes;
                     else if (typeof object.memoryTotalBytes === "object")
                         message.memoryTotalBytes = new $util.LongBits(object.memoryTotalBytes.low >>> 0, object.memoryTotalBytes.high >>> 0).toNumber(true);
+                if (object.cpuUserPercent != null)
+                    message.cpuUserPercent = Number(object.cpuUserPercent);
+                if (object.cpuSystemPercent != null)
+                    message.cpuSystemPercent = Number(object.cpuSystemPercent);
+                if (object.cpuIowaitPercent != null)
+                    message.cpuIowaitPercent = Number(object.cpuIowaitPercent);
+                if (object.cpuStealPercent != null)
+                    message.cpuStealPercent = Number(object.cpuStealPercent);
+                if (object.cpuIdlePercent != null)
+                    message.cpuIdlePercent = Number(object.cpuIdlePercent);
+                if (object.memoryCacheBytes != null)
+                    if ($util.Long)
+                        message.memoryCacheBytes = $util.Long.fromValue(object.memoryCacheBytes, true);
+                    else if (typeof object.memoryCacheBytes === "string")
+                        message.memoryCacheBytes = parseInt(object.memoryCacheBytes, 10);
+                    else if (typeof object.memoryCacheBytes === "number")
+                        message.memoryCacheBytes = object.memoryCacheBytes;
+                    else if (typeof object.memoryCacheBytes === "object")
+                        message.memoryCacheBytes = new $util.LongBits(object.memoryCacheBytes.low >>> 0, object.memoryCacheBytes.high >>> 0).toNumber(true);
+                if (object.swapTotalBytes != null)
+                    if ($util.Long)
+                        message.swapTotalBytes = $util.Long.fromValue(object.swapTotalBytes, true);
+                    else if (typeof object.swapTotalBytes === "string")
+                        message.swapTotalBytes = parseInt(object.swapTotalBytes, 10);
+                    else if (typeof object.swapTotalBytes === "number")
+                        message.swapTotalBytes = object.swapTotalBytes;
+                    else if (typeof object.swapTotalBytes === "object")
+                        message.swapTotalBytes = new $util.LongBits(object.swapTotalBytes.low >>> 0, object.swapTotalBytes.high >>> 0).toNumber(true);
+                if (object.swapUsedBytes != null)
+                    if ($util.Long)
+                        message.swapUsedBytes = $util.Long.fromValue(object.swapUsedBytes, true);
+                    else if (typeof object.swapUsedBytes === "string")
+                        message.swapUsedBytes = parseInt(object.swapUsedBytes, 10);
+                    else if (typeof object.swapUsedBytes === "number")
+                        message.swapUsedBytes = object.swapUsedBytes;
+                    else if (typeof object.swapUsedBytes === "object")
+                        message.swapUsedBytes = new $util.LongBits(object.swapUsedBytes.low >>> 0, object.swapUsedBytes.high >>> 0).toNumber(true);
+                if (object.temperatureCelsius != null)
+                    message.temperatureCelsius = Number(object.temperatureCelsius);
+                if (object.batteryPercent != null)
+                    message.batteryPercent = object.batteryPercent >>> 0;
+                if (object.batteryState != null)
+                    message.batteryState = String(object.batteryState);
                 return message;
             };
 
@@ -3338,6 +3667,76 @@ export const enoki = $root.enoki = (() => {
                         object.memoryTotalBytes = options.longs === String ? $util.Long.prototype.toString.call(message.memoryTotalBytes) : options.longs === Number ? new $util.LongBits(message.memoryTotalBytes.low >>> 0, message.memoryTotalBytes.high >>> 0).toNumber(true) : message.memoryTotalBytes;
                     if (options.oneofs)
                         object._memoryTotalBytes = "memoryTotalBytes";
+                }
+                if (message.cpuUserPercent != null && Object.hasOwnProperty.call(message, "cpuUserPercent")) {
+                    object.cpuUserPercent = options.json && !isFinite(message.cpuUserPercent) ? String(message.cpuUserPercent) : message.cpuUserPercent;
+                    if (options.oneofs)
+                        object._cpuUserPercent = "cpuUserPercent";
+                }
+                if (message.cpuSystemPercent != null && Object.hasOwnProperty.call(message, "cpuSystemPercent")) {
+                    object.cpuSystemPercent = options.json && !isFinite(message.cpuSystemPercent) ? String(message.cpuSystemPercent) : message.cpuSystemPercent;
+                    if (options.oneofs)
+                        object._cpuSystemPercent = "cpuSystemPercent";
+                }
+                if (message.cpuIowaitPercent != null && Object.hasOwnProperty.call(message, "cpuIowaitPercent")) {
+                    object.cpuIowaitPercent = options.json && !isFinite(message.cpuIowaitPercent) ? String(message.cpuIowaitPercent) : message.cpuIowaitPercent;
+                    if (options.oneofs)
+                        object._cpuIowaitPercent = "cpuIowaitPercent";
+                }
+                if (message.cpuStealPercent != null && Object.hasOwnProperty.call(message, "cpuStealPercent")) {
+                    object.cpuStealPercent = options.json && !isFinite(message.cpuStealPercent) ? String(message.cpuStealPercent) : message.cpuStealPercent;
+                    if (options.oneofs)
+                        object._cpuStealPercent = "cpuStealPercent";
+                }
+                if (message.cpuIdlePercent != null && Object.hasOwnProperty.call(message, "cpuIdlePercent")) {
+                    object.cpuIdlePercent = options.json && !isFinite(message.cpuIdlePercent) ? String(message.cpuIdlePercent) : message.cpuIdlePercent;
+                    if (options.oneofs)
+                        object._cpuIdlePercent = "cpuIdlePercent";
+                }
+                if (message.memoryCacheBytes != null && Object.hasOwnProperty.call(message, "memoryCacheBytes")) {
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.memoryCacheBytes = typeof message.memoryCacheBytes === "number" ? BigInt(message.memoryCacheBytes) : $util.Long.fromBits(message.memoryCacheBytes.low >>> 0, message.memoryCacheBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.memoryCacheBytes === "number")
+                        object.memoryCacheBytes = options.longs === String ? String(message.memoryCacheBytes) : message.memoryCacheBytes;
+                    else
+                        object.memoryCacheBytes = options.longs === String ? $util.Long.prototype.toString.call(message.memoryCacheBytes) : options.longs === Number ? new $util.LongBits(message.memoryCacheBytes.low >>> 0, message.memoryCacheBytes.high >>> 0).toNumber(true) : message.memoryCacheBytes;
+                    if (options.oneofs)
+                        object._memoryCacheBytes = "memoryCacheBytes";
+                }
+                if (message.swapTotalBytes != null && Object.hasOwnProperty.call(message, "swapTotalBytes")) {
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.swapTotalBytes = typeof message.swapTotalBytes === "number" ? BigInt(message.swapTotalBytes) : $util.Long.fromBits(message.swapTotalBytes.low >>> 0, message.swapTotalBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.swapTotalBytes === "number")
+                        object.swapTotalBytes = options.longs === String ? String(message.swapTotalBytes) : message.swapTotalBytes;
+                    else
+                        object.swapTotalBytes = options.longs === String ? $util.Long.prototype.toString.call(message.swapTotalBytes) : options.longs === Number ? new $util.LongBits(message.swapTotalBytes.low >>> 0, message.swapTotalBytes.high >>> 0).toNumber(true) : message.swapTotalBytes;
+                    if (options.oneofs)
+                        object._swapTotalBytes = "swapTotalBytes";
+                }
+                if (message.swapUsedBytes != null && Object.hasOwnProperty.call(message, "swapUsedBytes")) {
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.swapUsedBytes = typeof message.swapUsedBytes === "number" ? BigInt(message.swapUsedBytes) : $util.Long.fromBits(message.swapUsedBytes.low >>> 0, message.swapUsedBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.swapUsedBytes === "number")
+                        object.swapUsedBytes = options.longs === String ? String(message.swapUsedBytes) : message.swapUsedBytes;
+                    else
+                        object.swapUsedBytes = options.longs === String ? $util.Long.prototype.toString.call(message.swapUsedBytes) : options.longs === Number ? new $util.LongBits(message.swapUsedBytes.low >>> 0, message.swapUsedBytes.high >>> 0).toNumber(true) : message.swapUsedBytes;
+                    if (options.oneofs)
+                        object._swapUsedBytes = "swapUsedBytes";
+                }
+                if (message.temperatureCelsius != null && Object.hasOwnProperty.call(message, "temperatureCelsius")) {
+                    object.temperatureCelsius = options.json && !isFinite(message.temperatureCelsius) ? String(message.temperatureCelsius) : message.temperatureCelsius;
+                    if (options.oneofs)
+                        object._temperatureCelsius = "temperatureCelsius";
+                }
+                if (message.batteryPercent != null && Object.hasOwnProperty.call(message, "batteryPercent")) {
+                    object.batteryPercent = message.batteryPercent;
+                    if (options.oneofs)
+                        object._batteryPercent = "batteryPercent";
+                }
+                if (message.batteryState != null && Object.hasOwnProperty.call(message, "batteryState")) {
+                    object.batteryState = message.batteryState;
+                    if (options.oneofs)
+                        object._batteryState = "batteryState";
                 }
                 return object;
             };
@@ -3945,6 +4344,12 @@ export const enoki = $root.enoki = (() => {
              * @property {Long|null} [totalBytes] DiskUsageMetric totalBytes
              * @property {Long|null} [usedBytes] DiskUsageMetric usedBytes
              * @property {Long|null} [availableBytes] DiskUsageMetric availableBytes
+             * @property {Long|null} [readBytesDelta] DiskUsageMetric readBytesDelta
+             * @property {Long|null} [writeBytesDelta] DiskUsageMetric writeBytesDelta
+             * @property {number|null} [ioUtilizationPercent] DiskUsageMetric ioUtilizationPercent
+             * @property {number|null} [readAwaitMs] DiskUsageMetric readAwaitMs
+             * @property {number|null} [writeAwaitMs] DiskUsageMetric writeAwaitMs
+             * @property {number|null} [weightedIoPercent] DiskUsageMetric weightedIoPercent
              */
 
             /**
@@ -4003,6 +4408,81 @@ export const enoki = $root.enoki = (() => {
             DiskUsageMetric.prototype.availableBytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
 
             /**
+             * DiskUsageMetric readBytesDelta.
+             * @member {Long} readBytesDelta
+             * @memberof enoki.v1.DiskUsageMetric
+             * @instance
+             */
+            DiskUsageMetric.prototype.readBytesDelta = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * DiskUsageMetric writeBytesDelta.
+             * @member {Long} writeBytesDelta
+             * @memberof enoki.v1.DiskUsageMetric
+             * @instance
+             */
+            DiskUsageMetric.prototype.writeBytesDelta = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * DiskUsageMetric ioUtilizationPercent.
+             * @member {number|null|undefined} ioUtilizationPercent
+             * @memberof enoki.v1.DiskUsageMetric
+             * @instance
+             */
+            DiskUsageMetric.prototype.ioUtilizationPercent = null;
+
+            /**
+             * DiskUsageMetric readAwaitMs.
+             * @member {number|null|undefined} readAwaitMs
+             * @memberof enoki.v1.DiskUsageMetric
+             * @instance
+             */
+            DiskUsageMetric.prototype.readAwaitMs = null;
+
+            /**
+             * DiskUsageMetric writeAwaitMs.
+             * @member {number|null|undefined} writeAwaitMs
+             * @memberof enoki.v1.DiskUsageMetric
+             * @instance
+             */
+            DiskUsageMetric.prototype.writeAwaitMs = null;
+
+            /**
+             * DiskUsageMetric weightedIoPercent.
+             * @member {number|null|undefined} weightedIoPercent
+             * @memberof enoki.v1.DiskUsageMetric
+             * @instance
+             */
+            DiskUsageMetric.prototype.weightedIoPercent = null;
+
+            // OneOf field names bound to virtual getters and setters
+            let $oneOfFields;
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskUsageMetric.prototype, "_ioUtilizationPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["ioUtilizationPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskUsageMetric.prototype, "_readAwaitMs", {
+                get: $util.oneOfGetter($oneOfFields = ["readAwaitMs"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskUsageMetric.prototype, "_writeAwaitMs", {
+                get: $util.oneOfGetter($oneOfFields = ["writeAwaitMs"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskUsageMetric.prototype, "_weightedIoPercent", {
+                get: $util.oneOfGetter($oneOfFields = ["weightedIoPercent"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
              * Creates a new DiskUsageMetric instance using the specified properties.
              * @function create
              * @memberof enoki.v1.DiskUsageMetric
@@ -4040,6 +4520,18 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 4, wireType 0 =*/32).uint64(message.usedBytes);
                 if (message.availableBytes != null && Object.hasOwnProperty.call(message, "availableBytes"))
                     writer.uint32(/* id 5, wireType 0 =*/40).uint64(message.availableBytes);
+                if (message.readBytesDelta != null && Object.hasOwnProperty.call(message, "readBytesDelta"))
+                    writer.uint32(/* id 6, wireType 0 =*/48).uint64(message.readBytesDelta);
+                if (message.writeBytesDelta != null && Object.hasOwnProperty.call(message, "writeBytesDelta"))
+                    writer.uint32(/* id 7, wireType 0 =*/56).uint64(message.writeBytesDelta);
+                if (message.ioUtilizationPercent != null && Object.hasOwnProperty.call(message, "ioUtilizationPercent"))
+                    writer.uint32(/* id 8, wireType 1 =*/65).double(message.ioUtilizationPercent);
+                if (message.readAwaitMs != null && Object.hasOwnProperty.call(message, "readAwaitMs"))
+                    writer.uint32(/* id 9, wireType 1 =*/73).double(message.readAwaitMs);
+                if (message.writeAwaitMs != null && Object.hasOwnProperty.call(message, "writeAwaitMs"))
+                    writer.uint32(/* id 10, wireType 1 =*/81).double(message.writeAwaitMs);
+                if (message.weightedIoPercent != null && Object.hasOwnProperty.call(message, "weightedIoPercent"))
+                    writer.uint32(/* id 11, wireType 1 =*/89).double(message.weightedIoPercent);
                 return writer;
             };
 
@@ -4100,6 +4592,30 @@ export const enoki = $root.enoki = (() => {
                             message.availableBytes = reader.uint64();
                             break;
                         }
+                    case 6: {
+                            message.readBytesDelta = reader.uint64();
+                            break;
+                        }
+                    case 7: {
+                            message.writeBytesDelta = reader.uint64();
+                            break;
+                        }
+                    case 8: {
+                            message.ioUtilizationPercent = reader.double();
+                            break;
+                        }
+                    case 9: {
+                            message.readAwaitMs = reader.double();
+                            break;
+                        }
+                    case 10: {
+                            message.writeAwaitMs = reader.double();
+                            break;
+                        }
+                    case 11: {
+                            message.weightedIoPercent = reader.double();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -4139,6 +4655,7 @@ export const enoki = $root.enoki = (() => {
                     long = 0;
                 if (long > $util.recursionLimit)
                     return "maximum nesting depth exceeded";
+                let properties = {};
                 if (message.mountPoint != null && Object.hasOwnProperty.call(message, "mountPoint"))
                     if (!$util.isString(message.mountPoint))
                         return "mountPoint: string expected";
@@ -4154,6 +4671,32 @@ export const enoki = $root.enoki = (() => {
                 if (message.availableBytes != null && Object.hasOwnProperty.call(message, "availableBytes"))
                     if (!$util.isInteger(message.availableBytes) && !(message.availableBytes && $util.isInteger(message.availableBytes.low) && $util.isInteger(message.availableBytes.high)))
                         return "availableBytes: integer|Long expected";
+                if (message.readBytesDelta != null && Object.hasOwnProperty.call(message, "readBytesDelta"))
+                    if (!$util.isInteger(message.readBytesDelta) && !(message.readBytesDelta && $util.isInteger(message.readBytesDelta.low) && $util.isInteger(message.readBytesDelta.high)))
+                        return "readBytesDelta: integer|Long expected";
+                if (message.writeBytesDelta != null && Object.hasOwnProperty.call(message, "writeBytesDelta"))
+                    if (!$util.isInteger(message.writeBytesDelta) && !(message.writeBytesDelta && $util.isInteger(message.writeBytesDelta.low) && $util.isInteger(message.writeBytesDelta.high)))
+                        return "writeBytesDelta: integer|Long expected";
+                if (message.ioUtilizationPercent != null && Object.hasOwnProperty.call(message, "ioUtilizationPercent")) {
+                    properties._ioUtilizationPercent = 1;
+                    if (typeof message.ioUtilizationPercent !== "number")
+                        return "ioUtilizationPercent: number expected";
+                }
+                if (message.readAwaitMs != null && Object.hasOwnProperty.call(message, "readAwaitMs")) {
+                    properties._readAwaitMs = 1;
+                    if (typeof message.readAwaitMs !== "number")
+                        return "readAwaitMs: number expected";
+                }
+                if (message.writeAwaitMs != null && Object.hasOwnProperty.call(message, "writeAwaitMs")) {
+                    properties._writeAwaitMs = 1;
+                    if (typeof message.writeAwaitMs !== "number")
+                        return "writeAwaitMs: number expected";
+                }
+                if (message.weightedIoPercent != null && Object.hasOwnProperty.call(message, "weightedIoPercent")) {
+                    properties._weightedIoPercent = 1;
+                    if (typeof message.weightedIoPercent !== "number")
+                        return "weightedIoPercent: number expected";
+                }
                 return null;
             };
 
@@ -4206,6 +4749,32 @@ export const enoki = $root.enoki = (() => {
                         message.availableBytes = object.availableBytes;
                     else if (typeof object.availableBytes === "object")
                         message.availableBytes = new $util.LongBits(object.availableBytes.low >>> 0, object.availableBytes.high >>> 0).toNumber(true);
+                if (object.readBytesDelta != null)
+                    if ($util.Long)
+                        message.readBytesDelta = $util.Long.fromValue(object.readBytesDelta, true);
+                    else if (typeof object.readBytesDelta === "string")
+                        message.readBytesDelta = parseInt(object.readBytesDelta, 10);
+                    else if (typeof object.readBytesDelta === "number")
+                        message.readBytesDelta = object.readBytesDelta;
+                    else if (typeof object.readBytesDelta === "object")
+                        message.readBytesDelta = new $util.LongBits(object.readBytesDelta.low >>> 0, object.readBytesDelta.high >>> 0).toNumber(true);
+                if (object.writeBytesDelta != null)
+                    if ($util.Long)
+                        message.writeBytesDelta = $util.Long.fromValue(object.writeBytesDelta, true);
+                    else if (typeof object.writeBytesDelta === "string")
+                        message.writeBytesDelta = parseInt(object.writeBytesDelta, 10);
+                    else if (typeof object.writeBytesDelta === "number")
+                        message.writeBytesDelta = object.writeBytesDelta;
+                    else if (typeof object.writeBytesDelta === "object")
+                        message.writeBytesDelta = new $util.LongBits(object.writeBytesDelta.low >>> 0, object.writeBytesDelta.high >>> 0).toNumber(true);
+                if (object.ioUtilizationPercent != null)
+                    message.ioUtilizationPercent = Number(object.ioUtilizationPercent);
+                if (object.readAwaitMs != null)
+                    message.readAwaitMs = Number(object.readAwaitMs);
+                if (object.writeAwaitMs != null)
+                    message.writeAwaitMs = Number(object.writeAwaitMs);
+                if (object.weightedIoPercent != null)
+                    message.weightedIoPercent = Number(object.weightedIoPercent);
                 return message;
             };
 
@@ -4244,6 +4813,16 @@ export const enoki = $root.enoki = (() => {
                         object.availableBytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
                     } else
                         object.availableBytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.readBytesDelta = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.readBytesDelta = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.writeBytesDelta = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.writeBytesDelta = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
                 }
                 if (message.mountPoint != null && Object.hasOwnProperty.call(message, "mountPoint"))
                     object.mountPoint = message.mountPoint;
@@ -4270,6 +4849,40 @@ export const enoki = $root.enoki = (() => {
                         object.availableBytes = options.longs === String ? String(message.availableBytes) : message.availableBytes;
                     else
                         object.availableBytes = options.longs === String ? $util.Long.prototype.toString.call(message.availableBytes) : options.longs === Number ? new $util.LongBits(message.availableBytes.low >>> 0, message.availableBytes.high >>> 0).toNumber(true) : message.availableBytes;
+                if (message.readBytesDelta != null && Object.hasOwnProperty.call(message, "readBytesDelta"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.readBytesDelta = typeof message.readBytesDelta === "number" ? BigInt(message.readBytesDelta) : $util.Long.fromBits(message.readBytesDelta.low >>> 0, message.readBytesDelta.high >>> 0, true).toBigInt();
+                    else if (typeof message.readBytesDelta === "number")
+                        object.readBytesDelta = options.longs === String ? String(message.readBytesDelta) : message.readBytesDelta;
+                    else
+                        object.readBytesDelta = options.longs === String ? $util.Long.prototype.toString.call(message.readBytesDelta) : options.longs === Number ? new $util.LongBits(message.readBytesDelta.low >>> 0, message.readBytesDelta.high >>> 0).toNumber(true) : message.readBytesDelta;
+                if (message.writeBytesDelta != null && Object.hasOwnProperty.call(message, "writeBytesDelta"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.writeBytesDelta = typeof message.writeBytesDelta === "number" ? BigInt(message.writeBytesDelta) : $util.Long.fromBits(message.writeBytesDelta.low >>> 0, message.writeBytesDelta.high >>> 0, true).toBigInt();
+                    else if (typeof message.writeBytesDelta === "number")
+                        object.writeBytesDelta = options.longs === String ? String(message.writeBytesDelta) : message.writeBytesDelta;
+                    else
+                        object.writeBytesDelta = options.longs === String ? $util.Long.prototype.toString.call(message.writeBytesDelta) : options.longs === Number ? new $util.LongBits(message.writeBytesDelta.low >>> 0, message.writeBytesDelta.high >>> 0).toNumber(true) : message.writeBytesDelta;
+                if (message.ioUtilizationPercent != null && Object.hasOwnProperty.call(message, "ioUtilizationPercent")) {
+                    object.ioUtilizationPercent = options.json && !isFinite(message.ioUtilizationPercent) ? String(message.ioUtilizationPercent) : message.ioUtilizationPercent;
+                    if (options.oneofs)
+                        object._ioUtilizationPercent = "ioUtilizationPercent";
+                }
+                if (message.readAwaitMs != null && Object.hasOwnProperty.call(message, "readAwaitMs")) {
+                    object.readAwaitMs = options.json && !isFinite(message.readAwaitMs) ? String(message.readAwaitMs) : message.readAwaitMs;
+                    if (options.oneofs)
+                        object._readAwaitMs = "readAwaitMs";
+                }
+                if (message.writeAwaitMs != null && Object.hasOwnProperty.call(message, "writeAwaitMs")) {
+                    object.writeAwaitMs = options.json && !isFinite(message.writeAwaitMs) ? String(message.writeAwaitMs) : message.writeAwaitMs;
+                    if (options.oneofs)
+                        object._writeAwaitMs = "writeAwaitMs";
+                }
+                if (message.weightedIoPercent != null && Object.hasOwnProperty.call(message, "weightedIoPercent")) {
+                    object.weightedIoPercent = options.json && !isFinite(message.weightedIoPercent) ? String(message.weightedIoPercent) : message.weightedIoPercent;
+                    if (options.oneofs)
+                        object._weightedIoPercent = "weightedIoPercent";
+                }
                 return object;
             };
 

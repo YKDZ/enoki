@@ -303,13 +303,28 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             usagePercent: core.usagePercent ?? 0,
             user: unsignedNumber(core.user),
           })),
+          batteryPercent: metricUnsignedField(sample, "batteryPercent"),
+          batteryState: hasMetricField(sample, "batteryState")
+            ? sample.batteryState || null
+            : null,
+          cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
+          cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
           cpuPercent: metricField(sample, "cpuPercent"),
+          cpuStealPercent: metricField(sample, "cpuStealPercent"),
+          cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
+          cpuUserPercent: metricField(sample, "cpuUserPercent"),
           disks: (sample.disks ?? []).map((disk) => ({
             availableBytes: unsignedNumber(disk.availableBytes),
             filesystemType: disk.filesystemType ?? "",
+            ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
             mountPoint: disk.mountPoint ?? "",
+            readAwaitMs: metricField(disk, "readAwaitMs"),
+            readBytesDelta: unsignedNumber(disk.readBytesDelta),
             totalBytes: unsignedNumber(disk.totalBytes),
             usedBytes: unsignedNumber(disk.usedBytes),
+            weightedIoPercent: metricField(disk, "weightedIoPercent"),
+            writeAwaitMs: metricField(disk, "writeAwaitMs"),
+            writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
           })),
           diskTotalBytes: sample.disks?.length
             ? sumUnsigned(sample.disks, (disk) => disk.totalBytes)
@@ -321,6 +336,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           load5: metricField(sample, "load_5"),
           load15: metricField(sample, "load_15"),
           hostId: host.id,
+          memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
           memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
           memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
           networkInterfaces: (sample.networkInterfaces ?? []).map(
@@ -347,6 +363,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           probeId: host.probeId,
           receivedAtMs: reportReceivedAtMs,
           sequence,
+          swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
+          swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
+          temperatureCelsius: metricField(sample, "temperatureCelsius"),
           uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
         });
         detailSamples.push(
@@ -828,15 +847,31 @@ function liveDetailSampleFromMetricSample(
       name: core.name ?? "",
       usagePercent: core.usagePercent ?? 0,
     })),
+    batteryPercent: metricUnsignedField(sample, "batteryPercent"),
+    batteryState: hasMetricField(sample, "batteryState")
+      ? sample.batteryState || null
+      : null,
+    cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
+    cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
     cpuPercent: metricField(sample, "cpuPercent"),
+    cpuStealPercent: metricField(sample, "cpuStealPercent"),
+    cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
+    cpuUserPercent: metricField(sample, "cpuUserPercent"),
     disks: (sample.disks ?? []).map((disk) => ({
       availableBytes: unsignedNumber(disk.availableBytes),
       filesystemType: disk.filesystemType ?? "",
+      ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
       mountPoint: disk.mountPoint ?? "",
+      readAwaitMs: metricField(disk, "readAwaitMs"),
+      readBytesDelta: unsignedNumber(disk.readBytesDelta),
       totalBytes: unsignedNumber(disk.totalBytes),
       usedBytes: unsignedNumber(disk.usedBytes),
+      weightedIoPercent: metricField(disk, "weightedIoPercent"),
+      writeAwaitMs: metricField(disk, "writeAwaitMs"),
+      writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
     })),
     hostId,
+    memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
     memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
     memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
     networkInterfaces: (sample.networkInterfaces ?? []).map(
@@ -848,6 +883,9 @@ function liveDetailSampleFromMetricSample(
     ),
     receivedAtMs,
     sequence: unsignedNumber(sample.sequence),
+    swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
+    swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
+    temperatureCelsius: metricField(sample, "temperatureCelsius"),
     uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
   };
 }
@@ -1152,20 +1190,53 @@ function signedNumber(
 }
 
 function metricField(
-  sample: enoki.v1.IMetricSample,
-  field: "cpuPercent" | "load_1" | "load_5" | "load_15",
+  sample: object,
+  field:
+    | "cpuPercent"
+    | "cpuUserPercent"
+    | "cpuSystemPercent"
+    | "cpuIowaitPercent"
+    | "cpuStealPercent"
+    | "cpuIdlePercent"
+    | "ioUtilizationPercent"
+    | "load_1"
+    | "load_5"
+    | "load_15"
+    | "readAwaitMs"
+    | "temperatureCelsius"
+    | "weightedIoPercent"
+    | "writeAwaitMs",
 ) {
-  return hasMetricField(sample, field) ? (sample[field] ?? null) : null;
+  const value = (sample as Record<string, unknown>)[field];
+
+  return hasMetricField(sample, field) && typeof value === "number"
+    ? value
+    : null;
 }
 
 function metricUnsignedField(
-  sample: enoki.v1.IMetricSample,
-  field: "memoryTotalBytes" | "memoryUsedBytes" | "uptimeSeconds",
+  sample: object,
+  field:
+    | "batteryPercent"
+    | "memoryCacheBytes"
+    | "memoryTotalBytes"
+    | "memoryUsedBytes"
+    | "swapTotalBytes"
+    | "swapUsedBytes"
+    | "uptimeSeconds",
 ) {
-  return hasMetricField(sample, field) ? unsignedNumber(sample[field]) : null;
+  return hasMetricField(sample, field)
+    ? unsignedNumber(
+        (sample as Record<string, unknown>)[field] as
+          | number
+          | { toNumber: () => number }
+          | null
+          | undefined,
+      )
+    : null;
 }
 
-function hasMetricField(sample: enoki.v1.IMetricSample, field: string) {
+function hasMetricField(sample: object, field: string) {
   return Object.prototype.hasOwnProperty.call(sample, field);
 }
 

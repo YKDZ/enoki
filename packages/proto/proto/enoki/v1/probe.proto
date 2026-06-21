@@ -78,6 +78,17 @@ message MetricSample {
   repeated NetworkInterfaceMetric network_interfaces = 10;
   repeated CpuCoreMetric cpu_cores = 11;
   optional uint64 memory_total_bytes = 12;
+  optional double cpu_user_percent = 13;
+  optional double cpu_system_percent = 14;
+  optional double cpu_iowait_percent = 15;
+  optional double cpu_steal_percent = 16;
+  optional double cpu_idle_percent = 17;
+  optional uint64 memory_cache_bytes = 18;
+  optional uint64 swap_total_bytes = 19;
+  optional uint64 swap_used_bytes = 20;
+  optional double temperature_celsius = 21;
+  optional uint32 battery_percent = 22;
+  optional string battery_state = 23;
 }
 
 message CpuCoreMetric {
@@ -99,6 +110,12 @@ message DiskUsageMetric {
   uint64 total_bytes = 3;
   uint64 used_bytes = 4;
   uint64 available_bytes = 5;
+  uint64 read_bytes_delta = 6;
+  uint64 write_bytes_delta = 7;
+  optional double io_utilization_percent = 8;
+  optional double read_await_ms = 9;
+  optional double write_await_ms = 10;
+  optional double weighted_io_percent = 11;
 }
 
 message NetworkInterfaceMetric {
