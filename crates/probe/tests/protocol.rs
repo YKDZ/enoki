@@ -96,6 +96,7 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
             id: "operation-01".to_string(),
             operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                 current_probe_version: "0.1.0".to_string(),
+                operation_token: "operation-token-01".to_string(),
                 target_probe_version: "0.2.0".to_string(),
             })),
         }),
@@ -111,9 +112,10 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
     assert!(matches!(
         operation.operation,
         Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+            operation_token,
             target_probe_version,
             ..
-        })) if target_probe_version == "0.2.0"
+        })) if target_probe_version == "0.2.0" && operation_token == "operation-token-01"
     ));
 
     let request = ProbeReportRequest {

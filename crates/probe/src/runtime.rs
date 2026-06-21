@@ -424,14 +424,21 @@ fn run_reporting_loop(
     Ok(())
 }
 
+struct ProbeUpgradeRunnerInput<'a> {
+    stdin: &'a str,
+    operation: &'a ProbeUpgradeOperation,
+}
+
 trait ProbeOperationRunner {
-    fn run_probe_upgrade(&mut self, operation: &ProbeUpgradeOperation) -> ProbeOperationFailed;
+    fn run_probe_upgrade(&mut self, input: ProbeUpgradeRunnerInput<'_>) -> ProbeOperationFailed;
 }
 
 struct NoopProbeOperationRunner;
 
 impl ProbeOperationRunner for NoopProbeOperationRunner {
-    fn run_probe_upgrade(&mut self, _operation: &ProbeUpgradeOperation) -> ProbeOperationFailed {
+    fn run_probe_upgrade(&mut self, input: ProbeUpgradeRunnerInput<'_>) -> ProbeOperationFailed {
+        let _ = (input.operation, input.stdin);
+
         ProbeOperationFailed {
             error_code: "unsupported_installation".to_string(),
             message: "Probe Upgrader is not installed in this build.".to_string(),
@@ -464,7 +471,10 @@ impl ProbeOperationReportQueue {
             return;
         };
 
-        let failed = runner.run_probe_upgrade(probe_upgrade);
+        let failed = runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
+            stdin: &probe_upgrade.operation_token,
+            operation: probe_upgrade,
+        });
         self.started.push(operation.id.clone());
         self.failed.push((operation.id.clone(), failed));
     }
@@ -842,5 +852,53 @@ fn bool_value(value: &toml::Value, key: &'static str) -> Result<Option<bool>, Pr
         Some(toml::Value::Boolean(boolean)) => Ok(Some(*boolean)),
         Some(_) => Err(ProbeRunError::InvalidConfig("expected boolean values")),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingOperationRunner {
+        observed_stdin: Option<String>,
+    }
+
+    impl ProbeOperationRunner for RecordingOperationRunner {
+        fn run_probe_upgrade(
+            &mut self,
+            input: ProbeUpgradeRunnerInput<'_>,
+        ) -> ProbeOperationFailed {
+            self.observed_stdin = Some(input.stdin.to_string());
+
+            ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message: "not installed".to_string(),
+            }
+        }
+    }
+
+    #[test]
+    fn probe_operation_report_queue_passes_operation_token_to_runner_stdin() {
+        let mut queue = ProbeOperationReportQueue::default();
+        let mut runner = RecordingOperationRunner::default();
+        let response = ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_string(),
+            inventory_needed: false,
+            pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                id: "operation-01".to_string(),
+                operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                    current_probe_version: "0.1.0".to_string(),
+                    operation_token: "operation-token-01".to_string(),
+                    target_probe_version: "0.2.0".to_string(),
+                })),
+            }),
+            server_time_ms: 1_725_000_000_000,
+        };
+
+        queue.observe_response(&response, &mut runner);
+
+        assert_eq!(runner.observed_stdin.as_deref(), Some("operation-token-01"));
     }
 }

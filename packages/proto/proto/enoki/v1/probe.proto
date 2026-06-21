@@ -128,6 +128,7 @@ message ProbeOperation {
 message ProbeUpgradeOperation {
   string current_probe_version = 1;
   string target_probe_version = 2;
+  string operation_token = 3;
 }
 
 message ProbeOperationAcknowledgement {

@@ -5326,6 +5326,7 @@ export const enoki = $root.enoki = (() => {
              * @interface IProbeUpgradeOperation
              * @property {string|null} [currentProbeVersion] ProbeUpgradeOperation currentProbeVersion
              * @property {string|null} [targetProbeVersion] ProbeUpgradeOperation targetProbeVersion
+             * @property {string|null} [operationToken] ProbeUpgradeOperation operationToken
              */
 
             /**
@@ -5360,6 +5361,14 @@ export const enoki = $root.enoki = (() => {
             ProbeUpgradeOperation.prototype.targetProbeVersion = "";
 
             /**
+             * ProbeUpgradeOperation operationToken.
+             * @member {string} operationToken
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             */
+            ProbeUpgradeOperation.prototype.operationToken = "";
+
+            /**
              * Creates a new ProbeUpgradeOperation instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeUpgradeOperation
@@ -5391,6 +5400,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 1, wireType 2 =*/10).string(message.currentProbeVersion);
                 if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
                     writer.uint32(/* id 2, wireType 2 =*/18).string(message.targetProbeVersion);
+                if (message.operationToken != null && Object.hasOwnProperty.call(message, "operationToken"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.operationToken);
                 return writer;
             };
 
@@ -5439,6 +5450,10 @@ export const enoki = $root.enoki = (() => {
                             message.targetProbeVersion = reader.string();
                             break;
                         }
+                    case 3: {
+                            message.operationToken = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -5484,6 +5499,9 @@ export const enoki = $root.enoki = (() => {
                 if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
                     if (!$util.isString(message.targetProbeVersion))
                         return "targetProbeVersion: string expected";
+                if (message.operationToken != null && Object.hasOwnProperty.call(message, "operationToken"))
+                    if (!$util.isString(message.operationToken))
+                        return "operationToken: string expected";
                 return null;
             };
 
@@ -5509,6 +5527,8 @@ export const enoki = $root.enoki = (() => {
                     message.currentProbeVersion = String(object.currentProbeVersion);
                 if (object.targetProbeVersion != null)
                     message.targetProbeVersion = String(object.targetProbeVersion);
+                if (object.operationToken != null)
+                    message.operationToken = String(object.operationToken);
                 return message;
             };
 
@@ -5532,11 +5552,14 @@ export const enoki = $root.enoki = (() => {
                 if (options.defaults) {
                     object.currentProbeVersion = "";
                     object.targetProbeVersion = "";
+                    object.operationToken = "";
                 }
                 if (message.currentProbeVersion != null && Object.hasOwnProperty.call(message, "currentProbeVersion"))
                     object.currentProbeVersion = message.currentProbeVersion;
                 if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
                     object.targetProbeVersion = message.targetProbeVersion;
+                if (message.operationToken != null && Object.hasOwnProperty.call(message, "operationToken"))
+                    object.operationToken = message.operationToken;
                 return object;
             };
 

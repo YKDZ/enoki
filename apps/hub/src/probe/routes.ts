@@ -21,6 +21,11 @@ import {
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "./configuration.js";
 import {
+  defaultProbeOperationTokenTtlMs,
+  issueProbeOperationToken,
+  validateProbeOperationToken,
+} from "./operation-token.js";
+import {
   acknowledgeProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
   startProbeUpgradeRequest,
@@ -37,6 +42,7 @@ const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse;
 const maxProbeReportPayloadBytes = 1024 * 1024;
 const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
+const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
 
 export type ProbeRouteServices = {
   enrollments: EnrollmentRepository;
@@ -48,6 +54,7 @@ export type ProbeRouteServices = {
   hostStatus?: HostStatusThresholds;
   liveUpdates?: LiveUpdateBroadcaster | null;
   now?: () => number;
+  probeOperationTokenSecret?: string;
   trustForwardedHeaders?: boolean;
 };
 
@@ -353,7 +360,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         currentProbeConfigurationVersion:
           services.probeConfigurations.getEffectiveForHost(host.id)
             .configuration.version,
-        pendingOperation: pendingProbeOperationForHost(services, host.id),
+        pendingOperation: pendingProbeOperationForHost(
+          services,
+          host.id,
+          host.probeId,
+          reportReceivedAtMs,
+        ),
         serverTimeMs: reportReceivedAtMs,
       }),
     ).finish();
@@ -361,6 +373,53 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     return context.body(toArrayBuffer(responseBody), 200, {
       "cache-control": "no-store",
       "content-type": "application/x-protobuf",
+    });
+  });
+
+  routes.post("/operations/:operationId/token/validate", async (context) => {
+    const host = authenticateProbe(
+      services.hosts,
+      context.req.raw.headers.get("authorization"),
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    const operationId = parseProbeOperationId(context.req.param("operationId"));
+    if (operationId === null) {
+      return probeJsonError("probe_operation_not_found", 404);
+    }
+
+    const operation = services.probeOperations?.findById(operationId) ?? null;
+    if (!operation) {
+      return probeJsonError("probe_operation_not_found", 404);
+    }
+
+    if (operation.hostId !== host.id) {
+      return probeJsonError("probe_operation_token_probe_mismatch", 403);
+    }
+
+    const body = await readTokenValidationBody(context);
+    if (!body) {
+      return probeJsonError("malformed_probe_operation_token_validation", 400);
+    }
+
+    const result = validateProbeOperationToken({
+      nowMs: now(),
+      operation,
+      probeId: host.probeId,
+      secret: probeOperationTokenSecret(services),
+      targetProbeVersion: body.targetProbeVersion,
+      token: body.token,
+    });
+
+    if (result.error) {
+      return probeJsonError(result.error, 403);
+    }
+
+    return context.json({ valid: true }, 200, {
+      "cache-control": "no-store",
     });
   });
 
@@ -400,6 +459,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 function pendingProbeOperationForHost(
   services: ProbeRouteServices,
   hostId: number,
+  probeId: string,
+  nowMs: number,
 ): enoki.v1.IProbeOperation | null {
   const operation = services.probeOperations?.findActiveForHost(hostId);
 
@@ -407,19 +468,63 @@ function pendingProbeOperationForHost(
     return null;
   }
 
-  return probeUpgradeOperationMessage(operation);
+  return probeUpgradeOperationMessage(operation, {
+    expiresAtMs: nowMs + defaultProbeOperationTokenTtlMs,
+    probeId,
+    secret: probeOperationTokenSecret(services),
+  });
 }
 
 function probeUpgradeOperationMessage(
   operation: ProbeUpgradeRequest,
+  tokenInput: {
+    expiresAtMs: number;
+    probeId: string;
+    secret: string;
+  },
 ): enoki.v1.IProbeOperation {
   return {
     id: String(operation.id),
     probeUpgrade: {
       currentProbeVersion: operation.currentProbeVersion ?? "",
+      operationToken: issueProbeOperationToken({
+        expiresAtMs: tokenInput.expiresAtMs,
+        operation,
+        probeId: tokenInput.probeId,
+        secret: tokenInput.secret,
+      }),
       targetProbeVersion: operation.targetProbeVersion,
     },
   };
+}
+
+function probeOperationTokenSecret(services: ProbeRouteServices) {
+  return services.probeOperationTokenSecret ?? defaultProbeOperationTokenSecret;
+}
+
+async function readTokenValidationBody(context: Context) {
+  try {
+    const body = (await context.req.json()) as {
+      targetProbeVersion?: unknown;
+      token?: unknown;
+    };
+
+    if (
+      typeof body.targetProbeVersion !== "string" ||
+      typeof body.token !== "string" ||
+      body.targetProbeVersion.length === 0 ||
+      body.token.length === 0
+    ) {
+      return null;
+    }
+
+    return {
+      targetProbeVersion: body.targetProbeVersion,
+      token: body.token,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function applyProbeOperationReports(input: {
@@ -820,7 +925,10 @@ async function readCappedRequestBody(request: Request, maxBytes: number) {
   return body;
 }
 
-function probeJsonError(error: string, status: 400 | 401 | 413 | 415) {
+function probeJsonError(
+  error: string,
+  status: 400 | 401 | 403 | 404 | 413 | 415,
+) {
   return new Response(JSON.stringify({ error }), {
     headers: {
       "cache-control": "no-store",

@@ -1686,6 +1686,9 @@ export namespace enoki {
 
             /** ProbeUpgradeOperation targetProbeVersion */
             targetProbeVersion?: (string|null);
+
+            /** ProbeUpgradeOperation operationToken */
+            operationToken?: (string|null);
         }
 
         /** Represents a ProbeUpgradeOperation. */
@@ -1702,6 +1705,9 @@ export namespace enoki {
 
             /** ProbeUpgradeOperation targetProbeVersion. */
             public targetProbeVersion: string;
+
+            /** ProbeUpgradeOperation operationToken. */
+            public operationToken: string;
 
             /**
              * Creates a new ProbeUpgradeOperation instance using the specified properties.

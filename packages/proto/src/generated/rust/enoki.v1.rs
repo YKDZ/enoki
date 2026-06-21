@@ -216,6 +216,8 @@ pub struct ProbeUpgradeOperation {
     pub current_probe_version: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub target_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub operation_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeOperationAcknowledgement {

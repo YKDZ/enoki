@@ -167,10 +167,148 @@ describe("Probe report API", () => {
       expect(response.pendingOperation?.probeUpgrade).toEqual(
         expect.objectContaining({
           currentProbeVersion: "0.1.0",
+          operationToken: expect.any(String),
           targetProbeVersion: "0.2.0",
         }),
       );
+      expect(response.pendingOperation?.probeUpgrade?.operationToken).not.toBe(
+        "",
+      );
     }
+  });
+
+  it("validates Probe Operation Tokens on a probe-only API path", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const otherEnrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const otherRegistration = await registerProbe(app, otherEnrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+
+    const delivery = await app.request("/api/probe/report", {
+      body: ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-01",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+        }),
+      ).finish(),
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    expect(delivery.status).toBe(200);
+    const token = ReportResponse.decode(
+      new Uint8Array(await delivery.arrayBuffer()),
+    ).pendingOperation?.probeUpgrade?.operationToken;
+    expect(token).toEqual(expect.any(String));
+
+    const accepted = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
+      {
+        body: JSON.stringify({
+          targetProbeVersion: "0.2.0",
+          token,
+        }),
+        headers: {
+          authorization: `Bearer ${registration.probeSecret}`,
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    );
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toEqual({ valid: true });
+
+    const wrongProbe = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
+      {
+        body: JSON.stringify({
+          targetProbeVersion: "0.2.0",
+          token,
+        }),
+        headers: {
+          authorization: `Bearer ${otherRegistration.probeSecret}`,
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    );
+    expect(wrongProbe.status).toBe(403);
+    await expect(wrongProbe.json()).resolves.toEqual({
+      error: "probe_operation_token_probe_mismatch",
+    });
+
+    const wrongTarget = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
+      {
+        body: JSON.stringify({
+          targetProbeVersion: "0.3.0",
+          token,
+        }),
+        headers: {
+          authorization: `Bearer ${registration.probeSecret}`,
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    );
+    expect(wrongTarget.status).toBe(403);
+    await expect(wrongTarget.json()).resolves.toEqual({
+      error: "probe_operation_token_target_mismatch",
+    });
+
+    database.probeOperations.updateProbeUpgradeRequest({
+      ...operation,
+      canceledAtMs: 1_725_000_010_000,
+      state: "canceled",
+      updatedAtMs: 1_725_000_010_000,
+    });
+    const canceled = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
+      {
+        body: JSON.stringify({
+          targetProbeVersion: "0.2.0",
+          token,
+        }),
+        headers: {
+          authorization: `Bearer ${registration.probeSecret}`,
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    );
+    expect(canceled.status).toBe(403);
+    await expect(canceled.json()).resolves.toEqual({
+      error: "probe_operation_token_operation_closed",
+    });
   });
 
   it("accepts Probe Operation acknowledgements and status reports idempotently", async () => {

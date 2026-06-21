@@ -156,6 +156,7 @@ describe("generated Probe protocol TypeScript", () => {
             id: "operation-01",
             probeUpgrade: {
               currentProbeVersion: "0.1.0",
+              operationToken: "operation-token-01",
               targetProbeVersion: "0.2.0",
             },
           },
@@ -167,6 +168,9 @@ describe("generated Probe protocol TypeScript", () => {
     expect(response.pendingOperation?.id).toBe("operation-01");
     expect(response.pendingOperation?.probeUpgrade?.targetProbeVersion).toBe(
       "0.2.0",
+    );
+    expect(response.pendingOperation?.probeUpgrade?.operationToken).toBe(
+      "operation-token-01",
     );
 
     const request = ReportRequest.decode(
