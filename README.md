@@ -1,7 +1,7 @@
 # Enoki
 
-[![Probe size](https://img.shields.io/endpoint?url=https%3A%2F%2Fgithub.com%2FYKDZ%2Fenoki%2Freleases%2Flatest%2Fdownload%2Fbadge-probe-size.json)](https://github.com/YKDZ/enoki/releases/latest)
-[![Hub image size](https://img.shields.io/endpoint?url=https%3A%2F%2Fgithub.com%2FYKDZ%2Fenoki%2Freleases%2Flatest%2Fdownload%2Fbadge-hub-size.json)](https://github.com/YKDZ/enoki/pkgs/container/enoki-hub)
+[![Probe size](https://github.com/YKDZ/enoki/releases/latest/download/badge-probe-size.svg)](https://github.com/YKDZ/enoki/releases/latest)
+[![Hub image size](https://github.com/YKDZ/enoki/releases/latest/download/badge-hub-size.svg)](https://github.com/YKDZ/enoki/pkgs/container/enoki-hub)
 
 Enoki MVP 的生产部署路径是将 Hub 作为 Docker 容器运行。Probe 不通过
 Docker 部署；每台 Host 上的 Probe 应直接安装为宿主机

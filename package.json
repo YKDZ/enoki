@@ -15,7 +15,7 @@
     "proto:check": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
     "smoke:mvp": "node scripts/smoke-mvp.mjs",
-    "test": "turbo run test",
+    "test": "turbo run test && node --test scripts/*.test.mjs",
     "typecheck": "turbo run typecheck"
   },
   "devDependencies": {

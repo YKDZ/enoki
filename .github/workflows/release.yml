@@ -127,4 +127,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.release-version.outputs.version }}
-        run: gh release upload "$VERSION" dist/size-badges/*.json --clobber
+        run: gh release upload "$VERSION" dist/size-badges/*.{json,svg} --clobber
