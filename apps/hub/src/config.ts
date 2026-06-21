@@ -42,6 +42,7 @@ export type ProbeAssetConfig = {
 export type ProbeOperationConfig = {
   acceptedTimeoutMs: number;
   runningTimeoutMs: number;
+  tokenSigningSecret?: string;
 };
 
 export type HubRuntimeConfig = {
@@ -125,6 +126,10 @@ export function createHubRuntimeConfigFromEnvironment(
           defaultProbeOperationRunningTimeoutSeconds,
           "ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS",
         ) * 1000,
+      tokenSigningSecret: readOptionalSecret(
+        environment.ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET,
+        "ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET",
+      ),
     },
   };
 }
@@ -181,4 +186,16 @@ function readPositiveInteger(
   }
 
   return parsed;
+}
+
+function readOptionalSecret(value: string | undefined, name: string) {
+  if (value === undefined || value === "") {
+    return undefined;
+  }
+
+  if (value.trim().length === 0) {
+    throw new Error(`${name} must not be blank.`);
+  }
+
+  return value;
 }

@@ -8,6 +8,7 @@ import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { createProbeUpgradeRequest } from "../src/probe/operation";
+import { validateProbeOperationToken } from "../src/probe/operation-token";
 
 const tempRoots: string[] = [];
 
@@ -187,6 +188,7 @@ describe("Probe report API", () => {
       },
       database,
       now: () => 1_725_000_010_000,
+      probeOperationTokenSecret: "configured-token-signing-secret",
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -229,6 +231,16 @@ describe("Probe report API", () => {
       new Uint8Array(await delivery.arrayBuffer()),
     ).pendingOperation?.probeUpgrade?.operationToken;
     expect(token).toEqual(expect.any(String));
+    expect(
+      validateProbeOperationToken({
+        nowMs: 1_725_000_010_000,
+        operation,
+        probeId: registration.probeId,
+        secret: "configured-token-signing-secret",
+        targetProbeVersion: "0.2.0",
+        token: token ?? "",
+      }),
+    ).toEqual({ error: null });
 
     const accepted = await app.request(
       `/api/probe/operations/${operation.id}/token/validate`,

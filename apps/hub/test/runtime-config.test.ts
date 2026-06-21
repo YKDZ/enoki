@@ -27,6 +27,7 @@ describe("Hub runtime configuration", () => {
     expect(config.probeOperations).toEqual({
       acceptedTimeoutMs: 300_000,
       runningTimeoutMs: 900_000,
+      tokenSigningSecret: undefined,
     });
   });
 
@@ -41,6 +42,7 @@ describe("Hub runtime configuration", () => {
       ENOKI_PROBE_ASSET_DIR: "/opt/enoki/assets",
       ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS: "60",
       ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS: "600",
+      ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET: "stable-token-secret",
       ENOKI_PROBE_INSTALL_PATH: "/opt/enoki/bin/enoki-probe",
       ENOKI_PUBLIC_HUB_URL: "https://hub.example",
       ENOKI_SQLITE_PATH: "/tmp/custom-enoki.db",
@@ -69,6 +71,7 @@ describe("Hub runtime configuration", () => {
     expect(config.probeOperations).toEqual({
       acceptedTimeoutMs: 60_000,
       runningTimeoutMs: 600_000,
+      tokenSigningSecret: "stable-token-secret",
     });
   });
 
@@ -80,5 +83,14 @@ describe("Hub runtime configuration", () => {
         OWNER_PASSWORD: "correct horse battery staple",
       }),
     ).toThrow("ENOKI_HOST_STATUS_OFFLINE_AFTER_SECONDS must be greater");
+  });
+
+  it("rejects blank Probe Operation Token signing secrets", () => {
+    expect(() =>
+      createHubRuntimeConfigFromEnvironment({
+        ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET: "   ",
+        OWNER_PASSWORD: "correct horse battery staple",
+      }),
+    ).toThrow("ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET must not be blank");
   });
 });

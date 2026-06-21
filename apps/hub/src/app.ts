@@ -42,6 +42,7 @@ export type HubAppOptions = {
   hostStatus?: HostStatusThresholds;
   now?: () => number;
   probeOperations?: ProbeOperationConfig;
+  probeOperationTokenSecret?: string;
   trustForwardedProbeHeaders?: boolean;
   liveUpdates?: LiveUpdateBroadcaster;
   webSocket?: {
@@ -58,6 +59,7 @@ export type ProbeApiAppOptions = Pick<
   | "hostStatus"
   | "liveUpdates"
   | "now"
+  | "probeOperationTokenSecret"
   | "probeOperations"
   | "probeAssets"
   | "trustForwardedProbeHeaders"
@@ -243,6 +245,7 @@ export function createHubAppFromEnvironment(
     auth: config.auth,
     clockSkewThresholdMs: config.clockSkew.thresholdMs,
     hostStatus: config.hostStatus,
+    probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
     probeOperations: config.probeOperations,
   });
 }
@@ -279,6 +282,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       hostStatus: options.hostStatus,
       liveUpdates: options.liveUpdates ?? null,
       now: options.now,
+      probeOperationTokenSecret: options.probeOperationTokenSecret,
       trustForwardedHeaders: options.trustForwardedProbeHeaders,
     }),
   );

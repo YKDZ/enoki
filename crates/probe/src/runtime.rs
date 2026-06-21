@@ -10,8 +10,8 @@ use crate::{
     protocol::enoki::v1::{
         ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
         ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationRunning,
-        ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
-        probe_operation::Operation, probe_operation_status::Status,
+        ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse, probe_operation::Operation,
+        probe_operation_status::Status,
     },
     report::{full_inventory_report, regular_report, startup_report},
 };
@@ -426,7 +426,13 @@ fn run_reporting_loop(
 
 struct ProbeUpgradeRunnerInput<'a> {
     stdin: &'a str,
-    operation: &'a ProbeUpgradeOperation,
+    operation: ProbeUpgradeRunnerOperationMetadata<'a>,
+}
+
+struct ProbeUpgradeRunnerOperationMetadata<'a> {
+    current_probe_version: &'a str,
+    operation_id: &'a str,
+    target_probe_version: &'a str,
 }
 
 trait ProbeOperationRunner {
@@ -437,7 +443,12 @@ struct NoopProbeOperationRunner;
 
 impl ProbeOperationRunner for NoopProbeOperationRunner {
     fn run_probe_upgrade(&mut self, input: ProbeUpgradeRunnerInput<'_>) -> ProbeOperationFailed {
-        let _ = (input.operation, input.stdin);
+        let _ = (
+            input.operation.current_probe_version,
+            input.operation.operation_id,
+            input.operation.target_probe_version,
+            input.stdin,
+        );
 
         ProbeOperationFailed {
             error_code: "unsupported_installation".to_string(),
@@ -473,7 +484,11 @@ impl ProbeOperationReportQueue {
 
         let failed = runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
             stdin: &probe_upgrade.operation_token,
-            operation: probe_upgrade,
+            operation: ProbeUpgradeRunnerOperationMetadata {
+                current_probe_version: &probe_upgrade.current_probe_version,
+                operation_id: &operation.id,
+                target_probe_version: &probe_upgrade.target_probe_version,
+            },
         });
         self.started.push(operation.id.clone());
         self.failed.push((operation.id.clone(), failed));
@@ -858,10 +873,14 @@ fn bool_value(value: &toml::Value, key: &'static str) -> Result<Option<bool>, Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::enoki::v1::ProbeUpgradeOperation;
 
     #[derive(Default)]
     struct RecordingOperationRunner {
+        observed_current_probe_version: Option<String>,
+        observed_operation_id: Option<String>,
         observed_stdin: Option<String>,
+        observed_target_probe_version: Option<String>,
     }
 
     impl ProbeOperationRunner for RecordingOperationRunner {
@@ -869,7 +888,12 @@ mod tests {
             &mut self,
             input: ProbeUpgradeRunnerInput<'_>,
         ) -> ProbeOperationFailed {
+            self.observed_current_probe_version =
+                Some(input.operation.current_probe_version.to_string());
+            self.observed_operation_id = Some(input.operation.operation_id.to_string());
             self.observed_stdin = Some(input.stdin.to_string());
+            self.observed_target_probe_version =
+                Some(input.operation.target_probe_version.to_string());
 
             ProbeOperationFailed {
                 error_code: "unsupported_installation".to_string(),
@@ -900,5 +924,17 @@ mod tests {
         queue.observe_response(&response, &mut runner);
 
         assert_eq!(runner.observed_stdin.as_deref(), Some("operation-token-01"));
+        assert_eq!(
+            runner.observed_operation_id.as_deref(),
+            Some("operation-01")
+        );
+        assert_eq!(
+            runner.observed_current_probe_version.as_deref(),
+            Some("0.1.0")
+        );
+        assert_eq!(
+            runner.observed_target_probe_version.as_deref(),
+            Some("0.2.0")
+        );
     }
 }

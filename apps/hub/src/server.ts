@@ -33,6 +33,7 @@ servers.push(
     liveUpdates,
     port,
     probeAssets: config.probeAssets,
+    probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
     probeOperations: config.probeOperations,
     trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
     webDistPath,
@@ -49,6 +50,7 @@ servers.push(
     liveUpdates,
     port: probePort,
     probeAssets: config.probeAssets,
+    probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
     trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
   }),
 );
