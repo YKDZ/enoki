@@ -504,7 +504,6 @@ Group=${SERVICE_GROUP}
 ExecStart=$(host_path "$INSTALL_PATH") run --config $(host_path "$CONFIG_PATH")
 Restart=always
 RestartSec=5s
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full

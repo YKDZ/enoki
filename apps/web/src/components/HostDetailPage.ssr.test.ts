@@ -149,9 +149,9 @@ describe("Host detail page", () => {
     expect(html).toContain("Hub 当前探针资产版本");
     expect(html).toContain("0.1.0");
     expect(html).toContain("0.2.0");
-    expect(html).toContain("探针可升级");
-    expect(html).toContain("确认探针升级");
-    expect(html).toContain("将此主机的探针升级到 0.2.0");
+    expect(html).toContain("探针可升级到 0.2.0");
+    expect(html).not.toContain("确认升级探针");
+    expect(html).not.toContain("将此主机的探针升级到 0.2.0");
     expect(html).toContain("配置");
     expect(html).toContain("在线");
 

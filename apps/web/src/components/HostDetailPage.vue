@@ -13,7 +13,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Select,
@@ -143,6 +142,7 @@ watch(
       return;
     }
 
+    isProbeUpgradeDialogOpen.value = false;
     toast.error("探针升级失败", {
       description: failure.message || failure.code,
     });
@@ -246,53 +246,47 @@ async function createProbeUpgradeRequest() {
         </div>
 
         <div class="flex items-center gap-2">
-          <Dialog
+          <Button
             v-if="probeUpgradeEligibility"
-            v-model:open="isProbeUpgradeDialogOpen"
+            variant="outline"
+            size="sm"
+            type="button"
+            class="relative"
+            :disabled="!canCreateProbeUpgradeRequest"
+            :aria-label="
+              probeUpgradeEligibility.isUpgradeable && !isProbeUpgradeActive
+                ? `探针可升级到 ${probeUpgradeTargetVersion}`
+                : '探针升级'
+            "
+            title="探针升级"
+            @click="isProbeUpgradeDialogOpen = true"
           >
-            <DialogTrigger as-child>
-              <Button
-                variant="outline"
-                size="sm"
-                type="button"
-                class="relative"
-                :disabled="!canCreateProbeUpgradeRequest"
-                title="探针升级"
-              >
-                <LoaderCircle
-                  v-if="
-                    isProbeUpgradeActive ||
-                    detail.isCreatingProbeUpgradeRequest.value
-                  "
-                  class="text-muted-foreground size-4 animate-spin"
-                  aria-hidden="true"
-                />
-                <span
-                  v-if="
-                    probeUpgradeEligibility.isUpgradeable &&
-                    !isProbeUpgradeActive
-                  "
-                  class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
-                  aria-hidden="true"
-                />
-                <span
-                  v-if="
-                    probeUpgradeEligibility.isUpgradeable &&
-                    !isProbeUpgradeActive
-                  "
-                  class="sr-only"
-                >
-                  探针可升级，确认探针升级，将此主机的探针升级到
-                  {{ probeUpgradeTargetVersion }}
-                </span>
-                {{
-                  isProbeUpgradeActive ||
-                  detail.isCreatingProbeUpgradeRequest.value
-                    ? "探针升级中"
-                    : "探针升级"
-                }}
-              </Button>
-            </DialogTrigger>
+            <LoaderCircle
+              v-if="
+                isProbeUpgradeActive ||
+                detail.isCreatingProbeUpgradeRequest.value
+              "
+              class="text-muted-foreground size-4 animate-spin"
+              aria-hidden="true"
+            />
+            <span
+              v-if="
+                probeUpgradeEligibility.isUpgradeable && !isProbeUpgradeActive
+              "
+              class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
+              aria-hidden="true"
+            />
+            {{
+              isProbeUpgradeActive || detail.isCreatingProbeUpgradeRequest.value
+                ? "探针升级中"
+                : "探针升级"
+            }}
+          </Button>
+          <Dialog
+            v-if="isProbeUpgradeDialogOpen"
+            :open="isProbeUpgradeDialogOpen"
+            @update:open="isProbeUpgradeDialogOpen = $event"
+          >
             <DialogContent class="pointer-events-auto! z-60 opacity-100!">
               <DialogHeader>
                 <DialogTitle>确认升级探针</DialogTitle>

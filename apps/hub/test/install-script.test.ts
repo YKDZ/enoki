@@ -87,18 +87,13 @@ describe("Probe systemd installer", () => {
         (metadata) => metadata.mode & 0o777,
       ),
     ).resolves.toBe(0o644);
-    await expect(
-      readFile(
-        path.join(root, "etc/systemd/system/enoki-probe.service"),
-        "utf8",
-      ),
-    ).resolves.toContain("User=enoki-probe");
-    await expect(
-      readFile(
-        path.join(root, "etc/systemd/system/enoki-probe.service"),
-        "utf8",
-      ),
-    ).resolves.toContain("Group=enoki-probe");
+    const serviceFile = await readFile(
+      path.join(root, "etc/systemd/system/enoki-probe.service"),
+      "utf8",
+    );
+    expect(serviceFile).toContain("User=enoki-probe");
+    expect(serviceFile).toContain("Group=enoki-probe");
+    expect(serviceFile).not.toContain("NoNewPrivileges=true");
     await expect(
       readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
     ).resolves.toBe(
