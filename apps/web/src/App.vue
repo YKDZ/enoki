@@ -694,7 +694,7 @@ function hostDetailPath(hostId: number) {
         v-else-if="hosts.length === 0"
         :icon="Server"
         title="暂无主机"
-        description="创建部署链接后，在目标机器上安装并启动 Probe，主机会在首次上报后出现在这里。"
+        description="创建部署链接后，在目标机器上安装并启动探针，主机会在首次上报后出现在这里。"
       >
         <template #action>
           <Button

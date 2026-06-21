@@ -143,7 +143,7 @@ watch(
       return;
     }
 
-    toast.error("Probe 升级失败", {
+    toast.error("探针升级失败", {
       description: failure.message || failure.code,
     });
   },
@@ -178,7 +178,7 @@ async function createProbeUpgradeRequest() {
     await props.detail.createProbeUpgradeRequest();
     isProbeUpgradeDialogOpen.value = false;
   } catch {
-    toast.error("无法创建 Probe Upgrade Request", {
+    toast.error("无法创建探针升级请求", {
       description: "请稍后重试。",
     });
   }
@@ -257,7 +257,7 @@ async function createProbeUpgradeRequest() {
                 type="button"
                 class="relative"
                 :disabled="!canCreateProbeUpgradeRequest"
-                title="Probe 升级"
+                title="探针升级"
               >
                 <LoaderCircle
                   v-if="
@@ -282,22 +282,22 @@ async function createProbeUpgradeRequest() {
                   "
                   class="sr-only"
                 >
-                  Probe 可升级，确认 Probe 升级，将此 Host 的 Probe 升级到
+                  探针可升级，确认探针升级，将此主机的探针升级到
                   {{ probeUpgradeTargetVersion }}
                 </span>
                 {{
                   isProbeUpgradeActive ||
                   detail.isCreatingProbeUpgradeRequest.value
-                    ? "Probe 升级中"
-                    : "Probe 升级"
+                    ? "探针升级中"
+                    : "探针升级"
                 }}
               </Button>
             </DialogTrigger>
-            <DialogContent force-mount>
+            <DialogContent class="pointer-events-auto! z-60 opacity-100!">
               <DialogHeader>
-                <DialogTitle>确认 Probe 升级</DialogTitle>
+                <DialogTitle>确认升级探针</DialogTitle>
                 <DialogDescription>
-                  将此 Host 的 Probe 升级到 {{ probeUpgradeTargetVersion }}。
+                  将此主机的探针升级到 {{ probeUpgradeTargetVersion }}。
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>
