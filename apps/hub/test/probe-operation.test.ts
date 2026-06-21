@@ -107,6 +107,35 @@ describe("Probe Upgrade Request lifecycle", () => {
     ]);
   });
 
+  it("rejects a different target while a request is already running", () => {
+    const active = {
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+      id: 42,
+      runningAtMs: 1_725_000_100_000,
+      state: "running" as const,
+    };
+
+    expect(
+      createProbeUpgradeRequest({
+        activeOperation: active,
+        currentProbeVersion: "0.1.0",
+        hostId: 7,
+        nowMs: 1_725_000_200_000,
+        targetProbeVersion: "0.3.0",
+      }),
+    ).toEqual({
+      error: "probe_upgrade_request_active",
+      events: [],
+      operation: null,
+    });
+  });
+
   it("cancels pending requests but rejects accepted and running requests", () => {
     const pending = createProbeUpgradeRequest({
       activeOperation: null,

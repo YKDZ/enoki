@@ -32,10 +32,17 @@ export type ProbeUpgradeRequestLifecycleEvent = {
   operation: ProbeUpgradeRequest;
 };
 
-export type CreateProbeUpgradeRequestResult = {
-  events: ProbeUpgradeRequestLifecycleEvent[];
-  operation: ProbeUpgradeRequest;
-};
+export type CreateProbeUpgradeRequestResult =
+  | {
+      error: null;
+      events: ProbeUpgradeRequestLifecycleEvent[];
+      operation: ProbeUpgradeRequest;
+    }
+  | {
+      error: "probe_upgrade_request_active";
+      events: [];
+      operation: null;
+    };
 
 export function createProbeUpgradeRequest(input: {
   activeOperation: ProbeUpgradeRequest | null;
@@ -49,6 +56,7 @@ export function createProbeUpgradeRequest(input: {
     isActiveProbeOperation(input.activeOperation)
   ) {
     return {
+      error: null,
       events: [],
       operation: input.activeOperation,
     };
@@ -68,6 +76,7 @@ export function createProbeUpgradeRequest(input: {
     };
 
     return {
+      error: null,
       events: [
         {
           action: "superseded",
@@ -82,7 +91,16 @@ export function createProbeUpgradeRequest(input: {
     };
   }
 
+  if (input.activeOperation && isActiveProbeOperation(input.activeOperation)) {
+    return {
+      error: "probe_upgrade_request_active",
+      events: [],
+      operation: null,
+    };
+  }
+
   return {
+    error: null,
     events: [
       {
         action: "created",

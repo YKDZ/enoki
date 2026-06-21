@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 
+import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
 import type {
   HostStatusThresholds,
@@ -13,9 +14,11 @@ import {
   readProbeAssetSetVersionFromDirectory,
 } from "../probe/asset-set.js";
 import {
+  acceptedTimedOutProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
   createProbeUpgradeRequest,
   type ProbeUpgradeRequest,
+  runningTimedOutProbeUpgradeRequest,
 } from "../probe/operation.js";
 
 export type HostRouteServices = {
@@ -25,8 +28,14 @@ export type HostRouteServices = {
   metrics?: MetricsRepository;
   now?: () => number;
   probeAssetDir?: string;
+  probeOperationTimeouts?: ProbeOperationConfig;
   probeConfigurations?: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+};
+
+const defaultProbeOperationTimeouts: ProbeOperationConfig = {
+  acceptedTimeoutMs: 5 * 60 * 1000,
+  runningTimeoutMs: 15 * 60 * 1000,
 };
 
 const metricsWindows = {
@@ -42,6 +51,8 @@ type MetricsWindow = keyof typeof metricsWindows;
 export function createHostRoutes(services: HostRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
+  const probeOperationTimeouts =
+    services.probeOperationTimeouts ?? defaultProbeOperationTimeouts;
 
   routes.get("/:hostId", async (context) => {
     const hostId = numericHostId(context.req.param("hostId"));
@@ -83,6 +94,14 @@ export function createHostRoutes(services: HostRouteServices) {
           version: null,
         };
 
+    const timedOutOperation = failTimedOutActiveProbeUpgradeRequest({
+      hostId,
+      nowMs: now(),
+      probeOperationTimeouts,
+      services,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
+
     return context.json({
       host: {
         ...hostSummary,
@@ -106,7 +125,9 @@ export function createHostRoutes(services: HostRouteServices) {
           probeVersion: host.probeVersion,
         }),
         probeUpgradeStatus: probeUpgradeStatus(
-          services.probeOperations?.findLatestForHost(hostId) ?? null,
+          timedOutOperation ??
+            services.probeOperations?.findLatestForHost(hostId) ??
+            null,
         ),
         warnings: warningList(host),
       },
@@ -154,7 +175,14 @@ export function createHostRoutes(services: HostRouteServices) {
       );
     }
 
-    const activeOperation = services.probeOperations.findActiveForHost(hostId);
+    const activeOperation =
+      failTimedOutActiveProbeUpgradeRequest({
+        hostId,
+        nowMs: now(),
+        probeOperationTimeouts,
+        services,
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      }) ?? services.probeOperations.findActiveForHost(hostId);
     const result = createProbeUpgradeRequest({
       activeOperation,
       currentProbeVersion: eligibility.currentProbeVersion,
@@ -162,6 +190,15 @@ export function createHostRoutes(services: HostRouteServices) {
       nowMs: now(),
       targetProbeVersion: eligibility.currentProbeAssetSetVersion,
     });
+    if (result.error) {
+      return context.json(
+        {
+          error: result.error,
+        },
+        409,
+      );
+    }
+
     const isDuplicate = result.events.length === 0 && result.operation.id;
     let operation = result.operation;
 
@@ -448,6 +485,55 @@ function hostMetadataError(error: string, status: 400 | 404 | 503 = 400) {
     },
     status,
   });
+}
+
+function failTimedOutActiveProbeUpgradeRequest(input: {
+  hostId: number;
+  nowMs: number;
+  probeOperationTimeouts: ProbeOperationConfig;
+  services: HostRouteServices;
+  userAgent?: string;
+}) {
+  const activeOperation =
+    input.services.probeOperations?.findActiveForHost(input.hostId) ?? null;
+  if (!activeOperation) {
+    return null;
+  }
+
+  const failed =
+    acceptedTimedOutProbeUpgradeRequest({
+      acceptedTimeoutMs: input.probeOperationTimeouts.acceptedTimeoutMs,
+      nowMs: input.nowMs,
+      operation: activeOperation,
+    }) ??
+    runningTimedOutProbeUpgradeRequest({
+      nowMs: input.nowMs,
+      operation: activeOperation,
+      runningTimeoutMs: input.probeOperationTimeouts.runningTimeoutMs,
+    });
+
+  if (!failed) {
+    return null;
+  }
+
+  const persisted =
+    input.services.probeOperations?.updateProbeUpgradeRequest(failed) ?? failed;
+  input.services.audit?.record({
+    action: "probe_upgrade_request.fail",
+    actor: "system",
+    details: {
+      failureCode: persisted.failureCode,
+      hostId: input.hostId,
+      targetProbeVersion: persisted.targetProbeVersion,
+    },
+    occurredAtMs: input.nowMs,
+    outcome: "success",
+    subjectId: String(persisted.id),
+    subjectType: "probe_upgrade_request",
+    userAgent: input.userAgent,
+  });
+
+  return persisted;
 }
 
 function probeUpgradeStatus(operation: ProbeUpgradeRequest | null) {

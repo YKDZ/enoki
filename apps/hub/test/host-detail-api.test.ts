@@ -758,6 +758,234 @@ describe("Host detail API", () => {
     database.close();
   });
 
+  it("rejects a different target while an active Probe Upgrade Request is running", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    const manifestPath = path.join(assetDir, "manifest.json");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(manifestPath, JSON.stringify(probeAssetManifest("v0.2.0")));
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    const hostId = await firstHostId(app, ownerSession);
+
+    const createResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    database.sqlite
+      .prepare(
+        "update probe_operations set state = 'running', running_at_ms = ?, updated_at_ms = ? where id = ?",
+      )
+      .run(
+        1_725_000_000_500,
+        1_725_000_000_500,
+        created.probeUpgradeRequest.id,
+      );
+    await writeFile(manifestPath, JSON.stringify(probeAssetManifest("v0.3.0")));
+
+    const rejectedResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+
+    expect(rejectedResponse.status).toBe(409);
+    await expect(rejectedResponse.json()).resolves.toEqual({
+      error: "probe_upgrade_request_active",
+    });
+    const activeRows = database.sqlite
+      .prepare(
+        "select id, state, target_probe_version from probe_operations where managed_host_id = ? and state in ('pending', 'accepted', 'running')",
+      )
+      .all(hostId);
+    expect(activeRows).toEqual([
+      {
+        id: created.probeUpgradeRequest.id,
+        state: "running",
+        target_probe_version: "0.2.0",
+      },
+    ]);
+
+    database.close();
+  });
+
+  it("persists accepted and running Probe Upgrade Request timeouts on observable routes", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify(probeAssetManifest("v0.2.0")),
+    );
+    let nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetRoot, "install-probe.sh"),
+      },
+      probeOperations: {
+        acceptedTimeoutMs: 1_000,
+        runningTimeoutMs: 2_000,
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    const hostId = await firstHostId(app, ownerSession);
+
+    const createResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    const created = (await createResponse.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    database.sqlite
+      .prepare(
+        "update probe_operations set state = 'accepted', accepted_at_ms = ?, updated_at_ms = ? where id = ?",
+      )
+      .run(nowMs, nowMs, created.probeUpgradeRequest.id);
+    nowMs += 1_001;
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: {
+          createdAtMs: 1_725_000_000_000,
+          failure: {
+            code: "accepted_timeout",
+            message:
+              "Probe accepted the upgrade request but did not start it in time.",
+          },
+          id: created.probeUpgradeRequest.id,
+          state: "failed",
+          targetProbeVersion: "0.2.0",
+          updatedAtMs: 1_725_000_001_001,
+        },
+      }),
+    });
+    expect(
+      database.probeOperations.findById(created.probeUpgradeRequest.id),
+    ).toEqual(
+      expect.objectContaining({
+        completedAtMs: 1_725_000_001_001,
+        failureCode: "accepted_timeout",
+        state: "failed",
+      }),
+    );
+
+    const secondCreateResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+    expect(secondCreateResponse.status).toBe(201);
+    const secondCreated = (await secondCreateResponse.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    database.sqlite
+      .prepare(
+        "update probe_operations set state = 'running', running_at_ms = ?, updated_at_ms = ? where id = ?",
+      )
+      .run(nowMs, nowMs, secondCreated.probeUpgradeRequest.id);
+    nowMs += 2_001;
+
+    const thirdCreateResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-upgrade-requests`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "POST",
+      },
+    );
+
+    expect(thirdCreateResponse.status).toBe(201);
+    expect(
+      database.probeOperations.findById(secondCreated.probeUpgradeRequest.id),
+    ).toEqual(
+      expect.objectContaining({
+        completedAtMs: 1_725_000_003_002,
+        failureCode: "running_timeout",
+        state: "failed",
+      }),
+    );
+    const failureAudits = database.audit
+      .recent(10)
+      .filter((event) => event.action === "probe_upgrade_request.fail");
+    expect(failureAudits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actor: "system",
+          detailsJson: expect.stringContaining("accepted_timeout"),
+          outcome: "success",
+          subjectId: String(created.probeUpgradeRequest.id),
+        }),
+        expect.objectContaining({
+          actor: "system",
+          detailsJson: expect.stringContaining("running_timeout"),
+          outcome: "success",
+          subjectId: String(secondCreated.probeUpgradeRequest.id),
+        }),
+      ]),
+    );
+
+    database.close();
+  });
+
   it("rejects Probe Upgrade Request creation for non-upgradeable Hosts with stable error codes", async () => {
     const database = await createTemporaryDatabase();
     const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));

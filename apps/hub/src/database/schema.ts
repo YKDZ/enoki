@@ -1,4 +1,6 @@
+import { sql } from "drizzle-orm";
 import {
+  index,
   integer,
   sqliteTable,
   text,
@@ -97,23 +99,39 @@ export const hosts = sqliteTable(
 export type HostRow = typeof hosts.$inferSelect;
 export type NewHostRow = typeof hosts.$inferInsert;
 
-export const probeOperations = sqliteTable("probe_operations", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  managedHostId: integer("managed_host_id").notNull(),
-  kind: text("kind").notNull(),
-  state: text("state").notNull(),
-  currentProbeVersion: text("current_probe_version"),
-  targetProbeVersion: text("target_probe_version").notNull(),
-  failureCode: text("failure_code"),
-  failureMessage: text("failure_message"),
-  createdAtMs: integer("created_at_ms").notNull(),
-  updatedAtMs: integer("updated_at_ms").notNull(),
-  acceptedAtMs: integer("accepted_at_ms"),
-  runningAtMs: integer("running_at_ms"),
-  completedAtMs: integer("completed_at_ms"),
-  supersededAtMs: integer("superseded_at_ms"),
-  canceledAtMs: integer("canceled_at_ms"),
-});
+export const probeOperations = sqliteTable(
+  "probe_operations",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    managedHostId: integer("managed_host_id").notNull(),
+    kind: text("kind").notNull(),
+    state: text("state").notNull(),
+    currentProbeVersion: text("current_probe_version"),
+    targetProbeVersion: text("target_probe_version").notNull(),
+    failureCode: text("failure_code"),
+    failureMessage: text("failure_message"),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+    acceptedAtMs: integer("accepted_at_ms"),
+    runningAtMs: integer("running_at_ms"),
+    completedAtMs: integer("completed_at_ms"),
+    supersededAtMs: integer("superseded_at_ms"),
+    canceledAtMs: integer("canceled_at_ms"),
+  },
+  (table) => [
+    uniqueIndex("probe_operations_one_active_per_host_idx")
+      .on(table.managedHostId)
+      .where(sql`state in ('pending', 'accepted', 'running')`),
+    index("probe_operations_active_for_host_idx")
+      .on(table.managedHostId, table.updatedAtMs, table.id)
+      .where(sql`state in ('pending', 'accepted', 'running')`),
+    index("probe_operations_latest_for_host_idx").on(
+      table.managedHostId,
+      table.updatedAtMs,
+      table.id,
+    ),
+  ],
+);
 
 export type ProbeOperationRow = typeof probeOperations.$inferSelect;
 export type NewProbeOperationRow = typeof probeOperations.$inferInsert;

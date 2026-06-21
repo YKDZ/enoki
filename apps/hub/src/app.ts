@@ -3,7 +3,10 @@ import type { UpgradeWebSocket } from "hono/ws";
 
 import { type AuthConfig, type AuthEnvironment } from "./auth/config.js";
 import { createOwnerAuth } from "./auth/routes.js";
-import { createHubRuntimeConfigFromEnvironment } from "./config.js";
+import {
+  createHubRuntimeConfigFromEnvironment,
+  type ProbeOperationConfig,
+} from "./config.js";
 import type { HostStatusThresholds } from "./database/hosts.js";
 import type { HubDatabase } from "./database/index.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
@@ -38,6 +41,7 @@ export type HubAppOptions = {
   probeAssets?: ProbeAssetRouteOptions;
   hostStatus?: HostStatusThresholds;
   now?: () => number;
+  probeOperations?: ProbeOperationConfig;
   trustForwardedProbeHeaders?: boolean;
   liveUpdates?: LiveUpdateBroadcaster;
   webSocket?: {
@@ -130,6 +134,7 @@ export function createHubApp(options: HubAppOptions = {}) {
           metrics: options.database.metrics,
           now: options.now,
           probeAssetDir: options.probeAssets?.assetDir,
+          probeOperationTimeouts: options.probeOperations,
           probeConfigurations: options.database.probeConfigurations,
           probeOperations: options.database.probeOperations,
         }),
@@ -237,6 +242,7 @@ export function createHubAppFromEnvironment(
     auth: config.auth,
     clockSkewThresholdMs: config.clockSkew.thresholdMs,
     hostStatus: config.hostStatus,
+    probeOperations: config.probeOperations,
   });
 }
 

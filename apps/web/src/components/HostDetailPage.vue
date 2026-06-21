@@ -28,6 +28,7 @@ import type { useHostDetail } from "@/composables/useHostDetail";
 import { formatBitsPerSecond, formatPercent } from "@/lib/format";
 import { hostStatusText, warningTitle } from "@/lib/host-display";
 import { buildMetricsChartData } from "@/lib/metrics-chart-data";
+import { shouldToastProbeUpgradeFailure } from "@/lib/probe-upgrade-toast";
 
 import type {
   HostMetadataDraft,
@@ -133,16 +134,17 @@ onMounted(() => {
 watch(
   () => probeUpgradeStatus.value,
   (status, previousStatus) => {
-    if (
-      status?.state !== "failed" ||
-      status.id === previousStatus?.id ||
-      !status.failure
-    ) {
+    if (!shouldToastProbeUpgradeFailure(status, previousStatus)) {
+      return;
+    }
+
+    const failure = status?.failure;
+    if (!failure) {
       return;
     }
 
     toast.error("Probe 升级失败", {
-      description: status.failure.message || status.failure.code,
+      description: failure.message || failure.code,
     });
   },
 );

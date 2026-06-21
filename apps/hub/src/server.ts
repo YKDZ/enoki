@@ -33,6 +33,7 @@ servers.push(
     liveUpdates,
     port,
     probeAssets: config.probeAssets,
+    probeOperations: config.probeOperations,
     trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
     webDistPath,
   }),
