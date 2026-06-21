@@ -18,3 +18,18 @@ export function shouldToastProbeUpgradeFailure(
 
   return activeProbeUpgradeStates.has(previousStatus.state);
 }
+
+export function shouldToastProbeUpgradeSuccess(
+  status: ProbeUpgradeStatus,
+  previousStatus: ProbeUpgradeStatus,
+) {
+  if (status?.state !== "succeeded") {
+    return false;
+  }
+
+  if (!previousStatus || status.id !== previousStatus.id) {
+    return false;
+  }
+
+  return activeProbeUpgradeStates.has(previousStatus.state);
+}

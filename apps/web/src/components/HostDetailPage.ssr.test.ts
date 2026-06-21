@@ -145,7 +145,7 @@ describe("Host detail page", () => {
       "report request failed: 503 Service Unavailable",
     );
     expect(html).toContain("主机资料");
-    expect(html).toContain("当前探针版本");
+    expect(html).toContain("探针版本");
     expect(html).toContain("Hub 当前探针资产版本");
     expect(html).toContain("0.1.0");
     expect(html).toContain("0.2.0");
@@ -281,6 +281,7 @@ describe("Host detail page", () => {
     expect(html).not.toContain("确认升级探针");
     expect(html).not.toContain("将此主机的探针升级到 0.1.14");
     expect(html).not.toContain("确认升级");
+    expect(html).not.toContain("探针升级");
   });
 
   it("uses the current probe asset version when the last probe upgrade failed", async () => {

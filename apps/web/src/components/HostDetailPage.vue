@@ -27,7 +27,10 @@ import type { useHostDetail } from "@/composables/useHostDetail";
 import { formatBitsPerSecond, formatPercent } from "@/lib/format";
 import { hostStatusText, warningTitle } from "@/lib/host-display";
 import { buildMetricsChartData } from "@/lib/metrics-chart-data";
-import { shouldToastProbeUpgradeFailure } from "@/lib/probe-upgrade-toast";
+import {
+  shouldToastProbeUpgradeFailure,
+  shouldToastProbeUpgradeSuccess,
+} from "@/lib/probe-upgrade-toast";
 
 import type {
   HostMetadataDraft,
@@ -127,6 +130,12 @@ const canCreateProbeUpgradeRequest = computed(
     !isProbeUpgradeActive.value &&
     !props.detail.isCreatingProbeUpgradeRequest.value,
 );
+const showProbeUpgradeButton = computed(
+  () =>
+    Boolean(probeUpgradeEligibility.value?.isUpgradeable) ||
+    isProbeUpgradeActive.value ||
+    props.detail.isCreatingProbeUpgradeRequest.value,
+);
 
 onMounted(() => {
   void props.detail.load();
@@ -135,6 +144,12 @@ onMounted(() => {
 watch(
   () => probeUpgradeStatus.value,
   (status, previousStatus) => {
+    if (shouldToastProbeUpgradeSuccess(status, previousStatus)) {
+      isProbeUpgradeDialogOpen.value = false;
+      toast.success("探针升级完成");
+      return;
+    }
+
     if (!shouldToastProbeUpgradeFailure(status, previousStatus)) {
       return;
     }
@@ -249,14 +264,14 @@ async function createProbeUpgradeRequest() {
 
         <div class="flex items-center gap-2">
           <Button
-            v-if="probeUpgradeEligibility"
+            v-if="showProbeUpgradeButton"
             variant="outline"
             size="sm"
             type="button"
             class="relative"
             :disabled="!canCreateProbeUpgradeRequest"
             :aria-label="
-              probeUpgradeEligibility.isUpgradeable && !isProbeUpgradeActive
+              probeUpgradeEligibility?.isUpgradeable && !isProbeUpgradeActive
                 ? `探针可升级到 ${probeUpgradeTargetVersion}`
                 : '探针升级'
             "
@@ -273,7 +288,7 @@ async function createProbeUpgradeRequest() {
             />
             <span
               v-if="
-                probeUpgradeEligibility.isUpgradeable && !isProbeUpgradeActive
+                probeUpgradeEligibility?.isUpgradeable && !isProbeUpgradeActive
               "
               class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
               aria-hidden="true"

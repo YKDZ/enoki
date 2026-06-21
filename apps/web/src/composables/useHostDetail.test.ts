@@ -464,6 +464,91 @@ describe("Host detail data", () => {
     ]);
   });
 
+  it("refreshes Host detail while a Probe Upgrade Request is active", async () => {
+    vi.useFakeTimers();
+    const requestedPaths: string[] = [];
+    let detailRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        requestedPaths.push(path);
+
+        if (path === "/api/web/hosts/1") {
+          detailRequestCount += 1;
+
+          return {
+            host: {
+              id: 1,
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+              probeUpgradeEligibility:
+                detailRequestCount === 1
+                  ? {
+                      currentProbeAssetSetVersion: "0.2.0",
+                      currentProbeVersion: "0.1.0",
+                      isUpgradeable: false,
+                      nonUpgradeableReason: null,
+                    }
+                  : {
+                      currentProbeAssetSetVersion: "0.2.0",
+                      currentProbeVersion: "0.2.0",
+                      isUpgradeable: false,
+                      nonUpgradeableReason: "probe_version_current",
+                    },
+              probeUpgradeStatus:
+                detailRequestCount === 1
+                  ? {
+                      createdAtMs: 1_725_000_000_000,
+                      failure: null,
+                      id: 9,
+                      state: "running",
+                      targetProbeVersion: "0.2.0",
+                      updatedAtMs: 1_725_000_001_000,
+                    }
+                  : {
+                      createdAtMs: 1_725_000_000_000,
+                      failure: null,
+                      id: 9,
+                      state: "succeeded",
+                      targetProbeVersion: "0.2.0",
+                      updatedAtMs: 1_725_000_002_000,
+                    },
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+
+    expect(detail.host.value?.probeUpgradeStatus?.state).toBe("running");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(requestedPaths).toEqual([
+      "/api/web/hosts/1",
+      "/api/web/hosts/1/metrics?window=1h",
+      "/api/web/hosts/1/metrics?window=1h",
+      "/api/web/hosts/1",
+    ]);
+    expect(detail.host.value?.probeUpgradeStatus?.state).toBe("succeeded");
+    expect(detail.host.value?.probeUpgradeEligibility?.isUpgradeable).toBe(
+      false,
+    );
+  });
+
   it("keeps the visible chart range equal to the selected window when the window has a leading gap", async () => {
     const detail = useHostDetail(1, {
       async fetchJson<T>(path: string) {

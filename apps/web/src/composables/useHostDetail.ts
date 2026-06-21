@@ -101,10 +101,7 @@ export function useHostDetail(
     isLoading.value = true;
 
     try {
-      const detailResponse = await fetchJson<HostDetailResponse>(
-        `/api/web/hosts/${currentHostId()}`,
-      );
-      host.value = detailResponse.host;
+      await refreshHostDetail();
     } catch (caught) {
       if (handleUnauthorized(caught)) {
         isLoading.value = false;
@@ -288,6 +285,7 @@ export function useHostDetail(
     let shouldScheduleNextRefresh = true;
     try {
       await loadMetrics(selectedWindow.value, { mode: "enqueue-new" });
+      await refreshHostDetailIfProbeUpgradeActive();
     } catch (caught) {
       if (handleUnauthorized(caught)) {
         shouldScheduleNextRefresh = false;
@@ -344,6 +342,21 @@ export function useHostDetail(
       await sleep(150);
       return await fetchJson<HostMetricsResponse>(path);
     }
+  }
+
+  async function refreshHostDetail() {
+    const detailResponse = await fetchJson<HostDetailResponse>(
+      `/api/web/hosts/${currentHostId()}`,
+    );
+    host.value = detailResponse.host;
+  }
+
+  async function refreshHostDetailIfProbeUpgradeActive() {
+    if (!isProbeUpgradeActive(host.value?.probeUpgradeStatus ?? null)) {
+      return;
+    }
+
+    await refreshHostDetail();
   }
 
   function applyLiveSummary(summary: HostLiveSummary) {
@@ -448,6 +461,10 @@ function dedupeAndSortMetricSamples(samples: HostMetricSample[]) {
       left.collectedAtMs - right.collectedAtMs ||
       left.sequence - right.sequence,
   );
+}
+
+function isProbeUpgradeActive(status: HostDetail["probeUpgradeStatus"]) {
+  return ["pending", "accepted", "running"].includes(status?.state ?? "");
 }
 
 function metricSampleKey(sample: HostMetricSample) {

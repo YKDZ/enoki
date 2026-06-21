@@ -118,8 +118,8 @@ function probeVersionText(value: string | null) {
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-muted-foreground text-xs">当前探针版本</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="text-muted-foreground text-xs">探针版本</p>
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{
             probeVersionText(host.probeUpgradeEligibility.currentProbeVersion)
           }}
