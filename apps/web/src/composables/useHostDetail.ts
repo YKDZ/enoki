@@ -56,16 +56,10 @@ export function useHostDetail(
       host.value?.lastReportAtMs ??
       Date.now();
     const durationMs = metricsWindowDurationsMs[selectedWindow.value];
-    const windowMinMs = endMs - durationMs;
-    const firstSampleMs = samples.value[0]?.collectedAtMs;
-    const minMs =
-      firstSampleMs && firstSampleMs < endMs
-        ? Math.max(windowMinMs, firstSampleMs)
-        : windowMinMs;
 
     return {
       maxMs: endMs,
-      minMs,
+      minMs: endMs - durationMs,
     };
   });
   let livePlaybackTimer: ReturnType<typeof setTimeout> | null = null;

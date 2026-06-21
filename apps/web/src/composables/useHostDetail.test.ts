@@ -396,7 +396,7 @@ describe("Host detail data", () => {
     ]);
   });
 
-  it("starts the visible chart range at the first real sample when the window has a leading gap", async () => {
+  it("keeps the visible chart range equal to the selected window when the window has a leading gap", async () => {
     const detail = useHostDetail(1, {
       async fetchJson<T>(path: string) {
         if (path === "/api/web/hosts/1") {
@@ -433,7 +433,7 @@ describe("Host detail data", () => {
 
     expect(detail.chartRange.value).toEqual({
       maxMs: 1_725_000_060_000,
-      minMs: 1_725_000_003_000,
+      minMs: 1_725_000_060_000 - 60 * 1000,
     });
   });
 
