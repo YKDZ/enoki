@@ -931,15 +931,72 @@ fn operation_status_path(install_metadata: &TrustedProbeInstallMetadata) -> Path
 }
 
 fn host_probe_asset_target() -> Result<&'static str, ProbeUpgraderRunError> {
-    probe_asset_target_for_arch(std::env::consts::ARCH)
+    probe_asset_target_for_arch_and_abi(std::env::consts::ARCH, detect_linux_abi())
 }
 
-fn probe_asset_target_for_arch(architecture: &str) -> Result<&'static str, ProbeUpgraderRunError> {
-    match architecture {
-        "x86_64" => Ok("x86_64-unknown-linux-musl"),
-        "aarch64" => Ok("aarch64-unknown-linux-musl"),
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxAbi {
+    Gnu,
+    Musl,
+}
+
+fn detect_linux_abi() -> LinuxAbi {
+    if command_output_contains_success("getconf", &["GNU_LIBC_VERSION"], "") {
+        return LinuxAbi::Gnu;
+    }
+
+    if command_output_contains_success("ldd", &["--version"], "musl") {
+        return LinuxAbi::Musl;
+    }
+
+    if has_musl_loader("/lib") || has_musl_loader("/usr/lib") {
+        return LinuxAbi::Musl;
+    }
+
+    LinuxAbi::Gnu
+}
+
+fn command_output_contains_success(command: &str, args: &[&str], needle: &str) -> bool {
+    let Ok(output) = Command::new(command).args(args).output() else {
+        return false;
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    needle.is_empty()
+        || String::from_utf8_lossy(&output.stdout)
+            .to_ascii_lowercase()
+            .contains(needle)
+        || String::from_utf8_lossy(&output.stderr)
+            .to_ascii_lowercase()
+            .contains(needle)
+}
+
+fn has_musl_loader(directory: &str) -> bool {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        file_name.starts_with("ld-musl-") && file_name.ends_with(".so.1")
+    })
+}
+
+fn probe_asset_target_for_arch_and_abi(
+    architecture: &str,
+    abi: LinuxAbi,
+) -> Result<&'static str, ProbeUpgraderRunError> {
+    match (architecture, abi) {
+        ("x86_64", LinuxAbi::Gnu) => Ok("x86_64-unknown-linux-gnu"),
+        ("x86_64", LinuxAbi::Musl) => Ok("x86_64-unknown-linux-musl"),
+        ("aarch64", LinuxAbi::Gnu) => Ok("aarch64-unknown-linux-gnu"),
+        ("aarch64", LinuxAbi::Musl) => Ok("aarch64-unknown-linux-musl"),
         other => Err(ProbeUpgraderRunError::UnsupportedArchitecture(
-            other.to_string(),
+            other.0.to_string(),
         )),
     }
 }
@@ -1834,15 +1891,23 @@ mod tests {
     #[test]
     fn probe_asset_target_supports_only_x86_64_and_aarch64() {
         assert_eq!(
-            probe_asset_target_for_arch("x86_64").expect("x86 target"),
+            probe_asset_target_for_arch_and_abi("x86_64", LinuxAbi::Musl).expect("x86 target"),
             "x86_64-unknown-linux-musl",
         );
         assert_eq!(
-            probe_asset_target_for_arch("aarch64").expect("aarch64 target"),
+            probe_asset_target_for_arch_and_abi("aarch64", LinuxAbi::Musl).expect("aarch64 target"),
             "aarch64-unknown-linux-musl",
         );
+        assert_eq!(
+            probe_asset_target_for_arch_and_abi("x86_64", LinuxAbi::Gnu).expect("x86 target"),
+            "x86_64-unknown-linux-gnu",
+        );
+        assert_eq!(
+            probe_asset_target_for_arch_and_abi("aarch64", LinuxAbi::Gnu).expect("aarch64 target"),
+            "aarch64-unknown-linux-gnu",
+        );
         assert!(matches!(
-            probe_asset_target_for_arch("riscv64"),
+            probe_asset_target_for_arch_and_abi("riscv64", LinuxAbi::Gnu),
             Err(ProbeUpgraderRunError::UnsupportedArchitecture(architecture))
                 if architecture == "riscv64"
         ));

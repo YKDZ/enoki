@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { AlertTriangle, ArrowLeft, LoaderCircle, Settings } from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -101,6 +101,11 @@ const chartData = computed(() =>
   buildMetricsChartData(props.detail.samples.value),
 );
 const host = computed(() => props.detail.host.value);
+const visibleWarnings = computed(
+  () =>
+    host.value?.warnings.filter((warning) => warning.code !== "clock_skew") ??
+    [],
+);
 const latestSample = computed(() => props.detail.samples.value.at(-1) ?? null);
 const latestMetric = computed(
   () => latestSample.value ?? host.value?.latestMetrics ?? null,
@@ -143,9 +148,40 @@ const showProbeUpgradeButton = computed(
     isProbeUpgradeActive.value ||
     props.detail.isCreatingProbeUpgradeRequest.value,
 );
+const lastClockSkewToastHostId = ref<number | null>(null);
 
 onMounted(() => {
   void props.detail.load();
+  watch(
+    host,
+    (currentHost) => {
+      if (!currentHost) {
+        lastClockSkewToastHostId.value = null;
+        return;
+      }
+
+      if (!currentHost.clockSkew.detected) {
+        if (lastClockSkewToastHostId.value === currentHost.id) {
+          lastClockSkewToastHostId.value = null;
+        }
+        return;
+      }
+
+      if (lastClockSkewToastHostId.value === currentHost.id) {
+        return;
+      }
+
+      lastClockSkewToastHostId.value = currentHost.id;
+      toast.warning("时间不同步", {
+        description: clockSkewToastDescription(
+          currentHost.clockSkew.lastDeltaMs,
+        ),
+      });
+    },
+    {
+      immediate: true,
+    },
+  );
 });
 
 function statusClass(status: string) {
@@ -184,6 +220,14 @@ async function createProbeUpgradeRequest() {
       description: "请稍后重试。",
     });
   }
+}
+
+function clockSkewToastDescription(deltaMs: number | null) {
+  if (deltaMs === null) {
+    return "探针时间与中心端时间存在偏移。";
+  }
+
+  return `探针时间与中心端时间相差约 ${Math.round(deltaMs / 1000)} 秒。`;
 }
 </script>
 
@@ -338,7 +382,7 @@ async function createProbeUpgradeRequest() {
       </div>
 
       <Alert
-        v-for="warning in host.warnings"
+        v-for="warning in visibleWarnings"
         :key="`${warning.code}-${warning.occurredAtMs ?? 0}`"
         class="border-amber-200 bg-amber-50"
       >

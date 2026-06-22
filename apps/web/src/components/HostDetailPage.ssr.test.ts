@@ -19,8 +19,8 @@ describe("Host detail page", () => {
       error: ref(""),
       host: ref({
         clockSkew: {
-          detected: false,
-          lastDeltaMs: null,
+          detected: true,
+          lastDeltaMs: 600_000,
         },
         connectAddress: "10.0.0.10",
         cpu: "2 cores",
@@ -72,6 +72,10 @@ describe("Host detail page", () => {
         status: "online",
         system: "linux",
         warnings: [
+          {
+            code: "clock_skew",
+            message: "探针时间与 Hub 时间偏移 600 秒。",
+          },
           {
             code: "probe_configuration_error",
             message: "探针未能应用最新配置，请检查探针连通性或配置下发状态。",
@@ -140,6 +144,8 @@ describe("Host detail page", () => {
     expect(html).toContain(
       "探针未能应用最新配置，请检查探针连通性或配置下发状态。",
     );
+    expect(html).not.toContain("时间偏移警告");
+    expect(html).not.toContain("探针时间与 Hub 时间偏移 600 秒。");
     expect(html).not.toContain("技术详情");
     expect(html).not.toContain(
       "report request failed: 503 Service Unavailable",
