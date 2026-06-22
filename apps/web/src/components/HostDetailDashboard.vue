@@ -145,7 +145,9 @@ function statusClass(status: string) {
 <template>
   <section class="grid gap-4 pb-24">
     <div class="flex items-start gap-3 border-b pb-4">
-      <Server class="size-5" aria-hidden="true" />
+      <div class="flex h-7 shrink-0 items-center">
+        <Server class="size-5" aria-hidden="true" />
+      </div>
       <div class="grid min-w-0 flex-1 gap-3">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0">

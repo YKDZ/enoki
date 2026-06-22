@@ -18,7 +18,7 @@ import {
 
 import AppHeader from "./components/AppHeader.vue";
 import EnrollmentDialog from "./components/EnrollmentDialog.vue";
-import GlobalConfigurationPanel from "./components/GlobalConfigurationPanel.vue";
+import GlobalConfigurationDialog from "./components/GlobalConfigurationDialog.vue";
 import HostCard from "./components/HostCard.vue";
 import HostDetailPage from "./components/HostDetailPage.vue";
 import HostDetailSkeleton from "./components/HostDetailSkeleton.vue";
@@ -370,8 +370,23 @@ async function toggleGlobalConfiguration() {
   isShowingGlobalConfiguration.value = !isShowingGlobalConfiguration.value;
   globalConfigurationMessage.value = "";
 
-  if (isShowingGlobalConfiguration.value && !globalConfigurationDraft.value) {
+  if (!isShowingGlobalConfiguration.value) {
+    return;
+  }
+
+  if (!globalConfigurationDraft.value) {
     await loadGlobalConfiguration();
+  }
+}
+
+function updateGlobalConfigurationOpen(open: boolean) {
+  isShowingGlobalConfiguration.value = open;
+
+  if (open) {
+    globalConfigurationMessage.value = "";
+    if (!globalConfigurationDraft.value) {
+      void loadGlobalConfiguration();
+    }
   }
 }
 
@@ -726,6 +741,17 @@ function routePath() {
       @toggle-global-configuration="toggleGlobalConfiguration"
     />
 
+    <GlobalConfigurationDialog
+      v-if="isAuthenticated"
+      :draft="globalConfigurationDraft"
+      :error="globalConfigurationError"
+      :is-saving="isSavingGlobalConfiguration"
+      :message="globalConfigurationMessage"
+      :open="isShowingGlobalConfiguration"
+      @save-probe-configuration="saveGlobalConfiguration"
+      @update:open="updateGlobalConfigurationOpen"
+    />
+
     <EnrollmentDialog
       v-if="isAuthenticated"
       v-model:open="isShowingEnrollmentDialog"
@@ -778,15 +804,6 @@ function routePath() {
     />
 
     <section v-else class="mx-auto max-w-7xl px-6 py-8">
-      <GlobalConfigurationPanel
-        v-if="isShowingGlobalConfiguration"
-        :draft="globalConfigurationDraft"
-        :error="globalConfigurationError"
-        :is-saving="isSavingGlobalConfiguration"
-        :message="globalConfigurationMessage"
-        @save="saveGlobalConfiguration"
-      />
-
       <HostListSkeleton
         v-if="isLoadingHosts && hosts.length === 0 && overviewView === 'list'"
       />

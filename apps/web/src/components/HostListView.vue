@@ -34,7 +34,6 @@ export type HostListSortKey =
   | "memory"
   | "name"
   | "rx"
-  | "status"
   | "tx"
   | "uptime";
 export type HostListSortDirection = "asc" | "desc";
@@ -56,7 +55,6 @@ const sortDirection = defineModel<HostListSortDirection>("sortDirection", {
 
 const columns: Array<{ key: HostListSortKey; label: string }> = [
   { key: "name", label: "主机" },
-  { key: "status", label: "状态" },
   { key: "cpu", label: "CPU" },
   { key: "memory", label: "内存" },
   { key: "disk", label: "磁盘" },
@@ -134,10 +132,6 @@ function sortValue(host: HostSummary, key: HostListSortKey) {
     return host.displayName;
   }
 
-  if (key === "status") {
-    return statusOrder(host.status);
-  }
-
   if (key === "cpu") {
     return metrics?.cpuPercent ?? -1;
   }
@@ -159,22 +153,6 @@ function sortValue(host: HostSummary, key: HostListSortKey) {
   }
 
   return metrics?.uptimeSeconds ?? -1;
-}
-
-function statusOrder(status: string) {
-  if (status === "online") {
-    return 0;
-  }
-
-  if (status === "stale") {
-    return 1;
-  }
-
-  if (status === "offline") {
-    return 2;
-  }
-
-  return 3;
 }
 
 function statusClass(status: string) {
@@ -224,7 +202,7 @@ function SortIcon(key: HostListSortKey) {
   <div class="overflow-x-auto">
     <div class="grid min-w-[980px] gap-2">
       <div
-        class="text-muted-foreground grid grid-cols-[minmax(220px,1.3fr)_76px_repeat(6,minmax(92px,1fr))] gap-3 px-3 text-xs font-medium"
+        class="text-muted-foreground grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] gap-3 px-3 text-xs font-medium"
       >
         <button
           v-for="column in columns"
@@ -241,7 +219,7 @@ function SortIcon(key: HostListSortKey) {
         v-for="host in sortedHosts"
         :key="host.id"
         type="button"
-        class="bg-card text-card-foreground hover:bg-accent/40 grid grid-cols-[minmax(220px,1.3fr)_76px_repeat(6,minmax(92px,1fr))] items-center gap-3 rounded-md border px-3 py-3 text-left transition"
+        class="bg-card text-card-foreground hover:bg-accent/40 grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] items-center gap-3 rounded-md border px-3 py-3 text-left transition"
         @click="$emit('openHostDetail', host.id)"
       >
         <div class="min-w-0">
@@ -253,6 +231,9 @@ function SortIcon(key: HostListSortKey) {
             <span class="break-words whitespace-normal">{{
               host.displayName
             }}</span>
+            <Badge :class="statusClass(host.status)" variant="outline">
+              {{ hostStatusText(host.status) }}
+            </Badge>
           </div>
           <p
             v-if="host.description"
@@ -261,9 +242,6 @@ function SortIcon(key: HostListSortKey) {
             {{ host.description }}
           </p>
         </div>
-        <Badge :class="statusClass(host.status)" variant="outline">
-          {{ hostStatusText(host.status) }}
-        </Badge>
         <MetricInline
           :icon="Cpu"
           :text="percentText(host.latestMetrics?.cpuPercent)"
