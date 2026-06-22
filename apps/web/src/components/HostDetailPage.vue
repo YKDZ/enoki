@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertTriangle, ArrowLeft, LoaderCircle } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, LoaderCircle, RefreshCw } from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
 import { computed, onMounted, ref, watch } from "vue";
 
@@ -288,16 +288,22 @@ function openHostSettings(currentHost: HostDetail) {
           <Button
             v-if="showProbeUpgradeButton"
             variant="outline"
-            size="sm"
+            size="icon-sm"
             type="button"
             class="relative"
             :disabled="!canCreateProbeUpgradeRequest"
             :aria-label="
-              probeUpgradeEligibility?.isUpgradeable && !isProbeUpgradeActive
-                ? `探针可升级到 ${probeUpgradeTargetVersion}`
+              isProbeUpgradeActive || detail.isCreatingProbeUpgradeRequest.value
+                ? '探针升级中'
+                : probeUpgradeEligibility?.isUpgradeable
+                  ? `探针可升级到 ${probeUpgradeTargetVersion}`
+                  : '探针升级'
+            "
+            :title="
+              isProbeUpgradeActive || detail.isCreatingProbeUpgradeRequest.value
+                ? '探针升级中'
                 : '探针升级'
             "
-            title="探针升级"
             @click="isProbeUpgradeDialogOpen = true"
           >
             <LoaderCircle
@@ -308,6 +314,7 @@ function openHostSettings(currentHost: HostDetail) {
               class="text-muted-foreground size-4 animate-spin"
               aria-hidden="true"
             />
+            <RefreshCw v-else class="size-4" aria-hidden="true" />
             <span
               v-if="
                 probeUpgradeEligibility?.isUpgradeable && !isProbeUpgradeActive
@@ -315,11 +322,6 @@ function openHostSettings(currentHost: HostDetail) {
               class="absolute -top-1 -right-1 size-2.5 rounded-full bg-red-500"
               aria-hidden="true"
             />
-            {{
-              isProbeUpgradeActive || detail.isCreatingProbeUpgradeRequest.value
-                ? "探针升级中"
-                : "探针升级"
-            }}
           </Button>
         </template>
       </HostDetailDashboard>
