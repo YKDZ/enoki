@@ -90,15 +90,13 @@ const hostListSortDirection = useStorage<HostListSortDirection>(
   "enoki-overview-list-sort-direction",
   "asc",
 );
+const hostCardBatchSize = 12;
 const hostListPage = useStorage("enoki-overview-list-page", 1);
 const hostListPageSize = useStorage("enoki-overview-list-page-size", 10);
-const hostCardBatchSize = useStorage("enoki-overview-card-batch-size", 12);
-const hostCardVisibleCount = useStorage(
-  "enoki-overview-card-visible-count",
-  12,
-);
+const hostCardVisibleCount = ref(12);
+const isLoadingMoreHostCards = ref(false);
 const hostListPageSizeOptions = [10, 20, 50, 100];
-const hostCardBatchSizeOptions = [6, 12, 24, 48];
+let hostCardLazyLoadTimer: ReturnType<typeof setTimeout> | null = null;
 const enrollment = ref<EnrollmentResponse | null>(null);
 const enrollmentError = ref("");
 const globalConfigurationDraft = ref<ProbeConfiguration | null>(null);
@@ -205,6 +203,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disconnectLiveUpdates();
+  clearHostCardLazyLoadTimer();
 });
 
 useEventListener("popstate", syncRouteFromLocation);
@@ -218,7 +217,7 @@ watch(
 );
 
 watch(
-  [() => hosts.value.length, hostCardBatchSize, hostCardVisibleCount],
+  [() => hosts.value.length, hostCardVisibleCount],
   () => {
     normalizeHostCardLazyLoading();
   },
@@ -756,17 +755,24 @@ function updateHostListPageSize(pageSize: number) {
   normalizeHostListPagination();
 }
 
-function updateHostCardBatchSize(batchSize: number) {
-  hostCardBatchSize.value = batchSize;
-  hostCardVisibleCount.value = Math.max(hostCardVisibleCount.value, batchSize);
-  normalizeHostCardLazyLoading();
-}
-
 function loadMoreHostCards() {
-  hostCardVisibleCount.value = Math.min(
-    hosts.value.length,
-    hostCardVisibleCount.value + hostCardBatchSize.value,
-  );
+  if (
+    isLoadingMoreHostCards.value ||
+    hostCardVisibleCount.value >= hosts.value.length
+  ) {
+    return;
+  }
+
+  isLoadingMoreHostCards.value = true;
+  clearHostCardLazyLoadTimer();
+  hostCardLazyLoadTimer = setTimeout(() => {
+    hostCardVisibleCount.value = Math.min(
+      hosts.value.length,
+      hostCardVisibleCount.value + hostCardBatchSize,
+    );
+    isLoadingMoreHostCards.value = false;
+    hostCardLazyLoadTimer = null;
+  }, 180);
 }
 
 function normalizeHostListPagination() {
@@ -783,16 +789,25 @@ function normalizeHostListPagination() {
 }
 
 function normalizeHostCardLazyLoading() {
-  hostCardBatchSize.value = normalizeOption(
-    hostCardBatchSize.value,
-    hostCardBatchSizeOptions,
-    12,
-  );
   hostCardVisibleCount.value = clampInteger(
     hostCardVisibleCount.value,
-    Math.min(hostCardBatchSize.value, Math.max(hosts.value.length, 1)),
-    Math.max(hostCardBatchSize.value, hosts.value.length),
+    Math.min(hostCardBatchSize, Math.max(hosts.value.length, 1)),
+    Math.max(hostCardBatchSize, hosts.value.length),
   );
+
+  if (hostCardVisibleCount.value >= hosts.value.length) {
+    isLoadingMoreHostCards.value = false;
+    clearHostCardLazyLoadTimer();
+  }
+}
+
+function clearHostCardLazyLoadTimer() {
+  if (!hostCardLazyLoadTimer) {
+    return;
+  }
+
+  clearTimeout(hostCardLazyLoadTimer);
+  hostCardLazyLoadTimer = null;
 }
 
 function normalizeOption(value: number, options: number[], fallback: number) {
@@ -1003,12 +1018,11 @@ function routePath() {
 
       <HostCardMasonry
         v-else-if="!isLoadingHosts && hosts.length > 0"
-        :batch-size="hostCardBatchSize"
-        :batch-size-options="hostCardBatchSizeOptions"
         :hosts="hosts"
+        :is-loading-more="isLoadingMoreHostCards"
+        :skeleton-count="hostCardBatchSize"
         :visible-count="hostCardVisibleCount"
         @load-more="loadMoreHostCards"
-        @update:batch-size="updateHostCardBatchSize"
         @open-host-detail="openHostDetail"
       />
     </section>
