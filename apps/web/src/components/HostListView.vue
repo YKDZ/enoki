@@ -40,6 +40,8 @@ export type HostListSortDirection = "asc" | "desc";
 
 const props = defineProps<{
   hosts: HostSummary[];
+  page: number;
+  pageSize: number;
 }>();
 
 defineEmits<{
@@ -107,6 +109,11 @@ const sortedHosts = computed(() => {
 
     return sortDirection.value === "asc" ? result : -result;
   });
+});
+const visibleHosts = computed(() => {
+  const start = (props.page - 1) * props.pageSize;
+
+  return sortedHosts.value.slice(start, start + props.pageSize);
 });
 
 function setSort(nextKey: HostListSortKey) {
@@ -216,7 +223,7 @@ function SortIcon(key: HostListSortKey) {
         </button>
       </div>
       <button
-        v-for="host in sortedHosts"
+        v-for="host in visibleHosts"
         :key="host.id"
         type="button"
         class="bg-card text-card-foreground hover:bg-accent/40 grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] items-center gap-3 rounded-md border px-3 py-3 text-left transition"

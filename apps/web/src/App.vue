@@ -14,12 +14,13 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  watch,
 } from "vue";
 
 import AppHeader from "./components/AppHeader.vue";
 import EnrollmentDialog from "./components/EnrollmentDialog.vue";
 import GlobalConfigurationDialog from "./components/GlobalConfigurationDialog.vue";
-import HostCard from "./components/HostCard.vue";
+import HostCardMasonry from "./components/HostCardMasonry.vue";
 import HostDetailPage from "./components/HostDetailPage.vue";
 import HostDetailSkeleton from "./components/HostDetailSkeleton.vue";
 import HostGridSkeleton from "./components/HostGridSkeleton.vue";
@@ -29,6 +30,7 @@ import HostListView, {
   type HostListSortKey,
 } from "./components/HostListView.vue";
 import LoginPanel from "./components/LoginPanel.vue";
+import OverviewPagination from "./components/OverviewPagination.vue";
 import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
 import { Toaster, toast } from "./components/ui/sonner";
@@ -88,6 +90,15 @@ const hostListSortDirection = useStorage<HostListSortDirection>(
   "enoki-overview-list-sort-direction",
   "asc",
 );
+const hostListPage = useStorage("enoki-overview-list-page", 1);
+const hostListPageSize = useStorage("enoki-overview-list-page-size", 10);
+const hostCardBatchSize = useStorage("enoki-overview-card-batch-size", 12);
+const hostCardVisibleCount = useStorage(
+  "enoki-overview-card-visible-count",
+  12,
+);
+const hostListPageSizeOptions = [10, 20, 50, 100];
+const hostCardBatchSizeOptions = [6, 12, 24, 48];
 const enrollment = ref<EnrollmentResponse | null>(null);
 const enrollmentError = ref("");
 const globalConfigurationDraft = ref<ProbeConfiguration | null>(null);
@@ -126,6 +137,9 @@ const sonnerTheme = computed(() => {
 
   return "system";
 });
+const hostListPageCount = computed(() =>
+  Math.max(1, Math.ceil(hosts.value.length / hostListPageSize.value)),
+);
 const detail = useHostDetail(activeDetailHostIdForComposable, {
   onUnauthorized: requireLogin,
 });
@@ -194,6 +208,22 @@ onBeforeUnmount(() => {
 });
 
 useEventListener("popstate", syncRouteFromLocation);
+
+watch(
+  [() => hosts.value.length, hostListPage, hostListPageSize],
+  () => {
+    normalizeHostListPagination();
+  },
+  { immediate: true },
+);
+
+watch(
+  [() => hosts.value.length, hostCardBatchSize, hostCardVisibleCount],
+  () => {
+    normalizeHostCardLazyLoading();
+  },
+  { immediate: true },
+);
 
 async function login() {
   loginError.value = "";
@@ -720,6 +750,63 @@ function toggleOverviewView() {
   overviewView.value = overviewView.value === "cards" ? "list" : "cards";
 }
 
+function updateHostListPageSize(pageSize: number) {
+  hostListPageSize.value = pageSize;
+  hostListPage.value = 1;
+  normalizeHostListPagination();
+}
+
+function updateHostCardBatchSize(batchSize: number) {
+  hostCardBatchSize.value = batchSize;
+  hostCardVisibleCount.value = Math.max(hostCardVisibleCount.value, batchSize);
+  normalizeHostCardLazyLoading();
+}
+
+function loadMoreHostCards() {
+  hostCardVisibleCount.value = Math.min(
+    hosts.value.length,
+    hostCardVisibleCount.value + hostCardBatchSize.value,
+  );
+}
+
+function normalizeHostListPagination() {
+  hostListPageSize.value = normalizeOption(
+    hostListPageSize.value,
+    hostListPageSizeOptions,
+    10,
+  );
+  hostListPage.value = clampInteger(
+    hostListPage.value,
+    1,
+    hostListPageCount.value,
+  );
+}
+
+function normalizeHostCardLazyLoading() {
+  hostCardBatchSize.value = normalizeOption(
+    hostCardBatchSize.value,
+    hostCardBatchSizeOptions,
+    12,
+  );
+  hostCardVisibleCount.value = clampInteger(
+    hostCardVisibleCount.value,
+    Math.min(hostCardBatchSize.value, Math.max(hosts.value.length, 1)),
+    Math.max(hostCardBatchSize.value, hosts.value.length),
+  );
+}
+
+function normalizeOption(value: number, options: number[], fallback: number) {
+  return options.includes(value) ? value : fallback;
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.min(Math.max(Math.trunc(value), min), max);
+}
+
 function routePath() {
   if (typeof window === "undefined") {
     return "/";
@@ -893,25 +980,37 @@ function routePath() {
         </Button>
       </div>
 
-      <HostListView
-        v-if="!isLoadingHosts && hosts.length > 0 && overviewView === 'list'"
-        v-model:sort-direction="hostListSortDirection"
-        v-model:sort-key="hostListSortKey"
-        :hosts="hosts"
-        @open-host-detail="openHostDetail"
-      />
-
       <div
-        v-else-if="!isLoadingHosts && hosts.length > 0"
-        class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
+        v-if="!isLoadingHosts && hosts.length > 0 && overviewView === 'list'"
+        class="grid gap-4"
       >
-        <HostCard
-          v-for="host in hosts"
-          :key="host.id"
-          :host="host"
+        <HostListView
+          v-model:sort-direction="hostListSortDirection"
+          v-model:sort-key="hostListSortKey"
+          :hosts="hosts"
+          :page="hostListPage"
+          :page-size="hostListPageSize"
           @open-host-detail="openHostDetail"
         />
+        <OverviewPagination
+          v-model:page="hostListPage"
+          :page-size="hostListPageSize"
+          :page-size-options="hostListPageSizeOptions"
+          :total="hosts.length"
+          @update:page-size="updateHostListPageSize"
+        />
       </div>
+
+      <HostCardMasonry
+        v-else-if="!isLoadingHosts && hosts.length > 0"
+        :batch-size="hostCardBatchSize"
+        :batch-size-options="hostCardBatchSizeOptions"
+        :hosts="hosts"
+        :visible-count="hostCardVisibleCount"
+        @load-more="loadMoreHostCards"
+        @update:batch-size="updateHostCardBatchSize"
+        @open-host-detail="openHostDetail"
+      />
     </section>
   </main>
 </template>

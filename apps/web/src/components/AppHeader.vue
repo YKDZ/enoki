@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Activity, LoaderCircle, LogOut, Plus, Settings } from "@lucide/vue";
+import { LoaderCircle, LogOut, Plus, Settings } from "@lucide/vue";
 
 import { Button } from "@/components/ui/button";
 
@@ -23,15 +23,18 @@ defineEmits<{
     <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
       <button
         type="button"
-        class="hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center gap-3 rounded-md pr-2 transition outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
+        class="focus-visible:ring-ring flex cursor-pointer items-center gap-3 rounded-md pr-2 transition outline-none focus-visible:ring-2 focus-visible:ring-offset-2"
         aria-label="返回首页"
         @click="$emit('goHome')"
       >
-        <div
-          class="bg-primary text-primary-foreground grid size-9 place-items-center rounded-md"
-        >
-          <Activity class="size-5" aria-hidden="true" />
-        </div>
+        <span
+          class="size-8 shrink-0 bg-current"
+          style="
+            mask: url(&quot;/logo.svg&quot;) center / contain no-repeat;
+            -webkit-mask: url(&quot;/logo.svg&quot;) center / contain no-repeat;
+          "
+          aria-hidden="true"
+        />
         <h1 class="text-lg leading-6 font-semibold">Enoki</h1>
       </button>
 
