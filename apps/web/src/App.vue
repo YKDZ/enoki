@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { LoaderCircle, Plus, Server, ServerCrash } from "@lucide/vue";
 import { useColorMode, useEventListener } from "@vueuse/core";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+} from "vue";
 
 import AppHeader from "./components/AppHeader.vue";
 import EnrollmentDialog from "./components/EnrollmentDialog.vue";
@@ -38,6 +44,14 @@ import type {
 
 const isCheckingSession = ref(true);
 const isAuthenticated = ref(false);
+const LayoutLabPage = defineAsyncComponent(
+  () => import("./components/LayoutLabPage.vue"),
+);
+const isLayoutLabEnabled =
+  import.meta.env.DEV || import.meta.env.VITE_ENABLE_LAYOUT_LAB === "1";
+const isLayoutLabRoute = ref(
+  isLayoutLabEnabled && routePath() === "/layout-lab",
+);
 const isSubmitting = ref(false);
 const isCreatingEnrollment = ref(false);
 const isLoadingHosts = ref(false);
@@ -127,6 +141,11 @@ const {
 });
 
 onMounted(async () => {
+  if (isLayoutLabRoute.value) {
+    isCheckingSession.value = false;
+    return;
+  }
+
   try {
     const session = await apiGet<SessionResponse>("/api/web/auth/session");
     isAuthenticated.value = session.authenticated;
@@ -220,6 +239,7 @@ async function logout() {
   password.value = "";
   loginErrorKind.value = "";
   isAuthenticated.value = false;
+  isLayoutLabRoute.value = false;
   window.history.pushState({}, "", "/");
 }
 
@@ -594,6 +614,7 @@ async function deleteHost(
 }
 
 function openHostDetail(hostId: number) {
+  isLayoutLabRoute.value = false;
   if (activeDetailHostId.value && activeDetailHostId.value !== hostId) {
     unsubscribeHostDetail(activeDetailHostId.value);
   }
@@ -611,6 +632,7 @@ function trackProbeUpgradeRequest(
 }
 
 function navigateToOverview() {
+  isLayoutLabRoute.value = false;
   if (activeDetailHostId.value) {
     unsubscribeHostDetail(activeDetailHostId.value);
   }
@@ -619,6 +641,16 @@ function navigateToOverview() {
 }
 
 function syncRouteFromLocation() {
+  isLayoutLabRoute.value = isLayoutLabEnabled && routePath() === "/layout-lab";
+
+  if (isLayoutLabRoute.value) {
+    if (activeDetailHostId.value) {
+      unsubscribeHostDetail(activeDetailHostId.value);
+    }
+    activeDetailHostId.value = null;
+    return;
+  }
+
   const nextHostId = routeHostId();
   if (activeDetailHostId.value && activeDetailHostId.value !== nextHostId) {
     unsubscribeHostDetail(activeDetailHostId.value);
@@ -631,7 +663,7 @@ function syncRouteFromLocation() {
 }
 
 function routeHostId() {
-  const match = window.location.pathname.match(/^\/hosts\/(\d+)$/);
+  const match = routePath().match(/^\/hosts\/(\d+)$/);
   const hostId = Number(match?.[1]);
 
   if (!Number.isInteger(hostId) || hostId <= 0) {
@@ -644,6 +676,14 @@ function routeHostId() {
 function hostDetailPath(hostId: number) {
   return `/hosts/${hostId}`;
 }
+
+function routePath() {
+  if (typeof window === "undefined") {
+    return "/";
+  }
+
+  return window.location.pathname;
+}
 </script>
 
 <template>
@@ -652,6 +692,7 @@ function hostDetailPath(hostId: number) {
     <AppHeader
       :is-authenticated="isAuthenticated"
       :is-creating-enrollment="isCreatingEnrollment"
+      @go-home="navigateToOverview"
       @logout="logout"
       @open-enrollment="openEnrollmentDialog"
       @toggle-global-configuration="toggleGlobalConfiguration"
@@ -666,8 +707,10 @@ function hostDetailPath(hostId: number) {
       @create-enrollment="createEnrollment"
     />
 
+    <LayoutLabPage v-if="isLayoutLabRoute" />
+
     <section
-      v-if="isCheckingSession"
+      v-else-if="isCheckingSession"
       class="mx-auto max-w-7xl px-6 py-8"
       aria-live="polite"
     >

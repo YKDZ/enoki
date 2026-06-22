@@ -22,25 +22,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  formatBitsPerSecond,
-  formatDuration,
-  formatPercent,
-  formatTemperature,
-  formatTrafficBytes,
-} from "@/lib/format";
+import { formatDuration, formatTemperature } from "@/lib/format";
 import { hostStatusText } from "@/lib/host-display";
 import type { MetricsChartData } from "@/lib/metrics-chart-data";
 
 import type { HostDetail, HostMetricSample, MetricsWindow } from "../types";
-import CpuCoreGrid from "./CpuCoreGrid.vue";
-import CpuDetails from "./CpuDetails.vue";
 import DeleteHostAlertDialog from "./DeleteHostAlertDialog.vue";
-import DiskDetails from "./DiskDetails.vue";
-import MemoryDetails from "./MemoryDetails.vue";
-import MetricPanel from "./MetricPanel.vue";
-import MetricsChart from "./MetricsChart.vue";
-import NetworkDetails from "./NetworkDetails.vue";
+import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
 
 const props = defineProps<{
   chartData: MetricsChartData;
@@ -62,7 +50,6 @@ const emit = defineEmits<{
   switchMetricsWindow: [value: AcceptableValue];
 }>();
 
-const cpuModel = computed(() => props.host.cpuModel || "暂无型号");
 const metadataCapabilityMetric = computed(
   () => props.host.latestMetrics ?? props.latestMetric,
 );
@@ -142,13 +129,6 @@ function inventoryOptionalText(key: string) {
     : String(value);
 }
 
-function inventoryText(key: string) {
-  const value = props.host.inventory?.[key];
-  return value === null || value === undefined || value === ""
-    ? "暂无"
-    : String(value);
-}
-
 function statusClass(status: string) {
   if (status === "online") {
     return "border-[var(--status-online-border)] bg-[var(--status-online-bg)] text-[var(--status-online-fg)]";
@@ -160,10 +140,6 @@ function statusClass(status: string) {
 
   return "border-[var(--status-offline-border)] bg-[var(--status-offline-bg)] text-[var(--status-offline-fg)]";
 }
-
-function panelStorageKey(panel: string) {
-  return `enoki:host:${props.host.id}:panel:${panel}:collapsed`;
-}
 </script>
 
 <template>
@@ -174,7 +150,7 @@ function panelStorageKey(panel: string) {
         class="bg-primary text-primary-foreground grid size-10 shrink-0 place-items-center rounded-md"
         aria-label="返回首页"
       >
-        <Activity class="size-5" aria-hidden="true" />
+        <Server class="size-5" aria-hidden="true" />
       </a>
       <div class="grid min-w-0 flex-1 gap-3">
         <div class="flex flex-wrap items-start justify-between gap-3">
@@ -256,114 +232,15 @@ function panelStorageKey(panel: string) {
       </div>
     </div>
 
-    <div class="grid grid-cols-12 gap-4">
-      <MetricPanel
-        title="CPU"
-        :description="`${cpuModel} / ${inventoryText('cpuCount')} 核心`"
-        size="xl"
-        height="tall"
-        :storage-key="panelStorageKey('cpu')"
-        collapsible
-      >
-        <template #chart>
-          <CpuCoreGrid
-            :cpu-core-series="chartData.cpu.cores"
-            :latest-sample="latestSample"
-            :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-          />
-        </template>
-        <CpuDetails
-          :cpu-model="host.cpuModel"
-          :inventory="host.inventory"
-          :latest-sample="latestSample"
-        />
-      </MetricPanel>
-
-      <MetricPanel
-        title="网络"
-        description="公网接口吞吐"
-        size="lg"
-        height="normal"
-        :storage-key="panelStorageKey('network')"
-        collapsible
-      >
-        <template #chart>
-          <MetricsChart
-            :series="chartData.network.aggregate"
-            title="吞吐量"
-            :x-axis-max-ms="xAxisMaxMs"
-            :x-axis-min-ms="xAxisMinMs"
-            :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-            y-axis-name="b/s"
-            :value-formatter="formatBitsPerSecond"
-          />
-        </template>
-        <NetworkDetails
-          :latest-metric="latestMetric"
-          :latest-sample="latestSample"
-          :samples="samples"
-        />
-      </MetricPanel>
-
-      <MetricPanel
-        title="内存"
-        description="使用量、缓存与交换"
-        size="lg"
-        height="normal"
-        :storage-key="panelStorageKey('memory')"
-        collapsible
-      >
-        <template #chart>
-          <MetricsChart
-            :series="[chartData.memory.usedPercent]"
-            title="内存"
-            :x-axis-max-ms="xAxisMaxMs"
-            :x-axis-min-ms="xAxisMinMs"
-            :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-            :y-axis-max="100"
-            :y-axis-min="0"
-            y-axis-name="%"
-            :value-formatter="formatPercent"
-          />
-        </template>
-        <MemoryDetails :host="host" :latest-metric="latestMetric" />
-      </MetricPanel>
-
-      <MetricPanel
-        title="磁盘与 I/O"
-        size="xl"
-        layout="side"
-        :storage-key="panelStorageKey('disk')"
-        collapsible
-      >
-        <template #chart>
-          <div class="grid gap-4">
-            <MetricsChart
-              :series="[chartData.disk.aggregateUsedPercent]"
-              title="占用率"
-              :x-axis-max-ms="xAxisMaxMs"
-              :x-axis-min-ms="xAxisMinMs"
-              :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-              :y-axis-max="100"
-              :y-axis-min="0"
-              y-axis-name="%"
-              :value-formatter="formatPercent"
-            />
-            <MetricsChart
-              :series="chartData.disk.aggregateIoBytes"
-              title="I/O"
-              :x-axis-max-ms="xAxisMaxMs"
-              :x-axis-min-ms="xAxisMinMs"
-              :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-              y-axis-name="B"
-              :value-formatter="formatTrafficBytes"
-            />
-          </div>
-        </template>
-        <template #details>
-          <DiskDetails :latest-sample="latestSample" variant="stack" />
-        </template>
-      </MetricPanel>
-    </div>
+    <HostMetricSlotGrid
+      :chart-data="chartData"
+      :chart-start-continuity-gap-ms="chartStartContinuityGapMs"
+      :host="host"
+      :latest-metric="latestMetric"
+      :latest-sample="latestSample"
+      :samples="samples"
+      :x-axis-max-ms="xAxisMaxMs"
+      :x-axis-min-ms="xAxisMinMs"
+    />
   </section>
 </template>

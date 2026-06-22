@@ -57,7 +57,7 @@ export default defineConfig({
       `rm -rf ${shellQuote(dataDir)}`,
       `mkdir -p ${shellQuote(dataDir)}`,
       "pnpm --filter @enoki/api-client build",
-      "pnpm --filter @enoki/web build",
+      "VITE_ENABLE_LAYOUT_LAB=1 pnpm --filter @enoki/web build",
       "pnpm --filter @enoki/hub build",
       `${environmentPrefix(hubEnvironment)} pnpm --filter @enoki/hub start`,
     ].join(" && "),
