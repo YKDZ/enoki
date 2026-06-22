@@ -58,10 +58,13 @@ COPY --from=builder --chown=node:node /app/deploy ./
 COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
+COPY apps/hub/docker-entrypoint.sh /usr/local/bin/enoki-hub-entrypoint
 
-RUN install -d -o node -g node /data
+RUN apk add --no-cache su-exec && \
+  chmod +x /usr/local/bin/enoki-hub-entrypoint && \
+  install -d -o node -g node /data
 
 VOLUME ["/data"]
 EXPOSE 3000 3001
-USER node
+ENTRYPOINT ["enoki-hub-entrypoint"]
 CMD ["node", "dist/src/server.js"]
