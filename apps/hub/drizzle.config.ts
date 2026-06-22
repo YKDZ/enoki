@@ -7,6 +7,7 @@ const sqlitePath =
   process.env.ENOKI_SQLITE_PATH ?? path.join(dataRoot, "enoki.db");
 
 export default defineConfig({
+  casing: "snake_case",
   dbCredentials: {
     url: sqlitePath,
   },

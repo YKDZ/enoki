@@ -1,9 +1,9 @@
 import { and, eq, gt, isNull } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { enrollmentTokens, type EnrollmentTokenRow } from "./schema.js";
 
-type EnrollmentDatabase = BetterSQLite3Database<typeof import("./schema.js")>;
+type EnrollmentDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
 export type CreatePendingEnrollmentInput = {
   createdAtMs: number;

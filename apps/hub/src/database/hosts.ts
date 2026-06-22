@@ -1,9 +1,9 @@
 import { and, eq, isNull } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { hosts, type HostRow, type NewHostRow } from "./schema.js";
 
-type HostDatabase = BetterSQLite3Database<typeof import("./schema.js")>;
+type HostDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
 export type HostSummary = {
   clockSkew: {

@@ -1,9 +1,9 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { drizzle } from "drizzle-orm/node-sqlite";
+import { migrate } from "drizzle-orm/node-sqlite/migrator";
 
 import type { DatabaseConfig } from "../config.js";
 import { createAuditRepository, type AuditRepository } from "./audit.js";
@@ -31,7 +31,7 @@ export type HubDatabase = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations: ProbeOperationRepository;
-  sqlite: Database.Database;
+  sqlite: DatabaseSync;
 };
 
 export type InitializeHubDatabaseOptions = {
@@ -45,9 +45,9 @@ export function initializeHubDatabase(
   mkdirSync(config.dataRoot, { recursive: true });
   mkdirSync(dirname(config.sqlitePath), { recursive: true });
 
-  const sqlite = new Database(config.sqlitePath);
-  sqlite.pragma("journal_mode = WAL");
-  const database = drizzle(sqlite, { schema });
+  const sqlite = new DatabaseSync(config.sqlitePath);
+  sqlite.exec("PRAGMA journal_mode = WAL");
+  const database = drizzle({ casing: "snake_case", client: sqlite, schema });
   migrate(database, {
     migrationsFolder: options.migrationsFolder ?? defaultMigrationsFolder(),
   });

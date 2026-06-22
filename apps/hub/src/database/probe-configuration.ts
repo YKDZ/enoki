@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
   defaultProbeConfiguration,
@@ -12,7 +12,7 @@ import {
   probeConfigurationHostOverrides,
 } from "./schema.js";
 
-type ProbeConfigurationDatabase = BetterSQLite3Database<
+type ProbeConfigurationDatabase = NodeSQLiteDatabase<
   typeof import("./schema.js")
 >;
 

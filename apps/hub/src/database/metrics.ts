@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gte, inArray, lte } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
   metricCpuCores,
@@ -10,7 +10,7 @@ import {
   reportObservations,
 } from "./schema.js";
 
-type MetricsDatabase = BetterSQLite3Database<typeof import("./schema.js")>;
+type MetricsDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
 export type RawMetricSampleInput = {
   bootId: string;

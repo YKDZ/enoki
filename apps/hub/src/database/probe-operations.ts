@@ -1,5 +1,5 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import type { ProbeUpgradeRequest } from "../probe/operation.js";
 import {
@@ -8,9 +8,7 @@ import {
   type ProbeOperationRow,
 } from "./schema.js";
 
-type ProbeOperationDatabase = BetterSQLite3Database<
-  typeof import("./schema.js")
->;
+type ProbeOperationDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
 const activeStates = ["pending", "accepted", "running"] as const;
 

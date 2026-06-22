@@ -40,9 +40,9 @@ RUN mkdir -p /app/probe-assets && \
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true \
-  pnpm --filter @enoki/hub --prod deploy --legacy --offline /app/deploy
+  pnpm --filter @enoki/hub --prod --no-optional deploy --legacy --offline /app/deploy
 
-FROM node:24-slim AS runtime
+FROM node:24-alpine AS runtime
 
 ENV ENOKI_WEB_DIST=/app/web-dist
 ENV ENOKI_DATA_ROOT=/data
@@ -59,8 +59,9 @@ COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
 
-RUN mkdir -p /data && chown -R node:node /app /data
+RUN install -d -o node -g node /data
 
 VOLUME ["/data"]
 EXPOSE 3000 3001
+USER node
 CMD ["node", "dist/src/server.js"]

@@ -1,9 +1,9 @@
 import { desc } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { auditLog, type AuditLogRow } from "./schema.js";
 
-type AuditDatabase = BetterSQLite3Database<typeof import("./schema.js")>;
+type AuditDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
 export type AuditEventInput = {
   action: string;
