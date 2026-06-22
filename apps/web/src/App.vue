@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { LoaderCircle, Plus, Server, ServerCrash } from "@lucide/vue";
-import { useColorMode, useEventListener } from "@vueuse/core";
+import {
+  LayoutGrid,
+  List,
+  LoaderCircle,
+  Plus,
+  Server,
+  ServerCrash,
+} from "@lucide/vue";
+import { useColorMode, useEventListener, useStorage } from "@vueuse/core";
 import {
   computed,
   defineAsyncComponent,
@@ -16,6 +23,11 @@ import HostCard from "./components/HostCard.vue";
 import HostDetailPage from "./components/HostDetailPage.vue";
 import HostDetailSkeleton from "./components/HostDetailSkeleton.vue";
 import HostGridSkeleton from "./components/HostGridSkeleton.vue";
+import HostListSkeleton from "./components/HostListSkeleton.vue";
+import HostListView, {
+  type HostListSortDirection,
+  type HostListSortKey,
+} from "./components/HostListView.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
@@ -64,6 +76,18 @@ const loginError = ref("");
 const loginErrorKind = ref<LoginErrorKind>("");
 const hostListError = ref("");
 const hosts = ref<HostSummary[]>([]);
+const overviewView = useStorage<"cards" | "list">(
+  "enoki-overview-view",
+  "cards",
+);
+const hostListSortKey = useStorage<HostListSortKey | null>(
+  "enoki-overview-list-sort-key",
+  null,
+);
+const hostListSortDirection = useStorage<HostListSortDirection>(
+  "enoki-overview-list-sort-direction",
+  "asc",
+);
 const enrollment = ref<EnrollmentResponse | null>(null);
 const enrollmentError = ref("");
 const globalConfigurationDraft = ref<ProbeConfiguration | null>(null);
@@ -560,13 +584,13 @@ async function saveHostMetadata() {
       throw new Error(((await response.json()) as { error?: string }).error);
     }
 
-    await loadHosts();
-    if (activeDetailHostId.value) {
-      await detail.load();
-    }
     activeHostMetadataId.value = null;
     hostMetadataDraft.value = null;
     hostMetadataOriginal.value = null;
+    void loadHosts();
+    if (activeDetailHostId.value) {
+      void detail.load();
+    }
   } catch {
     hostMetadataError.value = "无法保存主机信息，请检查输入后重试。";
   } finally {
@@ -677,6 +701,10 @@ function hostDetailPath(hostId: number) {
   return `/hosts/${hostId}`;
 }
 
+function toggleOverviewView() {
+  overviewView.value = overviewView.value === "cards" ? "list" : "cards";
+}
+
 function routePath() {
   if (typeof window === "undefined") {
     return "/";
@@ -715,6 +743,7 @@ function routePath() {
       aria-live="polite"
     >
       <HostDetailSkeleton v-if="activeDetailHostId" />
+      <HostListSkeleton v-else-if="overviewView === 'list'" />
       <HostGridSkeleton v-else />
     </section>
 
@@ -758,7 +787,10 @@ function routePath() {
         @save="saveGlobalConfiguration"
       />
 
-      <HostGridSkeleton v-if="isLoadingHosts && hosts.length === 0" />
+      <HostListSkeleton
+        v-if="isLoadingHosts && hosts.length === 0 && overviewView === 'list'"
+      />
+      <HostGridSkeleton v-else-if="isLoadingHosts && hosts.length === 0" />
 
       <StateHero
         v-else-if="hostListError && hosts.length === 0"
@@ -825,6 +857,35 @@ function routePath() {
 
       <div
         v-if="!isLoadingHosts && hosts.length > 0"
+        class="mb-4 flex justify-end"
+      >
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          :aria-label="overviewView === 'cards' ? '切换到列表' : '切换到卡片'"
+          :title="overviewView === 'cards' ? '切换到列表' : '切换到卡片'"
+          @click="toggleOverviewView"
+        >
+          <List
+            v-if="overviewView === 'cards'"
+            class="size-4"
+            aria-hidden="true"
+          />
+          <LayoutGrid v-else class="size-4" aria-hidden="true" />
+        </Button>
+      </div>
+
+      <HostListView
+        v-if="!isLoadingHosts && hosts.length > 0 && overviewView === 'list'"
+        v-model:sort-direction="hostListSortDirection"
+        v-model:sort-key="hostListSortKey"
+        :hosts="hosts"
+        @open-host-detail="openHostDetail"
+      />
+
+      <div
+        v-else-if="!isLoadingHosts && hosts.length > 0"
         class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"
       >
         <HostCard

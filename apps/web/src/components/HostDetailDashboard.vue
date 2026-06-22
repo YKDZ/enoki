@@ -145,13 +145,7 @@ function statusClass(status: string) {
 <template>
   <section class="grid gap-4 pb-24">
     <div class="flex items-start gap-3 border-b pb-4">
-      <a
-        href="/"
-        class="bg-primary text-primary-foreground grid size-10 shrink-0 place-items-center rounded-md"
-        aria-label="返回首页"
-      >
-        <Server class="size-5" aria-hidden="true" />
-      </a>
+      <Server class="size-5" aria-hidden="true" />
       <div class="grid min-w-0 flex-1 gap-3">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0">
