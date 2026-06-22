@@ -53,6 +53,7 @@ useIntersectionObserver(
       <div
         v-for="index in isLoadingMore ? skeletonCount : 0"
         :key="`skeleton-${index}`"
+        data-testid="host-card-lazy-skeleton"
         class="mb-4 break-inside-avoid rounded-lg border p-5"
       >
         <div class="flex items-start justify-between gap-4">

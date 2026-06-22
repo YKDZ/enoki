@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { AlertTriangle, ArrowLeft, LoaderCircle, RefreshCw } from "@lucide/vue";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  LoaderCircle,
+  CircleArrowUp,
+} from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
 import { computed, onMounted, ref, watch } from "vue";
 
@@ -314,7 +319,7 @@ function openHostSettings(currentHost: HostDetail) {
               class="text-muted-foreground size-4 animate-spin"
               aria-hidden="true"
             />
-            <RefreshCw v-else class="size-4" aria-hidden="true" />
+            <CircleArrowUp v-else class="size-4" aria-hidden="true" />
             <span
               v-if="
                 probeUpgradeEligibility?.isUpgradeable && !isProbeUpgradeActive

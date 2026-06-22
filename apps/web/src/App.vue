@@ -781,6 +781,11 @@ function normalizeHostListPagination() {
     hostListPageSizeOptions,
     10,
   );
+
+  if (hosts.value.length === 0) {
+    return;
+  }
+
   hostListPage.value = clampInteger(
     hostListPage.value,
     1,
