@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { AlertTriangle, ArrowLeft, LoaderCircle, Settings } from "@lucide/vue";
+import { AlertTriangle, ArrowLeft, LoaderCircle } from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
 import { computed, onMounted, ref, watch } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,18 +13,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { toast } from "@/components/ui/sonner";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { useHostDetail } from "@/composables/useHostDetail";
-import { formatBitsPerSecond, formatPercent } from "@/lib/format";
-import { hostStatusText, warningTitle } from "@/lib/host-display";
+import { warningTitle } from "@/lib/host-display";
 import { buildMetricsChartData } from "@/lib/metrics-chart-data";
 
 import type {
@@ -34,14 +24,9 @@ import type {
   HostDetail,
   MetricsWindow,
 } from "../types";
-import DeleteHostAlertDialog from "./DeleteHostAlertDialog.vue";
+import HostDetailDashboard from "./HostDetailDashboard.vue";
 import HostDetailSkeleton from "./HostDetailSkeleton.vue";
-import HostMetadataDialog from "./HostMetadataDialog.vue";
-import HostMetricsSummary from "./HostMetricsSummary.vue";
-import HostProbeConfigurationDialog from "./HostProbeConfigurationDialog.vue";
-import HostResourcePanels from "./HostResourcePanels.vue";
-import HostStaticInfoCard from "./HostStaticInfoCard.vue";
-import MetricsChart from "./MetricsChart.vue";
+import HostSettingsDialog from "./HostSettingsDialog.vue";
 import StateHero from "./StateHero.vue";
 
 const props = defineProps<{
@@ -184,18 +169,6 @@ onMounted(() => {
   );
 });
 
-function statusClass(status: string) {
-  if (status === "online") {
-    return "border-[var(--status-online-border)] bg-[var(--status-online-bg)] text-[var(--status-online-fg)]";
-  }
-
-  if (status === "stale") {
-    return "border-[var(--status-stale-border)] bg-[var(--status-stale-bg)] text-[var(--status-stale-fg)]";
-  }
-
-  return "border-[var(--status-offline-border)] bg-[var(--status-offline-bg)] text-[var(--status-offline-fg)]";
-}
-
 function switchMetricsWindow(value: AcceptableValue) {
   if (!isMetricsWindow(value)) {
     return;
@@ -229,6 +202,16 @@ function clockSkewToastDescription(deltaMs: number | null) {
 
   return `探针时间与中心端时间相差约 ${Math.round(deltaMs / 1000)} 秒。`;
 }
+
+function openHostSettings(currentHost: HostDetail) {
+  if (props.activeHostMetadataId !== currentHost.id) {
+    emit("openHostMetadata", currentHost);
+  }
+
+  if (props.activeHostConfigurationId !== currentHost.id) {
+    emit("openHostConfiguration", currentHost.id);
+  }
+}
 </script>
 
 <template>
@@ -259,39 +242,49 @@ function clockSkewToastDescription(deltaMs: number | null) {
     </StateHero>
 
     <div v-else-if="host" class="grid gap-4">
-      <div
-        class="flex flex-wrap items-center justify-between gap-3 border-b pb-4"
+      <Alert
+        v-for="warning in visibleWarnings"
+        :key="`${warning.code}-${warning.occurredAtMs ?? 0}`"
+        class="border-amber-200 bg-amber-50"
       >
-        <div class="flex min-w-0 items-center gap-3">
-          <Button
-            variant="ghost"
-            size="icon"
-            type="button"
-            aria-label="返回"
-            title="返回"
-            @click="emit('back')"
-          >
-            <ArrowLeft class="size-4" aria-hidden="true" />
-          </Button>
-          <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <h2 class="truncate text-xl font-semibold">
-                {{ host.displayName }}
-              </h2>
-              <Badge :class="statusClass(host.status)" variant="outline">
-                {{ hostStatusText(host.status) }}
-              </Badge>
-            </div>
-            <p
-              v-if="host.description"
-              class="text-muted-foreground mt-1 max-w-3xl text-sm wrap-break-word whitespace-normal"
-            >
-              {{ host.description }}
-            </p>
-          </div>
-        </div>
+        <AlertTriangle class="size-4" aria-hidden="true" />
+        <AlertTitle>{{ warningTitle(warning.code) }}</AlertTitle>
+        <AlertDescription>{{ warning.message }}</AlertDescription>
+      </Alert>
 
-        <div class="flex items-center gap-2">
+      <Alert v-if="detail.metricsError?.value">
+        <AlertTriangle class="size-4" aria-hidden="true" />
+        <AlertTitle>历史指标暂时不可用</AlertTitle>
+        <AlertDescription class="flex flex-wrap items-center gap-3">
+          <span>{{ detail.metricsError?.value }}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            @click="detail.switchWindow(detail.selectedWindow.value)"
+          >
+            重试
+          </Button>
+        </AlertDescription>
+      </Alert>
+
+      <HostDetailDashboard
+        :chart-data="chartData"
+        :chart-start-continuity-gap-ms="chartStartContinuityGapMs"
+        :deleting-host-id="deletingHostId"
+        :host="host"
+        :latest-metric="latestMetric"
+        :latest-sample="latestSample"
+        :samples="detail.samples.value"
+        :selected-window="detail.selectedWindow.value"
+        :window-options="windowOptions"
+        :x-axis-max-ms="detail.chartRange.value.maxMs"
+        :x-axis-min-ms="detail.chartRange.value.minMs"
+        @delete-host="emit('deleteHost', $event)"
+        @open-host-settings="openHostSettings"
+        @switch-metrics-window="switchMetricsWindow"
+      >
+        <template #actions>
           <Button
             v-if="showProbeUpgradeButton"
             variant="outline"
@@ -328,238 +321,59 @@ function clockSkewToastDescription(deltaMs: number | null) {
                 : "探针升级"
             }}
           </Button>
-          <Dialog
-            v-if="isProbeUpgradeDialogOpen"
-            :open="isProbeUpgradeDialogOpen"
-            @update:open="isProbeUpgradeDialogOpen = $event"
-          >
-            <DialogContent class="pointer-events-auto! z-60 opacity-100!">
-              <DialogHeader>
-                <DialogTitle>确认升级探针</DialogTitle>
-                <DialogDescription>
-                  将此主机的探针升级到 {{ probeUpgradeTargetVersion }}。
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter>
-                <Button
-                  type="button"
-                  variant="outline"
-                  @click="isProbeUpgradeDialogOpen = false"
-                >
-                  返回
-                </Button>
-                <Button
-                  type="button"
-                  :disabled="detail.isCreatingProbeUpgradeRequest.value"
-                  @click="createProbeUpgradeRequest"
-                >
-                  <LoaderCircle
-                    v-if="detail.isCreatingProbeUpgradeRequest.value"
-                    class="size-4 animate-spin"
-                    aria-hidden="true"
-                  />
-                  确认升级
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-          <Button
-            variant="outline"
-            size="icon-sm"
-            type="button"
-            aria-label="配置"
-            title="配置"
-            @click="emit('openHostConfiguration', host.id)"
-          >
-            <Settings class="size-4" aria-hidden="true" />
-          </Button>
-          <DeleteHostAlertDialog
-            :deleting-host-id="deletingHostId"
-            :host="host"
-            @delete-host="emit('deleteHost', $event)"
-          />
-        </div>
-      </div>
+        </template>
+      </HostDetailDashboard>
 
-      <Alert
-        v-for="warning in visibleWarnings"
-        :key="`${warning.code}-${warning.occurredAtMs ?? 0}`"
-        class="border-amber-200 bg-amber-50"
+      <Dialog
+        v-if="isProbeUpgradeDialogOpen"
+        :open="isProbeUpgradeDialogOpen"
+        @update:open="isProbeUpgradeDialogOpen = $event"
       >
-        <AlertTriangle class="size-4" aria-hidden="true" />
-        <AlertTitle>{{ warningTitle(warning.code) }}</AlertTitle>
-        <AlertDescription>{{ warning.message }}</AlertDescription>
-      </Alert>
-
-      <HostMetricsSummary :latest-metric="latestMetric" />
-
-      <div class="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <div class="order-2 min-w-0 xl:order-1">
-          <Tabs default-value="overview">
-            <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <TabsList class="bg-muted h-8">
-                <TabsTrigger value="overview" class="h-7">概览</TabsTrigger>
-                <TabsTrigger value="cpu" class="h-7">CPU</TabsTrigger>
-                <TabsTrigger value="disk" class="h-7">磁盘</TabsTrigger>
-                <TabsTrigger value="network" class="h-7">网络</TabsTrigger>
-              </TabsList>
-              <Select
-                :model-value="detail.selectedWindow.value"
-                @update:model-value="switchMetricsWindow"
-              >
-                <SelectTrigger class="h-8 w-28">
-                  <SelectValue placeholder="时间范围" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
-                    v-for="option in windowOptions"
-                    :key="option.value"
-                    :value="option.value"
-                  >
-                    {{ option.label }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <Alert v-if="detail.metricsError?.value" class="mb-4">
-              <AlertTriangle class="size-4" aria-hidden="true" />
-              <AlertTitle>历史指标暂时不可用</AlertTitle>
-              <AlertDescription class="flex flex-wrap items-center gap-3">
-                <span>{{ detail.metricsError?.value }}</span>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  @click="detail.switchWindow(detail.selectedWindow.value)"
-                >
-                  重试
-                </Button>
-              </AlertDescription>
-            </Alert>
-
-            <TabsContent
-              value="overview"
-              class="mt-0 grid gap-4 lg:grid-cols-2"
+        <DialogContent class="pointer-events-auto! z-60 opacity-100!">
+          <DialogHeader>
+            <DialogTitle>确认升级探针</DialogTitle>
+            <DialogDescription>
+              将此主机的探针升级到 {{ probeUpgradeTargetVersion }}。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              @click="isProbeUpgradeDialogOpen = false"
             >
-              <MetricsChart
-                :series="[chartData.cpu.aggregate]"
-                title="CPU"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-                :y-axis-max="100"
-                :y-axis-min="0"
-                y-axis-name="%"
-                :value-formatter="formatPercent"
+              返回
+            </Button>
+            <Button
+              type="button"
+              :disabled="detail.isCreatingProbeUpgradeRequest.value"
+              @click="createProbeUpgradeRequest"
+            >
+              <LoaderCircle
+                v-if="detail.isCreatingProbeUpgradeRequest.value"
+                class="size-4 animate-spin"
+                aria-hidden="true"
               />
-              <MetricsChart
-                :series="[chartData.memory.usedPercent]"
-                title="内存"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-                :y-axis-max="100"
-                :y-axis-min="0"
-                y-axis-name="%"
-                :value-formatter="formatPercent"
-              />
-              <MetricsChart
-                :series="[chartData.disk.aggregateUsedPercent]"
-                title="磁盘"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-                :y-axis-max="100"
-                :y-axis-min="0"
-                y-axis-name="%"
-                :value-formatter="formatPercent"
-              />
-              <MetricsChart
-                :series="chartData.network.aggregate"
-                title="网络吞吐量"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-                y-axis-name="b/s"
-                :value-formatter="formatBitsPerSecond"
-              />
-            </TabsContent>
-            <TabsContent value="cpu" class="mt-0">
-              <HostResourcePanels
-                panel="cpu"
-                :aggregate-disk-io-series="chartData.disk.aggregateIoBytes"
-                :aggregate-disk-series="chartData.disk.aggregateUsedPercent"
-                :aggregate-network-series="chartData.network.aggregate"
-                :cpu-core-series="chartData.cpu.cores"
-                :cpu-model="host.cpuModel"
-                :inventory="host.inventory"
-                :latest-sample="latestSample"
-                :samples="detail.samples.value"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-              />
-            </TabsContent>
-            <TabsContent value="disk" class="mt-0">
-              <HostResourcePanels
-                panel="disk"
-                :aggregate-disk-io-series="chartData.disk.aggregateIoBytes"
-                :aggregate-disk-series="chartData.disk.aggregateUsedPercent"
-                :aggregate-network-series="chartData.network.aggregate"
-                :cpu-core-series="chartData.cpu.cores"
-                :cpu-model="host.cpuModel"
-                :inventory="host.inventory"
-                :latest-sample="latestSample"
-                :samples="detail.samples.value"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-              />
-            </TabsContent>
-            <TabsContent value="network" class="mt-0">
-              <HostResourcePanels
-                panel="network"
-                :aggregate-disk-io-series="chartData.disk.aggregateIoBytes"
-                :aggregate-disk-series="chartData.disk.aggregateUsedPercent"
-                :aggregate-network-series="chartData.network.aggregate"
-                :cpu-core-series="chartData.cpu.cores"
-                :cpu-model="host.cpuModel"
-                :inventory="host.inventory"
-                :latest-sample="latestSample"
-                :samples="detail.samples.value"
-                :x-axis-max-ms="detail.chartRange.value.maxMs"
-                :x-axis-min-ms="detail.chartRange.value.minMs"
-                :x-axis-start-continuity-gap-ms="chartStartContinuityGapMs"
-              />
-            </TabsContent>
-          </Tabs>
-        </div>
+              确认升级
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-        <HostStaticInfoCard
-          class="order-1 xl:order-2"
-          :host="host"
-          @open-host-metadata="emit('openHostMetadata', $event)"
-        />
-      </div>
-
-      <HostMetadataDialog
-        :active-host-metadata-id="activeHostMetadataId"
-        :host="host"
-        :host-metadata-draft="hostMetadataDraft"
-        :host-metadata-error="hostMetadataError"
-        :is-saving-host-metadata="isSavingHostMetadata"
-        @close-host-metadata="emit('openHostMetadata', $event)"
-        @save-host-metadata="emit('saveHostMetadata')"
-      />
-      <HostProbeConfigurationDialog
+      <HostSettingsDialog
         :active-host-configuration-id="activeHostConfigurationId"
+        :active-host-metadata-id="activeHostMetadataId"
         :host="host"
         :host-configuration-draft="hostConfigurationDraft"
         :host-configuration-error="hostConfigurationError"
+        :host-metadata-draft="hostMetadataDraft"
+        :host-metadata-error="hostMetadataError"
         :is-saving-host-configuration="isSavingHostConfiguration"
+        :is-saving-host-metadata="isSavingHostMetadata"
         @close-host-configuration="emit('openHostConfiguration', $event)"
+        @close-host-metadata="emit('openHostMetadata', $event)"
         @save-host-configuration="emit('saveHostConfiguration')"
+        @save-host-metadata="emit('saveHostMetadata')"
       />
     </div>
   </section>

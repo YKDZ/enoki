@@ -136,11 +136,13 @@ describe("Host detail page", () => {
     expect(html).toContain("1 小时 1 分钟");
     expect(html).toContain("Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz");
     expect(html).toContain("生产数据库");
-    expect(html).toContain("概览");
-    expect(html).toContain("1 分钟");
+    expect(html).toContain("CPU");
+    expect(html).toContain("网络");
+    expect(html).toContain("内存");
+    expect(html).toContain("磁盘与 I/O");
     expect(html).toContain("时间范围");
-    expect(html).toContain("IP 地址");
-    expect(html).toContain("操作系统");
+    expect(html).toContain("IP");
+    expect(html).toContain("系统");
     expect(html).toContain(
       "探针未能应用最新配置，请检查探针连通性或配置下发状态。",
     );
@@ -150,15 +152,11 @@ describe("Host detail page", () => {
     expect(html).not.toContain(
       "report request failed: 503 Service Unavailable",
     );
-    expect(html).toContain("主机资料");
-    expect(html).toContain("探针版本");
-    expect(html).toContain("Hub 当前探针资产版本");
+    expect(html).toContain("设置");
     expect(html).toContain("0.1.0");
-    expect(html).toContain("0.2.0");
     expect(html).toContain("探针可升级到 0.2.0");
     expect(html).not.toContain("确认升级探针");
     expect(html).not.toContain("将此主机的探针升级到 0.2.0");
-    expect(html).toContain("配置");
     expect(html).toContain("在线");
 
     const currentHost = detail.host.value;
