@@ -11,7 +11,7 @@ use crate::registration::{
 };
 use crate::{
     inventory::collect_local_inventory,
-    metrics::{MetricsCollectionConfig, MetricsCollector},
+    metrics::{CollectorCadenceSchedule, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
         ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
         ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationRunning,
@@ -875,6 +875,9 @@ fn collect_observation_batch(
         .as_secs()
         .max(1);
     let sample_count = (reporting_seconds / collection_seconds).max(1);
+    let schedule = CollectorCadenceSchedule::for_runtime_collection_interval(
+        active_configuration.metrics_collection_interval,
+    );
     let mut elapsed_seconds = 0;
     let mut metrics = Vec::new();
 
@@ -882,11 +885,20 @@ fn collect_observation_batch(
         sleeper.sleep(active_configuration.metrics_collection_interval);
         elapsed_seconds += collection_seconds;
         *sequence += 1;
-        metrics.push(metrics_collector.collect(*sequence, active_configuration.metrics_config));
+        if let Some(sample) = metrics_collector.collect_after(
+            *sequence,
+            active_configuration.metrics_collection_interval,
+            schedule,
+            active_configuration.metrics_config,
+        ) {
+            metrics.push(sample);
+        }
     }
 
     if elapsed_seconds < reporting_seconds {
-        sleeper.sleep(Duration::from_secs(reporting_seconds - elapsed_seconds));
+        let leftover = Duration::from_secs(reporting_seconds - elapsed_seconds);
+        sleeper.sleep(leftover);
+        metrics_collector.advance_time(leftover);
     }
 
     (sequence_start, *sequence, metrics)
@@ -1295,6 +1307,127 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::{fs::PermissionsExt, fs::symlink};
+
+    #[test]
+    fn observation_batch_keeps_low_frequency_collectors_off_high_frequency_ticks() {
+        let active_configuration = ActiveProbeConfiguration {
+            metrics_collection_interval: Duration::from_secs(5),
+            metrics_config: MetricsCollectionConfig::all_enabled(),
+            reporting_interval: Duration::from_secs(15),
+            version: "default-v1".to_string(),
+        };
+        let mut sequence = 1;
+        let mut sleeper = NoopSleeper;
+        let mut metrics_collector = MetricsCollector::from_registry(
+            crate::metrics::CollectorRegistry::from_collectors(vec![
+                Box::new(FakeMetricCollector {
+                    cadence_class: crate::metrics::CollectorCadenceClass::HighFrequency,
+                    metric_field: FakeMetricField::Cpu,
+                }),
+                Box::new(FakeMetricCollector {
+                    cadence_class: crate::metrics::CollectorCadenceClass::LowFrequency,
+                    metric_field: FakeMetricField::Load,
+                }),
+            ]),
+        );
+
+        let (_, _, metrics) = collect_observation_batch(
+            &mut sleeper,
+            &active_configuration,
+            &mut sequence,
+            &mut metrics_collector,
+        );
+
+        assert_eq!(
+            metrics
+                .iter()
+                .map(|sample| sample.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4],
+        );
+        assert!(
+            metrics
+                .iter()
+                .all(|sample| sample.cpu_percent == Some(42.0))
+        );
+        assert!(metrics.iter().all(|sample| sample.load_1.is_none()));
+    }
+
+    #[test]
+    fn observation_batch_counts_reporting_leftover_sleep_toward_collector_cadence() {
+        let active_configuration = ActiveProbeConfiguration {
+            metrics_collection_interval: Duration::from_secs(7),
+            metrics_config: MetricsCollectionConfig::all_enabled(),
+            reporting_interval: Duration::from_secs(68),
+            version: "default-v1".to_string(),
+        };
+        let mut sequence = 0;
+        let mut sleeper = NoopSleeper;
+        let mut metrics_collector =
+            MetricsCollector::from_registry(crate::metrics::CollectorRegistry::from_collectors(
+                vec![Box::new(FakeMetricCollector {
+                    cadence_class: crate::metrics::CollectorCadenceClass::LowFrequency,
+                    metric_field: FakeMetricField::Load,
+                })],
+            ));
+
+        let (_, _, first_metrics) = collect_observation_batch(
+            &mut sleeper,
+            &active_configuration,
+            &mut sequence,
+            &mut metrics_collector,
+        );
+        let (_, _, second_metrics) = collect_observation_batch(
+            &mut sleeper,
+            &active_configuration,
+            &mut sequence,
+            &mut metrics_collector,
+        );
+
+        assert_eq!(
+            first_metrics
+                .iter()
+                .map(|sample| sample.sequence)
+                .collect::<Vec<_>>(),
+            vec![9],
+        );
+        assert_eq!(
+            second_metrics
+                .iter()
+                .map(|sample| sample.sequence)
+                .collect::<Vec<_>>(),
+            vec![17],
+        );
+    }
+
+    enum FakeMetricField {
+        Cpu,
+        Load,
+    }
+
+    struct FakeMetricCollector {
+        cadence_class: crate::metrics::CollectorCadenceClass,
+        metric_field: FakeMetricField,
+    }
+
+    impl crate::metrics::MetricCollector for FakeMetricCollector {
+        fn cadence_class(&self) -> crate::metrics::CollectorCadenceClass {
+            self.cadence_class
+        }
+
+        fn collect(
+            &mut self,
+            sample: &mut crate::protocol::enoki::v1::MetricSample,
+            _config: MetricsCollectionConfig,
+        ) -> Result<bool, crate::metrics::CollectorError> {
+            match self.metric_field {
+                FakeMetricField::Cpu => sample.cpu_percent = Some(42.0),
+                FakeMetricField::Load => sample.load_1 = Some(1.0),
+            }
+
+            Ok(true)
+        }
+    }
 
     #[derive(Default)]
     struct RecordingOperationRunner {

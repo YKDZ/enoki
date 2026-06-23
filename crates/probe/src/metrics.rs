@@ -3,10 +3,12 @@ use std::{
     ffi::CString,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::protocol::enoki::v1::{CpuCoreMetric, DiskUsageMetric, NetworkInterfaceMetric};
+use crate::protocol::enoki::v1::{
+    CpuCoreMetric, DiskUsageMetric, MetricSample, NetworkInterfaceMetric,
+};
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "cgroup", "cgroup2", "debugfs", "devtmpfs", "fusectl", "overlay", "proc", "squashfs", "sysfs",
@@ -107,123 +109,474 @@ impl MetricsCollectionConfig {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorCadenceClass {
+    HighFrequency,
+    LowFrequency,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CollectorCadenceSchedule {
+    high_frequency: Duration,
+    low_frequency: Duration,
+}
+
+impl CollectorCadenceSchedule {
+    pub fn new(high_frequency: Duration, low_frequency: Duration) -> Self {
+        Self {
+            high_frequency: high_frequency.max(Duration::from_secs(1)),
+            low_frequency: low_frequency.max(Duration::from_secs(1)),
+        }
+    }
+
+    pub fn for_high_frequency_interval(high_frequency: Duration) -> Self {
+        Self::new(high_frequency, high_frequency)
+    }
+
+    pub fn for_runtime_collection_interval(high_frequency: Duration) -> Self {
+        Self::new(high_frequency, Duration::from_secs(60))
+    }
+
+    pub fn interval_for(&self, class: CollectorCadenceClass) -> Duration {
+        match class {
+            CollectorCadenceClass::HighFrequency => self.high_frequency,
+            CollectorCadenceClass::LowFrequency => self.low_frequency,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectorError {
+    message: String,
+}
+
+impl CollectorError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+pub trait MetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass;
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError>;
+}
+
+pub struct CollectorRegistry {
+    collectors: Vec<Box<dyn MetricCollector>>,
+    last_collected_at: Vec<Option<Duration>>,
+}
+
+impl CollectorRegistry {
+    pub fn official() -> Self {
+        Self::from_collectors(vec![
+            Box::<CpuMetricCollector>::default(),
+            Box::<MemoryMetricCollector>::default(),
+            Box::<DiskMetricCollector>::default(),
+            Box::<NetworkMetricCollector>::default(),
+            Box::<LoadMetricCollector>::default(),
+            Box::<UptimeMetricCollector>::default(),
+            Box::<TemperatureMetricCollector>::default(),
+            Box::<BatteryMetricCollector>::default(),
+        ])
+    }
+
+    pub fn from_collectors(collectors: Vec<Box<dyn MetricCollector>>) -> Self {
+        let last_collected_at = vec![None; collectors.len()];
+
+        Self {
+            collectors,
+            last_collected_at,
+        }
+    }
+
+    pub fn collect_due(
+        &mut self,
+        sequence: u64,
+        elapsed: Duration,
+        schedule: CollectorCadenceSchedule,
+        config: MetricsCollectionConfig,
+    ) -> Option<MetricSample> {
+        let mut sample = MetricSample {
+            collected_at_ms: unix_time_millis(),
+            sequence,
+            ..MetricSample::default()
+        };
+        let mut produced = false;
+
+        for (index, collector) in self.collectors.iter_mut().enumerate() {
+            let interval = schedule.interval_for(collector.cadence_class());
+            if !collector_is_due(self.last_collected_at[index], elapsed, interval) {
+                continue;
+            }
+
+            let sample_before_collection = sample.clone();
+            match collector.collect(&mut sample, config) {
+                Ok(true) => {
+                    produced = true;
+                    self.last_collected_at[index] = Some(elapsed);
+                }
+                Ok(false) => {
+                    self.last_collected_at[index] = Some(elapsed);
+                }
+                Err(_) => {
+                    sample = sample_before_collection;
+                    self.last_collected_at[index] = Some(elapsed);
+                }
+            }
+        }
+
+        produced.then_some(sample)
+    }
+}
+
+fn collector_is_due(
+    last_collected_at: Option<Duration>,
+    elapsed: Duration,
+    interval: Duration,
+) -> bool {
+    match last_collected_at {
+        Some(last_collected_at) => elapsed.saturating_sub(last_collected_at) >= interval,
+        None => elapsed >= interval,
+    }
+}
+
 pub struct MetricsCollector {
-    previous_cpu: Option<CpuCounterSnapshot>,
-    previous_disk: Option<DiskCounterSnapshot>,
-    previous_network: Option<NetworkCounterSnapshot>,
+    elapsed: Duration,
+    registry: CollectorRegistry,
+}
+
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self {
+            elapsed: Duration::ZERO,
+            registry: CollectorRegistry::official(),
+        }
+    }
 }
 
 impl MetricsCollector {
-    pub fn collect(
+    pub fn from_registry(registry: CollectorRegistry) -> Self {
+        Self {
+            elapsed: Duration::ZERO,
+            registry,
+        }
+    }
+
+    pub fn collect(&mut self, sequence: u64, config: MetricsCollectionConfig) -> MetricSample {
+        self.elapsed += Duration::from_secs(1);
+        self.collect_due(
+            sequence,
+            self.elapsed,
+            CollectorCadenceSchedule::for_high_frequency_interval(Duration::from_secs(1)),
+            config,
+        )
+        .unwrap_or_else(|| MetricSample {
+            collected_at_ms: unix_time_millis(),
+            sequence,
+            ..MetricSample::default()
+        })
+    }
+
+    pub fn collect_due(
         &mut self,
         sequence: u64,
+        elapsed: Duration,
+        schedule: CollectorCadenceSchedule,
         config: MetricsCollectionConfig,
-    ) -> crate::protocol::enoki::v1::MetricSample {
-        let cpu = config.collect_cpu.then(|| {
-            fs::read_to_string("/proc/stat").ok().and_then(|contents| {
-                collect_cpu_metrics_from_proc_stat(&contents, self.previous_cpu.as_ref())
+    ) -> Option<MetricSample> {
+        self.elapsed = elapsed;
+        self.registry
+            .collect_due(sequence, elapsed, schedule, config)
+    }
+
+    pub fn collect_after(
+        &mut self,
+        sequence: u64,
+        elapsed_since_last_collection: Duration,
+        schedule: CollectorCadenceSchedule,
+        config: MetricsCollectionConfig,
+    ) -> Option<MetricSample> {
+        self.elapsed += elapsed_since_last_collection;
+        self.registry
+            .collect_due(sequence, self.elapsed, schedule, config)
+    }
+
+    pub fn advance_time(&mut self, elapsed: Duration) {
+        self.elapsed += elapsed;
+    }
+}
+
+#[derive(Default)]
+struct CpuMetricCollector {
+    previous: Option<CpuCounterSnapshot>,
+}
+
+impl MetricCollector for CpuMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        if !config.collect_cpu {
+            return Ok(false);
+        }
+
+        let Some(metrics) = fs::read_to_string("/proc/stat").ok().and_then(|contents| {
+            collect_cpu_metrics_from_proc_stat(&contents, self.previous.as_ref())
+        }) else {
+            return Ok(false);
+        };
+
+        self.previous = Some(metrics.snapshot.clone());
+        sample.cpu_cores = metrics.cores;
+        sample.cpu_percent = Some(metrics.aggregate_percent);
+        sample.cpu_idle_percent = Some(metrics.breakdown.idle_percent);
+        sample.cpu_iowait_percent = Some(metrics.breakdown.iowait_percent);
+        sample.cpu_steal_percent = Some(metrics.breakdown.steal_percent);
+        sample.cpu_system_percent = Some(metrics.breakdown.system_percent);
+        sample.cpu_user_percent = Some(metrics.breakdown.user_percent);
+
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct MemoryMetricCollector;
+
+impl MetricCollector for MemoryMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        if !config.collect_memory {
+            return Ok(false);
+        }
+
+        let Some(metrics) = fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|contents| collect_memory_metrics_from_proc_meminfo(&contents))
+        else {
+            return Ok(false);
+        };
+
+        sample.memory_cache_bytes = Some(metrics.cache_bytes);
+        sample.memory_total_bytes = Some(metrics.total_bytes);
+        sample.memory_used_bytes = Some(metrics.used_bytes);
+        sample.swap_total_bytes = Some(metrics.swap_total_bytes);
+        sample.swap_used_bytes = Some(metrics.swap_used_bytes);
+
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct LoadMetricCollector;
+
+impl MetricCollector for LoadMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        if !config.collect_load {
+            return Ok(false);
+        }
+
+        let Some(metrics) = fs::read_to_string("/proc/loadavg")
+            .ok()
+            .and_then(|contents| collect_load_metrics_from_proc_loadavg(&contents))
+        else {
+            return Ok(false);
+        };
+
+        sample.load_1 = Some(metrics.one);
+        sample.load_5 = Some(metrics.five);
+        sample.load_15 = Some(metrics.fifteen);
+
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct UptimeMetricCollector;
+
+impl MetricCollector for UptimeMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        if !config.collect_uptime {
+            return Ok(false);
+        }
+
+        let Some(uptime_seconds) = fs::read_to_string("/proc/uptime")
+            .ok()
+            .and_then(|contents| collect_uptime_seconds_from_proc_uptime(&contents))
+        else {
+            return Ok(false);
+        };
+
+        sample.uptime_seconds = Some(uptime_seconds);
+
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct DiskMetricCollector {
+    previous: Option<DiskCounterSnapshot>,
+}
+
+impl MetricCollector for DiskMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        if !config.collect_disk {
+            return Ok(false);
+        }
+
+        let disk_counters = fs::read_to_string("/proc/diskstats")
+            .ok()
+            .and_then(|contents| collect_disk_counters_from_proc_diskstats(&contents));
+        let disks = fs::read_to_string("/proc/mounts")
+            .map(|contents| {
+                collect_disk_metrics_from_mounts(
+                    &contents,
+                    |mount_point| filesystem_capacity(mount_point),
+                    disk_counters.as_ref(),
+                    self.previous.as_ref(),
+                )
             })
-        });
-        let memory = config.collect_memory.then(|| {
-            fs::read_to_string("/proc/meminfo")
-                .ok()
-                .and_then(|contents| collect_memory_metrics_from_proc_meminfo(&contents))
-        });
-        let load = config.collect_load.then(|| {
-            fs::read_to_string("/proc/loadavg")
-                .ok()
-                .and_then(|contents| collect_load_metrics_from_proc_loadavg(&contents))
-        });
-        let uptime_seconds = config.collect_uptime.then(|| {
-            fs::read_to_string("/proc/uptime")
-                .ok()
-                .and_then(|contents| collect_uptime_seconds_from_proc_uptime(&contents))
-        });
-        let disks = if config.collect_disk {
-            let disk_counters = fs::read_to_string("/proc/diskstats")
-                .ok()
-                .and_then(|contents| collect_disk_counters_from_proc_diskstats(&contents));
-            let disks = fs::read_to_string("/proc/mounts")
-                .map(|contents| {
-                    collect_disk_metrics_from_mounts(
-                        &contents,
-                        |mount_point| filesystem_capacity(mount_point),
-                        disk_counters.as_ref(),
-                        self.previous_disk.as_ref(),
-                    )
-                })
-                .unwrap_or_default();
-            if let Some(snapshot) = disk_counters {
-                self.previous_disk = Some(snapshot);
-            }
-            disks
-        } else {
-            Vec::new()
-        };
-        let temperature_celsius = collect_temperature_celsius_from_sysfs("/sys/class/hwmon");
-        let battery = collect_battery_metrics_from_sysfs("/sys/class/power_supply");
-        let network_interfaces = if config.collect_network {
-            let network = fs::read_to_string("/proc/net/dev")
-                .ok()
-                .and_then(|contents| {
-                    let default_route_interfaces =
-                        collect_default_route_interfaces_from_proc_routes(
-                            fs::read_to_string("/proc/net/route").ok().as_deref(),
-                            fs::read_to_string("/proc/net/ipv6_route").ok().as_deref(),
-                        );
-
-                    collect_network_metrics_from_proc_net_dev(
-                        &contents,
-                        default_route_interfaces.as_ref(),
-                        self.previous_network.as_ref(),
-                    )
-                });
-            if let Some(metrics) = network {
-                self.previous_network = Some(metrics.snapshot);
-                metrics.interfaces
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
-        let cpu = cpu.flatten();
-        if let Some(metrics) = cpu.as_ref() {
-            self.previous_cpu = Some(metrics.snapshot.clone());
+            .unwrap_or_default();
+        if let Some(snapshot) = disk_counters {
+            self.previous = Some(snapshot);
         }
-        let memory = memory.flatten();
-        let load = load.flatten();
+        let produced = !disks.is_empty();
+        sample.disks = disks;
 
-        crate::protocol::enoki::v1::MetricSample {
-            collected_at_ms: unix_time_millis(),
-            cpu_cores: cpu
-                .as_ref()
-                .map(|metrics| metrics.cores.clone())
-                .unwrap_or_default(),
-            cpu_percent: cpu.as_ref().map(|metrics| metrics.aggregate_percent),
-            cpu_idle_percent: cpu.as_ref().map(|metrics| metrics.breakdown.idle_percent),
-            cpu_iowait_percent: cpu.as_ref().map(|metrics| metrics.breakdown.iowait_percent),
-            cpu_steal_percent: cpu.as_ref().map(|metrics| metrics.breakdown.steal_percent),
-            cpu_system_percent: cpu.as_ref().map(|metrics| metrics.breakdown.system_percent),
-            cpu_user_percent: cpu.as_ref().map(|metrics| metrics.breakdown.user_percent),
-            disks,
-            load_1: load.as_ref().map(|metrics| metrics.one),
-            load_5: load.as_ref().map(|metrics| metrics.five),
-            load_15: load.as_ref().map(|metrics| metrics.fifteen),
-            battery_percent: battery.as_ref().map(|metrics| metrics.percent),
-            battery_state: battery.as_ref().map(|metrics| metrics.state.clone()),
-            memory_cache_bytes: memory.as_ref().map(|metrics| metrics.cache_bytes),
-            memory_total_bytes: memory.as_ref().map(|metrics| metrics.total_bytes),
-            memory_used_bytes: memory.as_ref().map(|metrics| metrics.used_bytes),
-            network_interfaces,
-            sequence,
-            swap_total_bytes: memory.as_ref().map(|metrics| metrics.swap_total_bytes),
-            swap_used_bytes: memory.as_ref().map(|metrics| metrics.swap_used_bytes),
-            temperature_celsius,
-            uptime_seconds: uptime_seconds.flatten(),
+        Ok(produced)
+    }
+}
+
+#[derive(Default)]
+struct NetworkMetricCollector {
+    previous: Option<NetworkCounterSnapshot>,
+}
+
+impl MetricCollector for NetworkMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        if !config.collect_network {
+            return Ok(false);
         }
+
+        let network = fs::read_to_string("/proc/net/dev")
+            .ok()
+            .and_then(|contents| {
+                let default_route_interfaces = collect_default_route_interfaces_from_proc_routes(
+                    fs::read_to_string("/proc/net/route").ok().as_deref(),
+                    fs::read_to_string("/proc/net/ipv6_route").ok().as_deref(),
+                );
+
+                collect_network_metrics_from_proc_net_dev(
+                    &contents,
+                    default_route_interfaces.as_ref(),
+                    self.previous.as_ref(),
+                )
+            });
+        let Some(metrics) = network else {
+            return Ok(false);
+        };
+        self.previous = Some(metrics.snapshot);
+        sample.network_interfaces = metrics.interfaces;
+
+        Ok(!sample.network_interfaces.is_empty())
+    }
+}
+
+#[derive(Default)]
+struct TemperatureMetricCollector;
+
+impl MetricCollector for TemperatureMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        _config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        let Some(temperature_celsius) = collect_temperature_celsius_from_sysfs("/sys/class/hwmon")
+        else {
+            return Ok(false);
+        };
+
+        sample.temperature_celsius = Some(temperature_celsius);
+
+        Ok(true)
+    }
+}
+
+#[derive(Default)]
+struct BatteryMetricCollector;
+
+impl MetricCollector for BatteryMetricCollector {
+    fn cadence_class(&self) -> CollectorCadenceClass {
+        CollectorCadenceClass::HighFrequency
+    }
+
+    fn collect(
+        &mut self,
+        sample: &mut MetricSample,
+        _config: MetricsCollectionConfig,
+    ) -> Result<bool, CollectorError> {
+        let Some(metrics) = collect_battery_metrics_from_sysfs("/sys/class/power_supply") else {
+            return Ok(false);
+        };
+
+        sample.battery_percent = Some(metrics.percent);
+        sample.battery_state = Some(metrics.state);
+
+        Ok(true)
     }
 }
 
