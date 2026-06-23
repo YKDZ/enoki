@@ -98,13 +98,15 @@ function memoryPercent() {
               class="text-muted-foreground size-4 shrink-0"
               aria-hidden="true"
             />
-            <h3 class="text-base font-semibold break-words whitespace-normal">
+            <h3
+              class="text-base font-semibold wrap-break-word whitespace-normal"
+            >
               {{ host.displayName }}
             </h3>
           </div>
           <p
             v-if="host.description"
-            class="text-muted-foreground mt-1 text-sm break-words whitespace-normal"
+            class="text-muted-foreground mt-1 text-sm wrap-break-word whitespace-normal"
           >
             {{ host.description }}
           </p>

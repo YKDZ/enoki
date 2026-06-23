@@ -581,6 +581,7 @@ async function saveHostMetadata() {
 
   hostMetadataError.value = "";
   isSavingHostMetadata.value = true;
+  const targetHostId = activeHostMetadataId.value;
 
   try {
     const metadataUpdate: Partial<HostMetadataDraft> = {};
@@ -611,17 +612,14 @@ async function saveHostMetadata() {
       return;
     }
 
-    const response = await fetch(
-      `/api/web/hosts/${activeHostMetadataId.value}/metadata`,
-      {
-        body: JSON.stringify(metadataUpdate),
-        credentials: "same-origin",
-        headers: {
-          "content-type": "application/json",
-        },
-        method: "PUT",
+    const response = await fetch(`/api/web/hosts/${targetHostId}/metadata`, {
+      body: JSON.stringify(metadataUpdate),
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
       },
-    );
+      method: "PUT",
+    });
 
     if (handleUnauthorizedResponse(response)) {
       return;
@@ -631,12 +629,17 @@ async function saveHostMetadata() {
       throw new Error(((await response.json()) as { error?: string }).error);
     }
 
-    activeHostMetadataId.value = null;
-    hostMetadataDraft.value = null;
-    hostMetadataOriginal.value = null;
-    void loadHosts();
+    await response.json();
+    const refreshes = [loadHosts()];
     if (activeDetailHostId.value) {
-      void detail.load();
+      refreshes.push(detail.load());
+    }
+    await Promise.allSettled(refreshes);
+
+    if (activeHostMetadataId.value === targetHostId) {
+      activeHostMetadataId.value = null;
+      hostMetadataDraft.value = null;
+      hostMetadataOriginal.value = null;
     }
   } catch {
     hostMetadataError.value = "无法保存主机信息，请检查输入后重试。";

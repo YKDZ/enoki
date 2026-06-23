@@ -57,8 +57,8 @@ function initialCollapsed() {
     :class="[
       'min-w-0 overflow-hidden',
       size ? sizeClass[size] : width === 'full' ? 'lg:col-span-2' : '',
-      height === 'normal' ? 'min-h-[280px]' : '',
-      height === 'tall' && !isCollapsed ? 'min-h-[520px] lg:row-span-2' : '',
+      height === 'normal' ? 'min-h-70' : '',
+      height === 'tall' && !isCollapsed ? 'min-h-130 lg:row-span-2' : '',
     ]"
   >
     <CardHeader class="pb-2">

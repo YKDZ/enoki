@@ -235,7 +235,7 @@ function SortIcon(key: HostListSortKey) {
               class="text-muted-foreground size-4 shrink-0"
               aria-hidden="true"
             />
-            <span class="break-words whitespace-normal">{{
+            <span class="wrap-break-word whitespace-normal">{{
               host.displayName
             }}</span>
             <Badge :class="statusClass(host.status)" variant="outline">
@@ -244,7 +244,7 @@ function SortIcon(key: HostListSortKey) {
           </div>
           <p
             v-if="host.description"
-            class="text-muted-foreground mt-1 text-xs break-words whitespace-normal"
+            class="text-muted-foreground mt-1 text-xs wrap-break-word whitespace-normal"
           >
             {{ host.description }}
           </p>

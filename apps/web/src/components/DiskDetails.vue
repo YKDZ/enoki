@@ -54,7 +54,7 @@ function boundedPercent(value: number) {
           class="border-border/70 bg-background/40 grid gap-2 rounded-md border p-3"
         >
           <div class="flex items-center justify-between gap-3 text-sm">
-            <span class="min-w-0 font-medium break-words">
+            <span class="min-w-0 font-medium wrap-break-word">
               {{ disk.model || disk.deviceName }}
             </span>
             <Badge :variant="disk.passed ? 'secondary' : 'destructive'">
@@ -85,7 +85,7 @@ function boundedPercent(value: number) {
       <div :class="['grid gap-3', variant === 'stack' ? '' : 'xl:grid-cols-2']">
         <div v-for="disk in diskRows" :key="disk.mountPoint" class="grid gap-2">
           <div class="flex items-center justify-between gap-3 text-sm">
-            <span class="min-w-0 font-medium break-words">
+            <span class="min-w-0 font-medium wrap-break-word">
               {{ disk.mountPoint }}
             </span>
             <span class="text-muted-foreground shrink-0">

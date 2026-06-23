@@ -13,7 +13,7 @@ defineProps<{
   <div class="grid gap-3 text-sm sm:grid-cols-2 xl:grid-cols-4">
     <div class="min-w-0">
       <p class="text-muted-foreground text-xs">已用 / 总量</p>
-      <p class="font-semibold break-words">
+      <p class="font-semibold wrap-break-word">
         {{
           formatByteUsage(
             latestMetric?.memoryUsedBytes ?? null,
@@ -24,7 +24,7 @@ defineProps<{
     </div>
     <div class="min-w-0">
       <p class="text-muted-foreground text-xs">RAM 总量</p>
-      <p class="font-semibold break-words">
+      <p class="font-semibold wrap-break-word">
         {{ formatBytes(Number(inventory?.memoryTotalBytes ?? 0) || null) }}
       </p>
     </div>
@@ -36,7 +36,7 @@ defineProps<{
       class="min-w-0"
     >
       <p class="text-muted-foreground text-xs">缓存</p>
-      <p class="font-semibold break-words">
+      <p class="font-semibold wrap-break-word">
         {{ formatBytes(latestMetric.memoryCacheBytes) }}
       </p>
     </div>
@@ -48,7 +48,7 @@ defineProps<{
       class="min-w-0"
     >
       <p class="text-muted-foreground text-xs">Swap</p>
-      <p class="font-semibold break-words">
+      <p class="font-semibold wrap-break-word">
         {{
           formatByteUsage(
             latestMetric?.swapUsedBytes ?? null,

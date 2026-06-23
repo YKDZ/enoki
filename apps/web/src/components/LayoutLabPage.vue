@@ -75,7 +75,7 @@ const heights = ["normal", "tall"] as const;
           :size="size"
           data-layout-card
         >
-          <p class="text-muted-foreground text-sm break-words">
+          <p class="text-muted-foreground text-sm wrap-break-word">
             长文本内容用于验证换行行为：abcdefghijklmnopqrstuvwxyz0123456789 /
             very-long-token-without-natural-breakpoints
           </p>

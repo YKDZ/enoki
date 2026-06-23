@@ -3,32 +3,25 @@ use std::{
     ffi::CString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicI8, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use serde::Deserialize;
-
-use crate::privileged_runtime::{
-    LocalPrivilegedRuntimeRunner, PrivilegedCollector, PrivilegedCollectorId,
-    PrivilegedCollectorRuntime, PrivilegedRuntimeRunner, SystemdPrivilegedRuntimeProcessRunner,
-};
 use crate::protocol::enoki::v1::{
-    CpuCoreMetric, DiskHealthMetric, DiskUsageMetric, MetricSample, NetworkInterfaceMetric,
+    CpuCoreMetric, DiskUsageMetric, MetricSample, NetworkInterfaceMetric,
+};
+
+pub mod disk_health;
+mod official;
+pub use disk_health::{
+    DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner,
+    collect_disk_health_metrics_from_smartctl_json, collect_disk_health_metrics_with_smartctl,
+    format_disk_health_metrics_json, last_disk_health_collector_availability,
 };
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "cgroup", "cgroup2", "debugfs", "devtmpfs", "fusectl", "overlay", "proc", "squashfs", "sysfs",
     "tmpfs", "tracefs",
 ];
-
-const DISK_HEALTH_AVAILABILITY_UNKNOWN: i8 = -1;
-const DISK_HEALTH_AVAILABILITY_UNAVAILABLE: i8 = 0;
-const DISK_HEALTH_AVAILABILITY_AVAILABLE: i8 = 1;
-
-static LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY: AtomicI8 =
-    AtomicI8::new(DISK_HEALTH_AVAILABILITY_UNKNOWN);
 
 #[derive(Debug)]
 pub struct CpuMetrics {
@@ -131,126 +124,6 @@ pub enum CollectorCadenceClass {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DiskHealthAvailability {
-    Available,
-    Unavailable,
-}
-
-impl DiskHealthAvailability {
-    pub fn from_smartctl_result(
-        result: Result<Option<DiskHealthMetric>, serde_json::Error>,
-    ) -> DiskHealthAvailability {
-        match result {
-            Ok(Some(_)) => DiskHealthAvailability::Available,
-            Ok(None) | Err(_) => DiskHealthAvailability::Unavailable,
-        }
-    }
-}
-
-pub fn last_disk_health_collector_availability() -> Option<DiskHealthAvailability> {
-    match LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY.load(Ordering::Relaxed) {
-        DISK_HEALTH_AVAILABILITY_AVAILABLE => Some(DiskHealthAvailability::Available),
-        DISK_HEALTH_AVAILABILITY_UNAVAILABLE => Some(DiskHealthAvailability::Unavailable),
-        _ => None,
-    }
-}
-
-fn record_disk_health_collector_availability(availability: DiskHealthAvailability) {
-    let value = match availability {
-        DiskHealthAvailability::Available => DISK_HEALTH_AVAILABILITY_AVAILABLE,
-        DiskHealthAvailability::Unavailable => DISK_HEALTH_AVAILABILITY_UNAVAILABLE,
-    };
-    LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY.store(value, Ordering::Relaxed);
-}
-
-pub fn collect_disk_health_metrics_from_smartctl_json(
-    device_name: &str,
-    contents: &str,
-) -> Result<Option<DiskHealthMetric>, serde_json::Error> {
-    let value: serde_json::Value = serde_json::from_str(contents)?;
-
-    if value
-        .pointer("/smart_support/available")
-        .and_then(serde_json::Value::as_bool)
-        == Some(false)
-    {
-        return Ok(None);
-    }
-
-    let Some(passed) = value
-        .pointer("/smart_status/passed")
-        .and_then(serde_json::Value::as_bool)
-    else {
-        return Ok(None);
-    };
-
-    Ok(Some(DiskHealthMetric {
-        device_name: device_name.to_string(),
-        model: json_string(&value, "/model_name").unwrap_or_default(),
-        power_on_hours: json_u64(&value, "/power_on_time/hours"),
-        serial_number: json_string(&value, "/serial_number").unwrap_or_default(),
-        passed,
-        temperature_celsius: json_f64(&value, "/temperature/current"),
-    }))
-}
-
-pub fn collect_disk_health_metrics_with_smartctl() -> Result<Vec<DiskHealthMetric>, CollectorError>
-{
-    let scan_output = Command::new("smartctl")
-        .args(["--scan-open", "--json"])
-        .output()
-        .map_err(|error| CollectorError::new(format!("smartctl unavailable: {error}")))?;
-    if !scan_output.status.success() {
-        return Err(CollectorError::new("smartctl scan failed"));
-    }
-
-    let scan_json = String::from_utf8_lossy(&scan_output.stdout);
-    let devices = smartctl_scan_devices(&scan_json)
-        .map_err(|error| CollectorError::new(format!("smartctl scan output malformed: {error}")))?;
-    let mut metrics = Vec::new();
-
-    for device in devices {
-        let output = Command::new("smartctl")
-            .args(["--json", &device])
-            .output()
-            .map_err(|error| {
-                CollectorError::new(format!("smartctl failed for {device}: {error}"))
-            })?;
-
-        if !output.status.success() && output.stdout.is_empty() {
-            continue;
-        }
-
-        let json = String::from_utf8_lossy(&output.stdout);
-        match collect_disk_health_metrics_from_smartctl_json(&device, &json) {
-            Ok(Some(metric)) => metrics.push(metric),
-            Ok(None) => {}
-            Err(_) => {}
-        }
-    }
-
-    Ok(metrics)
-}
-
-pub fn format_disk_health_metrics_json(metrics: &[DiskHealthMetric]) -> String {
-    let values = metrics
-        .iter()
-        .map(|metric| {
-            serde_json::json!({
-                "device_name": metric.device_name,
-                "model": metric.model,
-                "serial_number": metric.serial_number,
-                "passed": metric.passed,
-                "temperature_celsius": metric.temperature_celsius,
-                "power_on_hours": metric.power_on_hours,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectorCadenceSchedule {
     high_frequency: Duration,
     low_frequency: Duration,
@@ -303,132 +176,6 @@ pub trait MetricCollector {
     ) -> Result<bool, CollectorError>;
 }
 
-pub trait DiskHealthMetricsRunner {
-    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError>;
-}
-
-pub struct DiskHealthMetricCollector<R = PrivilegedDiskHealthMetricsRunner> {
-    runner: R,
-}
-
-impl<R> DiskHealthMetricCollector<R> {
-    pub fn new(runner: R) -> Self {
-        Self { runner }
-    }
-}
-
-impl Default for DiskHealthMetricCollector {
-    fn default() -> Self {
-        Self::new(PrivilegedDiskHealthMetricsRunner::default())
-    }
-}
-
-impl<R> MetricCollector for DiskHealthMetricCollector<R>
-where
-    R: DiskHealthMetricsRunner,
-{
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::LowFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        let metrics = match self.runner.collect_disk_health_metrics() {
-            Ok(metrics) => metrics,
-            Err(error) => {
-                record_disk_health_collector_availability(DiskHealthAvailability::Unavailable);
-                return Err(error);
-            }
-        };
-        if metrics.is_empty() {
-            record_disk_health_collector_availability(DiskHealthAvailability::Unavailable);
-            return Ok(false);
-        }
-
-        record_disk_health_collector_availability(DiskHealthAvailability::Available);
-        sample.disk_health = metrics;
-        Ok(true)
-    }
-}
-
-pub struct PrivilegedDiskHealthMetricsRunner<R = LocalPrivilegedRuntimeRunner> {
-    runtime: PrivilegedCollectorRuntime<R>,
-}
-
-impl Default for PrivilegedDiskHealthMetricsRunner {
-    fn default() -> Self {
-        let probe_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("enoki-probe"));
-        Self::new(LocalPrivilegedRuntimeRunner::new(
-            probe_binary,
-            SystemdPrivilegedRuntimeProcessRunner,
-        ))
-    }
-}
-
-impl<R> PrivilegedDiskHealthMetricsRunner<R> {
-    pub fn new(runner: R) -> Self {
-        Self {
-            runtime: PrivilegedCollectorRuntime::new(runner),
-        }
-    }
-}
-
-impl<R> DiskHealthMetricsRunner for PrivilegedDiskHealthMetricsRunner<R>
-where
-    R: PrivilegedRuntimeRunner,
-{
-    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError> {
-        let output = self
-            .runtime
-            .run(&DiskHealthSmartctlPrivilegedCollector)
-            .map_err(|error| CollectorError::new(error.to_string()))?;
-
-        parse_privileged_disk_health_output(&output.stdout)
-            .map_err(|error| CollectorError::new(error.to_string()))
-    }
-}
-
-struct DiskHealthSmartctlPrivilegedCollector;
-
-impl PrivilegedCollector for DiskHealthSmartctlPrivilegedCollector {
-    fn collector_id(&self) -> PrivilegedCollectorId {
-        PrivilegedCollectorId::DiskHealthSmartctl
-    }
-}
-
-#[derive(Deserialize)]
-struct PrivilegedDiskHealthOutput {
-    device_name: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    serial_number: String,
-    passed: bool,
-    temperature_celsius: Option<f64>,
-    power_on_hours: Option<u64>,
-}
-
-fn parse_privileged_disk_health_output(
-    contents: &str,
-) -> Result<Vec<DiskHealthMetric>, serde_json::Error> {
-    let disks: Vec<PrivilegedDiskHealthOutput> = serde_json::from_str(contents)?;
-
-    Ok(disks
-        .into_iter()
-        .map(|disk| DiskHealthMetric {
-            device_name: disk.device_name,
-            model: disk.model,
-            passed: disk.passed,
-            power_on_hours: disk.power_on_hours,
-            serial_number: disk.serial_number,
-            temperature_celsius: disk.temperature_celsius,
-        })
-        .collect())
-}
-
 pub struct CollectorRegistry {
     collectors: Vec<Box<dyn MetricCollector>>,
     last_collected_at: Vec<Option<Duration>>,
@@ -436,17 +183,10 @@ pub struct CollectorRegistry {
 
 impl CollectorRegistry {
     pub fn official() -> Self {
-        Self::from_collectors(vec![
-            Box::<CpuMetricCollector>::default(),
-            Box::<MemoryMetricCollector>::default(),
-            Box::<DiskMetricCollector>::default(),
-            Box::<NetworkMetricCollector>::default(),
-            Box::<LoadMetricCollector>::default(),
-            Box::<UptimeMetricCollector>::default(),
-            Box::<TemperatureMetricCollector>::default(),
-            Box::<BatteryMetricCollector>::default(),
-            Box::<DiskHealthMetricCollector>::default(),
-        ])
+        let mut collectors = official::collectors();
+        collectors.push(Box::<DiskHealthMetricCollector>::default());
+
+        Self::from_collectors(collectors)
     }
 
     pub fn from_collectors(collectors: Vec<Box<dyn MetricCollector>>) -> Self {
@@ -507,38 +247,6 @@ fn collector_is_due(
         Some(last_collected_at) => elapsed.saturating_sub(last_collected_at) >= interval,
         None => elapsed >= interval,
     }
-}
-
-fn json_string(value: &serde_json::Value, pointer: &str) -> Option<String> {
-    value
-        .pointer(pointer)
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn json_u64(value: &serde_json::Value, pointer: &str) -> Option<u64> {
-    value.pointer(pointer).and_then(serde_json::Value::as_u64)
-}
-
-fn json_f64(value: &serde_json::Value, pointer: &str) -> Option<f64> {
-    value
-        .pointer(pointer)
-        .and_then(serde_json::Value::as_f64)
-        .filter(|value| value.is_finite())
-}
-
-fn smartctl_scan_devices(contents: &str) -> Result<Vec<String>, serde_json::Error> {
-    let value: serde_json::Value = serde_json::from_str(contents)?;
-
-    Ok(value
-        .pointer("/devices")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|device| json_string(device, "/name"))
-        .collect())
 }
 
 pub struct MetricsCollector {
@@ -604,273 +312,6 @@ impl MetricsCollector {
 
     pub fn advance_time(&mut self, elapsed: Duration) {
         self.elapsed += elapsed;
-    }
-}
-
-#[derive(Default)]
-struct CpuMetricCollector {
-    previous: Option<CpuCounterSnapshot>,
-}
-
-impl MetricCollector for CpuMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_cpu {
-            return Ok(false);
-        }
-
-        let Some(metrics) = fs::read_to_string("/proc/stat").ok().and_then(|contents| {
-            collect_cpu_metrics_from_proc_stat(&contents, self.previous.as_ref())
-        }) else {
-            return Ok(false);
-        };
-
-        self.previous = Some(metrics.snapshot.clone());
-        sample.cpu_cores = metrics.cores;
-        sample.cpu_percent = Some(metrics.aggregate_percent);
-        sample.cpu_idle_percent = Some(metrics.breakdown.idle_percent);
-        sample.cpu_iowait_percent = Some(metrics.breakdown.iowait_percent);
-        sample.cpu_steal_percent = Some(metrics.breakdown.steal_percent);
-        sample.cpu_system_percent = Some(metrics.breakdown.system_percent);
-        sample.cpu_user_percent = Some(metrics.breakdown.user_percent);
-
-        Ok(true)
-    }
-}
-
-#[derive(Default)]
-struct MemoryMetricCollector;
-
-impl MetricCollector for MemoryMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_memory {
-            return Ok(false);
-        }
-
-        let Some(metrics) = fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|contents| collect_memory_metrics_from_proc_meminfo(&contents))
-        else {
-            return Ok(false);
-        };
-
-        sample.memory_cache_bytes = Some(metrics.cache_bytes);
-        sample.memory_total_bytes = Some(metrics.total_bytes);
-        sample.memory_used_bytes = Some(metrics.used_bytes);
-        sample.swap_total_bytes = Some(metrics.swap_total_bytes);
-        sample.swap_used_bytes = Some(metrics.swap_used_bytes);
-
-        Ok(true)
-    }
-}
-
-#[derive(Default)]
-struct LoadMetricCollector;
-
-impl MetricCollector for LoadMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_load {
-            return Ok(false);
-        }
-
-        let Some(metrics) = fs::read_to_string("/proc/loadavg")
-            .ok()
-            .and_then(|contents| collect_load_metrics_from_proc_loadavg(&contents))
-        else {
-            return Ok(false);
-        };
-
-        sample.load_1 = Some(metrics.one);
-        sample.load_5 = Some(metrics.five);
-        sample.load_15 = Some(metrics.fifteen);
-
-        Ok(true)
-    }
-}
-
-#[derive(Default)]
-struct UptimeMetricCollector;
-
-impl MetricCollector for UptimeMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_uptime {
-            return Ok(false);
-        }
-
-        let Some(uptime_seconds) = fs::read_to_string("/proc/uptime")
-            .ok()
-            .and_then(|contents| collect_uptime_seconds_from_proc_uptime(&contents))
-        else {
-            return Ok(false);
-        };
-
-        sample.uptime_seconds = Some(uptime_seconds);
-
-        Ok(true)
-    }
-}
-
-#[derive(Default)]
-struct DiskMetricCollector {
-    previous: Option<DiskCounterSnapshot>,
-}
-
-impl MetricCollector for DiskMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_disk {
-            return Ok(false);
-        }
-
-        let disk_counters = fs::read_to_string("/proc/diskstats")
-            .ok()
-            .and_then(|contents| collect_disk_counters_from_proc_diskstats(&contents));
-        let disks = fs::read_to_string("/proc/mounts")
-            .map(|contents| {
-                collect_disk_metrics_from_mounts(
-                    &contents,
-                    |mount_point| filesystem_capacity(mount_point),
-                    disk_counters.as_ref(),
-                    self.previous.as_ref(),
-                )
-            })
-            .unwrap_or_default();
-        if let Some(snapshot) = disk_counters {
-            self.previous = Some(snapshot);
-        }
-        let produced = !disks.is_empty();
-        sample.disks = disks;
-
-        Ok(produced)
-    }
-}
-
-#[derive(Default)]
-struct NetworkMetricCollector {
-    previous: Option<NetworkCounterSnapshot>,
-}
-
-impl MetricCollector for NetworkMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_network {
-            return Ok(false);
-        }
-
-        let network = fs::read_to_string("/proc/net/dev")
-            .ok()
-            .and_then(|contents| {
-                let default_route_interfaces = collect_default_route_interfaces_from_proc_routes(
-                    fs::read_to_string("/proc/net/route").ok().as_deref(),
-                    fs::read_to_string("/proc/net/ipv6_route").ok().as_deref(),
-                );
-
-                collect_network_metrics_from_proc_net_dev(
-                    &contents,
-                    default_route_interfaces.as_ref(),
-                    self.previous.as_ref(),
-                )
-            });
-        let Some(metrics) = network else {
-            return Ok(false);
-        };
-        self.previous = Some(metrics.snapshot);
-        sample.network_interfaces = metrics.interfaces;
-
-        Ok(!sample.network_interfaces.is_empty())
-    }
-}
-
-#[derive(Default)]
-struct TemperatureMetricCollector;
-
-impl MetricCollector for TemperatureMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        let Some(temperature_celsius) = collect_temperature_celsius_from_sysfs("/sys/class/hwmon")
-        else {
-            return Ok(false);
-        };
-
-        sample.temperature_celsius = Some(temperature_celsius);
-
-        Ok(true)
-    }
-}
-
-#[derive(Default)]
-struct BatteryMetricCollector;
-
-impl MetricCollector for BatteryMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
-    }
-
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        let Some(metrics) = collect_battery_metrics_from_sysfs("/sys/class/power_supply") else {
-            return Ok(false);
-        };
-
-        sample.battery_percent = Some(metrics.percent);
-        sample.battery_state = Some(metrics.state);
-
-        Ok(true)
     }
 }
 

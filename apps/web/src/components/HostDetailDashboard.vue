@@ -152,7 +152,7 @@ function statusClass(status: string) {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
-              <h2 class="text-xl leading-7 font-semibold break-words">
+              <h2 class="text-xl leading-7 font-semibold wrap-break-word">
                 {{ host.displayName }}
               </h2>
               <Badge :class="statusClass(host.status)" variant="outline">
@@ -220,7 +220,7 @@ function statusClass(status: string) {
               aria-hidden="true"
             />
             <span class="shrink-0">{{ item.label }}</span>
-            <span class="text-foreground min-w-0 font-medium break-words">
+            <span class="text-foreground min-w-0 font-medium wrap-break-word">
               {{ item.value }}
             </span>
           </div>

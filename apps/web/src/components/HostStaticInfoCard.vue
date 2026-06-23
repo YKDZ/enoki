@@ -63,7 +63,7 @@ function probeVersionText(value: string | null) {
       >
         <span class="text-muted-foreground shrink-0">显示名称</span>
         <span
-          class="min-w-0 text-right font-medium break-words whitespace-normal"
+          class="min-w-0 text-right font-medium wrap-break-word whitespace-normal"
         >
           {{ host.hostMetadata.displayName }}
         </span>
@@ -73,12 +73,12 @@ function probeVersionText(value: string | null) {
           <Cpu class="text-muted-foreground mb-2 size-4" aria-hidden="true" />
           <p class="text-muted-foreground text-xs">CPU</p>
           <p
-            class="min-w-0 font-semibold break-words whitespace-normal"
+            class="min-w-0 font-semibold wrap-break-word whitespace-normal"
             :title="cpuModel(host)"
           >
             {{ cpuModel(host) }}
           </p>
-          <p class="text-muted-foreground mt-1 min-w-0 text-xs break-words">
+          <p class="text-muted-foreground mt-1 min-w-0 text-xs wrap-break-word">
             {{ cpuCoreCount(host) }}
           </p>
         </div>
@@ -88,32 +88,32 @@ function probeVersionText(value: string | null) {
             aria-hidden="true"
           />
           <p class="text-muted-foreground text-xs">RAM</p>
-          <p class="min-w-0 font-semibold break-words whitespace-normal">
+          <p class="min-w-0 font-semibold wrap-break-word whitespace-normal">
             {{ formatBytes(memoryTotal(host)) }}
           </p>
         </div>
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">IP 地址</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{ host.connectAddress }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">操作系统</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{ host.system }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">主机名</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{ inventoryText(host, "hostname") }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">架构</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{ inventoryText(host, "architecture") }}
         </p>
       </div>
@@ -127,7 +127,7 @@ function probeVersionText(value: string | null) {
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">Hub 当前探针资产版本</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{
             probeVersionText(
               host.probeUpgradeEligibility.currentProbeAssetSetVersion,
@@ -137,7 +137,7 @@ function probeVersionText(value: string | null) {
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">最近上报</p>
-        <p class="mt-1 min-w-0 font-medium break-words whitespace-normal">
+        <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{ formatTimestamp(host.lastReportAtMs) }}
         </p>
       </div>

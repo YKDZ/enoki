@@ -96,7 +96,7 @@ const networkRows = computed<NetworkRow[]>(() => {
           :key="networkInterface.key"
           class="bg-muted/35 grid gap-2 rounded-md border p-3 text-sm"
         >
-          <div class="font-medium break-words">
+          <div class="font-medium wrap-break-word">
             {{ networkInterface.name }}
           </div>
           <div class="grid gap-2 sm:grid-cols-2">

@@ -1,6 +1,7 @@
+use enoki_probe::metrics::disk_health::PrivilegedDiskHealthMetricsRunner;
 use enoki_probe::metrics::{
     CollectorCadenceClass, CollectorCadenceSchedule, CollectorError, CollectorRegistry,
-    MetricCollector, MetricsCollectionConfig,
+    DiskHealthMetricsRunner, MetricCollector, MetricsCollectionConfig,
 };
 use enoki_probe::privileged_runtime::{
     CollectorRuntimeProfile, LocalPrivilegedRuntimeRunner, NetworkAccess, PrivilegedCollector,
@@ -216,6 +217,28 @@ fn privileged_runtime_network_access_is_a_collector_profile_decision() {
 }
 
 #[test]
+fn disk_health_smartctl_declares_disabled_network_and_timeout_boundary() {
+    let mut runner = DiskHealthRecordingRunner::default();
+    let mut disk_health_runner = PrivilegedDiskHealthMetricsRunner::new(&mut runner);
+
+    let metrics = disk_health_runner
+        .collect_disk_health_metrics()
+        .expect("empty privileged disk health output is valid");
+
+    assert!(metrics.is_empty());
+    assert_eq!(
+        runner.invocations,
+        vec![RecordedInvocation {
+            collector_id: PrivilegedCollectorId::DiskHealthSmartctl,
+            profile: CollectorRuntimeProfile {
+                timeout: Duration::from_secs(10),
+                network_access: NetworkAccess::Disabled,
+            },
+        }]
+    );
+}
+
+#[test]
 fn privileged_runtime_failures_are_isolated_as_collector_failures() {
     let mut registry = CollectorRegistry::from_collectors(vec![
         Box::new(PrivilegedMetricCollector {
@@ -297,6 +320,26 @@ impl PrivilegedCollector for NetworkEnabledCollector {
 struct RecordedInvocation {
     collector_id: PrivilegedCollectorId,
     profile: CollectorRuntimeProfile,
+}
+
+#[derive(Default)]
+struct DiskHealthRecordingRunner {
+    invocations: Vec<RecordedInvocation>,
+}
+
+impl PrivilegedRuntimeRunner for DiskHealthRecordingRunner {
+    fn run(
+        &mut self,
+        invocation: enoki_probe::privileged_runtime::PrivilegedRuntimeInvocation,
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
+        self.invocations.push(RecordedInvocation {
+            collector_id: invocation.collector_id,
+            profile: invocation.profile,
+        });
+        Ok(PrivilegedRuntimeOutput {
+            stdout: "[]".to_string(),
+        })
+    }
 }
 
 #[derive(Default)]

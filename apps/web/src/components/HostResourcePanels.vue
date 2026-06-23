@@ -226,7 +226,7 @@ function formatMilliseconds(value: number | null) {
       <div class="min-w-0">
         <p>线程</p>
         <p
-          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
           {{ inventoryText("threadCount") }}
         </p>
@@ -234,7 +234,7 @@ function formatMilliseconds(value: number | null) {
       <div class="min-w-0">
         <p>L3 缓存</p>
         <p
-          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
           {{ inventoryText("cpuCacheL3Bytes", formatBytes) }}
         </p>
@@ -242,7 +242,7 @@ function formatMilliseconds(value: number | null) {
       <div class="min-w-0">
         <p>基准频率</p>
         <p
-          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
           {{ inventoryText("cpuBaseFrequencyMhz", frequencyText) }}
         </p>
@@ -250,7 +250,7 @@ function formatMilliseconds(value: number | null) {
       <div class="min-w-0">
         <p>物理 CPU</p>
         <p
-          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
           {{ inventoryText("cpuPhysicalCount") }}
         </p>
@@ -258,7 +258,7 @@ function formatMilliseconds(value: number | null) {
       <div class="min-w-0">
         <p>插槽</p>
         <p
-          class="text-foreground mt-1 min-w-0 font-medium break-words whitespace-normal"
+          class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
           {{ inventoryText("cpuSocketCount") }}
         </p>
