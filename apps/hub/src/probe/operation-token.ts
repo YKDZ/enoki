@@ -12,9 +12,10 @@ export type ProbeOperationTokenValidationError =
 
 type ProbeOperationTokenPayload = {
   expiresAtMs: number;
+  kind: string;
   operationId: number;
   probeId: string;
-  targetProbeVersion: string;
+  targetProbeVersion?: string;
 };
 
 const closedStates: ProbeOperationState[] = [
@@ -40,9 +41,13 @@ export function issueProbeOperationToken(input: {
 
   const payload: ProbeOperationTokenPayload = {
     expiresAtMs: input.expiresAtMs,
+    kind: input.operation.kind,
     operationId: input.operation.id,
     probeId: input.probeId,
-    targetProbeVersion: input.operation.targetProbeVersion,
+    targetProbeVersion:
+      input.operation.kind === "probe_upgrade"
+        ? input.operation.targetProbeVersion
+        : undefined,
   };
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
   const signature = sign(encodedPayload, input.secret);
@@ -72,9 +77,14 @@ export function validateProbeOperationToken(input: {
     return { error: "probe_operation_token_probe_mismatch" };
   }
 
+  if (payload.kind !== input.operation.kind) {
+    return { error: "probe_operation_token_operation_mismatch" };
+  }
+
   if (
-    payload.targetProbeVersion !== input.targetProbeVersion ||
-    input.operation.targetProbeVersion !== input.targetProbeVersion
+    input.operation.kind === "probe_upgrade" &&
+    (payload.targetProbeVersion !== input.targetProbeVersion ||
+      input.operation.targetProbeVersion !== input.targetProbeVersion)
   ) {
     return { error: "probe_operation_token_target_mismatch" };
   }
@@ -122,10 +132,13 @@ function isProbeOperationTokenPayload(
     typeof payload === "object" &&
     payload !== null &&
     typeof (payload as ProbeOperationTokenPayload).expiresAtMs === "number" &&
+    typeof (payload as ProbeOperationTokenPayload).kind === "string" &&
     typeof (payload as ProbeOperationTokenPayload).operationId === "number" &&
     typeof (payload as ProbeOperationTokenPayload).probeId === "string" &&
-    typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===
-      "string"
+    (typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===
+      "string" ||
+      typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===
+        "undefined")
   );
 }
 

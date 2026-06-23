@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   acceptedTimedOutProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
+  createProbeUninstallRequest,
   createProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
+  succeedReportedProbeOperation,
   succeedProbeUpgradeRequestFromInventory,
 } from "../src/probe/operation";
 
@@ -41,6 +43,69 @@ describe("Probe Upgrade Request lifecycle", () => {
         operation: result.operation,
       },
     ]);
+  });
+
+  it("creates a pending Probe Uninstall Request with Unix millisecond timestamps", () => {
+    const result = createProbeUninstallRequest({
+      activeOperation: null,
+      hostId: 7,
+      nowMs: 1_725_000_000_000,
+    });
+
+    expect(result.operation).toEqual({
+      acceptedAtMs: null,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1_725_000_000_000,
+      currentProbeVersion: null,
+      failureCode: null,
+      failureMessage: null,
+      hostId: 7,
+      id: null,
+      kind: "probe_uninstall",
+      runningAtMs: null,
+      state: "pending",
+      supersededAtMs: null,
+      targetProbeVersion: "",
+      updatedAtMs: 1_725_000_000_000,
+    });
+    expect(result.events).toEqual([
+      {
+        action: "created",
+        operation: result.operation,
+      },
+    ]);
+  });
+
+  it("marks a running Probe Uninstall Request as succeeded from reported status", () => {
+    const operation = {
+      ...createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+      }).operation,
+      acceptedAtMs: 1_725_000_001_000,
+      id: 42,
+      runningAtMs: 1_725_000_002_000,
+      state: "running" as const,
+    };
+
+    expect(
+      succeedReportedProbeOperation({
+        nowMs: 1_725_000_003_000,
+        operation,
+      }),
+    ).toEqual({
+      error: null,
+      operation: {
+        ...operation,
+        completedAtMs: 1_725_000_003_000,
+        failureCode: null,
+        failureMessage: null,
+        state: "succeeded",
+        updatedAtMs: 1_725_000_003_000,
+      },
+    });
   });
 
   it("reuses an active Probe Upgrade Request for the same Host and target", () => {

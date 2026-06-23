@@ -3,8 +3,8 @@ use enoki_probe::{
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{ProbeRunInput, run_loop_control_from_environment, run_probe_with_loop_control},
     upgrader::{
-        HttpProbeUpgraderValidationTransport, ProbeUpgraderRunInput, format_probe_upgrader_result,
-        run_probe_upgrader,
+        HttpProbeUpgraderValidationTransport, ProbeUninstallerRunInput, ProbeUpgraderRunInput,
+        format_probe_upgrader_result, run_probe_uninstaller, run_probe_upgrader,
     },
 };
 use std::io::Read;
@@ -40,6 +40,31 @@ fn main() {
                 }
                 Err(error) => {
                     eprintln!("Probe Upgrader failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        ProbeCommand::InternalUninstaller {
+            bootstrap_config_path,
+        } => {
+            let mut stdin = String::new();
+            if let Err(error) = std::io::stdin().read_to_string(&mut stdin) {
+                eprintln!("Probe Uninstaller failed: {error}");
+                std::process::exit(1);
+            }
+            let mut transport = HttpProbeUpgraderValidationTransport;
+            match run_probe_uninstaller(
+                ProbeUninstallerRunInput {
+                    bootstrap_config_path,
+                },
+                &stdin,
+                &mut transport,
+            ) {
+                Ok(result) => {
+                    println!("{}", format_probe_upgrader_result(&result));
+                }
+                Err(error) => {
+                    eprintln!("Probe Uninstaller failed: {error}");
                     std::process::exit(1);
                 }
             }

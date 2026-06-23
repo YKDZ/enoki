@@ -15,8 +15,9 @@ use crate::{
     },
     report::{full_inventory_report, regular_report, startup_report},
     upgrader::{
-        ProbeUpgraderCommandOutput, ProbeUpgraderLaunch, ProbeUpgraderLaunchError,
-        SystemProbeUpgraderCommandRunner, launch_systemd_probe_upgrader,
+        ProbeUninstallerLaunch, ProbeUpgraderCommandOutput, ProbeUpgraderLaunch,
+        ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
+        launch_systemd_probe_uninstaller, launch_systemd_probe_upgrader,
         parse_probe_upgrader_result,
     },
 };
@@ -491,6 +492,11 @@ struct ProbeUpgradeRunnerOperationMetadata<'a> {
     target_probe_version: &'a str,
 }
 
+struct ProbeUninstallRunnerInput<'a> {
+    stdin: &'a str,
+    operation_id: &'a str,
+}
+
 enum ProbeUpgradeRunnerOutcome {
     Running,
     Failed(ProbeOperationFailed),
@@ -500,6 +506,11 @@ trait ProbeOperationRunner {
     fn run_probe_upgrade(
         &mut self,
         input: ProbeUpgradeRunnerInput<'_>,
+    ) -> ProbeUpgradeRunnerOutcome;
+
+    fn run_probe_uninstall(
+        &mut self,
+        input: ProbeUninstallRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome;
 }
 
@@ -545,6 +556,35 @@ impl ProbeOperationRunner for InstalledProbeOperationRunner {
                 install_path,
                 operation_id: input.operation.operation_id.to_string(),
                 target_probe_version: input.operation.target_probe_version.to_string(),
+                token: input.stdin.to_string(),
+            },
+            &mut runner,
+        ))
+    }
+
+    fn run_probe_uninstall(
+        &mut self,
+        input: ProbeUninstallRunnerInput<'_>,
+    ) -> ProbeUpgradeRunnerOutcome {
+        let Some(install_path) = self.install_path.clone() else {
+            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message: "Probe Uninstaller launch is not configured.".to_string(),
+            });
+        };
+        if self.launch.as_deref() != Some("systemd") {
+            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "unsupported_installation".to_string(),
+                message: "Probe Uninstaller requires a systemd installation.".to_string(),
+            });
+        }
+
+        let mut runner = SystemProbeUpgraderCommandRunner;
+        probe_upgrade_outcome_from_launch_result(launch_systemd_probe_uninstaller(
+            ProbeUninstallerLaunch {
+                bootstrap_config_path: self.bootstrap_config_path.clone(),
+                install_path,
+                operation_id: input.operation_id.to_string(),
                 token: input.stdin.to_string(),
             },
             &mut runner,
@@ -604,18 +644,25 @@ impl ProbeOperationReportQueue {
             return;
         }
 
-        let Some(Operation::ProbeUpgrade(probe_upgrade)) = operation.operation.as_ref() else {
-            return;
+        let outcome = match operation.operation.as_ref() {
+            Some(Operation::ProbeUpgrade(probe_upgrade)) => {
+                runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
+                    stdin: &probe_upgrade.operation_token,
+                    operation: ProbeUpgradeRunnerOperationMetadata {
+                        current_probe_version: &probe_upgrade.current_probe_version,
+                        operation_id: &operation.id,
+                        target_probe_version: &probe_upgrade.target_probe_version,
+                    },
+                })
+            }
+            Some(Operation::ProbeUninstall(probe_uninstall)) => {
+                runner.run_probe_uninstall(ProbeUninstallRunnerInput {
+                    stdin: &probe_uninstall.operation_token,
+                    operation_id: &operation.id,
+                })
+            }
+            None => return,
         };
-
-        let outcome = runner.run_probe_upgrade(ProbeUpgradeRunnerInput {
-            stdin: &probe_upgrade.operation_token,
-            operation: ProbeUpgradeRunnerOperationMetadata {
-                current_probe_version: &probe_upgrade.current_probe_version,
-                operation_id: &operation.id,
-                target_probe_version: &probe_upgrade.target_probe_version,
-            },
-        });
         self.acknowledgements.push(operation.id.clone());
         self.statuses.push((
             operation.id.clone(),
@@ -697,6 +744,16 @@ mod operation_report_tests {
             fn run_probe_upgrade(
                 &mut self,
                 _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                    error_code: "insufficient_privilege".to_string(),
+                    message: "sudo denied".to_string(),
+                })
+            }
+
+            fn run_probe_uninstall(
+                &mut self,
+                _input: ProbeUninstallRunnerInput<'_>,
             ) -> ProbeUpgradeRunnerOutcome {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "insufficient_privilege".to_string(),
@@ -1183,6 +1240,21 @@ mod tests {
                 })
             })
         }
+
+        fn run_probe_uninstall(
+            &mut self,
+            input: ProbeUninstallRunnerInput<'_>,
+        ) -> ProbeUpgradeRunnerOutcome {
+            self.observed_operation_id = Some(input.operation_id.to_string());
+            self.observed_stdin = Some(input.stdin.to_string());
+
+            self.outcome.take().unwrap_or_else(|| {
+                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                    error_code: "unsupported_installation".to_string(),
+                    message: "not installed".to_string(),
+                })
+            })
+        }
     }
 
     #[test]
@@ -1431,6 +1503,21 @@ mod tests {
             ));
             ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "probe_upgrader_noop".to_string(),
+                message: "fake no-op launch".to_string(),
+            })
+        }
+
+        fn run_probe_uninstall(
+            &mut self,
+            input: ProbeUninstallRunnerInput<'_>,
+        ) -> ProbeUpgradeRunnerOutcome {
+            self.observed_launches.borrow_mut().push((
+                input.operation_id.to_string(),
+                "uninstall".to_string(),
+                input.stdin.to_string(),
+            ));
+            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+                error_code: "probe_uninstaller_noop".to_string(),
                 message: "fake no-op launch".to_string(),
             })
         }

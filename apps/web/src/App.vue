@@ -661,6 +661,8 @@ async function deleteHost(
       throw new Error("delete_failed");
     }
 
+    toast.success("已下发探针卸载请求");
+
     if (activeHostConfigurationId.value === host.id) {
       activeHostConfigurationId.value = null;
       hostConfigurationDraft.value = null;

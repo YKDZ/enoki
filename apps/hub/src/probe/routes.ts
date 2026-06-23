@@ -28,22 +28,25 @@ import {
 import {
   acknowledgeProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
+  succeedReportedProbeOperation,
   startProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromInventory,
   type ProbeUpgradeRequest,
 } from "./operation.js";
 
-const RegistrationRequest = enoki.v1.ProbeRegistrationRequest;
-const RegistrationResponse = enoki.v1.ProbeRegistrationResponse;
-const ReportRequest = enoki.v1.ProbeReportRequest;
-const ReportResponse = enoki.v1.ProbeReportResponse;
-const InventoryMessage = enoki.v1.Inventory;
-const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest;
-const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse;
+const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
+const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
+const ReportRequest = enoki.v1.ProbeReportRequest as any;
+const ReportResponse = enoki.v1.ProbeReportResponse as any;
+const InventoryMessage = enoki.v1.Inventory as any;
+const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest as any;
+const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse as any;
 const maxProbeReportPayloadBytes = 1024 * 1024;
 const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
 const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
+
+type ProtoMessage = Record<string, any>;
 
 export type ProbeRouteServices = {
   enrollments: EnrollmentRepository;
@@ -265,8 +268,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services,
     });
 
-    const samplesBySequence = new Map(
-      (request.metrics ?? []).map((sample) => [
+    const samplesBySequence = new Map<number, ProtoMessage>(
+      ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
         unsignedNumber(sample.sequence),
         sample,
       ]),
@@ -291,7 +294,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         services.metrics.recordSample({
           bootId: request.bootId,
           collectedAtMs: signedNumber(sample.collectedAtMs),
-          cpuCores: (sample.cpuCores ?? []).map((core) => ({
+          cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map((core) => ({
             idle: unsignedNumber(core.idle),
             iowait: unsignedNumber(core.iowait),
             irq: unsignedNumber(core.irq),
@@ -313,7 +316,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           cpuStealPercent: metricField(sample, "cpuStealPercent"),
           cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
           cpuUserPercent: metricField(sample, "cpuUserPercent"),
-          disks: (sample.disks ?? []).map((disk) => ({
+          disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
             availableBytes: unsignedNumber(disk.availableBytes),
             filesystemType: disk.filesystemType ?? "",
             ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
@@ -327,10 +330,16 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
           })),
           diskTotalBytes: sample.disks?.length
-            ? sumUnsigned(sample.disks, (disk) => disk.totalBytes)
+            ? sumUnsigned(
+                sample.disks as ProtoMessage[],
+                (disk: ProtoMessage) => disk.totalBytes,
+              )
             : null,
           diskUsedBytes: sample.disks?.length
-            ? sumUnsigned(sample.disks, (disk) => disk.usedBytes)
+            ? sumUnsigned(
+                sample.disks as ProtoMessage[],
+                (disk: ProtoMessage) => disk.usedBytes,
+              )
             : null,
           load1: metricField(sample, "load_1"),
           load5: metricField(sample, "load_5"),
@@ -339,25 +348,27 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
           memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
           memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
-          networkInterfaces: (sample.networkInterfaces ?? []).map(
-            (networkInterface) => ({
-              name: networkInterface.name ?? "",
-              rxBytes: unsignedNumber(networkInterface.rxBytes),
-              rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
-              txBytes: unsignedNumber(networkInterface.txBytes),
-              txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
-            }),
-          ),
+          networkInterfaces: (
+            (sample.networkInterfaces ?? []) as ProtoMessage[]
+          ).map((networkInterface) => ({
+            name: networkInterface.name ?? "",
+            rxBytes: unsignedNumber(networkInterface.rxBytes),
+            rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
+            txBytes: unsignedNumber(networkInterface.txBytes),
+            txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
+          })),
           networkRxBytesDelta: sample.networkInterfaces?.length
             ? sumUnsigned(
-                sample.networkInterfaces,
-                (networkInterface) => networkInterface.rxBytesDelta,
+                sample.networkInterfaces as ProtoMessage[],
+                (networkInterface: ProtoMessage) =>
+                  networkInterface.rxBytesDelta,
               )
             : null,
           networkTxBytesDelta: sample.networkInterfaces?.length
             ? sumUnsigned(
-                sample.networkInterfaces,
-                (networkInterface) => networkInterface.txBytesDelta,
+                sample.networkInterfaces as ProtoMessage[],
+                (networkInterface: ProtoMessage) =>
+                  networkInterface.txBytesDelta,
               )
             : null,
           probeId: host.probeId,
@@ -436,7 +447,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
-      targetProbeVersion: body.targetProbeVersion,
+      targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
 
@@ -445,6 +456,80 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     return context.json({ valid: true }, 200, {
+      "cache-control": "no-store",
+    });
+  });
+
+  routes.post("/operations/:operationId/status", async (context) => {
+    const host = authenticateProbe(
+      services.hosts,
+      context.req.raw.headers.get("authorization"),
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    const operationId = parseProbeOperationId(context.req.param("operationId"));
+    if (operationId === null) {
+      return probeJsonError("probe_operation_not_found", 404);
+    }
+
+    const operation = services.probeOperations?.findById(operationId) ?? null;
+    if (!operation) {
+      return probeJsonError("probe_operation_not_found", 404);
+    }
+
+    if (operation.hostId !== host.id) {
+      return probeJsonError("probe_operation_token_probe_mismatch", 403);
+    }
+
+    const body = await readOperationStatusBody(context);
+    if (!body) {
+      return probeJsonError("malformed_probe_operation_status", 400);
+    }
+
+    const tokenResult = validateProbeOperationToken({
+      nowMs: now(),
+      operation,
+      probeId: host.probeId,
+      secret: probeOperationTokenSecret(services),
+      targetProbeVersion: body.targetProbeVersion ?? "",
+      token: body.token,
+    });
+
+    if (tokenResult.error) {
+      return probeJsonError(tokenResult.error, 403);
+    }
+
+    const statusResult =
+      body.status === "succeeded"
+        ? succeedReportedProbeOperation({
+            nowMs: now(),
+            operation,
+          })
+        : failReportedProbeUpgradeRequest({
+            code: body.errorCode ?? "probe_operation_failed",
+            message: body.message ?? "",
+            nowMs: now(),
+            operation,
+          });
+
+    if (statusResult.error) {
+      return probeJsonError("malformed_probe_operation_status", 400);
+    }
+
+    const updated =
+      services.probeOperations?.updateProbeUpgradeRequest(
+        statusResult.operation,
+      ) ?? statusResult.operation;
+    completeProbeUninstallIfSucceeded({
+      nowMs: now(),
+      operation: updated,
+      services,
+    });
+
+    return context.json({ accepted: true }, 200, {
       "cache-control": "no-store",
     });
   });
@@ -487,7 +572,7 @@ function pendingProbeOperationForHost(
   hostId: number,
   probeId: string,
   nowMs: number,
-): enoki.v1.IProbeOperation | null {
+): ProtoMessage | null {
   const operation = services.probeOperations?.findActiveForHost(hostId);
 
   if (!operation || operation.state !== "pending") {
@@ -508,7 +593,21 @@ function probeUpgradeOperationMessage(
     probeId: string;
     secret: string;
   },
-): enoki.v1.IProbeOperation {
+): ProtoMessage {
+  if (operation.kind === "probe_uninstall") {
+    return {
+      id: String(operation.id),
+      probeUninstall: {
+        operationToken: issueProbeOperationToken({
+          expiresAtMs: tokenInput.expiresAtMs,
+          operation,
+          probeId: tokenInput.probeId,
+          secret: tokenInput.secret,
+        }),
+      },
+    };
+  }
+
   return {
     id: String(operation.id),
     probeUpgrade: {
@@ -536,16 +635,57 @@ async function readTokenValidationBody(context: Context) {
     };
 
     if (
-      typeof body.targetProbeVersion !== "string" ||
       typeof body.token !== "string" ||
-      body.targetProbeVersion.length === 0 ||
-      body.token.length === 0
+      body.token.length === 0 ||
+      (Object.hasOwn(body, "targetProbeVersion") &&
+        typeof body.targetProbeVersion !== "string")
     ) {
       return null;
     }
 
     return {
-      targetProbeVersion: body.targetProbeVersion,
+      targetProbeVersion:
+        typeof body.targetProbeVersion === "string"
+          ? body.targetProbeVersion
+          : undefined,
+      token: body.token,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function readOperationStatusBody(context: Context) {
+  try {
+    const body = (await context.req.json()) as {
+      errorCode?: unknown;
+      message?: unknown;
+      status?: unknown;
+      targetProbeVersion?: unknown;
+      token?: unknown;
+    };
+
+    if (
+      typeof body.token !== "string" ||
+      body.token.length === 0 ||
+      (body.status !== "succeeded" && body.status !== "failed") ||
+      (Object.hasOwn(body, "targetProbeVersion") &&
+        typeof body.targetProbeVersion !== "string") ||
+      (Object.hasOwn(body, "errorCode") &&
+        typeof body.errorCode !== "string") ||
+      (Object.hasOwn(body, "message") && typeof body.message !== "string")
+    ) {
+      return null;
+    }
+
+    return {
+      errorCode: typeof body.errorCode === "string" ? body.errorCode : null,
+      message: typeof body.message === "string" ? body.message : null,
+      status: body.status,
+      targetProbeVersion:
+        typeof body.targetProbeVersion === "string"
+          ? body.targetProbeVersion
+          : undefined,
       token: body.token,
     };
   } catch {
@@ -554,11 +694,11 @@ async function readTokenValidationBody(context: Context) {
 }
 
 function applyProbeOperationReports(input: {
-  acknowledgements: enoki.v1.IProbeOperationAcknowledgement[];
+  acknowledgements: ProtoMessage[];
   hostId: number;
   nowMs: number;
   services: ProbeRouteServices;
-  statuses: enoki.v1.IProbeOperationStatus[];
+  statuses: ProtoMessage[];
 }): string | null {
   const plan = planProbeOperationReportApplication(input);
 
@@ -567,18 +707,25 @@ function applyProbeOperationReports(input: {
   }
 
   for (const operation of plan.operations) {
-    input.services.probeOperations?.updateProbeUpgradeRequest(operation);
+    const updated =
+      input.services.probeOperations?.updateProbeUpgradeRequest(operation) ??
+      operation;
+    completeProbeUninstallIfSucceeded({
+      nowMs: input.nowMs,
+      operation: updated,
+      services: input.services,
+    });
   }
 
   return null;
 }
 
 function planProbeOperationReportApplication(input: {
-  acknowledgements: enoki.v1.IProbeOperationAcknowledgement[];
+  acknowledgements: ProtoMessage[];
   hostId: number;
   nowMs: number;
   services: ProbeRouteServices;
-  statuses: enoki.v1.IProbeOperationStatus[];
+  statuses: ProtoMessage[];
 }):
   | { error: string; operations: [] }
   | {
@@ -734,7 +881,7 @@ function findReportableProbeOperation(
 }
 
 function applyProbeOperationStatus(
-  status: enoki.v1.IProbeOperationStatus,
+  status: ProtoMessage,
   operation: ProbeUpgradeRequest,
   nowMs: number,
 ) {
@@ -754,10 +901,32 @@ function applyProbeOperationStatus(
     });
   }
 
+  if (status.succeeded && !status.running && !status.failed) {
+    return succeedReportedProbeOperation({
+      nowMs,
+      operation,
+    });
+  }
+
   return {
     error: "probe_operation_status_invalid" as const,
     operation,
   };
+}
+
+function completeProbeUninstallIfSucceeded(input: {
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+  services: ProbeRouteServices;
+}) {
+  if (
+    input.operation.kind !== "probe_uninstall" ||
+    input.operation.state !== "succeeded"
+  ) {
+    return;
+  }
+
+  input.services.hosts.softDelete(input.operation.hostId, input.nowMs);
 }
 
 function markProbeUpgradeSucceededFromInventory(input: {
@@ -838,12 +1007,12 @@ function broadcastHostSummary(
 
 function liveDetailSampleFromMetricSample(
   hostId: number,
-  sample: enoki.v1.IMetricSample,
+  sample: ProtoMessage,
   receivedAtMs: number,
 ): HostDetailSample {
   return {
     collectedAtMs: signedNumber(sample.collectedAtMs),
-    cpuCores: (sample.cpuCores ?? []).map((core) => ({
+    cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map((core) => ({
       name: core.name ?? "",
       usagePercent: core.usagePercent ?? 0,
     })),
@@ -857,7 +1026,7 @@ function liveDetailSampleFromMetricSample(
     cpuStealPercent: metricField(sample, "cpuStealPercent"),
     cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
     cpuUserPercent: metricField(sample, "cpuUserPercent"),
-    disks: (sample.disks ?? []).map((disk) => ({
+    disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
       availableBytes: unsignedNumber(disk.availableBytes),
       filesystemType: disk.filesystemType ?? "",
       ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
@@ -874,7 +1043,7 @@ function liveDetailSampleFromMetricSample(
     memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
     memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
     memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
-    networkInterfaces: (sample.networkInterfaces ?? []).map(
+    networkInterfaces: ((sample.networkInterfaces ?? []) as ProtoMessage[]).map(
       (networkInterface) => ({
         name: networkInterface.name ?? "",
         rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
@@ -890,7 +1059,7 @@ function liveDetailSampleFromMetricSample(
   };
 }
 
-function decodeRegistrationRequest(body: Uint8Array) {
+function decodeRegistrationRequest(body: Uint8Array): any | null {
   try {
     return RegistrationRequest.decode(body);
   } catch {
@@ -898,15 +1067,15 @@ function decodeRegistrationRequest(body: Uint8Array) {
   }
 }
 
-function decodeReportRequest(body: Uint8Array) {
+function decodeReportRequest(body: Uint8Array): ProtoMessage | null {
   try {
-    return ReportRequest.decode(body);
+    return ReportRequest.decode(body) as ProtoMessage;
   } catch {
     return null;
   }
 }
 
-function decodeConfigurationRequest(body: Uint8Array) {
+function decodeConfigurationRequest(body: Uint8Array): any | null {
   try {
     return ConfigurationRequest.decode(body);
   } catch {
@@ -1019,7 +1188,7 @@ function createProbeSecret() {
   return `enk_probe_${randomBytes(32).toString("base64url")}`;
 }
 
-function hashInventory(inventory: enoki.v1.IInventory) {
+function hashInventory(inventory: ProtoMessage) {
   const bytes = InventoryMessage.encode(
     InventoryMessage.create(stableInventory(inventory)),
   ).finish();
@@ -1027,7 +1196,7 @@ function hashInventory(inventory: enoki.v1.IInventory) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function serializeInventory(inventory: enoki.v1.IInventory) {
+function serializeInventory(inventory: ProtoMessage) {
   return JSON.stringify(
     InventoryMessage.toObject(
       InventoryMessage.create(stableInventory(inventory)),
@@ -1038,7 +1207,7 @@ function serializeInventory(inventory: enoki.v1.IInventory) {
   );
 }
 
-function stableInventory(inventory: enoki.v1.IInventory): enoki.v1.IInventory {
+function stableInventory(inventory: ProtoMessage): ProtoMessage {
   return {
     ...inventory,
     filesystems: [...(inventory.filesystems ?? [])].sort(
@@ -1061,7 +1230,7 @@ function stableInventory(inventory: enoki.v1.IInventory): enoki.v1.IInventory {
   };
 }
 
-function validateReportEnvelope(request: enoki.v1.IProbeReportRequest) {
+function validateReportEnvelope(request: ProtoMessage) {
   const sequenceStart = unsignedNumber(request.sequenceStart);
   const sequenceEnd = unsignedNumber(request.sequenceEnd);
 
@@ -1122,7 +1291,7 @@ function validateReportEnvelope(request: enoki.v1.IProbeReportRequest) {
 }
 
 function detectClockSkew(
-  samples: enoki.v1.IMetricSample[],
+  samples: ProtoMessage[],
   receivedAtMs: number,
   thresholdMs: number,
 ) {
@@ -1137,12 +1306,11 @@ function detectClockSkew(
   };
 }
 
-function firstInventoryAddress(
-  inventory: enoki.v1.IInventory | null | undefined,
-) {
-  for (const networkInterface of inventory?.networkInterfaces ?? []) {
-    const address = networkInterface.addresses?.find(
-      (candidate) => candidate.trim() !== "",
+function firstInventoryAddress(inventory: ProtoMessage | null | undefined) {
+  for (const networkInterface of (inventory?.networkInterfaces ??
+    []) as ProtoMessage[]) {
+    const address = (networkInterface.addresses as string[] | undefined)?.find(
+      (candidate: string) => candidate.trim() !== "",
     );
 
     if (address) {
@@ -1154,7 +1322,7 @@ function firstInventoryAddress(
 }
 
 function reportConnectAddress(
-  inventory: enoki.v1.IInventory | null | undefined,
+  inventory: ProtoMessage | null | undefined,
   host: {
     connectAddress: string;
     observedIp: string | null;

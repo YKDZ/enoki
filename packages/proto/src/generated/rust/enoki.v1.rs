@@ -233,7 +233,7 @@ pub struct ProbeReportResponse {
 pub struct ProbeOperation {
     #[prost(string, tag = "1")]
     pub id: ::prost::alloc::string::String,
-    #[prost(oneof = "probe_operation::Operation", tags = "2")]
+    #[prost(oneof = "probe_operation::Operation", tags = "2, 3")]
     pub operation: ::core::option::Option<probe_operation::Operation>,
 }
 /// Nested message and enum types in `ProbeOperation`.
@@ -242,6 +242,8 @@ pub mod probe_operation {
     pub enum Operation {
         #[prost(message, tag = "2")]
         ProbeUpgrade(super::ProbeUpgradeOperation),
+        #[prost(message, tag = "3")]
+        ProbeUninstall(super::ProbeUninstallOperation),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -254,6 +256,11 @@ pub struct ProbeUpgradeOperation {
     pub operation_token: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeUninstallOperation {
+    #[prost(string, tag = "1")]
+    pub operation_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeOperationAcknowledgement {
     #[prost(string, tag = "1")]
     pub operation_id: ::prost::alloc::string::String,
@@ -262,7 +269,7 @@ pub struct ProbeOperationAcknowledgement {
 pub struct ProbeOperationStatus {
     #[prost(string, tag = "1")]
     pub operation_id: ::prost::alloc::string::String,
-    #[prost(oneof = "probe_operation_status::Status", tags = "2, 3")]
+    #[prost(oneof = "probe_operation_status::Status", tags = "2, 3, 4")]
     pub status: ::core::option::Option<probe_operation_status::Status>,
 }
 /// Nested message and enum types in `ProbeOperationStatus`.
@@ -273,10 +280,14 @@ pub mod probe_operation_status {
         Running(super::ProbeOperationRunning),
         #[prost(message, tag = "3")]
         Failed(super::ProbeOperationFailed),
+        #[prost(message, tag = "4")]
+        Succeeded(super::ProbeOperationSucceeded),
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeOperationRunning {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeOperationSucceeded {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeOperationFailed {
     #[prost(string, tag = "1")]

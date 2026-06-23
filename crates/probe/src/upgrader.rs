@@ -22,7 +22,13 @@ pub struct ProbeUpgraderRunInput {
     pub bootstrap_config_path: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeUninstallerRunInput {
+    pub bootstrap_config_path: PathBuf,
+}
+
 const PRODUCTION_INSTALL_METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
+const PRODUCTION_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-upgrader";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderResult {
@@ -50,6 +56,7 @@ pub enum ProbeUpgraderRunError {
     SigningKeyUntrusted,
     TargetMismatch,
     TokenValidation(String),
+    UninstallStatusReportFailure(String),
     UnsafeArchive(&'static str),
     UnsupportedArchitecture(String),
 }
@@ -109,6 +116,9 @@ impl fmt::Display for ProbeUpgraderRunError {
                     "Probe Operation Token validation failed: {message}"
                 )
             }
+            Self::UninstallStatusReportFailure(message) => {
+                write!(formatter, "Probe uninstall status report failed: {message}")
+            }
             Self::UnsafeArchive(message) => write!(formatter, "unsafe Probe archive: {message}"),
             Self::UnsupportedArchitecture(architecture) => {
                 write!(formatter, "unsupported Host architecture: {architecture}")
@@ -136,6 +146,7 @@ impl Error for ProbeUpgraderRunError {
             | Self::SigningKeyUntrusted
             | Self::TargetMismatch
             | Self::TokenValidation(_)
+            | Self::UninstallStatusReportFailure(_)
             | Self::UnsafeArchive(_)
             | Self::UnsupportedArchitecture(_) => None,
         }
@@ -156,6 +167,13 @@ pub trait ProbeUpgraderValidationTransport {
     ) -> Result<Vec<u8>, ProbeUpgraderRunError>;
 
     fn post_token_validation(
+        &mut self,
+        url: &str,
+        bearer_secret: &str,
+        body: &str,
+    ) -> Result<(), ProbeUpgraderRunError>;
+
+    fn post_operation_status(
         &mut self,
         url: &str,
         bearer_secret: &str,
@@ -200,10 +218,44 @@ impl ProbeUpgraderValidationTransport for HttpProbeUpgraderValidationTransport {
 
         Ok(())
     }
+
+    fn post_operation_status(
+        &mut self,
+        url: &str,
+        bearer_secret: &str,
+        body: &str,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        ureq::post(url)
+            .set("accept", "application/json")
+            .set("authorization", &format!("Bearer {bearer_secret}"))
+            .set("content-type", "application/json")
+            .send_string(body)
+            .map_err(|error| {
+                ProbeUpgraderRunError::UninstallStatusReportFailure(error.to_string())
+            })?;
+
+        Ok(())
+    }
 }
 
 pub trait ProbeUpgraderSystemdRunner {
     fn restart_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError>;
+
+    fn stop_service(&mut self, _service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        Ok(())
+    }
+
+    fn disable_service(&mut self, _service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        Ok(())
+    }
+
+    fn daemon_reload(&mut self) -> Result<(), ProbeUpgraderRunError> {
+        Ok(())
+    }
+
+    fn reset_failed(&mut self, _service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        Ok(())
+    }
 }
 
 pub struct SystemProbeUpgraderSystemdRunner;
@@ -228,6 +280,30 @@ impl ProbeUpgraderSystemdRunner for SystemProbeUpgraderSystemdRunner {
             },
         ))
     }
+
+    fn stop_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        run_best_effort_systemctl(["stop", service_name]);
+        Ok(())
+    }
+
+    fn disable_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        run_best_effort_systemctl(["disable", service_name]);
+        Ok(())
+    }
+
+    fn daemon_reload(&mut self) -> Result<(), ProbeUpgraderRunError> {
+        run_best_effort_systemctl(["daemon-reload"]);
+        Ok(())
+    }
+
+    fn reset_failed(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        run_best_effort_systemctl(["reset-failed", service_name]);
+        Ok(())
+    }
+}
+
+fn run_best_effort_systemctl<const N: usize>(args: [&str; N]) {
+    let _ = Command::new("systemctl").args(args).output();
 }
 
 pub fn run_probe_upgrader(
@@ -303,6 +379,7 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     if let Err(error) = execute_probe_upgrade(
         &operation,
         &bootstrap_config,
+        &input.bootstrap_config_path,
         install_metadata,
         transport,
         systemd,
@@ -320,9 +397,217 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     })
 }
 
+pub fn run_probe_uninstaller(
+    input: ProbeUninstallerRunInput,
+    stdin: &str,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
+    let mut systemd = SystemProbeUpgraderSystemdRunner;
+    run_probe_uninstaller_with_systemd_runner(input, stdin, transport, &mut systemd)
+}
+
+pub fn run_probe_uninstaller_with_systemd_runner(
+    input: ProbeUninstallerRunInput,
+    stdin: &str,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
+    let operation = read_uninstall_operation_metadata(stdin)?;
+    if operation.token.is_empty() {
+        return Err(ProbeUpgraderRunError::MissingToken);
+    }
+    let install_metadata =
+        read_trusted_probe_install_metadata(Path::new(PRODUCTION_INSTALL_METADATA_PATH))?;
+    run_probe_uninstaller_with_systemd_runner_and_install_metadata(
+        input,
+        stdin,
+        transport,
+        systemd,
+        &install_metadata,
+    )
+}
+
+fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
+    input: ProbeUninstallerRunInput,
+    stdin: &str,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    install_metadata: &TrustedProbeInstallMetadata,
+) -> Result<ProbeUpgraderResult, ProbeUpgraderRunError> {
+    let operation = read_uninstall_operation_metadata(stdin)?;
+    if operation.token.is_empty() {
+        return Err(ProbeUpgraderRunError::MissingToken);
+    }
+
+    let bootstrap_config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
+    let hub_url = bootstrap_config
+        .hub_url
+        .as_ref()
+        .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?
+        .clone();
+    let probe_secret = bootstrap_config
+        .probe_secret
+        .as_ref()
+        .ok_or(ProbeUpgraderRunError::InvalidConfig(
+            "missing Probe Identity secret",
+        ))?
+        .clone();
+    validate_bootstrap_config_matches_trusted_install_metadata(
+        &bootstrap_config,
+        install_metadata,
+    )?;
+
+    let token_body = format!(
+        "{{\"token\":\"{}\"}}",
+        json_string_fragment(&operation.token)
+    );
+    transport.post_token_validation(
+        &format!(
+            "{}/api/probe/operations/{}/token/validate",
+            hub_url.trim_end_matches('/'),
+            operation.operation_id,
+        ),
+        &probe_secret,
+        &token_body,
+    )?;
+
+    let status_url = format!(
+        "{}/api/probe/operations/{}/status",
+        hub_url.trim_end_matches('/'),
+        operation.operation_id,
+    );
+
+    if let Err(error) = execute_probe_uninstall(&input, install_metadata, systemd) {
+        let failed = failed_probe_uninstaller_result(&operation, &error);
+        let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
+        let _ = transport.post_operation_status(&status_url, &probe_secret, &body);
+        return Ok(failed);
+    }
+
+    let body = render_operation_status_body(&operation.token, "succeeded", None);
+    transport.post_operation_status(&status_url, &probe_secret, &body)?;
+
+    Ok(ProbeUpgraderResult {
+        error_code: None,
+        message: None,
+        operation_id: operation.operation_id,
+        status: "succeeded".to_string(),
+    })
+}
+
+fn execute_probe_uninstall(
+    input: &ProbeUninstallerRunInput,
+    install_metadata: &TrustedProbeInstallMetadata,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<(), ProbeUpgraderRunError> {
+    ensure_absolute_path(&input.bootstrap_config_path)?;
+    systemd.stop_service(&install_metadata.service_name)?;
+    systemd.disable_service(&install_metadata.service_name)?;
+    remove_path_if_exists(&systemd_service_path(&install_metadata.service_name))?;
+    systemd.daemon_reload()?;
+    systemd.reset_failed(&install_metadata.service_name)?;
+    remove_path_if_exists(&install_metadata.install_path)?;
+    remove_path_if_exists(&install_metadata.sudoers_path)?;
+    remove_path_if_exists(Path::new(PRODUCTION_INSTALL_METADATA_PATH))?;
+    remove_path_if_exists(&input.bootstrap_config_path)?;
+    remove_empty_parent_dir(&input.bootstrap_config_path)?;
+    remove_path_if_exists(&install_metadata.state_dir)?;
+    remove_default_service_account();
+
+    Ok(())
+}
+
+fn systemd_service_path(service_name: &str) -> PathBuf {
+    PathBuf::from(format!("/etc/systemd/system/{service_name}.service"))
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    ensure_absolute_path(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
+    };
+
+    if metadata.is_dir() {
+        fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
+    } else {
+        fs::remove_file(path).map_err(ProbeUpgraderRunError::Io)
+    }
+}
+
+fn remove_empty_parent_dir(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    if parent == Path::new("/") {
+        return Ok(());
+    }
+
+    match fs::remove_dir(parent) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
+    }
+}
+
+fn ensure_absolute_path(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    if path.is_absolute() && path != Path::new("/") {
+        return Ok(());
+    }
+
+    Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+        "paths must be absolute",
+    ))
+}
+
+fn remove_default_service_account() {
+    let _ = Command::new("userdel").arg("enoki-probe").output();
+    let _ = Command::new("groupdel").arg("enoki-probe").output();
+}
+
+fn render_operation_status_body(
+    token: &str,
+    status: &str,
+    failure: Option<&ProbeUpgraderResult>,
+) -> String {
+    if let Some(failure) = failure {
+        return format!(
+            "{{\"errorCode\":\"{}\",\"message\":\"{}\",\"status\":\"{}\",\"token\":\"{}\"}}",
+            json_string_fragment(
+                failure
+                    .error_code
+                    .as_deref()
+                    .unwrap_or("probe_operation_failed")
+            ),
+            json_string_fragment(failure.message.as_deref().unwrap_or("")),
+            json_string_fragment(status),
+            json_string_fragment(token),
+        );
+    }
+
+    format!(
+        "{{\"status\":\"{}\",\"token\":\"{}\"}}",
+        json_string_fragment(status),
+        json_string_fragment(token),
+    )
+}
+
 struct ProbeUpgraderOperationMetadata {
     operation_id: String,
     target_probe_version: String,
+    token: String,
+}
+
+struct ProbeUninstallerOperationMetadata {
+    operation_id: String,
     token: String,
 }
 
@@ -343,6 +628,25 @@ fn read_operation_metadata(
     Ok(ProbeUpgraderOperationMetadata {
         operation_id,
         target_probe_version,
+        token,
+    })
+}
+
+fn read_uninstall_operation_metadata(
+    stdin: &str,
+) -> Result<ProbeUninstallerOperationMetadata, ProbeUpgraderRunError> {
+    if stdin.trim().is_empty() {
+        return Err(ProbeUpgraderRunError::MissingToken);
+    }
+
+    let value = stdin
+        .parse::<toml::Value>()
+        .map_err(|_| ProbeUpgraderRunError::InvalidMetadata("invalid TOML"))?;
+    let operation_id = required_metadata_string(&value, "operation_id")?;
+    let token = required_metadata_string(&value, "token")?;
+
+    Ok(ProbeUninstallerOperationMetadata {
+        operation_id,
         token,
     })
 }
@@ -376,7 +680,9 @@ struct TrustedProbeInstallMetadata {
     operation_status_path: PathBuf,
     probe_asset_public_key_sha256: String,
     service_name: String,
+    service_user: String,
     state_dir: PathBuf,
+    sudoers_path: PathBuf,
 }
 
 fn read_upgrader_bootstrap_config(
@@ -426,13 +732,22 @@ fn parse_trusted_probe_install_metadata(
     let install_path = required_install_metadata_path(&value, "install_path")?;
     let operation_status_path = required_install_metadata_path(&value, "operation_status_path")?;
     let state_dir = required_install_metadata_path(&value, "state_dir")?;
+    let sudoers_path = optional_install_metadata_path(&value, "sudoers_path")?
+        .unwrap_or_else(|| PathBuf::from(PRODUCTION_SUDOERS_PATH));
     let service_name = required_install_metadata_string(&value, "service_name")?;
+    let service_user = optional_install_metadata_string(&value, "service_user")?
+        .unwrap_or_else(|| "enoki-probe".to_string());
     let probe_asset_public_key_sha256 =
         required_install_metadata_string(&value, "probe_asset_public_key_sha256")?;
 
     if service_name != "enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "service name must be enoki-probe",
+        ));
+    }
+    if !is_safe_sudoers_token(&service_user) {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "service user is not safe for sudoers",
         ));
     }
     if !is_sha256_hex(&probe_asset_public_key_sha256) {
@@ -446,7 +761,9 @@ fn parse_trusted_probe_install_metadata(
         operation_status_path,
         probe_asset_public_key_sha256,
         service_name,
+        service_user,
         state_dir,
+        sudoers_path,
     })
 }
 
@@ -464,6 +781,23 @@ fn required_install_metadata_path(
     Ok(path)
 }
 
+fn optional_install_metadata_path(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<Option<PathBuf>, ProbeUpgraderRunError> {
+    let Some(raw) = optional_install_metadata_string(value, key)? else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "paths must be absolute",
+        ));
+    }
+
+    Ok(Some(path))
+}
+
 fn required_install_metadata_string(
     value: &toml::Value,
     key: &'static str,
@@ -476,6 +810,19 @@ fn required_install_metadata_string(
         Some(_) => Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "expected string values",
         )),
+    }
+}
+
+fn optional_install_metadata_string(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<Option<String>, ProbeUpgraderRunError> {
+    match value.get(key) {
+        Some(toml::Value::String(string)) => Ok(Some(string.clone())),
+        Some(_) => Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "expected string values",
+        )),
+        None => Ok(None),
     }
 }
 
@@ -526,6 +873,7 @@ struct ProbeAssetManifestSignature {
 fn execute_probe_upgrade(
     operation: &ProbeUpgraderOperationMetadata,
     bootstrap_config: &ProbeUpgraderBootstrapConfig,
+    bootstrap_config_path: &Path,
     install_metadata: &TrustedProbeInstallMetadata,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -582,6 +930,7 @@ fn execute_probe_upgrade(
     verify_archive_sha256(&archive, &asset.sha256)?;
     preflight_local_operation_status_writable(install_metadata)?;
     replace_installed_probe_binary(&archive, &install_metadata.install_path)?;
+    write_probe_operation_sudoers(install_metadata, bootstrap_config_path)?;
     write_local_operation_status(operation, install_metadata).map_err(|error| {
         ProbeUpgraderRunError::PostReplacementStatusWriteFailure(error.to_string())
     })?;
@@ -590,6 +939,52 @@ fn execute_probe_upgrade(
         .map_err(|error| ProbeUpgraderRunError::PostReplacementRestartFailure(error.to_string()))?;
 
     Ok(())
+}
+
+fn write_probe_operation_sudoers(
+    install_metadata: &TrustedProbeInstallMetadata,
+    bootstrap_config_path: &Path,
+) -> Result<(), ProbeUpgraderRunError> {
+    ensure_absolute_path(bootstrap_config_path)?;
+    if !is_safe_sudoers_path(&install_metadata.install_path)
+        || !is_safe_sudoers_path(bootstrap_config_path)
+        || !is_safe_sudoers_token(&install_metadata.service_user)
+        || !is_safe_sudoers_token(&install_metadata.service_name)
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "sudoers command contains unsafe values",
+        ));
+    }
+
+    let sudoers_path = &install_metadata.sudoers_path;
+    if let Some(parent) = sudoers_path.parent() {
+        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
+    }
+    fs::write(
+        sudoers_path,
+        [
+            "# Managed by Enoki Probe installer.".to_string(),
+            format!(
+                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-upgrader --property=Type=exec -- {} internal-upgrader --config {}",
+                install_metadata.service_user,
+                install_metadata.service_name,
+                install_metadata.install_path.display(),
+                bootstrap_config_path.display(),
+            ),
+            format!(
+                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-uninstaller --property=Type=exec -- {} internal-uninstaller --config {}",
+                install_metadata.service_user,
+                install_metadata.service_name,
+                install_metadata.install_path.display(),
+                bootstrap_config_path.display(),
+            ),
+            String::new(),
+        ]
+        .join("\n"),
+    )
+    .map_err(ProbeUpgraderRunError::Io)?;
+    fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
+        .map_err(ProbeUpgraderRunError::Io)
 }
 
 fn normalized_probe_version(value: &str) -> &str {
@@ -899,6 +1294,18 @@ fn failed_probe_upgrader_result(
     }
 }
 
+fn failed_probe_uninstaller_result(
+    operation: &ProbeUninstallerOperationMetadata,
+    error: &ProbeUpgraderRunError,
+) -> ProbeUpgraderResult {
+    ProbeUpgraderResult {
+        error_code: Some(probe_upgrader_error_code(error).to_string()),
+        message: Some(error.to_string()),
+        operation_id: operation.operation_id.clone(),
+        status: "failed".to_string(),
+    }
+}
+
 fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
     match error {
         ProbeUpgraderRunError::ArchitectureMissing => "architecture_missing",
@@ -914,6 +1321,7 @@ fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
         ProbeUpgraderRunError::SignatureFailure => "signature_failure",
         ProbeUpgraderRunError::SigningKeyUntrusted => "signing_key_untrusted",
         ProbeUpgraderRunError::TargetMismatch => "target_mismatch",
+        ProbeUpgraderRunError::UninstallStatusReportFailure(_) => "uninstall_status_report_failure",
         ProbeUpgraderRunError::UnsafeArchive(_) => "unsafe_archive",
         ProbeUpgraderRunError::UnsupportedArchitecture(_) => "unsupported_architecture",
         ProbeUpgraderRunError::InvalidConfig(_)
@@ -1019,12 +1427,37 @@ fn is_safe_asset_file_name(value: &str) -> bool {
             .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
 }
 
+fn is_safe_sudoers_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+}
+
+fn is_safe_sudoers_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path != Path::new("/")
+        && !path
+            .display()
+            .to_string()
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderLaunch {
     pub bootstrap_config_path: PathBuf,
     pub install_path: PathBuf,
     pub operation_id: String,
     pub target_probe_version: String,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeUninstallerLaunch {
+    pub bootstrap_config_path: PathBuf,
+    pub install_path: PathBuf,
+    pub operation_id: String,
     pub token: String,
 }
 
@@ -1126,6 +1559,28 @@ pub fn launch_systemd_probe_upgrader(
     runner.run("sudo", &args, &stdin)
 }
 
+pub fn launch_systemd_probe_uninstaller(
+    input: ProbeUninstallerLaunch,
+    runner: &mut impl ProbeUpgraderCommandRunner,
+) -> Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError> {
+    let args = vec![
+        "/usr/bin/systemd-run".to_string(),
+        "--collect".to_string(),
+        "--pipe".to_string(),
+        "--wait".to_string(),
+        "--unit=enoki-probe-uninstaller".to_string(),
+        "--property=Type=exec".to_string(),
+        "--".to_string(),
+        input.install_path.display().to_string(),
+        "internal-uninstaller".to_string(),
+        "--config".to_string(),
+        input.bootstrap_config_path.display().to_string(),
+    ];
+    let stdin = render_probe_uninstaller_stdin(&input);
+
+    runner.run("sudo", &args, &stdin)
+}
+
 pub fn render_probe_upgrader_stdin(input: &ProbeUpgraderLaunch) -> String {
     [
         format!("operation_id = {}", toml_string(&input.operation_id)),
@@ -1133,6 +1588,15 @@ pub fn render_probe_upgrader_stdin(input: &ProbeUpgraderLaunch) -> String {
             "target_probe_version = {}",
             toml_string(&input.target_probe_version),
         ),
+        format!("token = {}", toml_string(&input.token)),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+pub fn render_probe_uninstaller_stdin(input: &ProbeUninstallerLaunch) -> String {
+    [
+        format!("operation_id = {}", toml_string(&input.operation_id)),
         format!("token = {}", toml_string(&input.token)),
         String::new(),
     ]
@@ -1244,11 +1708,14 @@ mod tests {
         body: String,
         bearer_secret: String,
         downloads: Vec<String>,
+        status_body: String,
+        status_url: String,
         url: String,
     }
 
     #[derive(Default)]
     struct RecordingSystemdRunner {
+        calls: Vec<String>,
         failure: Option<String>,
         restarted: Vec<String>,
     }
@@ -1278,6 +1745,19 @@ mod tests {
 
             Ok(())
         }
+
+        fn post_operation_status(
+            &mut self,
+            url: &str,
+            bearer_secret: &str,
+            body: &str,
+        ) -> Result<(), ProbeUpgraderRunError> {
+            self.status_url = url.to_string();
+            self.bearer_secret = bearer_secret.to_string();
+            self.status_body = body.to_string();
+
+            Ok(())
+        }
     }
 
     impl ProbeUpgraderSystemdRunner for RecordingSystemdRunner {
@@ -1286,6 +1766,26 @@ mod tests {
                 return Err(ProbeUpgraderRunError::RestartFailure(failure));
             }
             self.restarted.push(service_name.to_string());
+            Ok(())
+        }
+
+        fn stop_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("stop {service_name}"));
+            Ok(())
+        }
+
+        fn disable_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("disable {service_name}"));
+            Ok(())
+        }
+
+        fn daemon_reload(&mut self) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push("daemon-reload".to_string());
+            Ok(())
+        }
+
+        fn reset_failed(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("reset-failed {service_name}"));
             Ok(())
         }
     }
@@ -1356,6 +1856,51 @@ mod tests {
     }
 
     #[test]
+    fn systemd_probe_uninstaller_launch_uses_typed_entrypoint_and_stdin_token() {
+        let mut runner = RecordingCommandRunner::default();
+
+        launch_systemd_probe_uninstaller(
+            ProbeUninstallerLaunch {
+                bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
+                install_path: PathBuf::from("/usr/local/bin/enoki-probe"),
+                operation_id: "42".to_string(),
+                token: "probe-operation-token".to_string(),
+            },
+            &mut runner,
+        )
+        .expect("launch succeeds");
+
+        assert_eq!(runner.program, "sudo");
+        assert_eq!(
+            runner.args,
+            vec![
+                "/usr/bin/systemd-run",
+                "--collect",
+                "--pipe",
+                "--wait",
+                "--unit=enoki-probe-uninstaller",
+                "--property=Type=exec",
+                "--",
+                "/usr/local/bin/enoki-probe",
+                "internal-uninstaller",
+                "--config",
+                "/etc/enoki/probe-bootstrap.toml",
+            ],
+        );
+        assert_eq!(
+            runner.stdin,
+            [
+                "operation_id = \"42\"",
+                "token = \"probe-operation-token\"",
+                "",
+            ]
+            .join("\n"),
+        );
+        assert!(!runner.args.iter().any(|arg| arg == "probe-operation-token"));
+        assert!(!runner.args.iter().any(|arg| arg == "42"));
+    }
+
+    #[test]
     fn internal_probe_upgrader_rejects_missing_stdin_token() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
@@ -1382,6 +1927,94 @@ mod tests {
 
         assert!(matches!(error, ProbeUpgraderRunError::MissingToken));
         assert_eq!(transport.url, "");
+    }
+
+    #[test]
+    fn internal_probe_uninstaller_removes_owned_files_and_reports_success() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
+        let install_path = temp.path().join("usr/local/bin/enoki-probe");
+        let state_dir = temp.path().join("var/lib/enoki-probe");
+        let status_path = state_dir.join("probe-operation-status.toml");
+        fs::create_dir_all(bootstrap_config_path.parent().expect("config dir"))
+            .expect("config dir");
+        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
+        fs::create_dir_all(&state_dir).expect("state dir");
+        fs::write(&install_path, "probe binary").expect("install binary");
+        fs::write(state_dir.join("state"), "state").expect("state");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_secret = \"probe-secret\"",
+                &format!(
+                    "install_path = {}",
+                    toml_string(install_path.to_str().expect("install path")),
+                ),
+                &format!(
+                    "operation_status_path = {}",
+                    toml_string(status_path.to_str().expect("status path")),
+                ),
+                &format!(
+                    "state_dir = {}",
+                    toml_string(state_dir.to_str().expect("state dir")),
+                ),
+                "service_name = \"enoki-probe\"",
+                &format!(
+                    "probe_asset_public_key_sha256 = {}",
+                    toml_string(&"a".repeat(64))
+                ),
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, "a".repeat(64));
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let result = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
+            ProbeUninstallerRunInput {
+                bootstrap_config_path: bootstrap_config_path.clone(),
+            },
+            &[
+                "operation_id = \"42\"",
+                "token = \"probe-operation-token\"",
+                "",
+            ]
+            .join("\n"),
+            &mut transport,
+            &mut systemd,
+            &install_metadata,
+        )
+        .expect("uninstall succeeds");
+
+        assert_eq!(result.status, "succeeded");
+        assert_eq!(
+            systemd.calls,
+            vec![
+                "stop enoki-probe",
+                "disable enoki-probe",
+                "daemon-reload",
+                "reset-failed enoki-probe",
+            ],
+        );
+        assert!(!install_path.exists());
+        assert!(!bootstrap_config_path.exists());
+        assert!(!state_dir.exists());
+        assert_eq!(
+            transport.url,
+            "https://hub.example/api/probe/operations/42/token/validate",
+        );
+        assert_eq!(
+            transport.status_url,
+            "https://hub.example/api/probe/operations/42/status",
+        );
+        assert_eq!(
+            transport.status_body,
+            "{\"status\":\"succeeded\",\"token\":\"probe-operation-token\"}"
+        );
     }
 
     #[test]
@@ -2064,10 +2697,15 @@ mod tests {
             operation_status_path: operation_status_path.to_path_buf(),
             probe_asset_public_key_sha256,
             service_name: "enoki-probe".to_string(),
+            service_user: "enoki-probe".to_string(),
             state_dir: operation_status_path
                 .parent()
                 .expect("status parent")
                 .to_path_buf(),
+            sudoers_path: operation_status_path
+                .parent()
+                .expect("status parent")
+                .join("enoki-probe-upgrader.sudoers"),
         }
     }
 

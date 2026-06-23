@@ -7,7 +7,7 @@ export type ProbeOperationState =
   | "superseded"
   | "canceled";
 
-export type ProbeOperationKind = "probe_upgrade";
+export type ProbeOperationKind = "probe_upgrade" | "probe_uninstall";
 
 export type ProbeUpgradeRequest = {
   acceptedAtMs: number | null;
@@ -40,6 +40,18 @@ export type CreateProbeUpgradeRequestResult =
     }
   | {
       error: "probe_upgrade_request_active";
+      events: [];
+      operation: null;
+    };
+
+export type CreateProbeUninstallRequestResult =
+  | {
+      error: null;
+      events: ProbeUpgradeRequestLifecycleEvent[];
+      operation: ProbeUpgradeRequest;
+    }
+  | {
+      error: "probe_operation_active";
       events: [];
       operation: null;
     };
@@ -94,6 +106,68 @@ export function createProbeUpgradeRequest(input: {
   if (input.activeOperation && isActiveProbeOperation(input.activeOperation)) {
     return {
       error: "probe_upgrade_request_active",
+      events: [],
+      operation: null,
+    };
+  }
+
+  return {
+    error: null,
+    events: [
+      {
+        action: "created",
+        operation,
+      },
+    ],
+    operation,
+  };
+}
+
+export function createProbeUninstallRequest(input: {
+  activeOperation: ProbeUpgradeRequest | null;
+  hostId: number;
+  nowMs: number;
+}): CreateProbeUninstallRequestResult {
+  if (input.activeOperation?.kind === "probe_uninstall") {
+    return {
+      error: null,
+      events: [],
+      operation: input.activeOperation,
+    };
+  }
+
+  const operation = newPendingProbeUninstallRequest(input);
+
+  if (
+    input.activeOperation &&
+    isSafeToSupersedeProbeOperation(input.activeOperation)
+  ) {
+    const superseded = {
+      ...input.activeOperation,
+      state: "superseded" as const,
+      supersededAtMs: input.nowMs,
+      updatedAtMs: input.nowMs,
+    };
+
+    return {
+      error: null,
+      events: [
+        {
+          action: "superseded",
+          operation: superseded,
+        },
+        {
+          action: "created",
+          operation,
+        },
+      ],
+      operation,
+    };
+  }
+
+  if (input.activeOperation && isActiveProbeOperation(input.activeOperation)) {
+    return {
+      error: "probe_operation_active",
       events: [],
       operation: null,
     };
@@ -240,12 +314,51 @@ export function failReportedProbeUpgradeRequest(input: {
   };
 }
 
+export function succeedReportedProbeOperation(input: {
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+}): {
+  error: "probe_operation_status_invalid" | null;
+  operation: ProbeUpgradeRequest;
+} {
+  if (
+    input.operation.kind === "probe_uninstall" &&
+    (input.operation.state === "accepted" ||
+      input.operation.state === "running")
+  ) {
+    return {
+      error: null,
+      operation: {
+        ...input.operation,
+        completedAtMs: input.nowMs,
+        failureCode: null,
+        failureMessage: null,
+        state: "succeeded",
+        updatedAtMs: input.nowMs,
+      },
+    };
+  }
+
+  if (input.operation.state === "succeeded") {
+    return {
+      error: null,
+      operation: input.operation,
+    };
+  }
+
+  return {
+    error: "probe_operation_status_invalid",
+    operation: input.operation,
+  };
+}
+
 export function succeedProbeUpgradeRequestFromInventory(input: {
   nowMs: number;
   operation: ProbeUpgradeRequest;
   probeVersion: string | null | undefined;
 }): ProbeUpgradeRequest | null {
   if (
+    input.operation.kind !== "probe_upgrade" ||
     !isActiveProbeOperation(input.operation) ||
     normalizeProbeVersion(input.probeVersion) !==
       normalizeProbeVersion(input.operation.targetProbeVersion)
@@ -300,7 +413,9 @@ export function runningTimedOutProbeUpgradeRequest(input: {
   return failProbeUpgradeRequest({
     code: "running_timeout",
     message:
-      "Probe started the upgrade but did not report the target version in time.",
+      input.operation.kind === "probe_uninstall"
+        ? "Probe started the uninstall but did not report completion in time."
+        : "Probe started the upgrade but did not report the target version in time.",
     nowMs: input.nowMs,
     operation: input.operation,
   });
@@ -339,6 +454,29 @@ function newPendingProbeUpgradeRequest(input: {
     state: "pending",
     supersededAtMs: null,
     targetProbeVersion: input.targetProbeVersion,
+    updatedAtMs: input.nowMs,
+  };
+}
+
+function newPendingProbeUninstallRequest(input: {
+  hostId: number;
+  nowMs: number;
+}): ProbeUpgradeRequest {
+  return {
+    acceptedAtMs: null,
+    canceledAtMs: null,
+    completedAtMs: null,
+    createdAtMs: input.nowMs,
+    currentProbeVersion: null,
+    failureCode: null,
+    failureMessage: null,
+    hostId: input.hostId,
+    id: null,
+    kind: "probe_uninstall",
+    runningAtMs: null,
+    state: "pending",
+    supersededAtMs: null,
+    targetProbeVersion: "",
     updatedAtMs: input.nowMs,
   };
 }

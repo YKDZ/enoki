@@ -578,7 +578,7 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
-  it("soft-deletes Hosts from normal views and rejects their Probe Identity", async () => {
+  it("creates a Probe uninstall request when deleting a Host", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -602,7 +602,17 @@ describe("Host Metadata API", () => {
       method: "DELETE",
     });
 
-    expect(deleteResponse.status).toBe(204);
+    expect(deleteResponse.status).toBe(202);
+    const deleteBody = (await deleteResponse.json()) as {
+      probeUninstallRequest: { id: number; state: string };
+    };
+    expect(deleteBody.probeUninstallRequest).toEqual({
+      createdAtMs: 1_725_000_060_000,
+      failure: null,
+      id: expect.any(Number),
+      state: "pending",
+      updatedAtMs: 1_725_000_060_000,
+    });
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
@@ -610,7 +620,11 @@ describe("Host Metadata API", () => {
       },
     });
     await expect(hostsResponse.json()).resolves.toEqual({
-      hosts: [],
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+        }),
+      ],
     });
 
     const metadataResponse = await app.request(
@@ -627,20 +641,14 @@ describe("Host Metadata API", () => {
         method: "PUT",
       },
     );
-    expect(metadataResponse.status).toBe(404);
+    expect(metadataResponse.status).toBe(200);
 
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const rejectedReport = await app.request("/api/probe/report", {
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const reportResponse = await app.request("/api/probe/report", {
       body: ReportRequest.encode(
         ReportRequest.create({
           bootId: "boot-soft-delete",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_060_500,
-              cpuPercent: 13.5,
-              sequence: 2,
-            },
-          ],
           probeConfigurationVersion: "default-v1",
           probeId: registration.probeId,
           sequenceEnd: 2,
@@ -653,23 +661,16 @@ describe("Host Metadata API", () => {
       },
       method: "POST",
     });
-    expect(rejectedReport.status).toBe(401);
-
-    const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
-    const rejectedConfig = await app.request("/api/probe/config", {
-      body: ConfigurationRequest.encode(
-        ConfigurationRequest.create({
-          currentVersion: "default-v1",
-          probeId: registration.probeId,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
-    expect(rejectedConfig.status).toBe(401);
+    expect(reportResponse.status).toBe(200);
+    const reportBody = ReportResponse.decode(
+      new Uint8Array(await reportResponse.arrayBuffer()),
+    );
+    expect(reportBody.pendingOperation?.id).toBe(
+      String(deleteBody.probeUninstallRequest.id),
+    );
+    expect(reportBody.pendingOperation?.probeUninstall?.operationToken).toEqual(
+      expect.any(String),
+    );
     expect(
       database.sqlite
         .prepare("select count(*) as count from metric_samples")

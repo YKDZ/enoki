@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,6 +9,8 @@ const protoRoot = resolve(packageRoot, "proto");
 const protoFile = resolve(packageRoot, "proto/enoki/v1/probe.proto");
 const tsOut = resolve(packageRoot, "src/generated/ts");
 const generatedTsFile = resolve(tsOut, "enoki_pb.js");
+const generatedTsTypesFile = resolve(tsOut, "enoki_pb.d.ts");
+const generatedTsTypesInputFile = resolve(tsOut, "enoki_pb.types-input.js");
 const rustOut = resolve(packageRoot, "src/generated/rust");
 
 mkdirSync(tsOut, { recursive: true });
@@ -27,15 +29,29 @@ run("pnpm", [
   protoFile,
 ]);
 
-rewriteGeneratedEsmImports(generatedTsFile);
+run("pnpm", [
+  "exec",
+  "pbjs",
+  "--target",
+  "static-module",
+  "--wrap",
+  "default",
+  "--force-long",
+  "--out",
+  generatedTsTypesInputFile,
+  protoFile,
+]);
 
 run("pnpm", [
   "exec",
   "pbts",
   "--out",
-  resolve(tsOut, "enoki_pb.d.ts"),
-  resolve(tsOut, "enoki_pb.js"),
+  generatedTsTypesFile,
+  generatedTsTypesInputFile,
 ]);
+
+rewriteGeneratedEsmImports(generatedTsFile);
+removeGeneratedTsTypesInput(generatedTsTypesInputFile);
 
 run("cargo", [
   "run",
@@ -73,4 +89,8 @@ function rewriteGeneratedEsmImports(file) {
   if (rewritten !== source) {
     writeFileSync(file, rewritten);
   }
+}
+
+function removeGeneratedTsTypesInput(file) {
+  rmSync(file, { force: true });
 }

@@ -16,6 +16,7 @@ import {
 import {
   acceptedTimedOutProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
+  createProbeUninstallRequest,
   createProbeUpgradeRequest,
   type ProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
@@ -427,14 +428,60 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    const host = services.hosts.softDelete(hostId, now());
+    if (!services.probeOperations) {
+      return hostMetadataError("probe_operations_unavailable", 503);
+    }
+
+    const host = services.hosts.findActiveById(hostId);
     if (!host) {
       return hostMetadataError("host_not_found", 404);
+    }
+
+    const activeOperation =
+      failTimedOutActiveProbeUpgradeRequest({
+        hostId,
+        nowMs: now(),
+        probeOperationTimeouts,
+        services,
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      }) ?? services.probeOperations.findActiveForHost(hostId);
+    const result = createProbeUninstallRequest({
+      activeOperation,
+      hostId,
+      nowMs: now(),
+    });
+
+    if (result.error) {
+      return context.json(
+        {
+          error: result.error,
+        },
+        409,
+      );
+    }
+
+    const isDuplicate = result.events.length === 0 && result.operation.id;
+    let operation = result.operation;
+
+    for (const event of result.events) {
+      if (event.action === "superseded") {
+        services.probeOperations.updateProbeUpgradeRequest(event.operation);
+      }
+
+      if (event.action === "created") {
+        operation = services.probeOperations.createProbeUpgradeRequest(
+          event.operation,
+        );
+      }
     }
 
     services.audit?.record({
       action: "host.delete",
       actor: "owner",
+      details: {
+        hostId,
+        probeOperationId: operation.id,
+      },
       occurredAtMs: now(),
       outcome: "success",
       subjectId: String(host.id),
@@ -442,7 +489,23 @@ export function createHostRoutes(services: HostRouteServices) {
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    return new Response(null, { status: 204 });
+    return context.json(
+      {
+        probeUninstallRequest: {
+          createdAtMs: operation.createdAtMs,
+          failure: operation.failureCode
+            ? {
+                code: operation.failureCode,
+                message: operation.failureMessage ?? "",
+              }
+            : null,
+          id: operation.id,
+          state: operation.state,
+          updatedAtMs: operation.updatedAtMs,
+        },
+      },
+      isDuplicate ? 200 : 202,
+    );
   });
 
   return routes;

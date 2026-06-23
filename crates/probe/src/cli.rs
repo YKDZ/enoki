@@ -6,6 +6,9 @@ pub enum ProbeCommand {
     InternalUpgrader {
         bootstrap_config_path: PathBuf,
     },
+    InternalUninstaller {
+        bootstrap_config_path: PathBuf,
+    },
     Register {
         bootstrap_config_path: PathBuf,
         enrollment_token: String,
@@ -22,11 +25,32 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
     let _binary = args.next();
 
     match args.next().as_deref() {
+        Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
         Some("internal-upgrader") => parse_internal_upgrader_command(args),
         Some("register") => parse_register_command(args),
         Some("run") => parse_run_command(args),
         Some("--version" | "-V") => ProbeCommand::Version,
         _ => ProbeCommand::Help,
+    }
+}
+
+fn parse_internal_uninstaller_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
+    let mut bootstrap_config_path = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                bootstrap_config_path = args.next().map(PathBuf::from);
+            }
+            _ => return ProbeCommand::Help,
+        }
+    }
+
+    match bootstrap_config_path {
+        Some(bootstrap_config_path) => ProbeCommand::InternalUninstaller {
+            bootstrap_config_path,
+        },
+        None => ProbeCommand::Help,
     }
 }
 
@@ -121,6 +145,9 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         .to_string(),
         ProbeCommand::InternalUpgrader { .. } => {
             "Probe Upgrader performs privileged Probe Upgrade execution.\n".to_string()
+        }
+        ProbeCommand::InternalUninstaller { .. } => {
+            "Probe Uninstaller performs privileged Probe uninstall execution.\n".to_string()
         }
         ProbeCommand::Register { .. } => {
             "Probe registration performs network I/O and cannot be rendered.\n".to_string()

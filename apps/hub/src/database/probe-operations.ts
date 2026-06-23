@@ -132,7 +132,7 @@ function rowToProbeUpgradeRequest(row: ProbeOperationRow): ProbeUpgradeRequest {
     failureMessage: row.failureMessage,
     hostId: row.managedHostId,
     id: row.id,
-    kind: "probe_upgrade",
+    kind: row.kind as ProbeUpgradeRequest["kind"],
     runningAtMs: row.runningAtMs,
     state: row.state as ProbeUpgradeRequest["state"],
     supersededAtMs: row.supersededAtMs,

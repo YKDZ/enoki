@@ -48,8 +48,9 @@ defineEmits<{
       <AlertDialogHeader>
         <AlertDialogTitle>删除主机</AlertDialogTitle>
         <AlertDialogDescription>
-          删除后，Hub
-          会隐藏此主机的记录、历史指标和详情页，并使当前探针身份失效。目标主机上的探针服务和二进制文件不会被远程卸载；如不再需要采集，请在目标主机上停止并卸载探针。
+          Hub
+          会向此主机下发探针卸载请求。探针确认卸载完成后，主机记录、历史指标和详情页会从
+          Hub 中移除。
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
@@ -58,7 +59,7 @@ defineEmits<{
           class="bg-destructive hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40 text-white"
           @click="$emit('deleteHost', host)"
         >
-          删除
+          卸载并删除
         </AlertDialogAction>
       </AlertDialogFooter>
     </AlertDialogContent>

@@ -1682,6 +1682,9 @@ export namespace enoki {
 
             /** ProbeOperation probeUpgrade */
             probeUpgrade?: (enoki.v1.IProbeUpgradeOperation|null);
+
+            /** ProbeOperation probeUninstall */
+            probeUninstall?: (enoki.v1.IProbeUninstallOperation|null);
         }
 
         /** Represents a ProbeOperation. */
@@ -1699,8 +1702,11 @@ export namespace enoki {
             /** ProbeOperation probeUpgrade. */
             public probeUpgrade?: (enoki.v1.IProbeUpgradeOperation|null);
 
+            /** ProbeOperation probeUninstall. */
+            public probeUninstall?: (enoki.v1.IProbeUninstallOperation|null);
+
             /** ProbeOperation operation. */
-            public operation?: "probeUpgrade";
+            public operation?: ("probeUpgrade"|"probeUninstall");
 
             /**
              * Creates a new ProbeOperation instance using the specified properties.
@@ -1889,6 +1895,103 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
+        /** Properties of a ProbeUninstallOperation. */
+        interface IProbeUninstallOperation {
+
+            /** ProbeUninstallOperation operationToken */
+            operationToken?: (string|null);
+        }
+
+        /** Represents a ProbeUninstallOperation. */
+        class ProbeUninstallOperation implements IProbeUninstallOperation {
+
+            /**
+             * Constructs a new ProbeUninstallOperation.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeUninstallOperation);
+
+            /** ProbeUninstallOperation operationToken. */
+            public operationToken: string;
+
+            /**
+             * Creates a new ProbeUninstallOperation instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeUninstallOperation instance
+             */
+            public static create(properties?: enoki.v1.IProbeUninstallOperation): enoki.v1.ProbeUninstallOperation;
+
+            /**
+             * Encodes the specified ProbeUninstallOperation message. Does not implicitly {@link enoki.v1.ProbeUninstallOperation.verify|verify} messages.
+             * @param message ProbeUninstallOperation message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeUninstallOperation, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeUninstallOperation message, length delimited. Does not implicitly {@link enoki.v1.ProbeUninstallOperation.verify|verify} messages.
+             * @param message ProbeUninstallOperation message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeUninstallOperation, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeUninstallOperation message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeUninstallOperation
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeUninstallOperation;
+
+            /**
+             * Decodes a ProbeUninstallOperation message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeUninstallOperation
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeUninstallOperation;
+
+            /**
+             * Verifies a ProbeUninstallOperation message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeUninstallOperation message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeUninstallOperation
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeUninstallOperation;
+
+            /**
+             * Creates a plain object from a ProbeUninstallOperation message. Also converts values to other types if specified.
+             * @param message ProbeUninstallOperation
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeUninstallOperation, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeUninstallOperation to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeUninstallOperation
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
         /** Properties of a ProbeOperationAcknowledgement. */
         interface IProbeOperationAcknowledgement {
 
@@ -1997,6 +2100,9 @@ export namespace enoki {
 
             /** ProbeOperationStatus failed */
             failed?: (enoki.v1.IProbeOperationFailed|null);
+
+            /** ProbeOperationStatus succeeded */
+            succeeded?: (enoki.v1.IProbeOperationSucceeded|null);
         }
 
         /** Represents a ProbeOperationStatus. */
@@ -2017,8 +2123,11 @@ export namespace enoki {
             /** ProbeOperationStatus failed. */
             public failed?: (enoki.v1.IProbeOperationFailed|null);
 
+            /** ProbeOperationStatus succeeded. */
+            public succeeded?: (enoki.v1.IProbeOperationSucceeded|null);
+
             /** ProbeOperationStatus status. */
-            public status?: ("running"|"failed");
+            public status?: ("running"|"failed"|"succeeded");
 
             /**
              * Creates a new ProbeOperationStatus instance using the specified properties.
@@ -2183,6 +2292,97 @@ export namespace enoki {
 
             /**
              * Gets the default type url for ProbeOperationRunning
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeOperationSucceeded. */
+        interface IProbeOperationSucceeded {
+        }
+
+        /** Represents a ProbeOperationSucceeded. */
+        class ProbeOperationSucceeded implements IProbeOperationSucceeded {
+
+            /**
+             * Constructs a new ProbeOperationSucceeded.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeOperationSucceeded);
+
+            /**
+             * Creates a new ProbeOperationSucceeded instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeOperationSucceeded instance
+             */
+            public static create(properties?: enoki.v1.IProbeOperationSucceeded): enoki.v1.ProbeOperationSucceeded;
+
+            /**
+             * Encodes the specified ProbeOperationSucceeded message. Does not implicitly {@link enoki.v1.ProbeOperationSucceeded.verify|verify} messages.
+             * @param message ProbeOperationSucceeded message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeOperationSucceeded, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeOperationSucceeded message, length delimited. Does not implicitly {@link enoki.v1.ProbeOperationSucceeded.verify|verify} messages.
+             * @param message ProbeOperationSucceeded message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeOperationSucceeded, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeOperationSucceeded message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeOperationSucceeded
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeOperationSucceeded;
+
+            /**
+             * Decodes a ProbeOperationSucceeded message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeOperationSucceeded
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeOperationSucceeded;
+
+            /**
+             * Verifies a ProbeOperationSucceeded message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeOperationSucceeded message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeOperationSucceeded
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeOperationSucceeded;
+
+            /**
+             * Creates a plain object from a ProbeOperationSucceeded message. Also converts values to other types if specified.
+             * @param message ProbeOperationSucceeded
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeOperationSucceeded, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeOperationSucceeded to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeOperationSucceeded
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

@@ -7,7 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
-import { createProbeUpgradeRequest } from "../src/probe/operation";
+import {
+  createProbeUninstallRequest,
+  createProbeUpgradeRequest,
+} from "../src/probe/operation";
 import { validateProbeOperationToken } from "../src/probe/operation-token";
 
 const tempRoots: string[] = [];
@@ -1803,6 +1806,170 @@ describe("Probe report API", () => {
         }),
       ],
     });
+
+    database.close();
+  });
+
+  it("delivers a pending Probe Uninstall Operation to the matching probe", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+      }).operation,
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+
+    const response = await app.request("/api/probe/report", {
+      body: ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-01",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+        }),
+      ).finish(),
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    const body = ReportResponse.decode(
+      new Uint8Array(await response.arrayBuffer()),
+    );
+    expect(body.pendingOperation?.id).toBe(String(operation.id));
+    expect(body.pendingOperation?.probeUninstall).toEqual(
+      expect.objectContaining({
+        operationToken: expect.any(String),
+      }),
+    );
+    expect(body.pendingOperation?.probeUpgrade).toBeNull();
+
+    database.close();
+  });
+
+  it("soft deletes the Host after a Probe Uninstall Operation reports success", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+      }).operation,
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+
+    const delivery = await app.request("/api/probe/report", {
+      body: ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-01",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+        }),
+      ).finish(),
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    const token = ReportResponse.decode(
+      new Uint8Array(await delivery.arrayBuffer()),
+    ).pendingOperation?.probeUninstall?.operationToken;
+
+    const runningReport = await app.request("/api/probe/report", {
+      body: ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-01",
+          operationAcknowledgements: [
+            {
+              operationId: String(operation.id),
+            },
+          ],
+          operationStatuses: [
+            {
+              operationId: String(operation.id),
+              running: {},
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+        }),
+      ).finish(),
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    expect(runningReport.status).toBe(200);
+
+    const status = await app.request(
+      `/api/probe/operations/${operation.id}/status`,
+      {
+        body: JSON.stringify({
+          status: "succeeded",
+          token,
+        }),
+        headers: {
+          authorization: `Bearer ${registration.probeSecret}`,
+          "content-type": "application/json",
+        },
+        method: "POST",
+      },
+    );
+    expect(status.status).toBe(200);
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    expect(hostsResponse.status).toBe(200);
+    await expect(hostsResponse.json()).resolves.toEqual({ hosts: [] });
 
     database.close();
   });

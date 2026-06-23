@@ -366,6 +366,12 @@ write_bootstrap_config() {
     printf 'service_name = '
     toml_string "$SERVICE_NAME"
     printf '\n'
+    printf 'service_user = '
+    toml_string "$SERVICE_USER"
+    printf '\n'
+    printf 'sudoers_path = '
+    toml_string "/etc/sudoers.d/enoki-probe-upgrader"
+    printf '\n'
     printf 'probe_asset_public_key_sha256 = '
     toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
     printf '\n'
@@ -413,6 +419,12 @@ write_install_metadata() {
     printf '\n'
     printf 'service_name = '
     toml_string "$SERVICE_NAME"
+    printf '\n'
+    printf 'service_user = '
+    toml_string "$SERVICE_USER"
+    printf '\n'
+    printf 'sudoers_path = '
+    toml_string "/etc/sudoers.d/enoki-probe-upgrader"
     printf '\n'
     printf 'probe_asset_public_key_sha256 = '
     toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
@@ -551,6 +563,7 @@ write_upgrader_sudoers() {
   cat >"$sudoers_path_rooted" <<EOF
 # Managed by Enoki Probe installer.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-upgrader --property=Type=exec -- ${install_path_host} internal-upgrader --config ${config_path_host}
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-uninstaller --property=Type=exec -- ${install_path_host} internal-uninstaller --config ${config_path_host}
 EOF
   chmod 0440 "$sudoers_path_rooted"
 }
