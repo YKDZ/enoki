@@ -8,6 +8,7 @@ import {
   ServerCrash,
 } from "@lucide/vue";
 import { useColorMode, useEventListener, useStorage } from "@vueuse/core";
+import { ConfigProvider } from "reka-ui";
 import {
   computed,
   defineAsyncComponent,
@@ -57,6 +58,7 @@ import type {
 } from "./types";
 
 const isCheckingSession = ref(true);
+const scrollBodyLock = { margin: 0, padding: 0 } as const;
 const isAuthenticated = ref(false);
 const LayoutLabPage = defineAsyncComponent(
   () => import("./components/LayoutLabPage.vue"),
@@ -839,199 +841,201 @@ function routePath() {
 </script>
 
 <template>
-  <main class="bg-background text-foreground min-h-screen">
-    <Toaster :theme="sonnerTheme" />
-    <AppHeader
-      :is-authenticated="isAuthenticated"
-      :is-creating-enrollment="isCreatingEnrollment"
-      @go-home="navigateToOverview"
-      @logout="logout"
-      @open-enrollment="openEnrollmentDialog"
-      @toggle-global-configuration="toggleGlobalConfiguration"
-    />
-
-    <GlobalConfigurationDialog
-      v-if="isAuthenticated"
-      :draft="globalConfigurationDraft"
-      :error="globalConfigurationError"
-      :is-saving="isSavingGlobalConfiguration"
-      :message="globalConfigurationMessage"
-      :open="isShowingGlobalConfiguration"
-      @save-probe-configuration="saveGlobalConfiguration"
-      @update:open="updateGlobalConfigurationOpen"
-    />
-
-    <EnrollmentDialog
-      v-if="isAuthenticated"
-      v-model:open="isShowingEnrollmentDialog"
-      :enrollment="enrollment"
-      :enrollment-error="enrollmentError"
-      :is-creating-enrollment="isCreatingEnrollment"
-      @create-enrollment="createEnrollment"
-    />
-
-    <LayoutLabPage v-if="isLayoutLabRoute" />
-
-    <section
-      v-else-if="isCheckingSession"
-      class="mx-auto max-w-7xl px-6 py-8"
-      aria-live="polite"
-    >
-      <HostDetailSkeleton v-if="activeDetailHostId" />
-      <HostListSkeleton v-else-if="overviewView === 'list'" />
-      <HostGridSkeleton v-else />
-    </section>
-
-    <LoginPanel
-      v-else-if="!isAuthenticated"
-      v-model:password="password"
-      :is-submitting="isSubmitting"
-      :login-error="loginError"
-      :login-error-kind="loginErrorKind"
-      @login="login"
-    />
-
-    <HostDetailPage
-      v-else-if="activeDetailHostId"
-      :active-host-configuration-id="activeHostConfigurationId"
-      :active-host-metadata-id="activeHostMetadataId"
-      :deleting-host-id="deletingHostId"
-      :detail="detail"
-      :host-configuration-draft="hostConfigurationDraft"
-      :host-configuration-error="hostConfigurationError"
-      :host-metadata-draft="hostMetadataDraft"
-      :host-metadata-error="hostMetadataError"
-      :is-saving-host-configuration="isSavingHostConfiguration"
-      :is-saving-host-metadata="isSavingHostMetadata"
-      @back="navigateToOverview"
-      @delete-host="deleteHost"
-      @open-host-configuration="openHostConfiguration"
-      @open-host-metadata="openHostMetadata"
-      @probe-upgrade-requested="trackProbeUpgradeRequest"
-      @save-host-configuration="saveHostConfiguration"
-      @save-host-metadata="saveHostMetadata"
-    />
-
-    <section v-else class="mx-auto max-w-7xl px-6 py-8">
-      <HostListSkeleton
-        v-if="isLoadingHosts && hosts.length === 0 && overviewView === 'list'"
+  <ConfigProvider :scroll-body="scrollBodyLock">
+    <main class="bg-background text-foreground min-h-screen">
+      <Toaster :theme="sonnerTheme" />
+      <AppHeader
+        :is-authenticated="isAuthenticated"
+        :is-creating-enrollment="isCreatingEnrollment"
+        @go-home="navigateToOverview"
+        @logout="logout"
+        @open-enrollment="openEnrollmentDialog"
+        @toggle-global-configuration="toggleGlobalConfiguration"
       />
-      <HostGridSkeleton v-else-if="isLoadingHosts && hosts.length === 0" />
 
-      <StateHero
-        v-else-if="hostListError && hosts.length === 0"
-        :icon="ServerCrash"
-        tone="destructive"
-        title="无法加载主机"
-        :description="hostListError"
-      >
-        <template #action>
-          <Button type="button" @click="loadHosts">
-            <LoaderCircle
-              v-if="isLoadingHosts"
-              class="size-4 animate-spin"
-              aria-hidden="true"
-            />
-            重试
-          </Button>
-        </template>
-      </StateHero>
+      <GlobalConfigurationDialog
+        v-if="isAuthenticated"
+        :draft="globalConfigurationDraft"
+        :error="globalConfigurationError"
+        :is-saving="isSavingGlobalConfiguration"
+        :message="globalConfigurationMessage"
+        :open="isShowingGlobalConfiguration"
+        @save-probe-configuration="saveGlobalConfiguration"
+        @update:open="updateGlobalConfigurationOpen"
+      />
 
-      <StateHero
-        v-else-if="hosts.length === 0"
-        :icon="Server"
-        title="暂无主机"
-        description="创建部署链接后，在目标机器上安装并启动探针，主机会在首次上报后出现在这里。"
+      <EnrollmentDialog
+        v-if="isAuthenticated"
+        v-model:open="isShowingEnrollmentDialog"
+        :enrollment="enrollment"
+        :enrollment-error="enrollmentError"
+        :is-creating-enrollment="isCreatingEnrollment"
+        @create-enrollment="createEnrollment"
+      />
+
+      <LayoutLabPage v-if="isLayoutLabRoute" />
+
+      <section
+        v-else-if="isCheckingSession"
+        class="mx-auto max-w-7xl px-6 py-8"
+        aria-live="polite"
       >
-        <template #action>
+        <HostDetailSkeleton v-if="activeDetailHostId" />
+        <HostListSkeleton v-else-if="overviewView === 'list'" />
+        <HostGridSkeleton v-else />
+      </section>
+
+      <LoginPanel
+        v-else-if="!isAuthenticated"
+        v-model:password="password"
+        :is-submitting="isSubmitting"
+        :login-error="loginError"
+        :login-error-kind="loginErrorKind"
+        @login="login"
+      />
+
+      <HostDetailPage
+        v-else-if="activeDetailHostId"
+        :active-host-configuration-id="activeHostConfigurationId"
+        :active-host-metadata-id="activeHostMetadataId"
+        :deleting-host-id="deletingHostId"
+        :detail="detail"
+        :host-configuration-draft="hostConfigurationDraft"
+        :host-configuration-error="hostConfigurationError"
+        :host-metadata-draft="hostMetadataDraft"
+        :host-metadata-error="hostMetadataError"
+        :is-saving-host-configuration="isSavingHostConfiguration"
+        :is-saving-host-metadata="isSavingHostMetadata"
+        @back="navigateToOverview"
+        @delete-host="deleteHost"
+        @open-host-configuration="openHostConfiguration"
+        @open-host-metadata="openHostMetadata"
+        @probe-upgrade-requested="trackProbeUpgradeRequest"
+        @save-host-configuration="saveHostConfiguration"
+        @save-host-metadata="saveHostMetadata"
+      />
+
+      <section v-else class="mx-auto max-w-7xl px-6 py-8">
+        <HostListSkeleton
+          v-if="isLoadingHosts && hosts.length === 0 && overviewView === 'list'"
+        />
+        <HostGridSkeleton v-else-if="isLoadingHosts && hosts.length === 0" />
+
+        <StateHero
+          v-else-if="hostListError && hosts.length === 0"
+          :icon="ServerCrash"
+          tone="destructive"
+          title="无法加载主机"
+          :description="hostListError"
+        >
+          <template #action>
+            <Button type="button" @click="loadHosts">
+              <LoaderCircle
+                v-if="isLoadingHosts"
+                class="size-4 animate-spin"
+                aria-hidden="true"
+              />
+              重试
+            </Button>
+          </template>
+        </StateHero>
+
+        <StateHero
+          v-else-if="hosts.length === 0"
+          :icon="Server"
+          title="暂无主机"
+          description="创建部署链接后，在目标机器上安装并启动探针，主机会在首次上报后出现在这里。"
+        >
+          <template #action>
+            <Button
+              type="button"
+              :disabled="isCreatingEnrollment"
+              @click="openEnrollmentDialog"
+            >
+              <LoaderCircle
+                v-if="isCreatingEnrollment"
+                class="size-4 animate-spin"
+                aria-hidden="true"
+              />
+              <Plus v-else class="size-4" aria-hidden="true" />
+              添加主机
+            </Button>
+          </template>
+        </StateHero>
+
+        <p
+          v-if="!isLoadingHosts && hosts.length > 0 && hostListError"
+          class="mb-4 text-sm text-red-600"
+          role="alert"
+        >
+          {{ hostListError }}
+        </p>
+
+        <p
+          v-if="
+            !isLoadingHosts &&
+            hosts.length > 0 &&
+            hostMetadataError &&
+            !activeHostMetadataId
+          "
+          class="mb-4 text-sm text-red-600"
+          role="alert"
+        >
+          {{ hostMetadataError }}
+        </p>
+
+        <div
+          v-if="!isLoadingHosts && hosts.length > 0"
+          class="mb-4 flex justify-end"
+        >
           <Button
             type="button"
-            :disabled="isCreatingEnrollment"
-            @click="openEnrollmentDialog"
+            variant="outline"
+            size="icon"
+            :aria-label="overviewView === 'cards' ? '切换到列表' : '切换到卡片'"
+            :title="overviewView === 'cards' ? '切换到列表' : '切换到卡片'"
+            @click="toggleOverviewView"
           >
-            <LoaderCircle
-              v-if="isCreatingEnrollment"
-              class="size-4 animate-spin"
+            <List
+              v-if="overviewView === 'cards'"
+              class="size-4"
               aria-hidden="true"
             />
-            <Plus v-else class="size-4" aria-hidden="true" />
-            添加主机
+            <LayoutGrid v-else class="size-4" aria-hidden="true" />
           </Button>
-        </template>
-      </StateHero>
+        </div>
 
-      <p
-        v-if="!isLoadingHosts && hosts.length > 0 && hostListError"
-        class="mb-4 text-sm text-red-600"
-        role="alert"
-      >
-        {{ hostListError }}
-      </p>
-
-      <p
-        v-if="
-          !isLoadingHosts &&
-          hosts.length > 0 &&
-          hostMetadataError &&
-          !activeHostMetadataId
-        "
-        class="mb-4 text-sm text-red-600"
-        role="alert"
-      >
-        {{ hostMetadataError }}
-      </p>
-
-      <div
-        v-if="!isLoadingHosts && hosts.length > 0"
-        class="mb-4 flex justify-end"
-      >
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          :aria-label="overviewView === 'cards' ? '切换到列表' : '切换到卡片'"
-          :title="overviewView === 'cards' ? '切换到列表' : '切换到卡片'"
-          @click="toggleOverviewView"
+        <div
+          v-if="!isLoadingHosts && hosts.length > 0 && overviewView === 'list'"
+          class="grid gap-4"
         >
-          <List
-            v-if="overviewView === 'cards'"
-            class="size-4"
-            aria-hidden="true"
+          <HostListView
+            v-model:sort-direction="hostListSortDirection"
+            v-model:sort-key="hostListSortKey"
+            :hosts="hosts"
+            :page="hostListPage"
+            :page-size="hostListPageSize"
+            @open-host-detail="openHostDetail"
           />
-          <LayoutGrid v-else class="size-4" aria-hidden="true" />
-        </Button>
-      </div>
+          <OverviewPagination
+            v-model:page="hostListPage"
+            :page-size="hostListPageSize"
+            :page-size-options="hostListPageSizeOptions"
+            :total="hosts.length"
+            @update:page-size="updateHostListPageSize"
+          />
+        </div>
 
-      <div
-        v-if="!isLoadingHosts && hosts.length > 0 && overviewView === 'list'"
-        class="grid gap-4"
-      >
-        <HostListView
-          v-model:sort-direction="hostListSortDirection"
-          v-model:sort-key="hostListSortKey"
+        <HostCardMasonry
+          v-else-if="!isLoadingHosts && hosts.length > 0"
           :hosts="hosts"
-          :page="hostListPage"
-          :page-size="hostListPageSize"
+          :is-loading-more="isLoadingMoreHostCards"
+          :skeleton-count="hostCardBatchSize"
+          :visible-count="hostCardVisibleCount"
+          @load-more="loadMoreHostCards"
           @open-host-detail="openHostDetail"
         />
-        <OverviewPagination
-          v-model:page="hostListPage"
-          :page-size="hostListPageSize"
-          :page-size-options="hostListPageSizeOptions"
-          :total="hosts.length"
-          @update:page-size="updateHostListPageSize"
-        />
-      </div>
-
-      <HostCardMasonry
-        v-else-if="!isLoadingHosts && hosts.length > 0"
-        :hosts="hosts"
-        :is-loading-more="isLoadingMoreHostCards"
-        :skeleton-count="hostCardBatchSize"
-        :visible-count="hostCardVisibleCount"
-        @load-more="loadMoreHostCards"
-        @open-host-detail="openHostDetail"
-      />
-    </section>
-  </main>
+      </section>
+    </main>
+  </ConfigProvider>
 </template>

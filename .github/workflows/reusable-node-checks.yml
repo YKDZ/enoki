@@ -3,6 +3,11 @@ name: Reusable Node checks
 on:
   workflow_call:
     inputs:
+      affected:
+        description: Run package-level affected Turbo tasks.
+        required: false
+        type: boolean
+        default: false
       run-build:
         description: Run the workspace build after typechecking.
         required: false
@@ -41,14 +46,30 @@ jobs:
         run: pnpm run lint
 
       - name: Typecheck
-        run: pnpm run typecheck
+        run: |
+          if [ "${{ inputs.affected }}" = "true" ]; then
+            pnpm exec turbo run typecheck --affected
+          else
+            pnpm run typecheck
+          fi
 
       - name: Build
         if: inputs.run-build
-        run: pnpm run build
+        run: |
+          if [ "${{ inputs.affected }}" = "true" ]; then
+            pnpm exec turbo run build --affected
+          else
+            pnpm run build
+          fi
 
       - name: Test
-        run: pnpm run test
+        run: |
+          pnpm exec vitest run scripts/*.test.mjs
+          if [ "${{ inputs.affected }}" = "true" ]; then
+            pnpm exec turbo run test --affected
+          else
+            pnpm exec turbo run test
+          fi
 
       - name: Check protobuf outputs
         run: pnpm run proto:check

@@ -18,6 +18,7 @@ jobs:
     name: Node checks
     uses: ./.github/workflows/reusable-node-checks.yml
     with:
+      affected: ${{ github.event_name == 'pull_request' }}
       run-build: true
 
   rust-checks:

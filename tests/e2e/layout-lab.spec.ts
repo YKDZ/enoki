@@ -50,6 +50,24 @@ test.describe("卡槽布局实验室", () => {
     await expectNoHorizontalOverflow(page);
     await expectNoCardOverlap(page);
   });
+
+  test("打开弹窗不改变页面横向位置", async ({ page }) => {
+    await page.setViewportSize({ height: 900, width: 1280 });
+    await page.goto("/layout-lab?scenario=dense");
+    await forceClassicScrollbarMeasurement(page);
+
+    const before = await layoutRootBox(page);
+    const beforeStyles = await scrollLockStyles(page);
+    await page.getByRole("button", { name: "打开测试弹窗" }).click();
+    await expect(page.getByRole("dialog", { name: "测试弹窗" })).toBeVisible();
+    const after = await layoutRootBox(page);
+    const afterStyles = await scrollLockStyles(page);
+
+    expect(after.left).toBeCloseTo(before.left, 1);
+    expect(after.width).toBeCloseTo(before.width, 1);
+    expect(afterStyles.bodyPaddingRight).toBe(beforeStyles.bodyPaddingRight);
+    await expectNoHorizontalOverflow(page);
+  });
 });
 
 async function expectNoHorizontalOverflow(page: Page) {
@@ -119,4 +137,34 @@ async function expectChartsHaveStableSize(page: Page) {
     );
 
   expect(invalidCharts).toEqual([]);
+}
+
+async function layoutRootBox(page: Page) {
+  return page.locator("[data-layout-root]").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return {
+      left: rect.left,
+      width: rect.width,
+    };
+  });
+}
+
+async function scrollLockStyles(page: Page) {
+  return page.evaluate(() => {
+    const bodyStyle = window.getComputedStyle(document.body);
+    return {
+      bodyPaddingRight: bodyStyle.paddingRight,
+      htmlScrollbarGutter: window.getComputedStyle(document.documentElement)
+        .scrollbarGutter,
+    };
+  });
+}
+
+async function forceClassicScrollbarMeasurement(page: Page) {
+  await page.evaluate(() => {
+    Object.defineProperty(document.documentElement, "clientWidth", {
+      configurable: true,
+      get: () => window.innerWidth - 17,
+    });
+  });
 }

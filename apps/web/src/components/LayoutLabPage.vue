@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { createLayoutLabFixture } from "@/lib/layout-lab-fixtures";
 
 import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
 import MetricPanel from "./MetricPanel.vue";
 
+const isDialogOpen = ref(false);
 const scenario = computed(() =>
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("scenario") === "sparse"
@@ -18,13 +27,29 @@ const heights = ["normal", "tall"] as const;
 </script>
 
 <template>
-  <main class="mx-auto grid max-w-7xl gap-6 px-5 py-5">
-    <header class="grid gap-1">
-      <h1 class="text-xl font-semibold">卡槽布局实验室</h1>
-      <p class="text-muted-foreground text-sm">
-        使用生产卡槽渲染器和固定极端数据验证响应式布局。
-      </p>
+  <main class="mx-auto grid max-w-7xl gap-6 px-5 py-5" data-layout-root>
+    <header class="flex flex-wrap items-start justify-between gap-3">
+      <div class="grid gap-1">
+        <h1 class="text-xl font-semibold">卡槽布局实验室</h1>
+        <p class="text-muted-foreground text-sm">
+          使用生产卡槽渲染器和固定极端数据验证响应式布局。
+        </p>
+      </div>
+      <Button type="button" variant="outline" @click="isDialogOpen = true">
+        打开测试弹窗
+      </Button>
     </header>
+
+    <Dialog v-model:open="isDialogOpen">
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>测试弹窗</DialogTitle>
+          <DialogDescription>
+            用于验证滚动锁定不会改变页面横向布局。
+          </DialogDescription>
+        </DialogHeader>
+      </DialogContent>
+    </Dialog>
 
     <section class="grid gap-3" data-layout-section="production-slots">
       <h2 class="text-base font-semibold">生产卡槽</h2>
