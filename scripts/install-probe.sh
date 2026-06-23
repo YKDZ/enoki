@@ -328,6 +328,7 @@ write_bootstrap_config() {
   local state_dir_rooted
   local existing_config_path
   local existing_probe_id
+  local existing_probe_private_key_pem
   local existing_probe_secret
 
   config_path_rooted="$(rooted_path "$CONFIG_PATH")"
@@ -345,9 +346,11 @@ write_bootstrap_config() {
 
     if can_reuse_existing_identity "$existing_config_path"; then
       existing_probe_id="$(toml_string_value "$existing_config_path" probe_id)"
+      existing_probe_private_key_pem="$(toml_string_value "$existing_config_path" probe_private_key_pem)"
       existing_probe_secret="$(toml_string_value "$existing_config_path" probe_secret)"
       printf 'probe_id = "%s"\n' "$existing_probe_id"
       printf 'probe_secret = "%s"\n' "$existing_probe_secret"
+      printf 'probe_private_key_pem = "%s"\n' "$existing_probe_private_key_pem"
     else
       printf 'enrollment_token = '
       toml_string "$ENOKI_ENROLLMENT_TOKEN"
@@ -479,14 +482,17 @@ can_reuse_existing_identity() {
   local existing_config="$1"
   local existing_hub_url
   local existing_probe_id
+  local existing_probe_private_key_pem
   local existing_probe_secret
 
   existing_hub_url="$(toml_string_value "$existing_config" hub_url || true)"
   existing_probe_id="$(toml_string_value "$existing_config" probe_id || true)"
+  existing_probe_private_key_pem="$(toml_string_value "$existing_config" probe_private_key_pem || true)"
   existing_probe_secret="$(toml_string_value "$existing_config" probe_secret || true)"
 
   if [ -z "$existing_hub_url" ] ||
     [ -z "$existing_probe_id" ] ||
+    [ -z "$existing_probe_private_key_pem" ] ||
     [ -z "$existing_probe_secret" ]; then
     return 1
   fi

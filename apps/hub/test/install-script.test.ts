@@ -159,6 +159,7 @@ describe("Probe systemd installer", () => {
         'hub_url = "https://hub.example/"',
         'probe_id = "probe_existing"',
         'probe_secret = "enk_probe_existing"',
+        'probe_private_key_pem = "existing-private-key"',
         'probe_configuration_version = "default-v2"',
         "reporting_batch_interval_seconds = 3",
         "metrics_collection_interval_seconds = 1",
@@ -183,6 +184,7 @@ describe("Probe systemd installer", () => {
         'hub_url = "https://hub.example"',
         'probe_id = "probe_existing"',
         'probe_secret = "enk_probe_existing"',
+        'probe_private_key_pem = "existing-private-key"',
         'state_dir = "/var/lib/enoki-probe"',
         'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
         'install_path = "/usr/local/bin/enoki-probe"',
@@ -212,6 +214,47 @@ describe("Probe systemd installer", () => {
     await expect(
       readFile(path.join(root, "tmp/useradd.log"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("uses a new enrollment token when the existing same-Hub Probe identity has no signing key", async () => {
+    const root = await createTempRoot("enoki-install-update-legacy-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, {
+      assetDir: assets.dir,
+      serviceGroupExists: true,
+      serviceUserExists: true,
+    });
+    const bootstrapPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    await mkdir(path.dirname(bootstrapPath), { recursive: true });
+    await writeFile(
+      bootstrapPath,
+      [
+        'hub_url = "https://hub.example/"',
+        'probe_id = "probe_existing"',
+        'probe_secret = "enk_probe_existing"',
+        'probe_configuration_version = "default-v2"',
+        "reporting_batch_interval_seconds = 3",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_legacy_reinstall",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(0);
+    const bootstrapConfig = await readFile(bootstrapPath, "utf8");
+    expect(bootstrapConfig).toContain(
+      'enrollment_token = "enk_enroll_legacy_reinstall"',
+    );
+    expect(bootstrapConfig).not.toContain("probe_existing");
+    expect(bootstrapConfig).not.toContain("enk_probe_existing");
+    expect(bootstrapConfig).not.toContain("probe_configuration_version");
   });
 
   it("uses a new enrollment token when reinstalling for a different Hub", async () => {
