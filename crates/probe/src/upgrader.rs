@@ -1023,6 +1023,11 @@ fn write_probe_operation_sudoers(
                 install_metadata.install_path.display(),
                 bootstrap_config_path.display(),
             ),
+            format!(
+                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes {} internal-privileged-collector --collector disk-health.smartctl",
+                install_metadata.service_user,
+                install_metadata.install_path.display(),
+            ),
             String::new(),
         ]
         .join("\n"),
@@ -2168,6 +2173,29 @@ mod tests {
             error,
             ProbeUpgraderRunError::InvalidInstallMetadata("sudoers command contains unsafe values")
         ));
+    }
+
+    #[test]
+    fn probe_operation_sudoers_include_compiled_privileged_collectors() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+
+        write_probe_operation_sudoers(&install_metadata, &bootstrap_config_path)
+            .expect("sudoers are written");
+
+        let sudoers = fs::read_to_string(&install_metadata.sudoers_path).expect("sudoers");
+        assert!(sudoers.contains("internal-upgrader --config"));
+        assert!(sudoers.contains("internal-uninstaller --config"));
+        assert!(sudoers.contains("internal-privileged-collector --collector disk-health.smartctl"));
+        assert!(sudoers.contains("--property=RuntimeMaxSec=10"));
+        assert!(sudoers.contains("--property=PrivateNetwork=yes"));
+        assert!(!sudoers.contains('*'));
+        assert!(!sudoers.contains("--operation-id"));
+        assert!(!sudoers.contains("--target-probe-version"));
     }
 
     #[test]

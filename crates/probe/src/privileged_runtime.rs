@@ -269,8 +269,14 @@ impl PrivilegedRuntimeProcessRunner for SystemdPrivilegedRuntimeProcessRunner {
         &mut self,
         plan: &PrivilegedRuntimeExecutionPlan,
     ) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
-        let mut command = Command::new("systemd-run");
-        command.args(["--quiet", "--wait", "--collect"]);
+        let mut command = Command::new("sudo");
+        command.args([
+            "-n",
+            "/usr/bin/systemd-run",
+            "--quiet",
+            "--wait",
+            "--collect",
+        ]);
 
         for property in &plan.systemd_properties {
             command.arg(format!("--property={property}"));

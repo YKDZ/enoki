@@ -565,6 +565,7 @@ write_upgrader_sudoers() {
 # Managed by Enoki Probe installer.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-upgrader --property=Type=exec -- ${install_path_host} internal-upgrader --config ${config_path_host}
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-uninstaller --property=Type=exec -- ${install_path_host} internal-uninstaller --config ${config_path_host}
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes ${install_path_host} internal-privileged-collector --collector disk-health.smartctl
 EOF
   chmod 0440 "$sudoers_path_rooted"
 }

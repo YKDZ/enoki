@@ -105,6 +105,7 @@ describe("Probe systemd installer", () => {
         "# Managed by Enoki Probe installer.",
         "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap.toml",
         "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /etc/enoki/probe-bootstrap.toml",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes /usr/local/bin/enoki-probe internal-privileged-collector --collector disk-health.smartctl",
         "",
       ].join("\n"),
     );
@@ -117,6 +118,7 @@ describe("Probe systemd installer", () => {
     expect(sudoers).not.toContain("--target-probe-version");
     expect(sudoers).toContain("--collect");
     expect(sudoers).toContain(" -- /usr/local/bin/enoki-probe ");
+    expect(sudoers).toContain("--collector disk-health.smartctl");
     await expect(
       validateSudoers(path.join(root, "etc/sudoers.d/enoki-probe-upgrader")),
     ).resolves.toBe(true);
