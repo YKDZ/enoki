@@ -506,7 +506,7 @@ function normalizeCollectorCapabilities(
 function normalizeCollectorAvailability(
   availability: CollectorAvailability | null | undefined,
 ) {
-  if (availability?.available === undefined) {
+  if (availability === null || availability === undefined) {
     return null;
   }
 

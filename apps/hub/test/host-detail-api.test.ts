@@ -768,6 +768,37 @@ describe("Host detail API", () => {
       }),
     });
 
+    const persistedInventory = JSON.parse(
+      database.sqlite
+        .prepare("select inventory_json from managed_hosts where id = ?")
+        .get(hostId)!.inventory_json as string,
+    ) as {
+      collectorCapabilities: {
+        official: Record<string, unknown>;
+      };
+    };
+    persistedInventory.collectorCapabilities.official.diskHealth = {};
+    database.sqlite
+      .prepare("update managed_hosts set inventory_json = ? where id = ?")
+      .run(JSON.stringify(persistedInventory), hostId);
+
+    const protoJsonFalseCapabilityResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      {
+        headers: { cookie: ownerSession },
+      },
+    );
+    expect(protoJsonFalseCapabilityResponse.status).toBe(200);
+    await expect(protoJsonFalseCapabilityResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        collectorCapabilities: expect.objectContaining({
+          official: expect.objectContaining({
+            diskHealth: { available: false },
+          }),
+        }),
+      }),
+    });
+
     await reportInventory(app, registration, {
       diskAvailable: null,
       sequence: 2,
