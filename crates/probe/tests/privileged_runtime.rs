@@ -5,7 +5,7 @@ use enoki_probe::metrics::{
 use enoki_probe::privileged_runtime::{
     CollectorRuntimeProfile, LocalPrivilegedRuntimeRunner, NetworkAccess, PrivilegedCollector,
     PrivilegedCollectorId, PrivilegedCollectorRuntime, PrivilegedRuntimeError,
-    PrivilegedRuntimeExecutionPlan, PrivilegedRuntimeNetworkBoundary,
+    PrivilegedRuntimeExecutionPlan, PrivilegedRuntimeNetworkBoundary, PrivilegedRuntimeOutput,
     PrivilegedRuntimeProcessError, PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessRunner,
     PrivilegedRuntimeRunner,
 };
@@ -169,7 +169,7 @@ impl PrivilegedRuntimeProcessRunner for RecordingProcessRunner {
         plan: &PrivilegedRuntimeExecutionPlan,
     ) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
         self.plans.push(plan.clone());
-        Ok(PrivilegedRuntimeProcessOutput)
+        Ok(PrivilegedRuntimeProcessOutput::default())
     }
 }
 
@@ -308,12 +308,12 @@ impl PrivilegedRuntimeRunner for RecordingRunner {
     fn run(
         &mut self,
         invocation: enoki_probe::privileged_runtime::PrivilegedRuntimeInvocation,
-    ) -> Result<(), PrivilegedRuntimeError> {
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
         self.invocations.push(RecordedInvocation {
             collector_id: invocation.collector_id,
             profile: invocation.profile,
         });
-        Ok(())
+        Ok(PrivilegedRuntimeOutput::default())
     }
 }
 
@@ -323,7 +323,7 @@ impl PrivilegedRuntimeRunner for TimeoutRunner {
     fn run(
         &mut self,
         invocation: enoki_probe::privileged_runtime::PrivilegedRuntimeInvocation,
-    ) -> Result<(), PrivilegedRuntimeError> {
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
         Err(PrivilegedRuntimeError::TimedOut {
             timeout: invocation.profile.timeout,
         })
@@ -336,7 +336,7 @@ impl PrivilegedRuntimeRunner for FailingRunner {
     fn run(
         &mut self,
         _invocation: enoki_probe::privileged_runtime::PrivilegedRuntimeInvocation,
-    ) -> Result<(), PrivilegedRuntimeError> {
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
         Err(PrivilegedRuntimeError::collector_failed(
             "privileged runtime failed",
         ))

@@ -33,6 +33,14 @@ export type HostSummary = {
     cpuStealPercent: number | null;
     cpuSystemPercent: number | null;
     cpuUserPercent: number | null;
+    diskHealth?: Array<{
+      deviceName: string;
+      model: string | null;
+      passed: boolean;
+      powerOnHours: number | null;
+      serialNumber: string | null;
+      temperatureCelsius: number | null;
+    }>;
     diskTotalBytes: number | null;
     diskUsedBytes: number | null;
     load1: number | null;
@@ -70,6 +78,7 @@ export type CollectorCapabilities = {
     battery?: CollectorAvailability;
     cpu?: CollectorAvailability;
     disk?: CollectorAvailability;
+    diskHealth?: CollectorAvailability;
     load?: CollectorAvailability;
     memory?: CollectorAvailability;
     network?: CollectorAvailability;
@@ -98,6 +107,14 @@ export type HostSummaryOptions = {
     cpuStealPercent: number | null;
     cpuSystemPercent: number | null;
     cpuUserPercent: number | null;
+    diskHealth?: Array<{
+      deviceName: string;
+      model: string | null;
+      passed: boolean;
+      powerOnHours: number | null;
+      serialNumber: string | null;
+      temperatureCelsius: number | null;
+    }>;
     diskTotalBytes: number | null;
     diskUsedBytes: number | null;
     load1: number | null;
@@ -267,6 +284,9 @@ export function createHostRepository(database: HostDatabase): HostRepository {
                   cpuStealPercent: latestMetric.cpuStealPercent,
                   cpuSystemPercent: latestMetric.cpuSystemPercent,
                   cpuUserPercent: latestMetric.cpuUserPercent,
+                  ...(latestMetric.diskHealth?.length
+                    ? { diskHealth: latestMetric.diskHealth }
+                    : {}),
                   diskTotalBytes: latestMetric.diskTotalBytes,
                   diskUsedBytes: latestMetric.diskUsedBytes,
                   load1: latestMetric.load1,

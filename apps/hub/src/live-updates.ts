@@ -122,6 +122,9 @@ export function liveSummaryFromHost(
           cpuStealPercent: host.latestMetrics.cpuStealPercent,
           cpuSystemPercent: host.latestMetrics.cpuSystemPercent,
           cpuUserPercent: host.latestMetrics.cpuUserPercent,
+          ...(host.latestMetrics.diskHealth?.length
+            ? { diskHealth: host.latestMetrics.diskHealth }
+            : {}),
           diskTotalBytes: host.latestMetrics.diskTotalBytes,
           diskUsedBytes: host.latestMetrics.diskUsedBytes,
           memoryCacheBytes: host.latestMetrics.memoryCacheBytes,

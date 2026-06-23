@@ -1,5 +1,7 @@
 use enoki_probe::{
     cli::{ProbeCommand, parse_probe_command, render_probe_output},
+    metrics::{collect_disk_health_metrics_with_smartctl, format_disk_health_metrics_json},
+    privileged_runtime::PrivilegedCollectorId,
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{ProbeRunInput, run_loop_control_from_environment, run_probe_with_loop_control},
     upgrader::{
@@ -20,6 +22,19 @@ fn main() {
             print!("{}", render_probe_output(ProbeCommand::Version));
         }
         ProbeCommand::InternalPrivilegedCollector { collector_id } => {
+            if collector_id == PrivilegedCollectorId::DiskHealthSmartctl {
+                match collect_disk_health_metrics_with_smartctl() {
+                    Ok(metrics) => {
+                        println!("{}", format_disk_health_metrics_json(&metrics));
+                    }
+                    Err(error) => {
+                        eprintln!("Privileged Collector failed: {error:?}");
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+
             eprintln!(
                 "Privileged Collector failed: no compiled entrypoint linked for {collector_id:?}"
             );

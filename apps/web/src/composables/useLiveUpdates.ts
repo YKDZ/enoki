@@ -46,6 +46,9 @@ export function applyHostLiveSummary(
             cpuStealPercent: summary.latestMetrics.cpuStealPercent,
             cpuSystemPercent: summary.latestMetrics.cpuSystemPercent,
             cpuUserPercent: summary.latestMetrics.cpuUserPercent,
+            diskHealth:
+              summary.latestMetrics.diskHealth ??
+              host.latestMetrics?.diskHealth,
             diskTotalBytes: summary.latestMetrics.diskTotalBytes,
             diskUsedBytes: summary.latestMetrics.diskUsedBytes,
             memoryCacheBytes: summary.latestMetrics.memoryCacheBytes,

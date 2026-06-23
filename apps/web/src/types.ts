@@ -25,6 +25,7 @@ export type HostSummary = {
     cpuStealPercent?: number | null;
     cpuSystemPercent?: number | null;
     cpuUserPercent?: number | null;
+    diskHealth?: DiskHealthMetric[];
     diskTotalBytes?: number | null;
     diskUsedBytes?: number | null;
     memoryCacheBytes?: number | null;
@@ -55,6 +56,7 @@ export type CollectorCapabilities = {
     battery?: CollectorAvailability;
     cpu?: CollectorAvailability;
     disk?: CollectorAvailability;
+    diskHealth?: CollectorAvailability;
     load?: CollectorAvailability;
     memory?: CollectorAvailability;
     network?: CollectorAvailability;
@@ -116,6 +118,7 @@ export type HostMetricSample = {
   cpuStealPercent?: number | null;
   cpuSystemPercent?: number | null;
   cpuUserPercent?: number | null;
+  diskHealth?: DiskHealthMetric[];
   diskTotalBytes: number | null;
   diskUsedBytes: number | null;
   disks: Array<{
@@ -151,6 +154,15 @@ export type HostMetricSample = {
   swapUsedBytes?: number | null;
   temperatureCelsius?: number | null;
   uptimeSeconds: number | null;
+};
+
+export type DiskHealthMetric = {
+  deviceName: string;
+  model: string | null;
+  passed: boolean;
+  powerOnHours: number | null;
+  serialNumber: string | null;
+  temperatureCelsius: number | null;
 };
 
 export type MetricsWindow = "1m" | "1h" | "6h" | "24h" | "7d";

@@ -343,6 +343,16 @@ export function createProbeRoutes(services: ProbeRouteServices) {
               writeAwaitMs: metricField(disk, "writeAwaitMs"),
               writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
             })),
+            diskHealth: ((sample.diskHealth ?? []) as ProtoMessage[]).map(
+              (disk) => ({
+                deviceName: disk.deviceName ?? "",
+                model: disk.model || null,
+                passed: Boolean(disk.passed),
+                powerOnHours: unsignedMetricField(disk, "powerOnHours"),
+                serialNumber: disk.serialNumber || null,
+                temperatureCelsius: metricField(disk, "temperatureCelsius"),
+              }),
+            ),
             diskTotalBytes: sample.disks?.length
               ? sumUnsigned(
                   sample.disks as ProtoMessage[],
@@ -1099,6 +1109,20 @@ function liveDetailSampleFromMetricSample(
       writeAwaitMs: metricField(disk, "writeAwaitMs"),
       writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
     })),
+    ...(((sample.diskHealth ?? []) as ProtoMessage[]).length
+      ? {
+          diskHealth: ((sample.diskHealth ?? []) as ProtoMessage[]).map(
+            (disk) => ({
+              deviceName: disk.deviceName ?? "",
+              model: disk.model || null,
+              passed: Boolean(disk.passed),
+              powerOnHours: unsignedMetricField(disk, "powerOnHours"),
+              serialNumber: disk.serialNumber || null,
+              temperatureCelsius: metricField(disk, "temperatureCelsius"),
+            }),
+          ),
+        }
+      : {}),
     hostId,
     memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
     memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
@@ -1577,6 +1601,18 @@ function metricUnsignedField(
     | "swapUsedBytes"
     | "uptimeSeconds",
 ) {
+  return hasMetricField(sample, field)
+    ? unsignedNumber(
+        (sample as Record<string, unknown>)[field] as
+          | number
+          | { toNumber: () => number }
+          | null
+          | undefined,
+      )
+    : null;
+}
+
+function unsignedMetricField(sample: object, field: string) {
   return hasMetricField(sample, field)
     ? unsignedNumber(
         (sample as Record<string, unknown>)[field] as

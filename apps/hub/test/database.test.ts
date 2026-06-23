@@ -549,6 +549,83 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("returns latest-known low-frequency Disk Health when the latest high-frequency sample is sparse", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+
+    database.metrics.recordSample({
+      bootId: "boot-disk-health",
+      collectedAtMs: 1_725_000_000_000,
+      diskHealth: [
+        {
+          deviceName: "/dev/sda",
+          model: "Samsung SSD 870 EVO 1TB",
+          passed: true,
+          powerOnHours: 12_345,
+          serialNumber: "S6PTEST",
+          temperatureCelsius: 31,
+        },
+      ],
+      hostId: 99,
+      probeId: "probe-disk-health",
+      receivedAtMs: 1_725_000_000_500,
+      sequence: 1,
+    });
+    database.metrics.recordSample({
+      bootId: "boot-disk-health",
+      collectedAtMs: 1_725_000_005_000,
+      cpuPercent: 25,
+      hostId: 99,
+      probeId: "probe-disk-health",
+      receivedAtMs: 1_725_000_005_500,
+      sequence: 2,
+    });
+
+    expect(database.metrics.findLatestSample(99)).toEqual(
+      expect.objectContaining({
+        cpuPercent: 25,
+        diskHealth: [
+          expect.objectContaining({
+            deviceName: "/dev/sda",
+            model: "Samsung SSD 870 EVO 1TB",
+            passed: true,
+            powerOnHours: 12_345,
+            serialNumber: "S6PTEST",
+            temperatureCelsius: 31,
+          }),
+        ],
+        sequence: 2,
+      }),
+    );
+    expect(
+      database.metrics.findSamplesForHost({
+        fromCollectedAtMs: 1_725_000_000_000,
+        hostId: 99,
+        toCollectedAtMs: 1_725_000_006_000,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        diskHealth: [
+          expect.objectContaining({
+            deviceName: "/dev/sda",
+            passed: true,
+          }),
+        ],
+        sequence: 1,
+      }),
+      expect.objectContaining({
+        diskHealth: [],
+        sequence: 2,
+      }),
+    ]);
+
+    database.close();
+  });
+
   it("enforces one active Probe Operation per Host and creates lookup indexes", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);

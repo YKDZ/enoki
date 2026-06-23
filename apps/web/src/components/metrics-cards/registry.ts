@@ -1,6 +1,10 @@
 import type { Component } from "vue";
 
-import type { CollectorAvailability, CollectorCapabilities } from "../../types";
+import type {
+  CollectorAvailability,
+  CollectorCapabilities,
+  HostMetricSample,
+} from "../../types";
 import CpuMetricsCard from "./CpuMetricsCard.vue";
 import DiskMetricsCard from "./DiskMetricsCard.vue";
 import MemoryMetricsCard from "./MemoryMetricsCard.vue";
@@ -50,8 +54,12 @@ export function officialMetricCardProps(
       return diskMetricCardProps(capability, {
         chartData: data.chartData.disk,
         chartStartContinuityGapMs: data.chartStartContinuityGapMs,
+        diskHealthCapability: capabilities?.official?.diskHealth,
         hostId: data.hostFacts.id,
-        latestSample: data.latestSample,
+        latestSample: diskLatestSampleWithLatestKnownHealth(
+          data.latestSample,
+          data.latestMetric,
+        ),
         xAxisMaxMs: data.xAxisMaxMs,
         xAxisMinMs: data.xAxisMinMs,
       });
@@ -136,4 +144,22 @@ function officialMetricCapability(
   domain: OfficialMetricDomain,
 ): CollectorAvailability | undefined {
   return capabilities?.official?.[domain];
+}
+
+function diskLatestSampleWithLatestKnownHealth(
+  latestSample: HostMetricSample | null,
+  latestMetric: OfficialMetricCardSourceData["latestMetric"],
+): HostMetricSample | null {
+  if (
+    !latestSample ||
+    latestSample.diskHealth !== undefined ||
+    !latestMetric?.diskHealth
+  ) {
+    return latestSample;
+  }
+
+  return {
+    ...latestSample,
+    diskHealth: latestMetric.diskHealth,
+  };
 }

@@ -77,6 +77,8 @@ pub struct OfficialCollectorCapabilities {
     pub temperature: ::core::option::Option<CollectorAvailability>,
     #[prost(message, optional, tag = "8")]
     pub battery: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "9")]
+    pub disk_health: ::core::option::Option<CollectorAvailability>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CollectorCapabilities {
@@ -187,6 +189,8 @@ pub struct MetricSample {
     pub battery_percent: ::core::option::Option<u32>,
     #[prost(string, optional, tag = "23")]
     pub battery_state: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "24")]
+    pub disk_health: ::prost::alloc::vec::Vec<DiskHealthMetric>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuCoreMetric {
@@ -235,6 +239,21 @@ pub struct DiskUsageMetric {
     pub write_await_ms: ::core::option::Option<f64>,
     #[prost(double, optional, tag = "11")]
     pub weighted_io_percent: ::core::option::Option<f64>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskHealthMetric {
+    #[prost(string, tag = "1")]
+    pub device_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub serial_number: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub passed: bool,
+    #[prost(double, optional, tag = "5")]
+    pub temperature_celsius: ::core::option::Option<f64>,
+    #[prost(uint64, optional, tag = "6")]
+    pub power_on_hours: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NetworkInterfaceMetric {

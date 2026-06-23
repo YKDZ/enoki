@@ -1539,6 +1539,7 @@ export const enoki = $root.enoki = (() => {
              * @property {enoki.v1.ICollectorAvailability|null} [uptime] OfficialCollectorCapabilities uptime
              * @property {enoki.v1.ICollectorAvailability|null} [temperature] OfficialCollectorCapabilities temperature
              * @property {enoki.v1.ICollectorAvailability|null} [battery] OfficialCollectorCapabilities battery
+             * @property {enoki.v1.ICollectorAvailability|null} [diskHealth] OfficialCollectorCapabilities diskHealth
              */
 
             /**
@@ -1621,6 +1622,14 @@ export const enoki = $root.enoki = (() => {
             OfficialCollectorCapabilities.prototype.battery = null;
 
             /**
+             * OfficialCollectorCapabilities diskHealth.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} diskHealth
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.diskHealth = null;
+
+            /**
              * Creates a new OfficialCollectorCapabilities instance using the specified properties.
              * @function create
              * @memberof enoki.v1.OfficialCollectorCapabilities
@@ -1664,6 +1673,8 @@ export const enoki = $root.enoki = (() => {
                     $root.enoki.v1.CollectorAvailability.encode(message.temperature, writer.uint32(/* id 7, wireType 2 =*/58).fork(), q + 1).ldelim();
                 if (message.battery != null && Object.hasOwnProperty.call(message, "battery"))
                     $root.enoki.v1.CollectorAvailability.encode(message.battery, writer.uint32(/* id 8, wireType 2 =*/66).fork(), q + 1).ldelim();
+                if (message.diskHealth != null && Object.hasOwnProperty.call(message, "diskHealth"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.diskHealth, writer.uint32(/* id 9, wireType 2 =*/74).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -1734,6 +1745,10 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 8: {
                             message.battery = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 9: {
+                            message.diskHealth = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
                     default:
@@ -1815,6 +1830,11 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "battery." + error;
                 }
+                if (message.diskHealth != null && Object.hasOwnProperty.call(message, "diskHealth")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.diskHealth, long + 1);
+                    if (error)
+                        return "diskHealth." + error;
+                }
                 return null;
             };
 
@@ -1876,6 +1896,11 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.OfficialCollectorCapabilities.battery: object expected");
                     message.battery = $root.enoki.v1.CollectorAvailability.fromObject(object.battery, long + 1);
                 }
+                if (object.diskHealth != null) {
+                    if (!$util.isObject(object.diskHealth))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.diskHealth: object expected");
+                    message.diskHealth = $root.enoki.v1.CollectorAvailability.fromObject(object.diskHealth, long + 1);
+                }
                 return message;
             };
 
@@ -1905,6 +1930,7 @@ export const enoki = $root.enoki = (() => {
                     object.uptime = null;
                     object.temperature = null;
                     object.battery = null;
+                    object.diskHealth = null;
                 }
                 if (message.cpu != null && Object.hasOwnProperty.call(message, "cpu"))
                     object.cpu = $root.enoki.v1.CollectorAvailability.toObject(message.cpu, options, q + 1);
@@ -1922,6 +1948,8 @@ export const enoki = $root.enoki = (() => {
                     object.temperature = $root.enoki.v1.CollectorAvailability.toObject(message.temperature, options, q + 1);
                 if (message.battery != null && Object.hasOwnProperty.call(message, "battery"))
                     object.battery = $root.enoki.v1.CollectorAvailability.toObject(message.battery, options, q + 1);
+                if (message.diskHealth != null && Object.hasOwnProperty.call(message, "diskHealth"))
+                    object.diskHealth = $root.enoki.v1.CollectorAvailability.toObject(message.diskHealth, options, q + 1);
                 return object;
             };
 
@@ -3651,6 +3679,7 @@ export const enoki = $root.enoki = (() => {
              * @property {number|null} [temperatureCelsius] MetricSample temperatureCelsius
              * @property {number|null} [batteryPercent] MetricSample batteryPercent
              * @property {string|null} [batteryState] MetricSample batteryState
+             * @property {Array.<enoki.v1.IDiskHealthMetric>|null} [diskHealth] MetricSample diskHealth
              */
 
             /**
@@ -3665,6 +3694,7 @@ export const enoki = $root.enoki = (() => {
                 this.disks = [];
                 this.networkInterfaces = [];
                 this.cpuCores = [];
+                this.diskHealth = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -3855,6 +3885,14 @@ export const enoki = $root.enoki = (() => {
              */
             MetricSample.prototype.batteryState = null;
 
+            /**
+             * MetricSample diskHealth.
+             * @member {Array.<enoki.v1.IDiskHealthMetric>} diskHealth
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.diskHealth = $util.emptyArray;
+
             // OneOf field names bound to virtual getters and setters
             let $oneOfFields;
 
@@ -4043,6 +4081,9 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 22, wireType 0 =*/176).uint32(message.batteryPercent);
                 if (message.batteryState != null && Object.hasOwnProperty.call(message, "batteryState"))
                     writer.uint32(/* id 23, wireType 2 =*/186).string(message.batteryState);
+                if (message.diskHealth != null && message.diskHealth.length)
+                    for (let i = 0; i < message.diskHealth.length; ++i)
+                        $root.enoki.v1.DiskHealthMetric.encode(message.diskHealth[i], writer.uint32(/* id 24, wireType 2 =*/194).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -4179,6 +4220,12 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 23: {
                             message.batteryState = reader.string();
+                            break;
+                        }
+                    case 24: {
+                            if (!(message.diskHealth && message.diskHealth.length))
+                                message.diskHealth = [];
+                            message.diskHealth.push($root.enoki.v1.DiskHealthMetric.decode(reader, reader.uint32(), undefined, long + 1));
                             break;
                         }
                     default:
@@ -4344,6 +4391,15 @@ export const enoki = $root.enoki = (() => {
                     if (!$util.isString(message.batteryState))
                         return "batteryState: string expected";
                 }
+                if (message.diskHealth != null && Object.hasOwnProperty.call(message, "diskHealth")) {
+                    if (!Array.isArray(message.diskHealth))
+                        return "diskHealth: array expected";
+                    for (let i = 0; i < message.diskHealth.length; ++i) {
+                        let error = $root.enoki.v1.DiskHealthMetric.verify(message.diskHealth[i], long + 1);
+                        if (error)
+                            return "diskHealth." + error;
+                    }
+                }
                 return null;
             };
 
@@ -4491,6 +4547,16 @@ export const enoki = $root.enoki = (() => {
                     message.batteryPercent = object.batteryPercent >>> 0;
                 if (object.batteryState != null)
                     message.batteryState = String(object.batteryState);
+                if (object.diskHealth) {
+                    if (!Array.isArray(object.diskHealth))
+                        throw TypeError(".enoki.v1.MetricSample.diskHealth: array expected");
+                    message.diskHealth = [];
+                    for (let i = 0; i < object.diskHealth.length; ++i) {
+                        if (!$util.isObject(object.diskHealth[i]))
+                            throw TypeError(".enoki.v1.MetricSample.diskHealth: object expected");
+                        message.diskHealth[i] = $root.enoki.v1.DiskHealthMetric.fromObject(object.diskHealth[i], long + 1);
+                    }
+                }
                 return message;
             };
 
@@ -4515,6 +4581,7 @@ export const enoki = $root.enoki = (() => {
                     object.disks = [];
                     object.networkInterfaces = [];
                     object.cpuCores = [];
+                    object.diskHealth = [];
                 }
                 if (options.defaults) {
                     if ($util.Long) {
@@ -4676,6 +4743,11 @@ export const enoki = $root.enoki = (() => {
                     object.batteryState = message.batteryState;
                     if (options.oneofs)
                         object._batteryState = "batteryState";
+                }
+                if (message.diskHealth && message.diskHealth.length) {
+                    object.diskHealth = [];
+                    for (let j = 0; j < message.diskHealth.length; ++j)
+                        object.diskHealth[j] = $root.enoki.v1.DiskHealthMetric.toObject(message.diskHealth[j], options, q + 1);
                 }
                 return object;
             };
@@ -5852,6 +5924,385 @@ export const enoki = $root.enoki = (() => {
             };
 
             return DiskUsageMetric;
+        })();
+
+        v1.DiskHealthMetric = (function() {
+
+            /**
+             * Properties of a DiskHealthMetric.
+             * @memberof enoki.v1
+             * @interface IDiskHealthMetric
+             * @property {string|null} [deviceName] DiskHealthMetric deviceName
+             * @property {string|null} [model] DiskHealthMetric model
+             * @property {string|null} [serialNumber] DiskHealthMetric serialNumber
+             * @property {boolean|null} [passed] DiskHealthMetric passed
+             * @property {number|null} [temperatureCelsius] DiskHealthMetric temperatureCelsius
+             * @property {Long|null} [powerOnHours] DiskHealthMetric powerOnHours
+             */
+
+            /**
+             * Constructs a new DiskHealthMetric.
+             * @memberof enoki.v1
+             * @classdesc Represents a DiskHealthMetric.
+             * @implements IDiskHealthMetric
+             * @constructor
+             * @param {enoki.v1.IDiskHealthMetric=} [properties] Properties to set
+             */
+            function DiskHealthMetric(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * DiskHealthMetric deviceName.
+             * @member {string} deviceName
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.deviceName = "";
+
+            /**
+             * DiskHealthMetric model.
+             * @member {string} model
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.model = "";
+
+            /**
+             * DiskHealthMetric serialNumber.
+             * @member {string} serialNumber
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.serialNumber = "";
+
+            /**
+             * DiskHealthMetric passed.
+             * @member {boolean} passed
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.passed = false;
+
+            /**
+             * DiskHealthMetric temperatureCelsius.
+             * @member {number|null|undefined} temperatureCelsius
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.temperatureCelsius = null;
+
+            /**
+             * DiskHealthMetric powerOnHours.
+             * @member {Long|null|undefined} powerOnHours
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.powerOnHours = null;
+
+            // OneOf field names bound to virtual getters and setters
+            let $oneOfFields;
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskHealthMetric.prototype, "_temperatureCelsius", {
+                get: $util.oneOfGetter($oneOfFields = ["temperatureCelsius"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskHealthMetric.prototype, "_powerOnHours", {
+                get: $util.oneOfGetter($oneOfFields = ["powerOnHours"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
+             * Creates a new DiskHealthMetric instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {enoki.v1.IDiskHealthMetric=} [properties] Properties to set
+             * @returns {enoki.v1.DiskHealthMetric} DiskHealthMetric instance
+             */
+            DiskHealthMetric.create = function create(properties) {
+                return new DiskHealthMetric(properties);
+            };
+
+            /**
+             * Encodes the specified DiskHealthMetric message. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {enoki.v1.IDiskHealthMetric} message DiskHealthMetric message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            DiskHealthMetric.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.deviceName);
+                if (message.model != null && Object.hasOwnProperty.call(message, "model"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.model);
+                if (message.serialNumber != null && Object.hasOwnProperty.call(message, "serialNumber"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.serialNumber);
+                if (message.passed != null && Object.hasOwnProperty.call(message, "passed"))
+                    writer.uint32(/* id 4, wireType 0 =*/32).bool(message.passed);
+                if (message.temperatureCelsius != null && Object.hasOwnProperty.call(message, "temperatureCelsius"))
+                    writer.uint32(/* id 5, wireType 1 =*/41).double(message.temperatureCelsius);
+                if (message.powerOnHours != null && Object.hasOwnProperty.call(message, "powerOnHours"))
+                    writer.uint32(/* id 6, wireType 0 =*/48).uint64(message.powerOnHours);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified DiskHealthMetric message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {enoki.v1.IDiskHealthMetric} message DiskHealthMetric message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            DiskHealthMetric.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a DiskHealthMetric message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.DiskHealthMetric} DiskHealthMetric
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            DiskHealthMetric.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.DiskHealthMetric();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.deviceName = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.model = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.serialNumber = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.passed = reader.bool();
+                            break;
+                        }
+                    case 5: {
+                            message.temperatureCelsius = reader.double();
+                            break;
+                        }
+                    case 6: {
+                            message.powerOnHours = reader.uint64();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a DiskHealthMetric message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.DiskHealthMetric} DiskHealthMetric
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            DiskHealthMetric.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a DiskHealthMetric message.
+             * @function verify
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            DiskHealthMetric.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                let properties = {};
+                if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
+                    if (!$util.isString(message.deviceName))
+                        return "deviceName: string expected";
+                if (message.model != null && Object.hasOwnProperty.call(message, "model"))
+                    if (!$util.isString(message.model))
+                        return "model: string expected";
+                if (message.serialNumber != null && Object.hasOwnProperty.call(message, "serialNumber"))
+                    if (!$util.isString(message.serialNumber))
+                        return "serialNumber: string expected";
+                if (message.passed != null && Object.hasOwnProperty.call(message, "passed"))
+                    if (typeof message.passed !== "boolean")
+                        return "passed: boolean expected";
+                if (message.temperatureCelsius != null && Object.hasOwnProperty.call(message, "temperatureCelsius")) {
+                    properties._temperatureCelsius = 1;
+                    if (typeof message.temperatureCelsius !== "number")
+                        return "temperatureCelsius: number expected";
+                }
+                if (message.powerOnHours != null && Object.hasOwnProperty.call(message, "powerOnHours")) {
+                    properties._powerOnHours = 1;
+                    if (!$util.isInteger(message.powerOnHours) && !(message.powerOnHours && $util.isInteger(message.powerOnHours.low) && $util.isInteger(message.powerOnHours.high)))
+                        return "powerOnHours: integer|Long expected";
+                }
+                return null;
+            };
+
+            /**
+             * Creates a DiskHealthMetric message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.DiskHealthMetric} DiskHealthMetric
+             */
+            DiskHealthMetric.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.DiskHealthMetric)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.DiskHealthMetric: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.DiskHealthMetric();
+                if (object.deviceName != null)
+                    message.deviceName = String(object.deviceName);
+                if (object.model != null)
+                    message.model = String(object.model);
+                if (object.serialNumber != null)
+                    message.serialNumber = String(object.serialNumber);
+                if (object.passed != null)
+                    message.passed = Boolean(object.passed);
+                if (object.temperatureCelsius != null)
+                    message.temperatureCelsius = Number(object.temperatureCelsius);
+                if (object.powerOnHours != null)
+                    if ($util.Long)
+                        message.powerOnHours = $util.Long.fromValue(object.powerOnHours, true);
+                    else if (typeof object.powerOnHours === "string")
+                        message.powerOnHours = parseInt(object.powerOnHours, 10);
+                    else if (typeof object.powerOnHours === "number")
+                        message.powerOnHours = object.powerOnHours;
+                    else if (typeof object.powerOnHours === "object")
+                        message.powerOnHours = new $util.LongBits(object.powerOnHours.low >>> 0, object.powerOnHours.high >>> 0).toNumber(true);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a DiskHealthMetric message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {enoki.v1.DiskHealthMetric} message DiskHealthMetric
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            DiskHealthMetric.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.deviceName = "";
+                    object.model = "";
+                    object.serialNumber = "";
+                    object.passed = false;
+                }
+                if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
+                    object.deviceName = message.deviceName;
+                if (message.model != null && Object.hasOwnProperty.call(message, "model"))
+                    object.model = message.model;
+                if (message.serialNumber != null && Object.hasOwnProperty.call(message, "serialNumber"))
+                    object.serialNumber = message.serialNumber;
+                if (message.passed != null && Object.hasOwnProperty.call(message, "passed"))
+                    object.passed = message.passed;
+                if (message.temperatureCelsius != null && Object.hasOwnProperty.call(message, "temperatureCelsius")) {
+                    object.temperatureCelsius = options.json && !isFinite(message.temperatureCelsius) ? String(message.temperatureCelsius) : message.temperatureCelsius;
+                    if (options.oneofs)
+                        object._temperatureCelsius = "temperatureCelsius";
+                }
+                if (message.powerOnHours != null && Object.hasOwnProperty.call(message, "powerOnHours")) {
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.powerOnHours = typeof message.powerOnHours === "number" ? BigInt(message.powerOnHours) : $util.Long.fromBits(message.powerOnHours.low >>> 0, message.powerOnHours.high >>> 0, true).toBigInt();
+                    else if (typeof message.powerOnHours === "number")
+                        object.powerOnHours = options.longs === String ? String(message.powerOnHours) : message.powerOnHours;
+                    else
+                        object.powerOnHours = options.longs === String ? $util.Long.prototype.toString.call(message.powerOnHours) : options.longs === Number ? new $util.LongBits(message.powerOnHours.low >>> 0, message.powerOnHours.high >>> 0).toNumber(true) : message.powerOnHours;
+                    if (options.oneofs)
+                        object._powerOnHours = "powerOnHours";
+                }
+                return object;
+            };
+
+            /**
+             * Converts this DiskHealthMetric to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            DiskHealthMetric.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for DiskHealthMetric
+             * @function getTypeUrl
+             * @memberof enoki.v1.DiskHealthMetric
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            DiskHealthMetric.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.DiskHealthMetric";
+            };
+
+            return DiskHealthMetric;
         })();
 
         v1.NetworkInterfaceMetric = (function() {

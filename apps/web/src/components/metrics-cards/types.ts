@@ -56,6 +56,7 @@ export type NetworkMetricCardData = {
 export type DiskMetricCardData = {
   chartData: MetricsChartData["disk"];
   chartStartContinuityGapMs: number;
+  diskHealthCapability?: CollectorAvailability;
   hostId: number;
   latestSample: HostMetricSample | null;
   xAxisMaxMs: number;

@@ -1,12 +1,15 @@
+use enoki_probe::inventory::collect_local_inventory;
 use enoki_probe::metrics::{
     CollectorCadenceClass, CollectorCadenceSchedule, CollectorError, CollectorRegistry,
-    FilesystemCapacity, MetricCollector, MetricsCollectionConfig,
-    collect_battery_metrics_from_sysfs, collect_cpu_metrics_from_proc_stat,
-    collect_default_route_interfaces_from_proc_routes, collect_disk_counters_from_proc_diskstats,
+    DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner, FilesystemCapacity,
+    MetricCollector, MetricsCollectionConfig, collect_battery_metrics_from_sysfs,
+    collect_cpu_metrics_from_proc_stat, collect_default_route_interfaces_from_proc_routes,
+    collect_disk_counters_from_proc_diskstats, collect_disk_health_metrics_from_smartctl_json,
     collect_disk_metrics_from_mounts, collect_load_metrics_from_proc_loadavg,
     collect_memory_metrics_from_proc_meminfo, collect_network_metrics_from_proc_net_dev,
     collect_temperature_celsius_from_sysfs, collect_uptime_seconds_from_proc_uptime,
 };
+use enoki_probe::protocol::enoki::v1::DiskHealthMetric;
 use enoki_probe::protocol::enoki::v1::MetricSample;
 use std::time::Duration;
 
@@ -173,6 +176,183 @@ fn failed_collector_partial_writes_do_not_leak_into_successful_sample() {
 
     assert_eq!(sample.cpu_percent, None);
     assert_eq!(sample.memory_used_bytes, Some(1024));
+}
+
+#[test]
+fn smartctl_json_fixture_parses_disk_health_metrics() {
+    let metrics = collect_disk_health_metrics_from_smartctl_json(
+        "/dev/sda",
+        r#"{
+          "model_name": "Samsung SSD 870 EVO 1TB",
+          "serial_number": "S6PTEST",
+          "smart_status": { "passed": true },
+          "temperature": { "current": 31 },
+          "power_on_time": { "hours": 12345 }
+        }"#,
+    )
+    .expect("healthy smartctl fixture parses")
+    .expect("SMART data is available");
+
+    assert_eq!(metrics.device_name, "/dev/sda");
+    assert_eq!(metrics.model, "Samsung SSD 870 EVO 1TB");
+    assert_eq!(metrics.serial_number, "S6PTEST");
+    assert!(metrics.passed);
+    assert_eq!(metrics.temperature_celsius, Some(31.0));
+    assert_eq!(metrics.power_on_hours, Some(12_345));
+}
+
+#[test]
+fn smartctl_json_fixture_reports_unavailable_when_smart_is_unsupported() {
+    let unavailable = collect_disk_health_metrics_from_smartctl_json(
+        "/dev/vda",
+        r#"{
+          "model_name": "QEMU HARDDISK",
+          "smart_support": { "available": false }
+        }"#,
+    )
+    .expect("unsupported SMART fixture is a parsed capability result");
+
+    assert_eq!(unavailable, None);
+}
+
+#[test]
+fn smartctl_capability_detection_distinguishes_parser_errors_from_unavailable_disks() {
+    assert_eq!(
+        DiskHealthAvailability::from_smartctl_result(Ok(
+            collect_disk_health_metrics_from_smartctl_json(
+                "/dev/sdb",
+                r#"{"smart_status":{"passed":false}}"#,
+            )
+            .expect("fixture parses"),
+        )),
+        DiskHealthAvailability::Available,
+    );
+    assert_eq!(
+        DiskHealthAvailability::from_smartctl_result(Ok(None)),
+        DiskHealthAvailability::Unavailable,
+    );
+    assert_eq!(
+        DiskHealthAvailability::from_smartctl_result(
+            collect_disk_health_metrics_from_smartctl_json("/dev/sdb", "{")
+        ),
+        DiskHealthAvailability::Unavailable,
+    );
+}
+
+#[test]
+fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results() {
+    let mut registry = CollectorRegistry::from_collectors(vec![Box::new(
+        DiskHealthMetricCollector::new(FakeDiskHealthRunner {
+            batches: vec![vec![DiskHealthMetric {
+                device_name: "/dev/sda".to_string(),
+                model: "Samsung SSD 870 EVO 1TB".to_string(),
+                passed: true,
+                power_on_hours: Some(12_345),
+                serial_number: "S6PTEST".to_string(),
+                temperature_celsius: Some(31.0),
+            }]],
+        }),
+    )]);
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(60));
+
+    assert!(
+        registry
+            .collect_due(
+                1,
+                Duration::from_secs(5),
+                schedule,
+                MetricsCollectionConfig::all_enabled(),
+            )
+            .is_none()
+    );
+
+    let low_frequency_sample = registry
+        .collect_due(
+            2,
+            Duration::from_secs(60),
+            schedule,
+            MetricsCollectionConfig::all_enabled(),
+        )
+        .expect("Disk Health emits when the low-frequency cadence is due");
+    assert_eq!(low_frequency_sample.disk_health.len(), 1);
+    assert_eq!(low_frequency_sample.disk_health[0].device_name, "/dev/sda");
+
+    assert!(
+        registry
+            .collect_due(
+                3,
+                Duration::from_secs(65),
+                schedule,
+                MetricsCollectionConfig::all_enabled(),
+            )
+            .is_none()
+    );
+}
+
+#[test]
+fn disk_health_collector_result_updates_inventory_capability() {
+    let mut sample = MetricSample::default();
+    let mut successful_collector = DiskHealthMetricCollector::new(FakeDiskHealthRunner {
+        batches: vec![vec![DiskHealthMetric {
+            device_name: "/dev/sda".to_string(),
+            model: "Samsung SSD 870 EVO 1TB".to_string(),
+            passed: true,
+            power_on_hours: Some(12_345),
+            serial_number: "S6PTEST".to_string(),
+            temperature_celsius: Some(31.0),
+        }]],
+    });
+
+    assert!(
+        successful_collector
+            .collect(&mut sample, MetricsCollectionConfig::all_enabled())
+            .expect("successful disk health collection emits metrics")
+    );
+    assert_eq!(local_disk_health_capability(), Some(true));
+
+    let mut unsupported_collector = DiskHealthMetricCollector::new(FakeDiskHealthRunner {
+        batches: vec![vec![]],
+    });
+    assert!(
+        !unsupported_collector
+            .collect(&mut sample, MetricsCollectionConfig::all_enabled())
+            .expect("unsupported SMART is a successful unavailable result")
+    );
+    assert_eq!(local_disk_health_capability(), Some(false));
+
+    let mut failing_collector = DiskHealthMetricCollector::new(FailingDiskHealthRunner);
+    assert!(
+        failing_collector
+            .collect(&mut sample, MetricsCollectionConfig::all_enabled())
+            .is_err()
+    );
+    assert_eq!(local_disk_health_capability(), Some(false));
+}
+
+struct FakeDiskHealthRunner {
+    batches: Vec<Vec<DiskHealthMetric>>,
+}
+
+impl DiskHealthMetricsRunner for FakeDiskHealthRunner {
+    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError> {
+        Ok(self.batches.pop().unwrap_or_default())
+    }
+}
+
+struct FailingDiskHealthRunner;
+
+impl DiskHealthMetricsRunner for FailingDiskHealthRunner {
+    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError> {
+        Err(CollectorError::new("smartctl permission denied"))
+    }
+}
+
+fn local_disk_health_capability() -> Option<bool> {
+    collect_local_inventory()
+        .collector_capabilities
+        .and_then(|capabilities| capabilities.official)
+        .and_then(|official| official.disk_health)
+        .map(|availability| availability.available)
 }
 
 #[derive(Clone, Copy)]

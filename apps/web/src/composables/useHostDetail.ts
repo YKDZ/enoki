@@ -455,6 +455,7 @@ export function useHostDetail(
         cpuStealPercent: sample.cpuStealPercent,
         cpuSystemPercent: sample.cpuSystemPercent,
         cpuUserPercent: sample.cpuUserPercent,
+        diskHealth: sample.diskHealth ?? host.value.latestMetrics?.diskHealth,
         diskTotalBytes: sample.diskTotalBytes,
         diskUsedBytes: sample.diskUsedBytes,
         memoryCacheBytes: sample.memoryCacheBytes,

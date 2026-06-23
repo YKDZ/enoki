@@ -536,6 +536,72 @@ describe("Host detail data", () => {
     ]);
   });
 
+  it("keeps latest-known Disk Health when a high-frequency detail sample is sparse", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              latestMetrics: {
+                collectedAtMs: 1_725_000_000_000,
+                cpuPercent: 31,
+                diskHealth: [
+                  {
+                    deviceName: "/dev/sda",
+                    model: "Samsung SSD 870 EVO 1TB",
+                    passed: true,
+                    powerOnHours: 12_345,
+                    serialNumber: "S6PTEST",
+                    temperatureCelsius: 31,
+                  },
+                ],
+                diskTotalBytes: 100_000,
+                diskUsedBytes: 50_000,
+                memoryTotalBytes: 200_000,
+                memoryUsedBytes: 80_000,
+                networkRxBitsPerSecond: null,
+                networkRxBytesDelta: null,
+                networkTxBitsPerSecond: null,
+                networkTxBytesDelta: null,
+                receivedAtMs: 1_725_000_000_500,
+                uptimeSeconds: 10_000,
+              },
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    detail.appendLiveSample({
+      ...liveSample(2, 1_725_000_005_000),
+      cpuPercent: 41,
+      receivedAtMs: 1_725_000_005_500,
+    });
+
+    expect(detail.host.value?.latestMetrics).toEqual(
+      expect.objectContaining({
+        cpuPercent: 41,
+        diskHealth: [
+          expect.objectContaining({
+            deviceName: "/dev/sda",
+            passed: true,
+          }),
+        ],
+        receivedAtMs: 1_725_000_005_500,
+      }),
+    );
+  });
+
   it("polls history and plays newly observed samples at the collection cadence", async () => {
     vi.useFakeTimers();
     let metricsRequestCount = 0;

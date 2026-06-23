@@ -124,6 +124,76 @@ describe("live Host summaries", () => {
     expect(result.needsReload).toBe(false);
   });
 
+  it("keeps latest-known Disk Health when a high-frequency live summary is sparse", () => {
+    const result = applyHostLiveSummary(
+      [
+        {
+          ...existingHost,
+          latestMetrics: {
+            collectedAtMs: 1_725_000_000_000,
+            cpuPercent: 31,
+            diskHealth: [
+              {
+                deviceName: "/dev/sda",
+                model: "Samsung SSD 870 EVO 1TB",
+                passed: true,
+                powerOnHours: 12_345,
+                serialNumber: "S6PTEST",
+                temperatureCelsius: 31,
+              },
+            ],
+            diskTotalBytes: 100_000,
+            diskUsedBytes: 50_000,
+            memoryTotalBytes: 200_000,
+            memoryUsedBytes: 80_000,
+            networkRxBitsPerSecond: null,
+            networkRxBytesDelta: null,
+            networkTxBitsPerSecond: null,
+            networkTxBytesDelta: null,
+            receivedAtMs: 1_725_000_000_500,
+            uptimeSeconds: 10_000,
+          },
+        },
+      ],
+      {
+        id: 1,
+        lastSeenAtMs: 1_725_000_005_500,
+        latestMetrics: {
+          collectedAtMs: 1_725_000_005_000,
+          cpuPercent: 41,
+          diskTotalBytes: 100_000,
+          diskUsedBytes: 55_000,
+          memoryTotalBytes: 200_000,
+          memoryUsedBytes: 90_000,
+          networkRxBitsPerSecond: null,
+          networkRxBytesDelta: null,
+          networkTxBitsPerSecond: null,
+          networkTxBytesDelta: null,
+          receivedAtMs: 1_725_000_005_500,
+          uptimeSeconds: 10_005,
+        },
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+    );
+
+    expect(result.hosts[0]?.latestMetrics).toEqual(
+      expect.objectContaining({
+        cpuPercent: 41,
+        diskHealth: [
+          expect.objectContaining({
+            deviceName: "/dev/sda",
+            passed: true,
+          }),
+        ],
+        receivedAtMs: 1_725_000_005_500,
+      }),
+    );
+  });
+
   it("reloads the typed host list when a WebSocket summary references an unknown host", async () => {
     const hosts = ref<HostSummary[]>([existingHost]);
     let reloadCount = 0;

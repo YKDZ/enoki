@@ -51,7 +51,11 @@ defineProps<DiskMetricCardProps>();
       </div>
     </template>
     <template v-if="data.latestSample" #details>
-      <DiskDetails :latest-sample="data.latestSample" variant="stack" />
+      <DiskDetails
+        :disk-health-capability="data.diskHealthCapability"
+        :latest-sample="data.latestSample"
+        variant="stack"
+      />
     </template>
     <template v-else #details>
       <div aria-hidden="true" class="grid gap-3">

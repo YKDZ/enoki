@@ -13,6 +13,7 @@ const collectorCapabilitiesSchema = v.nullable(
         battery: v.optional(collectorAvailabilitySchema),
         cpu: v.optional(collectorAvailabilitySchema),
         disk: v.optional(collectorAvailabilitySchema),
+        diskHealth: v.optional(collectorAvailabilitySchema),
         load: v.optional(collectorAvailabilitySchema),
         memory: v.optional(collectorAvailabilitySchema),
         network: v.optional(collectorAvailabilitySchema),
@@ -53,6 +54,18 @@ export const hostLiveSummarySchema = v.object({
       cpuStealPercent: v.optional(nullableNumberSchema),
       cpuSystemPercent: v.optional(nullableNumberSchema),
       cpuUserPercent: v.optional(nullableNumberSchema),
+      diskHealth: v.optional(
+        v.array(
+          v.object({
+            deviceName: v.string(),
+            model: v.nullable(v.string()),
+            passed: v.boolean(),
+            powerOnHours: nullableNumberSchema,
+            serialNumber: v.nullable(v.string()),
+            temperatureCelsius: nullableNumberSchema,
+          }),
+        ),
+      ),
       diskTotalBytes: nullableNumberSchema,
       diskUsedBytes: nullableNumberSchema,
       memoryCacheBytes: v.optional(nullableNumberSchema),
@@ -94,6 +107,18 @@ export const hostDetailSampleSchema = v.object({
   cpuStealPercent: v.optional(nullableNumberSchema),
   cpuSystemPercent: v.optional(nullableNumberSchema),
   cpuUserPercent: v.optional(nullableNumberSchema),
+  diskHealth: v.optional(
+    v.array(
+      v.object({
+        deviceName: v.string(),
+        model: v.nullable(v.string()),
+        passed: v.boolean(),
+        powerOnHours: nullableNumberSchema,
+        serialNumber: v.nullable(v.string()),
+        temperatureCelsius: nullableNumberSchema,
+      }),
+    ),
+  ),
   disks: v.array(
     v.object({
       availableBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),

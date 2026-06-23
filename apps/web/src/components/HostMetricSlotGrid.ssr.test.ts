@@ -247,4 +247,89 @@ describe("Host metric slot grid", () => {
     expect(html).toContain("挂载点");
     expect(html).not.toContain("正在加载指标");
   });
+
+  it("uses latest-known Disk Health in disk details unless capability is unavailable", async () => {
+    const sample: HostMetricSample = {
+      collectedAtMs: 1_725_000_005_000,
+      cpuCores: [],
+      cpuPercent: 30,
+      diskTotalBytes: 100,
+      diskUsedBytes: 60,
+      disks: [
+        {
+          availableBytes: 40,
+          filesystemType: "ext4",
+          mountPoint: "/",
+          totalBytes: 100,
+          usedBytes: 60,
+        },
+      ],
+      memoryTotalBytes: 100,
+      memoryUsedBytes: 50,
+      networkInterfaces: [],
+      networkRxBitsPerSecond: null,
+      networkRxBytesDelta: null,
+      networkTxBitsPerSecond: null,
+      networkTxBytesDelta: null,
+      receivedAtMs: 1_725_000_005_500,
+      sequence: 2,
+      uptimeSeconds: 120,
+    };
+    const latestMetric = {
+      ...sample,
+      diskHealth: [
+        {
+          deviceName: "/dev/sda",
+          model: "Samsung SSD 870 EVO 1TB",
+          passed: true,
+          powerOnHours: 12_345,
+          serialNumber: "S6PTEST",
+          temperatureCelsius: 31,
+        },
+      ],
+    };
+    const supportedHost = {
+      ...host,
+      collectorCapabilities: {
+        official: {
+          cpu: { available: true },
+          disk: { available: true },
+          diskHealth: { available: true },
+          memory: { available: true },
+          network: { available: true },
+        },
+      },
+    };
+
+    const supportedHtml = await renderHostMetricSlotGrid(supportedHost, {
+      latestMetric,
+      latestSample: sample,
+      samples: [sample],
+    });
+    expect(supportedHtml).toContain("硬盘健康");
+    expect(supportedHtml).toContain("Samsung SSD 870 EVO 1TB");
+
+    const unavailableHtml = await renderHostMetricSlotGrid(
+      {
+        ...supportedHost,
+        collectorCapabilities: {
+          official: {
+            cpu: { available: true },
+            disk: { available: true },
+            diskHealth: { available: false },
+            memory: { available: true },
+            network: { available: true },
+          },
+        },
+      },
+      {
+        latestMetric,
+        latestSample: sample,
+        samples: [sample],
+      },
+    );
+    expect(unavailableHtml).not.toContain("硬盘健康");
+    expect(unavailableHtml).not.toContain("Samsung SSD 870 EVO 1TB");
+    expect(unavailableHtml).toContain("挂载点");
+  });
 });

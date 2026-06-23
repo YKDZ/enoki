@@ -9,6 +9,7 @@ use std::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 
+use crate::metrics::{DiskHealthAvailability, last_disk_health_collector_availability};
 use crate::protocol::enoki::v1::{
     CollectorAvailability, CollectorCapabilities, FilesystemInventory, Inventory,
     NetworkInterfaceInventory, OfficialCollectorCapabilities,
@@ -74,6 +75,9 @@ fn official_collector_capabilities(
             disk: Some(CollectorAvailability {
                 available: !filesystems.is_empty(),
             }),
+            disk_health: Some(CollectorAvailability {
+                available: disk_health_available(),
+            }),
             load: Some(CollectorAvailability { available: true }),
             memory: Some(CollectorAvailability {
                 available: memory_total_bytes > 0,
@@ -86,6 +90,14 @@ fn official_collector_capabilities(
             }),
             uptime: Some(CollectorAvailability { available: true }),
         }),
+    }
+}
+
+fn disk_health_available() -> bool {
+    match last_disk_health_collector_availability() {
+        Some(DiskHealthAvailability::Available) => true,
+        Some(DiskHealthAvailability::Unavailable) => false,
+        None => Path::new("/usr/sbin/smartctl").exists() || Path::new("/usr/bin/smartctl").exists(),
     }
 }
 

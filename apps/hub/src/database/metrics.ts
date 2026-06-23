@@ -9,6 +9,7 @@ import {
   type MetricSampleRow,
   officialMetricCpu,
   officialMetricDiskSummary,
+  officialMetricDiskHealth,
   officialMetricLoad,
   officialMetricMemory,
   officialMetricNetworkSummary,
@@ -53,6 +54,14 @@ export type RawMetricSampleInput = {
     weightedIoPercent?: number | null;
     writeAwaitMs?: number | null;
     writeBytesDelta: number;
+  }>;
+  diskHealth?: Array<{
+    deviceName: string;
+    model?: string | null;
+    passed: boolean;
+    powerOnHours?: number | null;
+    serialNumber?: string | null;
+    temperatureCelsius?: number | null;
   }>;
   diskTotalBytes?: number | null;
   diskUsedBytes?: number | null;
@@ -109,6 +118,14 @@ export type MetricHistorySample = MetricSampleRow & {
     writeAwaitMs: number | null;
     writeBytesDelta: number;
   }>;
+  diskHealth: Array<{
+    deviceName: string;
+    model: string | null;
+    passed: boolean;
+    powerOnHours: number | null;
+    serialNumber: string | null;
+    temperatureCelsius: number | null;
+  }>;
   networkInterfaces: Array<{
     name: string;
     rxBytesDelta: number;
@@ -117,7 +134,11 @@ export type MetricHistorySample = MetricSampleRow & {
 };
 
 export type MetricsRepository = {
-  findLatestSample: (hostId: number) => MetricSampleRow | null;
+  findLatestSample: (hostId: number) =>
+    | (MetricSampleRow & {
+        diskHealth: MetricHistorySample["diskHealth"];
+      })
+    | null;
   findSamplesForHost: (input: {
     fromCollectedAtMs: number;
     hostId: number;
@@ -147,7 +168,19 @@ export function createMetricsRepository(
           )
           .limit(1)
           .get() ?? null;
-      return sample ? (hydrateSamples(database, [sample]).at(0) ?? null) : null;
+      if (!sample) {
+        return null;
+      }
+
+      const hydratedSample = hydrateSamples(database, [sample]).at(0);
+      if (!hydratedSample) {
+        return null;
+      }
+
+      return {
+        ...hydratedSample,
+        diskHealth: latestDiskHealthForHost(database, hostId),
+      };
     },
     findSamplesForHost(input) {
       const samples = database
@@ -195,6 +228,10 @@ export function createMetricsRepository(
           rxBytesDelta: number;
           txBytesDelta: number;
         }>
+      >();
+      const diskHealthBySample = new Map<
+        number,
+        MetricHistorySample["diskHealth"]
       >();
 
       for (const core of database
@@ -253,11 +290,30 @@ export function createMetricsRepository(
         );
       }
 
+      for (const diskHealth of database
+        .select()
+        .from(officialMetricDiskHealth)
+        .where(inArray(officialMetricDiskHealth.metricSampleId, sampleIds))
+        .orderBy(asc(officialMetricDiskHealth.deviceName))
+        .all()) {
+        const rows = diskHealthBySample.get(diskHealth.metricSampleId) ?? [];
+        rows.push({
+          deviceName: diskHealth.deviceName,
+          model: diskHealth.model,
+          passed: diskHealth.passed,
+          powerOnHours: diskHealth.powerOnHours,
+          serialNumber: diskHealth.serialNumber,
+          temperatureCelsius: diskHealth.temperatureCelsius,
+        });
+        diskHealthBySample.set(diskHealth.metricSampleId, rows);
+      }
+
       const hydratedSamples = hydrateSamples(database, samples);
       return hydratedSamples.map((sample) => ({
         ...sample,
         cpuCores: coresBySample.get(sample.id) ?? [],
         disks: disksBySample.get(sample.id) ?? [],
+        diskHealth: diskHealthBySample.get(sample.id) ?? [],
         networkInterfaces: interfacesBySample.get(sample.id) ?? [],
       }));
     },
@@ -494,6 +550,23 @@ function insertMetricSample(
       .run();
   }
 
+  if (input.diskHealth?.length) {
+    database
+      .insert(officialMetricDiskHealth)
+      .values(
+        input.diskHealth.map((disk) => ({
+          deviceName: disk.deviceName,
+          metricSampleId: sample.id,
+          model: disk.model ?? null,
+          passed: disk.passed,
+          powerOnHours: disk.powerOnHours ?? null,
+          serialNumber: disk.serialNumber ?? null,
+          temperatureCelsius: disk.temperatureCelsius ?? null,
+        })),
+      )
+      .run();
+  }
+
   if (input.networkInterfaces?.length) {
     database
       .insert(metricNetworkInterfaces)
@@ -597,4 +670,42 @@ function domainValues<T extends { id: number; metricSampleId: number }>(
 
 function hasAnyValue(...values: unknown[]) {
   return values.some((value) => value !== null && value !== undefined);
+}
+
+function latestDiskHealthForHost(
+  database: MetricsDatabase,
+  hostId: number,
+): MetricHistorySample["diskHealth"] {
+  const latestDiskHealthSample = database
+    .select({ id: metricSamples.id })
+    .from(metricSamples)
+    .where(eq(metricSamples.hostId, hostId))
+    .innerJoin(
+      officialMetricDiskHealth,
+      eq(officialMetricDiskHealth.metricSampleId, metricSamples.id),
+    )
+    .orderBy(desc(metricSamples.receivedAtMs), desc(metricSamples.sequence))
+    .limit(1)
+    .get();
+
+  if (!latestDiskHealthSample) {
+    return [];
+  }
+
+  return database
+    .select()
+    .from(officialMetricDiskHealth)
+    .where(
+      eq(officialMetricDiskHealth.metricSampleId, latestDiskHealthSample.id),
+    )
+    .orderBy(asc(officialMetricDiskHealth.deviceName))
+    .all()
+    .map((disk) => ({
+      deviceName: disk.deviceName,
+      model: disk.model,
+      passed: disk.passed,
+      powerOnHours: disk.powerOnHours,
+      serialNumber: disk.serialNumber,
+      temperatureCelsius: disk.temperatureCelsius,
+    }));
 }

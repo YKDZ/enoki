@@ -540,6 +540,9 @@ export namespace enoki {
 
             /** OfficialCollectorCapabilities battery */
             battery?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities diskHealth */
+            diskHealth?: (enoki.v1.ICollectorAvailability|null);
         }
 
         /** Represents an OfficialCollectorCapabilities. */
@@ -574,6 +577,9 @@ export namespace enoki {
 
             /** OfficialCollectorCapabilities battery. */
             public battery?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities diskHealth. */
+            public diskHealth?: (enoki.v1.ICollectorAvailability|null);
 
             /**
              * Creates a new OfficialCollectorCapabilities instance using the specified properties.
@@ -1311,6 +1317,9 @@ export namespace enoki {
 
             /** MetricSample batteryState */
             batteryState?: (string|null);
+
+            /** MetricSample diskHealth */
+            diskHealth?: (enoki.v1.IDiskHealthMetric[]|null);
         }
 
         /** Represents a MetricSample. */
@@ -1390,6 +1399,9 @@ export namespace enoki {
 
             /** MetricSample batteryState. */
             public batteryState?: (string|null);
+
+            /** MetricSample diskHealth. */
+            public diskHealth: enoki.v1.IDiskHealthMetric[];
 
             /**
              * Creates a new MetricSample instance using the specified properties.
@@ -1771,6 +1783,133 @@ export namespace enoki {
 
             /**
              * Gets the default type url for DiskUsageMetric
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a DiskHealthMetric. */
+        interface IDiskHealthMetric {
+
+            /** DiskHealthMetric deviceName */
+            deviceName?: (string|null);
+
+            /** DiskHealthMetric model */
+            model?: (string|null);
+
+            /** DiskHealthMetric serialNumber */
+            serialNumber?: (string|null);
+
+            /** DiskHealthMetric passed */
+            passed?: (boolean|null);
+
+            /** DiskHealthMetric temperatureCelsius */
+            temperatureCelsius?: (number|null);
+
+            /** DiskHealthMetric powerOnHours */
+            powerOnHours?: (Long|null);
+        }
+
+        /** Represents a DiskHealthMetric. */
+        class DiskHealthMetric implements IDiskHealthMetric {
+
+            /**
+             * Constructs a new DiskHealthMetric.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IDiskHealthMetric);
+
+            /** DiskHealthMetric deviceName. */
+            public deviceName: string;
+
+            /** DiskHealthMetric model. */
+            public model: string;
+
+            /** DiskHealthMetric serialNumber. */
+            public serialNumber: string;
+
+            /** DiskHealthMetric passed. */
+            public passed: boolean;
+
+            /** DiskHealthMetric temperatureCelsius. */
+            public temperatureCelsius?: (number|null);
+
+            /** DiskHealthMetric powerOnHours. */
+            public powerOnHours?: (Long|null);
+
+            /**
+             * Creates a new DiskHealthMetric instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns DiskHealthMetric instance
+             */
+            public static create(properties?: enoki.v1.IDiskHealthMetric): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Encodes the specified DiskHealthMetric message. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
+             * @param message DiskHealthMetric message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IDiskHealthMetric, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified DiskHealthMetric message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
+             * @param message DiskHealthMetric message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IDiskHealthMetric, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a DiskHealthMetric message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns DiskHealthMetric
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Decodes a DiskHealthMetric message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns DiskHealthMetric
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Verifies a DiskHealthMetric message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a DiskHealthMetric message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns DiskHealthMetric
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Creates a plain object from a DiskHealthMetric message. Also converts values to other types if specified.
+             * @param message DiskHealthMetric
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.DiskHealthMetric, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this DiskHealthMetric to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for DiskHealthMetric
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

@@ -274,6 +274,14 @@ async function sendReport(
   input: {
     collectedAtMs: number;
     cpuPercent: number;
+    diskHealth?: Array<{
+      deviceName: string;
+      model?: string;
+      passed: boolean;
+      powerOnHours?: number;
+      serialNumber?: string;
+      temperatureCelsius?: number;
+    }>;
     sequence: number;
   },
 ) {
@@ -323,6 +331,7 @@ async function sendReport(
               usedBytes: 8_000,
             },
           ],
+          diskHealth: input.diskHealth ?? [],
           memoryTotalBytes: 8_589_934_592,
           memoryUsedBytes: 4_294_967_296,
           networkInterfaces: [
@@ -581,6 +590,99 @@ describe("Host detail API", () => {
     );
 
     expect(invalidWindowResponse.status).toBe(400);
+
+    database.close();
+  });
+
+  it("returns latest-known Disk Health from sparse low-frequency Probe reports", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    nowMs = 1_725_000_005_000;
+    await sendReport(app, registration, {
+      collectedAtMs: 1_725_000_004_500,
+      cpuPercent: 33.5,
+      diskHealth: [
+        {
+          deviceName: "/dev/sda",
+          model: "Samsung SSD 870 EVO 1TB",
+          passed: true,
+          powerOnHours: 12_345,
+          serialNumber: "S6PTEST",
+          temperatureCelsius: 31,
+        },
+      ],
+      sequence: 1,
+    });
+    nowMs = 1_725_000_010_000;
+    await sendReport(app, registration, {
+      collectedAtMs: 1_725_000_009_500,
+      cpuPercent: 42.5,
+      sequence: 2,
+    });
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        latestMetrics: expect.objectContaining({
+          cpuPercent: 42.5,
+          diskHealth: [
+            expect.objectContaining({
+              deviceName: "/dev/sda",
+              model: "Samsung SSD 870 EVO 1TB",
+              passed: true,
+              powerOnHours: 12_345,
+              serialNumber: "S6PTEST",
+              temperatureCelsius: 31,
+            }),
+          ],
+        }),
+      }),
+    });
+
+    const historyResponse = await app.request(
+      `/api/web/hosts/${hostId}/metrics?window=1h`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+      },
+    );
+    expect(historyResponse.status).toBe(200);
+    await expect(historyResponse.json()).resolves.toEqual({
+      metrics: expect.objectContaining({
+        samples: [
+          expect.objectContaining({
+            diskHealth: [
+              expect.objectContaining({
+                deviceName: "/dev/sda",
+                passed: true,
+              }),
+            ],
+            sequence: 1,
+          }),
+          expect.objectContaining({ sequence: 2 }),
+        ],
+      }),
+    });
 
     database.close();
   });

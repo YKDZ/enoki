@@ -31,6 +31,7 @@ impl Default for CollectorRuntimeProfile {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrivilegedCollectorId {
+    DiskHealthSmartctl,
     FixedCollector,
     NetworkEnabledCollector,
     TimeoutCollector,
@@ -39,6 +40,7 @@ pub enum PrivilegedCollectorId {
 impl PrivilegedCollectorId {
     pub fn as_internal_arg(self) -> &'static str {
         match self {
+            Self::DiskHealthSmartctl => "disk-health.smartctl",
             Self::FixedCollector => "fixed.collector",
             Self::NetworkEnabledCollector => "network.collector",
             Self::TimeoutCollector => "timeout.collector",
@@ -47,6 +49,7 @@ impl PrivilegedCollectorId {
 
     pub fn from_internal_arg(value: &str) -> Option<Self> {
         match value {
+            "disk-health.smartctl" => Some(Self::DiskHealthSmartctl),
             "fixed.collector" => Some(Self::FixedCollector),
             "network.collector" => Some(Self::NetworkEnabledCollector),
             "timeout.collector" => Some(Self::TimeoutCollector),
@@ -101,7 +104,7 @@ pub trait PrivilegedRuntimeRunner {
     fn run(
         &mut self,
         invocation: PrivilegedRuntimeInvocation,
-    ) -> Result<(), PrivilegedRuntimeError>;
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError>;
 }
 
 impl<T> PrivilegedRuntimeRunner for &mut T
@@ -111,7 +114,7 @@ where
     fn run(
         &mut self,
         invocation: PrivilegedRuntimeInvocation,
-    ) -> Result<(), PrivilegedRuntimeError> {
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
         (**self).run(invocation)
     }
 }
@@ -133,12 +136,17 @@ where
     pub fn run(
         &mut self,
         collector: &dyn PrivilegedCollector,
-    ) -> Result<(), PrivilegedRuntimeError> {
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
         self.runner.run(PrivilegedRuntimeInvocation {
             collector_id: collector.collector_id(),
             profile: *collector.runtime_profile(),
         })
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PrivilegedRuntimeOutput {
+    pub stdout: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,8 +191,10 @@ impl PrivilegedRuntimeExecutionPlan {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PrivilegedRuntimeProcessOutput;
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PrivilegedRuntimeProcessOutput {
+    pub stdout: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrivilegedRuntimeProcessError {
@@ -232,12 +242,14 @@ where
     fn run(
         &mut self,
         invocation: PrivilegedRuntimeInvocation,
-    ) -> Result<(), PrivilegedRuntimeError> {
+    ) -> Result<PrivilegedRuntimeOutput, PrivilegedRuntimeError> {
         let plan = PrivilegedRuntimeExecutionPlan::new(&self.probe_binary, invocation);
 
         self.process_runner
             .run(&plan)
-            .map(|_| ())
+            .map(|output| PrivilegedRuntimeOutput {
+                stdout: output.stdout,
+            })
             .map_err(|error| match error {
                 PrivilegedRuntimeProcessError::Failed(message) => {
                     PrivilegedRuntimeError::collector_failed(message)
@@ -274,7 +286,9 @@ impl PrivilegedRuntimeProcessRunner for SystemdPrivilegedRuntimeProcessRunner {
         })?;
 
         if output.status.success() {
-            return Ok(PrivilegedRuntimeProcessOutput);
+            return Ok(PrivilegedRuntimeProcessOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            });
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);

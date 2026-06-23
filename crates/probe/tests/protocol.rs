@@ -1,5 +1,5 @@
 use enoki_probe::protocol::enoki::v1::{
-    CollectorAvailability, CollectorCapabilities, Inventory, MetricSample,
+    CollectorAvailability, CollectorCapabilities, DiskHealthMetric, Inventory, MetricSample,
     OfficialCollectorCapabilities, ProbeConfigurationResponse, ProbeOperation,
     ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationStatus,
     ProbeRegistrationRequest, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
@@ -116,6 +116,62 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
     assert_eq!(decoded.metrics[0].sequence, 7);
     assert_eq!(decoded.metrics[0].collected_at_ms, 1_710_000_000_000);
     assert_eq!(decoded.metrics[1].cpu_percent, Some(51.25));
+}
+
+#[test]
+fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
+    let request = ProbeReportRequest {
+        boot_id: "boot-01".to_string(),
+        metrics: vec![MetricSample {
+            collected_at_ms: 1_710_000_000_000,
+            disk_health: vec![DiskHealthMetric {
+                device_name: "/dev/sda".to_string(),
+                model: "Samsung SSD 870 EVO 1TB".to_string(),
+                passed: true,
+                power_on_hours: Some(12_345),
+                serial_number: "S6PTEST".to_string(),
+                temperature_celsius: Some(31.0),
+            }],
+            sequence: 7,
+            ..MetricSample::default()
+        }],
+        probe_configuration_version: "config-v1".to_string(),
+        probe_id: "probe-01".to_string(),
+        sequence_end: 7,
+        sequence_start: 7,
+        ..ProbeReportRequest::default()
+    };
+    let inventory = Inventory {
+        collector_capabilities: Some(CollectorCapabilities {
+            official: Some(OfficialCollectorCapabilities {
+                disk_health: Some(CollectorAvailability { available: true }),
+                ..OfficialCollectorCapabilities::default()
+            }),
+        }),
+        ..Inventory::default()
+    };
+
+    let decoded_request = ProbeReportRequest::decode(request.encode_to_vec().as_slice())
+        .expect("generated Probe report should decode Disk Health");
+    let decoded_inventory =
+        Inventory::decode(inventory.encode_to_vec().as_slice()).expect("inventory decodes");
+
+    assert_eq!(
+        decoded_request.metrics[0].disk_health[0].device_name,
+        "/dev/sda"
+    );
+    assert_eq!(
+        decoded_request.metrics[0].disk_health[0].power_on_hours,
+        Some(12_345)
+    );
+    assert!(
+        decoded_inventory
+            .collector_capabilities
+            .and_then(|capabilities| capabilities.official)
+            .and_then(|official| official.disk_health)
+            .expect("disk health capability")
+            .available
+    );
 }
 
 #[test]

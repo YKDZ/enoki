@@ -348,6 +348,9 @@ export function createHostRoutes(services: HostRouteServices) {
               cpuSystemPercent: sample.cpuSystemPercent,
               cpuUserPercent: sample.cpuUserPercent,
               diskTotalBytes: sample.diskTotalBytes,
+              ...(sample.diskHealth.length
+                ? { diskHealth: sample.diskHealth }
+                : {}),
               diskUsedBytes: sample.diskUsedBytes,
               disks: sample.disks,
               memoryCacheBytes: sample.memoryCacheBytes,

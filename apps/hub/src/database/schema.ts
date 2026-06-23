@@ -420,6 +420,28 @@ export type MetricNetworkInterfaceRow =
 export type NewMetricNetworkInterfaceRow =
   typeof metricNetworkInterfaces.$inferInsert;
 
+export const officialMetricDiskHealth = sqliteTable(
+  "official_metric_disk_health",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    deviceName: text().notNull(),
+    model: text(),
+    serialNumber: text(),
+    passed: integer({ mode: "boolean" }).notNull(),
+    temperatureCelsius: real(),
+    powerOnHours: integer(),
+  },
+  (table) => [
+    index("official_metric_disk_health_sample_idx").on(table.metricSampleId),
+  ],
+);
+
+export type OfficialMetricDiskHealthRow =
+  typeof officialMetricDiskHealth.$inferSelect;
+export type NewOfficialMetricDiskHealthRow =
+  typeof officialMetricDiskHealth.$inferInsert;
+
 export const probeConfigurationGlobalDefaults = sqliteTable(
   "probe_configuration_global_defaults",
   {
