@@ -42,7 +42,11 @@ describe("Probe upgrade monitor", () => {
         }),
       }),
     );
-    expect(onSuccess).toHaveBeenCalledOnce();
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 1,
+      }),
+    );
   });
 
   it("does not repeat a terminal toast after the operation is resolved", async () => {
@@ -111,10 +115,15 @@ describe("Probe upgrade monitor", () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
 
-    expect(onFailure).toHaveBeenCalledWith({
-      code: "running_timeout",
-      message: "升级超时。",
-    });
+    expect(onFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 1,
+      }),
+      {
+        code: "running_timeout",
+        message: "升级超时。",
+      },
+    );
   });
 });
 

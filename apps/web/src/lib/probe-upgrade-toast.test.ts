@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import type { HostDetail } from "../types";
 import {
+  probeUpgradeToastTitle,
   shouldToastProbeUpgradeFailure,
   shouldToastProbeUpgradeSuccess,
 } from "./probe-upgrade-toast";
@@ -109,4 +111,81 @@ describe("Probe upgrade failure toast", () => {
       ),
     ).toBe(false);
   });
+
+  it("uses the display name in upgrade result toast titles", () => {
+    expect(
+      probeUpgradeToastTitle(
+        hostDetail({
+          displayName: "腾讯云轻量",
+        }),
+        "succeeded",
+      ),
+    ).toBe("腾讯云轻量 探针升级完成");
+  });
+
+  it("falls back to hostname when display name is blank", () => {
+    expect(
+      probeUpgradeToastTitle(
+        hostDetail({
+          displayName: " ",
+          inventory: {
+            hostname: "racknerd-01",
+          },
+        }),
+        "failed",
+      ),
+    ).toBe("racknerd-01 探针升级失败");
+  });
 });
+
+function hostDetail(overrides: Partial<HostDetail>) {
+  return {
+    clockSkew: {
+      detected: false,
+      lastDeltaMs: null,
+    },
+    connectAddress: "10.0.0.1",
+    cpu: "1%",
+    cpuModel: null,
+    description: "",
+    displayName: "测试主机",
+    hostMetadata: {
+      connectAddress: "10.0.0.1",
+      description: "",
+      displayName: "测试主机",
+      observedIp: null,
+    },
+    id: 1,
+    inventory: null,
+    lastReportAtMs: null,
+    latestMetrics: null,
+    memory: "n/a",
+    probeConfiguration: {
+      configuration: {
+        collectCpu: true,
+        collectDisk: true,
+        collectLoad: true,
+        collectMemory: true,
+        collectNetwork: true,
+        collectUptime: true,
+        metricsCollectionIntervalSeconds: 1,
+        reportingBatchIntervalSeconds: 3,
+        version: "default",
+      },
+      mode: "inherit",
+      version: "default",
+    },
+    probeUpgradeEligibility: {
+      currentProbeAssetSetVersion: null,
+      currentProbeVersion: "0.1.45",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_version_current",
+    },
+    probeUpgradeStatus: null,
+    probeVersion: "0.1.45",
+    status: "online",
+    system: "Linux",
+    warnings: [],
+    ...overrides,
+  } satisfies HostDetail;
+}

@@ -46,6 +46,7 @@ import {
   type LoginErrorKind,
 } from "./lib/login-errors";
 import { configurationErrorText } from "./lib/probe-configuration";
+import { probeUpgradeToastTitle } from "./lib/probe-upgrade-toast";
 import type {
   EnrollmentResponse,
   HostMetadataDraft,
@@ -144,16 +145,16 @@ const detail = useHostDetail(activeDetailHostIdForComposable, {
   onUnauthorized: requireLogin,
 });
 const probeUpgradeMonitor = useProbeUpgradeMonitor({
-  onFailure(failure) {
-    toast.error("探针升级失败", {
+  onFailure(host, failure) {
+    toast.error(probeUpgradeToastTitle(host, "failed"), {
       description: failure.message || failure.code,
     });
   },
   onHostDetail(host) {
     detail.applyHostDetail(host);
   },
-  onSuccess() {
-    toast.success("探针升级完成");
+  onSuccess(host) {
+    toast.success(probeUpgradeToastTitle(host, "succeeded"));
   },
   onUnauthorized: requireLogin,
 });

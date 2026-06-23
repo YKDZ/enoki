@@ -10,9 +10,12 @@ const activeProbeUpgradeStates = new Set(["pending", "accepted", "running"]);
 
 export function useProbeUpgradeMonitor(options: {
   fetchJson?: FetchJson;
-  onFailure: (failure: { code: string; message: string }) => void;
+  onFailure: (
+    host: HostDetail,
+    failure: { code: string; message: string },
+  ) => void;
   onHostDetail?: (host: HostDetail) => void;
-  onSuccess: () => void;
+  onSuccess: (host: HostDetail) => void;
   onUnauthorized?: () => void;
   pollIntervalMs?: number;
 }) {
@@ -89,13 +92,13 @@ export function useProbeUpgradeMonitor(options: {
 
     if (status.state === "succeeded") {
       trackedOperations.delete(hostId);
-      options.onSuccess();
+      options.onSuccess(response.host);
       return;
     }
 
     if (status.state === "failed" && status.failure) {
       trackedOperations.delete(hostId);
-      options.onFailure(status.failure);
+      options.onFailure(response.host, status.failure);
       return;
     }
 
