@@ -1,6 +1,10 @@
 # Enoki
 
-开箱即用的轻量 Linux 服务器监控平台，Rust 编写的探针本体仅 2.2 MiB，单探针常态 PSS 约 2 MiB。
+![GitHub License](https://img.shields.io/github/license/YKDZ/enoki)
+
+安全且开箱即用的轻量 Linux 服务器监控平台。
+
+Rust 编写的探针本体仅 `2.2 MiB`，单探针常态 PSS 约 `2 MiB`。
 
 采取探针 POST Hub 架构，使用 [protobuf](https://github.com/protocolbuffers/protobuf) 作数据序列化协议以减少探针消耗的流量。
 
@@ -8,7 +12,6 @@
 
 Enoki **没有**以下功能：
 
-- 通过外部命令采集指标
 - 多用户系统
 - OAuth 验证
 - Windows / Mac 等系统支持
@@ -29,8 +32,22 @@ Enoki **有**以下功能：
 - Hub 侧触发探针更新 / 自删除
 - 探针常态下不拥有 root 权限
 - CPU / RAM / 磁盘 / 网络接口等多种常见指标
-- 可配置的采集和上报间隔
+- 基于时钟的指标级采集 / 上报间隔
 - 探针操作使用一次性操作 token 校验
+
+> Enoki 有意保持这种简洁性，若你需要更多外部指标，可以自行二次开发。
+>
+> 我们的架构从探针到数据库到 Web UI 全链路都是易于在编译前扩展的；现有签名、资产分发和 Probe 本地边界可作为自定义分发链路的基础。
+
+## 源码级扩展
+
+Source-Level Extension 是 Enoki 面向 fork 维护者的源码级定制方式：在源码中增加 Probe collector、强类型 protobuf、Hub storage/API 和 Metrics Card，然后自行构建、签名、发布自定义 Enoki 分发版。它适合新增 Metrics 域、采集能力和展示边界，不是稳定的运行时扩展 API。
+
+Enoki 默认发行版不会因为这套扩展模型开放新的远程控制面。Enoki 不支持运行时插件、Hub 下发 collector code、Owner 自定义脚本或任意 shell 命令；Probe Configuration 仍然只是观测配置，不是命令通道。新增 Metrics 域应通过强类型 protobuf 生成 Rust / TypeScript 类型，由 Probe collector 采集，Hub storage/API 入库和查询，再由对应 Metrics Card 消费强类型 Metrics 与 Collector Capability。
+
+Collector Capability 是 Probe 上报的 Inventory 事实，用来描述一个 Host 是否具备某个 collector 的采集条件；不可用的采集域不应在 Owner 界面中生成空卡片。需要独立数据库模式演进时，源码级扩展应优先使用独立 Migration Layer，避免和核心 Hub storage 或官方 Metrics storage 混在同一条迁移历史中。
+
+Privileged Collector Runtime 只是一条编译期固定的本地边界：它为已经打包进自定义 Probe 分发版的 collector code 创建临时较高权限环境，并应用编译期声明的超时、网络访问等约束。它不是安全证明，也不是 Hub、Owner、安装命令或 Probe Configuration 可以在运行时放宽的执行策略；fork 维护者需要负责其中 collector 行为的安全性。
 
 ## 界面
 
@@ -55,8 +72,8 @@ Enoki 的安全边界尽量保持简单：
 - 探针注册后会生成自己的非对称身份密钥，后续上报和操作状态使用请求签名证明身份，Hub 不再依赖共享密钥识别探针
 - 探针身份私钥和启动配置需要保持私密，配置文件不应允许其他用户读取
 - Hub 分发探针安装脚本和二进制资产；探针升级前会校验资产清单签名、受信公钥指纹、归档校验和、目标版本和本地防降级规则
-- 探针只会从最初安装时配置的 Hub 下载升级资产，不会跟随其他来源；签名校验用于防止资产被替换，防降级用于防止旧版本重放
-- 官方发版使用本仓库配置的资产签名密钥和安装脚本签名密钥；如果不想信任上游发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针资产
+- 探针只会从最初安装时配置的 Hub 下载升级资产；签名校验用于防止资产被替换，防降级用于防止旧版本重放
+- 官方版使用本仓库配置的资产签名密钥和安装脚本签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针资产
 - Hub 管理员可以触发探针升级和卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界
 - 探针常态下不以 root 运行；升级和卸载通过受限的 systemd 入口提权，只允许执行内置操作，不支持下发任意系统命令
 - `ENOKI_WEB_UI_NO_PASSWORD=true` 会让管理界面和管理接口无需登录即可访问，只适合完全可信的内网、演示或临时截图环境，**禁止公网裸奔**
