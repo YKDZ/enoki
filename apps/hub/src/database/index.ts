@@ -35,7 +35,14 @@ export type HubDatabase = {
 };
 
 export type InitializeHubDatabaseOptions = {
+  migrationLayers?: MigrationLayer[];
   migrationsFolder?: string;
+};
+
+export type MigrationLayer = {
+  historyTable: string;
+  migrationsFolder: string;
+  name: string;
 };
 
 export function initializeHubDatabase(
@@ -48,9 +55,12 @@ export function initializeHubDatabase(
   const sqlite = new DatabaseSync(config.sqlitePath);
   sqlite.exec("PRAGMA journal_mode = WAL");
   const database = drizzle({ casing: "snake_case", client: sqlite, schema });
-  migrate(database, {
-    migrationsFolder: options.migrationsFolder ?? defaultMigrationsFolder(),
-  });
+  for (const layer of migrationLayers(options)) {
+    migrate(database, {
+      migrationsFolder: layer.migrationsFolder,
+      migrationsTable: layer.historyTable,
+    });
+  }
 
   return {
     audit: createAuditRepository(database),
@@ -66,12 +76,59 @@ export function initializeHubDatabase(
   };
 }
 
+function migrationLayers(
+  options: InitializeHubDatabaseOptions,
+): MigrationLayer[] {
+  if (options.migrationLayers) {
+    return options.migrationLayers;
+  }
+
+  if (!options.migrationsFolder) {
+    return [
+      {
+        historyTable: "__drizzle_migrations",
+        migrationsFolder: defaultMigrationsFolder(),
+        name: "core",
+      },
+      {
+        historyTable: "__official_metrics_migrations",
+        migrationsFolder: defaultOfficialMetricsMigrationsFolder(),
+        name: "official_metrics",
+      },
+    ];
+  }
+
+  return [
+    {
+      historyTable: "__drizzle_migrations",
+      migrationsFolder: options.migrationsFolder,
+      name: "core",
+    },
+  ];
+}
+
 function defaultMigrationsFolder() {
   const sourceLayoutMigrationsFolder = new URL("../../drizzle", import.meta.url)
     .pathname;
   const candidates = [
     sourceLayoutMigrationsFolder,
     new URL("../../../drizzle", import.meta.url).pathname,
+  ];
+
+  return (
+    candidates.find((candidate) => existsSync(candidate)) ??
+    sourceLayoutMigrationsFolder
+  );
+}
+
+function defaultOfficialMetricsMigrationsFolder() {
+  const sourceLayoutMigrationsFolder = new URL(
+    "../../drizzle-official-metrics",
+    import.meta.url,
+  ).pathname;
+  const candidates = [
+    sourceLayoutMigrationsFolder,
+    new URL("../../../drizzle-official-metrics", import.meta.url).pathname,
   ];
 
   return (

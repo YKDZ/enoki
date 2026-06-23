@@ -914,7 +914,7 @@ describe("Probe report API", () => {
     );
   });
 
-  it("stores raw Metrics samples and exposes current Host Status summaries", async () => {
+  it("stores official Metrics as sample envelope and domain rows while exposing current Host Status summaries", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1026,21 +1026,87 @@ describe("Probe report API", () => {
       expect.objectContaining({
         boot_id: "boot-01",
         collected_at_ms: 1_725_000_009_500,
-        cpu_percent: 42.5,
-        disk_total_bytes: 2_048,
-        disk_used_bytes: 1_536,
-        load_1: 0.12,
-        load_5: 0.34,
-        load_15: 0.56,
-        memory_total_bytes: 2_147_483_648,
-        memory_used_bytes: 1_073_741_824,
-        network_rx_bytes_delta: 4_000,
-        network_tx_bytes_delta: 2_000,
         received_at_ms: 1_725_000_010_000,
         sequence: 1,
-        uptime_seconds: 86_400,
       }),
     );
+    expect(storedSample).toEqual(
+      expect.objectContaining({
+        cpu_percent: null,
+        disk_total_bytes: null,
+        disk_used_bytes: null,
+        load_1: null,
+        load_5: null,
+        load_15: null,
+        memory_total_bytes: null,
+        memory_used_bytes: null,
+        network_rx_bytes_delta: null,
+        network_tx_bytes_delta: null,
+        uptime_seconds: null,
+      }),
+    );
+
+    expect(
+      database.sqlite
+        .prepare(
+          "select cpu_percent, cpu_user_percent, cpu_system_percent from official_metric_cpu where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      cpu_percent: 42.5,
+      cpu_system_percent: null,
+      cpu_user_percent: null,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select memory_used_bytes, memory_total_bytes from official_metric_memory where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      memory_total_bytes: 2_147_483_648,
+      memory_used_bytes: 1_073_741_824,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select load_1, load_5, load_15 from official_metric_load where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      load_1: 0.12,
+      load_5: 0.34,
+      load_15: 0.56,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select uptime_seconds from official_metric_uptime where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      uptime_seconds: 86_400,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select disk_used_bytes, disk_total_bytes from official_metric_disk_summary where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      disk_total_bytes: 2_048,
+      disk_used_bytes: 1_536,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select network_rx_bytes_delta, network_tx_bytes_delta from official_metric_network_summary where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      network_rx_bytes_delta: 4_000,
+      network_tx_bytes_delta: 2_000,
+    });
 
     expect(
       database.sqlite
@@ -1168,21 +1234,35 @@ describe("Probe report API", () => {
 
     const storedSample = database.sqlite
       .prepare(
-        "select cpu_percent, memory_used_bytes, memory_total_bytes, load_1, load_5, load_15, uptime_seconds, disk_used_bytes, disk_total_bytes, network_rx_bytes_delta, network_tx_bytes_delta from metric_samples",
+        "select id, cpu_percent, memory_used_bytes, memory_total_bytes, load_1, load_5, load_15, uptime_seconds, disk_used_bytes, disk_total_bytes, network_rx_bytes_delta, network_tx_bytes_delta from metric_samples",
       )
-      .get();
+      .get() as {
+      id: number;
+      [key: string]: number | null;
+    };
     expect(storedSample).toEqual({
       cpu_percent: null,
       disk_total_bytes: null,
       disk_used_bytes: null,
+      id: storedSample.id,
       load_1: null,
       load_5: null,
       load_15: null,
-      memory_total_bytes: 2_147_483_648,
-      memory_used_bytes: 1_073_741_824,
+      memory_total_bytes: null,
+      memory_used_bytes: null,
       network_rx_bytes_delta: null,
       network_tx_bytes_delta: null,
       uptime_seconds: null,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select memory_used_bytes, memory_total_bytes from official_metric_memory where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      memory_total_bytes: 2_147_483_648,
+      memory_used_bytes: 1_073_741_824,
     });
 
     const hostsResponse = await app.request("/api/web/hosts", {
@@ -1285,6 +1365,171 @@ describe("Probe report API", () => {
             cpuPercent: 42.5,
           }),
           status: "online",
+        }),
+      ],
+    });
+
+    database.close();
+  });
+
+  it("retries a Metrics report after a domain storage failure without losing the sample", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-retry-domain-failure",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_009_500,
+            memoryTotalBytes: 2_147_483_648,
+            memoryUsedBytes: 1_073_741_824,
+            sequence: 9,
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 9,
+        sequenceStart: 9,
+      }),
+    ).finish();
+
+    const sendReport = () =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", reportBody),
+      );
+
+    database.sqlite.exec(`
+      create trigger fail_official_metric_memory_insert
+      before insert on official_metric_memory
+      begin
+        select raise(abort, 'injected official metric memory failure');
+      end
+    `);
+
+    const failedResponse = await sendReport();
+    expect(failedResponse.status).toBe(500);
+
+    database.sqlite.exec("drop trigger fail_official_metric_memory_insert");
+
+    const retryResponse = await sendReport();
+    expect(retryResponse.status).toBe(200);
+
+    const counts = database.sqlite
+      .prepare(
+        "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples, (select count(*) from official_metric_memory) as memory",
+      )
+      .get() as { memory: number; observations: number; samples: number };
+    expect(counts).toEqual({
+      memory: 1,
+      observations: 1,
+      samples: 1,
+    });
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          latestMetrics: expect.objectContaining({
+            memoryTotalBytes: 2_147_483_648,
+            memoryUsedBytes: 1_073_741_824,
+          }),
+        }),
+      ],
+    });
+
+    database.close();
+  });
+
+  it("does not add Metrics to an already accepted empty observation", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const emptyBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-empty-then-sample",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 3,
+        sequenceStart: 3,
+      }),
+    ).finish();
+    const changedBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-empty-then-sample",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_009_500,
+            cpuPercent: 42.5,
+            sequence: 3,
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 3,
+        sequenceStart: 3,
+      }),
+    ).finish();
+
+    const emptyResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", emptyBody),
+    );
+    const changedDuplicateResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", changedBody),
+    );
+
+    expect(emptyResponse.status).toBe(200);
+    expect(changedDuplicateResponse.status).toBe(200);
+    expect(
+      database.sqlite
+        .prepare(
+          "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
+        )
+        .get(),
+    ).toEqual({
+      observations: 1,
+      samples: 0,
+    });
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          latestMetrics: null,
         }),
       ],
     });

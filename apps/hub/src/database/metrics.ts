@@ -7,10 +7,18 @@ import {
   metricNetworkInterfaces,
   metricSamples,
   type MetricSampleRow,
+  officialMetricCpu,
+  officialMetricDiskSummary,
+  officialMetricLoad,
+  officialMetricMemory,
+  officialMetricNetworkSummary,
+  officialMetricThermalPower,
+  officialMetricUptime,
   reportObservations,
 } from "./schema.js";
 
 type MetricsDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
+type MetricsWriteDatabase = Pick<MetricsDatabase, "insert">;
 
 export type RawMetricSampleInput = {
   bootId: string;
@@ -116,6 +124,10 @@ export type MetricsRepository = {
     toCollectedAtMs: number;
   }) => MetricHistorySample[];
   recordObservation: (input: ReportObservationInput) => boolean;
+  recordObservationSample: (input: {
+    observation: ReportObservationInput;
+    sample?: RawMetricSampleInput;
+  }) => boolean;
   recordSample: (input: RawMetricSampleInput) => void;
 };
 
@@ -124,7 +136,7 @@ export function createMetricsRepository(
 ): MetricsRepository {
   return {
     findLatestSample(hostId) {
-      return (
+      const sample =
         database
           .select()
           .from(metricSamples)
@@ -134,8 +146,8 @@ export function createMetricsRepository(
             desc(metricSamples.sequence),
           )
           .limit(1)
-          .get() ?? null
-      );
+          .get() ?? null;
+      return sample ? (hydrateSamples(database, [sample]).at(0) ?? null) : null;
     },
     findSamplesForHost(input) {
       const samples = database
@@ -241,7 +253,8 @@ export function createMetricsRepository(
         );
       }
 
-      return samples.map((sample) => ({
+      const hydratedSamples = hydrateSamples(database, samples);
+      return hydratedSamples.map((sample) => ({
         ...sample,
         cpuCores: coresBySample.get(sample.id) ?? [],
         disks: disksBySample.get(sample.id) ?? [],
@@ -249,132 +262,339 @@ export function createMetricsRepository(
       }));
     },
     recordObservation(input) {
-      const row = database
-        .insert(reportObservations)
-        .values({
-          bootId: input.bootId,
-          hostId: input.hostId,
-          probeId: input.probeId,
-          receivedAtMs: input.receivedAtMs,
-          sequence: input.sequence,
-        })
-        .onConflictDoNothing({
-          target: [
-            reportObservations.probeId,
-            reportObservations.bootId,
-            reportObservations.sequence,
-          ],
-        })
-        .returning()
-        .get();
+      return insertReportObservation(database, input);
+    },
+    recordObservationSample(input) {
+      return database.transaction((transaction) => {
+        const inserted = insertReportObservation(
+          transaction,
+          input.observation,
+        );
+        if (!inserted) {
+          return false;
+        }
 
-      return Boolean(row);
+        if (input.sample) {
+          insertMetricSample(transaction, input.sample);
+        }
+
+        return true;
+      });
     },
     recordSample(input) {
-      const sample = database
-        .insert(metricSamples)
-        .values({
-          bootId: input.bootId,
-          collectedAtMs: input.collectedAtMs,
-          batteryPercent: input.batteryPercent ?? null,
-          batteryState: input.batteryState ?? null,
-          cpuIdlePercent: input.cpuIdlePercent ?? null,
-          cpuIowaitPercent: input.cpuIowaitPercent ?? null,
-          cpuPercent: input.cpuPercent ?? null,
-          cpuStealPercent: input.cpuStealPercent ?? null,
-          cpuSystemPercent: input.cpuSystemPercent ?? null,
-          cpuUserPercent: input.cpuUserPercent ?? null,
-          diskTotalBytes: input.diskTotalBytes ?? null,
-          diskUsedBytes: input.diskUsedBytes ?? null,
-          load1: input.load1 ?? null,
-          load5: input.load5 ?? null,
-          load15: input.load15 ?? null,
-          hostId: input.hostId,
-          memoryCacheBytes: input.memoryCacheBytes ?? null,
-          memoryTotalBytes: input.memoryTotalBytes ?? null,
-          memoryUsedBytes: input.memoryUsedBytes ?? null,
-          networkRxBytesDelta: input.networkRxBytesDelta ?? null,
-          networkTxBytesDelta: input.networkTxBytesDelta ?? null,
-          probeId: input.probeId,
-          receivedAtMs: input.receivedAtMs,
-          sequence: input.sequence,
-          swapTotalBytes: input.swapTotalBytes ?? null,
-          swapUsedBytes: input.swapUsedBytes ?? null,
-          temperatureCelsius: input.temperatureCelsius ?? null,
-          uptimeSeconds: input.uptimeSeconds ?? null,
-        })
-        .onConflictDoNothing({
-          target: [
-            metricSamples.probeId,
-            metricSamples.bootId,
-            metricSamples.sequence,
-          ],
-        })
-        .returning()
-        .get();
-
-      if (!sample) {
-        return;
-      }
-
-      if (input.cpuCores?.length) {
-        database
-          .insert(metricCpuCores)
-          .values(
-            input.cpuCores.map((core) => ({
-              idle: core.idle,
-              iowait: core.iowait,
-              irq: core.irq,
-              metricSampleId: sample.id,
-              name: core.name,
-              nice: core.nice,
-              softirq: core.softirq,
-              steal: core.steal,
-              system: core.system,
-              usagePercent: core.usagePercent,
-              user: core.user,
-            })),
-          )
-          .run();
-      }
-
-      if (input.disks?.length) {
-        database
-          .insert(metricDisks)
-          .values(
-            input.disks.map((disk) => ({
-              availableBytes: disk.availableBytes,
-              filesystemType: disk.filesystemType,
-              ioUtilizationPercent: disk.ioUtilizationPercent ?? null,
-              metricSampleId: sample.id,
-              mountPoint: disk.mountPoint,
-              readAwaitMs: disk.readAwaitMs ?? null,
-              readBytesDelta: disk.readBytesDelta,
-              totalBytes: disk.totalBytes,
-              usedBytes: disk.usedBytes,
-              weightedIoPercent: disk.weightedIoPercent ?? null,
-              writeAwaitMs: disk.writeAwaitMs ?? null,
-              writeBytesDelta: disk.writeBytesDelta,
-            })),
-          )
-          .run();
-      }
-
-      if (input.networkInterfaces?.length) {
-        database
-          .insert(metricNetworkInterfaces)
-          .values(
-            input.networkInterfaces.map((networkInterface) => ({
-              metricSampleId: sample.id,
-              name: networkInterface.name,
-              rxBytes: networkInterface.rxBytes,
-              rxBytesDelta: networkInterface.rxBytesDelta,
-              txBytes: networkInterface.txBytes,
-              txBytesDelta: networkInterface.txBytesDelta,
-            })),
-          )
-          .run();
-      }
+      database.transaction((transaction) => {
+        insertMetricSample(transaction, input);
+      });
     },
   };
+}
+
+function insertReportObservation(
+  database: MetricsWriteDatabase,
+  input: ReportObservationInput,
+) {
+  const row = database
+    .insert(reportObservations)
+    .values({
+      bootId: input.bootId,
+      hostId: input.hostId,
+      probeId: input.probeId,
+      receivedAtMs: input.receivedAtMs,
+      sequence: input.sequence,
+    })
+    .onConflictDoNothing({
+      target: [
+        reportObservations.probeId,
+        reportObservations.bootId,
+        reportObservations.sequence,
+      ],
+    })
+    .returning()
+    .get();
+
+  return Boolean(row);
+}
+
+function insertMetricSample(
+  database: MetricsWriteDatabase,
+  input: RawMetricSampleInput,
+) {
+  const sample = database
+    .insert(metricSamples)
+    .values({
+      bootId: input.bootId,
+      collectedAtMs: input.collectedAtMs,
+      hostId: input.hostId,
+      probeId: input.probeId,
+      receivedAtMs: input.receivedAtMs,
+      sequence: input.sequence,
+    })
+    .onConflictDoNothing({
+      target: [
+        metricSamples.probeId,
+        metricSamples.bootId,
+        metricSamples.sequence,
+      ],
+    })
+    .returning()
+    .get();
+
+  if (!sample) {
+    return;
+  }
+
+  if (
+    hasAnyValue(
+      input.cpuPercent,
+      input.cpuUserPercent,
+      input.cpuSystemPercent,
+      input.cpuIowaitPercent,
+      input.cpuStealPercent,
+      input.cpuIdlePercent,
+    )
+  ) {
+    database
+      .insert(officialMetricCpu)
+      .values({
+        cpuIdlePercent: input.cpuIdlePercent ?? null,
+        cpuIowaitPercent: input.cpuIowaitPercent ?? null,
+        cpuPercent: input.cpuPercent ?? null,
+        cpuStealPercent: input.cpuStealPercent ?? null,
+        cpuSystemPercent: input.cpuSystemPercent ?? null,
+        cpuUserPercent: input.cpuUserPercent ?? null,
+        metricSampleId: sample.id,
+      })
+      .run();
+  }
+
+  if (
+    hasAnyValue(
+      input.memoryUsedBytes,
+      input.memoryTotalBytes,
+      input.memoryCacheBytes,
+      input.swapTotalBytes,
+      input.swapUsedBytes,
+    )
+  ) {
+    database
+      .insert(officialMetricMemory)
+      .values({
+        memoryCacheBytes: input.memoryCacheBytes ?? null,
+        memoryTotalBytes: input.memoryTotalBytes ?? null,
+        memoryUsedBytes: input.memoryUsedBytes ?? null,
+        metricSampleId: sample.id,
+        swapTotalBytes: input.swapTotalBytes ?? null,
+        swapUsedBytes: input.swapUsedBytes ?? null,
+      })
+      .run();
+  }
+
+  if (hasAnyValue(input.load1, input.load5, input.load15)) {
+    database
+      .insert(officialMetricLoad)
+      .values({
+        load1: input.load1 ?? null,
+        load5: input.load5 ?? null,
+        load15: input.load15 ?? null,
+        metricSampleId: sample.id,
+      })
+      .run();
+  }
+
+  if (hasAnyValue(input.uptimeSeconds)) {
+    database
+      .insert(officialMetricUptime)
+      .values({
+        metricSampleId: sample.id,
+        uptimeSeconds: input.uptimeSeconds ?? null,
+      })
+      .run();
+  }
+
+  if (
+    hasAnyValue(
+      input.temperatureCelsius,
+      input.batteryPercent,
+      input.batteryState,
+    )
+  ) {
+    database
+      .insert(officialMetricThermalPower)
+      .values({
+        batteryPercent: input.batteryPercent ?? null,
+        batteryState: input.batteryState ?? null,
+        metricSampleId: sample.id,
+        temperatureCelsius: input.temperatureCelsius ?? null,
+      })
+      .run();
+  }
+
+  if (hasAnyValue(input.diskUsedBytes, input.diskTotalBytes)) {
+    database
+      .insert(officialMetricDiskSummary)
+      .values({
+        diskTotalBytes: input.diskTotalBytes ?? null,
+        diskUsedBytes: input.diskUsedBytes ?? null,
+        metricSampleId: sample.id,
+      })
+      .run();
+  }
+
+  if (hasAnyValue(input.networkRxBytesDelta, input.networkTxBytesDelta)) {
+    database
+      .insert(officialMetricNetworkSummary)
+      .values({
+        metricSampleId: sample.id,
+        networkRxBytesDelta: input.networkRxBytesDelta ?? null,
+        networkTxBytesDelta: input.networkTxBytesDelta ?? null,
+      })
+      .run();
+  }
+
+  if (input.cpuCores?.length) {
+    database
+      .insert(metricCpuCores)
+      .values(
+        input.cpuCores.map((core) => ({
+          idle: core.idle,
+          iowait: core.iowait,
+          irq: core.irq,
+          metricSampleId: sample.id,
+          name: core.name,
+          nice: core.nice,
+          softirq: core.softirq,
+          steal: core.steal,
+          system: core.system,
+          usagePercent: core.usagePercent,
+          user: core.user,
+        })),
+      )
+      .run();
+  }
+
+  if (input.disks?.length) {
+    database
+      .insert(metricDisks)
+      .values(
+        input.disks.map((disk) => ({
+          availableBytes: disk.availableBytes,
+          filesystemType: disk.filesystemType,
+          ioUtilizationPercent: disk.ioUtilizationPercent ?? null,
+          metricSampleId: sample.id,
+          mountPoint: disk.mountPoint,
+          readAwaitMs: disk.readAwaitMs ?? null,
+          readBytesDelta: disk.readBytesDelta,
+          totalBytes: disk.totalBytes,
+          usedBytes: disk.usedBytes,
+          weightedIoPercent: disk.weightedIoPercent ?? null,
+          writeAwaitMs: disk.writeAwaitMs ?? null,
+          writeBytesDelta: disk.writeBytesDelta,
+        })),
+      )
+      .run();
+  }
+
+  if (input.networkInterfaces?.length) {
+    database
+      .insert(metricNetworkInterfaces)
+      .values(
+        input.networkInterfaces.map((networkInterface) => ({
+          metricSampleId: sample.id,
+          name: networkInterface.name,
+          rxBytes: networkInterface.rxBytes,
+          rxBytesDelta: networkInterface.rxBytesDelta,
+          txBytes: networkInterface.txBytes,
+          txBytesDelta: networkInterface.txBytesDelta,
+        })),
+      )
+      .run();
+  }
+}
+
+function hydrateSamples(
+  database: MetricsDatabase,
+  samples: MetricSampleRow[],
+): MetricSampleRow[] {
+  if (samples.length === 0) {
+    return [];
+  }
+
+  const sampleIds = samples.map((sample) => sample.id);
+  const cpuBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricCpu)
+      .where(inArray(officialMetricCpu.metricSampleId, sampleIds))
+      .all(),
+  );
+  const memoryBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricMemory)
+      .where(inArray(officialMetricMemory.metricSampleId, sampleIds))
+      .all(),
+  );
+  const loadBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricLoad)
+      .where(inArray(officialMetricLoad.metricSampleId, sampleIds))
+      .all(),
+  );
+  const uptimeBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricUptime)
+      .where(inArray(officialMetricUptime.metricSampleId, sampleIds))
+      .all(),
+  );
+  const thermalPowerBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricThermalPower)
+      .where(inArray(officialMetricThermalPower.metricSampleId, sampleIds))
+      .all(),
+  );
+  const diskSummaryBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricDiskSummary)
+      .where(inArray(officialMetricDiskSummary.metricSampleId, sampleIds))
+      .all(),
+  );
+  const networkSummaryBySample = rowsBySampleId(
+    database
+      .select()
+      .from(officialMetricNetworkSummary)
+      .where(inArray(officialMetricNetworkSummary.metricSampleId, sampleIds))
+      .all(),
+  );
+
+  return samples.map((sample) => ({
+    ...sample,
+    ...cpuBySample.get(sample.id),
+    ...memoryBySample.get(sample.id),
+    ...loadBySample.get(sample.id),
+    ...uptimeBySample.get(sample.id),
+    ...thermalPowerBySample.get(sample.id),
+    ...diskSummaryBySample.get(sample.id),
+    ...networkSummaryBySample.get(sample.id),
+  }));
+}
+
+function rowsBySampleId<T extends { id: number; metricSampleId: number }>(
+  rows: T[],
+) {
+  return new Map(rows.map((row) => [row.metricSampleId, domainValues(row)]));
+}
+
+function domainValues<T extends { id: number; metricSampleId: number }>(
+  row: T,
+) {
+  const { id: _id, metricSampleId: _metricSampleId, ...values } = row;
+  return values;
+}
+
+function hasAnyValue(...values: unknown[]) {
+  return values.some((value) => value !== null && value !== undefined);
 }

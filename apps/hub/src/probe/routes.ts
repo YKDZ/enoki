@@ -292,107 +292,128 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       sequence <= validatedReport.sequenceEnd;
       sequence += 1
     ) {
-      const inserted = services.metrics.recordObservation({
-        bootId: request.bootId,
-        hostId: host.id,
-        probeId: host.probeId,
-        receivedAtMs: reportReceivedAtMs,
-        sequence,
-      });
       const sample = samplesBySequence.get(sequence);
 
-      if (inserted && sample) {
-        services.metrics.recordSample({
-          bootId: request.bootId,
-          collectedAtMs: signedNumber(sample.collectedAtMs),
-          cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map((core) => ({
-            idle: unsignedNumber(core.idle),
-            iowait: unsignedNumber(core.iowait),
-            irq: unsignedNumber(core.irq),
-            name: core.name ?? "",
-            nice: unsignedNumber(core.nice),
-            softirq: unsignedNumber(core.softirq),
-            steal: unsignedNumber(core.steal),
-            system: unsignedNumber(core.system),
-            usagePercent: core.usagePercent ?? 0,
-            user: unsignedNumber(core.user),
-          })),
-          batteryPercent: metricUnsignedField(sample, "batteryPercent"),
-          batteryState: hasMetricField(sample, "batteryState")
-            ? sample.batteryState || null
-            : null,
-          cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
-          cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
-          cpuPercent: metricField(sample, "cpuPercent"),
-          cpuStealPercent: metricField(sample, "cpuStealPercent"),
-          cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
-          cpuUserPercent: metricField(sample, "cpuUserPercent"),
-          disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
-            availableBytes: unsignedNumber(disk.availableBytes),
-            filesystemType: disk.filesystemType ?? "",
-            ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
-            mountPoint: disk.mountPoint ?? "",
-            readAwaitMs: metricField(disk, "readAwaitMs"),
-            readBytesDelta: unsignedNumber(disk.readBytesDelta),
-            totalBytes: unsignedNumber(disk.totalBytes),
-            usedBytes: unsignedNumber(disk.usedBytes),
-            weightedIoPercent: metricField(disk, "weightedIoPercent"),
-            writeAwaitMs: metricField(disk, "writeAwaitMs"),
-            writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
-          })),
-          diskTotalBytes: sample.disks?.length
-            ? sumUnsigned(
-                sample.disks as ProtoMessage[],
-                (disk: ProtoMessage) => disk.totalBytes,
-              )
-            : null,
-          diskUsedBytes: sample.disks?.length
-            ? sumUnsigned(
-                sample.disks as ProtoMessage[],
-                (disk: ProtoMessage) => disk.usedBytes,
-              )
-            : null,
-          load1: metricField(sample, "load_1"),
-          load5: metricField(sample, "load_5"),
-          load15: metricField(sample, "load_15"),
-          hostId: host.id,
-          memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
-          memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
-          memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
-          networkInterfaces: (
-            (sample.networkInterfaces ?? []) as ProtoMessage[]
-          ).map((networkInterface) => ({
-            name: networkInterface.name ?? "",
-            rxBytes: unsignedNumber(networkInterface.rxBytes),
-            rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
-            txBytes: unsignedNumber(networkInterface.txBytes),
-            txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
-          })),
-          networkRxBytesDelta: sample.networkInterfaces?.length
-            ? sumUnsigned(
-                sample.networkInterfaces as ProtoMessage[],
-                (networkInterface: ProtoMessage) =>
-                  networkInterface.rxBytesDelta,
-              )
-            : null,
-          networkTxBytesDelta: sample.networkInterfaces?.length
-            ? sumUnsigned(
-                sample.networkInterfaces as ProtoMessage[],
-                (networkInterface: ProtoMessage) =>
-                  networkInterface.txBytesDelta,
-              )
-            : null,
-          probeId: host.probeId,
-          receivedAtMs: reportReceivedAtMs,
-          sequence,
-          swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
-          swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
-          temperatureCelsius: metricField(sample, "temperatureCelsius"),
-          uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
+      if (sample) {
+        const inserted = services.metrics.recordObservationSample({
+          observation: {
+            bootId: request.bootId,
+            hostId: host.id,
+            probeId: host.probeId,
+            receivedAtMs: reportReceivedAtMs,
+            sequence,
+          },
+          sample: {
+            bootId: request.bootId,
+            collectedAtMs: signedNumber(sample.collectedAtMs),
+            cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map(
+              (core) => ({
+                idle: unsignedNumber(core.idle),
+                iowait: unsignedNumber(core.iowait),
+                irq: unsignedNumber(core.irq),
+                name: core.name ?? "",
+                nice: unsignedNumber(core.nice),
+                softirq: unsignedNumber(core.softirq),
+                steal: unsignedNumber(core.steal),
+                system: unsignedNumber(core.system),
+                usagePercent: core.usagePercent ?? 0,
+                user: unsignedNumber(core.user),
+              }),
+            ),
+            batteryPercent: metricUnsignedField(sample, "batteryPercent"),
+            batteryState: hasMetricField(sample, "batteryState")
+              ? sample.batteryState || null
+              : null,
+            cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
+            cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
+            cpuPercent: metricField(sample, "cpuPercent"),
+            cpuStealPercent: metricField(sample, "cpuStealPercent"),
+            cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
+            cpuUserPercent: metricField(sample, "cpuUserPercent"),
+            disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
+              availableBytes: unsignedNumber(disk.availableBytes),
+              filesystemType: disk.filesystemType ?? "",
+              ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
+              mountPoint: disk.mountPoint ?? "",
+              readAwaitMs: metricField(disk, "readAwaitMs"),
+              readBytesDelta: unsignedNumber(disk.readBytesDelta),
+              totalBytes: unsignedNumber(disk.totalBytes),
+              usedBytes: unsignedNumber(disk.usedBytes),
+              weightedIoPercent: metricField(disk, "weightedIoPercent"),
+              writeAwaitMs: metricField(disk, "writeAwaitMs"),
+              writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
+            })),
+            diskTotalBytes: sample.disks?.length
+              ? sumUnsigned(
+                  sample.disks as ProtoMessage[],
+                  (disk: ProtoMessage) => disk.totalBytes,
+                )
+              : null,
+            diskUsedBytes: sample.disks?.length
+              ? sumUnsigned(
+                  sample.disks as ProtoMessage[],
+                  (disk: ProtoMessage) => disk.usedBytes,
+                )
+              : null,
+            load1: metricField(sample, "load_1"),
+            load5: metricField(sample, "load_5"),
+            load15: metricField(sample, "load_15"),
+            hostId: host.id,
+            memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
+            memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
+            memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
+            networkInterfaces: (
+              (sample.networkInterfaces ?? []) as ProtoMessage[]
+            ).map((networkInterface) => ({
+              name: networkInterface.name ?? "",
+              rxBytes: unsignedNumber(networkInterface.rxBytes),
+              rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
+              txBytes: unsignedNumber(networkInterface.txBytes),
+              txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
+            })),
+            networkRxBytesDelta: sample.networkInterfaces?.length
+              ? sumUnsigned(
+                  sample.networkInterfaces as ProtoMessage[],
+                  (networkInterface: ProtoMessage) =>
+                    networkInterface.rxBytesDelta,
+                )
+              : null,
+            networkTxBytesDelta: sample.networkInterfaces?.length
+              ? sumUnsigned(
+                  sample.networkInterfaces as ProtoMessage[],
+                  (networkInterface: ProtoMessage) =>
+                    networkInterface.txBytesDelta,
+                )
+              : null,
+            probeId: host.probeId,
+            receivedAtMs: reportReceivedAtMs,
+            sequence,
+            swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
+            swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
+            temperatureCelsius: metricField(sample, "temperatureCelsius"),
+            uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
+          },
         });
-        detailSamples.push(
-          liveDetailSampleFromMetricSample(host.id, sample, reportReceivedAtMs),
-        );
+
+        if (inserted) {
+          detailSamples.push(
+            liveDetailSampleFromMetricSample(
+              host.id,
+              sample,
+              reportReceivedAtMs,
+            ),
+          );
+        }
+      } else {
+        services.metrics.recordObservationSample({
+          observation: {
+            bootId: request.bootId,
+            hostId: host.id,
+            probeId: host.probeId,
+            receivedAtMs: reportReceivedAtMs,
+            sequence,
+          },
+        });
       }
     }
 

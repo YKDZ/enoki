@@ -220,39 +220,181 @@ export const metricSamples = sqliteTable(
 export type MetricSampleRow = typeof metricSamples.$inferSelect;
 export type NewMetricSampleRow = typeof metricSamples.$inferInsert;
 
-export const metricCpuCores = sqliteTable("metric_cpu_cores", {
-  id: integer().primaryKey({ autoIncrement: true }),
-  metricSampleId: integer().notNull(),
-  name: text().notNull(),
-  user: integer().notNull(),
-  nice: integer().notNull(),
-  system: integer().notNull(),
-  idle: integer().notNull(),
-  iowait: integer().notNull(),
-  irq: integer().notNull(),
-  softirq: integer().notNull(),
-  steal: integer().notNull(),
-  usagePercent: real().notNull(),
-});
+export const officialMetricCpu = sqliteTable(
+  "official_metric_cpu",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    cpuPercent: real(),
+    cpuUserPercent: real(),
+    cpuSystemPercent: real(),
+    cpuIowaitPercent: real(),
+    cpuStealPercent: real(),
+    cpuIdlePercent: real(),
+  },
+  (table) => [
+    uniqueIndex("official_metric_cpu_sample_idx").on(table.metricSampleId),
+  ],
+);
+
+export type OfficialMetricCpuRow = typeof officialMetricCpu.$inferSelect;
+export type NewOfficialMetricCpuRow = typeof officialMetricCpu.$inferInsert;
+
+export const officialMetricMemory = sqliteTable(
+  "official_metric_memory",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    memoryUsedBytes: integer(),
+    memoryTotalBytes: integer(),
+    memoryCacheBytes: integer(),
+    swapTotalBytes: integer(),
+    swapUsedBytes: integer(),
+  },
+  (table) => [
+    uniqueIndex("official_metric_memory_sample_idx").on(table.metricSampleId),
+  ],
+);
+
+export type OfficialMetricMemoryRow = typeof officialMetricMemory.$inferSelect;
+export type NewOfficialMetricMemoryRow =
+  typeof officialMetricMemory.$inferInsert;
+
+export const officialMetricLoad = sqliteTable(
+  "official_metric_load",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    load1: real("load_1"),
+    load5: real("load_5"),
+    load15: real("load_15"),
+  },
+  (table) => [
+    uniqueIndex("official_metric_load_sample_idx").on(table.metricSampleId),
+  ],
+);
+
+export type OfficialMetricLoadRow = typeof officialMetricLoad.$inferSelect;
+export type NewOfficialMetricLoadRow = typeof officialMetricLoad.$inferInsert;
+
+export const officialMetricUptime = sqliteTable(
+  "official_metric_uptime",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    uptimeSeconds: integer(),
+  },
+  (table) => [
+    uniqueIndex("official_metric_uptime_sample_idx").on(table.metricSampleId),
+  ],
+);
+
+export type OfficialMetricUptimeRow = typeof officialMetricUptime.$inferSelect;
+export type NewOfficialMetricUptimeRow =
+  typeof officialMetricUptime.$inferInsert;
+
+export const officialMetricThermalPower = sqliteTable(
+  "official_metric_thermal_power",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    temperatureCelsius: real(),
+    batteryPercent: integer(),
+    batteryState: text(),
+  },
+  (table) => [
+    uniqueIndex("official_metric_thermal_power_sample_idx").on(
+      table.metricSampleId,
+    ),
+  ],
+);
+
+export type OfficialMetricThermalPowerRow =
+  typeof officialMetricThermalPower.$inferSelect;
+export type NewOfficialMetricThermalPowerRow =
+  typeof officialMetricThermalPower.$inferInsert;
+
+export const officialMetricDiskSummary = sqliteTable(
+  "official_metric_disk_summary",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    diskUsedBytes: integer(),
+    diskTotalBytes: integer(),
+  },
+  (table) => [
+    uniqueIndex("official_metric_disk_summary_sample_idx").on(
+      table.metricSampleId,
+    ),
+  ],
+);
+
+export type OfficialMetricDiskSummaryRow =
+  typeof officialMetricDiskSummary.$inferSelect;
+export type NewOfficialMetricDiskSummaryRow =
+  typeof officialMetricDiskSummary.$inferInsert;
+
+export const officialMetricNetworkSummary = sqliteTable(
+  "official_metric_network_summary",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    networkRxBytesDelta: integer(),
+    networkTxBytesDelta: integer(),
+  },
+  (table) => [
+    uniqueIndex("official_metric_network_summary_sample_idx").on(
+      table.metricSampleId,
+    ),
+  ],
+);
+
+export type OfficialMetricNetworkSummaryRow =
+  typeof officialMetricNetworkSummary.$inferSelect;
+export type NewOfficialMetricNetworkSummaryRow =
+  typeof officialMetricNetworkSummary.$inferInsert;
+
+export const metricCpuCores = sqliteTable(
+  "metric_cpu_cores",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    name: text().notNull(),
+    user: integer().notNull(),
+    nice: integer().notNull(),
+    system: integer().notNull(),
+    idle: integer().notNull(),
+    iowait: integer().notNull(),
+    irq: integer().notNull(),
+    softirq: integer().notNull(),
+    steal: integer().notNull(),
+    usagePercent: real().notNull(),
+  },
+  (table) => [index("metric_cpu_cores_sample_idx").on(table.metricSampleId)],
+);
 
 export type MetricCpuCoreRow = typeof metricCpuCores.$inferSelect;
 export type NewMetricCpuCoreRow = typeof metricCpuCores.$inferInsert;
 
-export const metricDisks = sqliteTable("metric_disks", {
-  id: integer().primaryKey({ autoIncrement: true }),
-  metricSampleId: integer().notNull(),
-  mountPoint: text().notNull(),
-  filesystemType: text().notNull(),
-  totalBytes: integer().notNull(),
-  usedBytes: integer().notNull(),
-  availableBytes: integer().notNull(),
-  readBytesDelta: integer().notNull().default(0),
-  writeBytesDelta: integer().notNull().default(0),
-  ioUtilizationPercent: real(),
-  readAwaitMs: real(),
-  writeAwaitMs: real(),
-  weightedIoPercent: real(),
-});
+export const metricDisks = sqliteTable(
+  "metric_disks",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer().notNull(),
+    mountPoint: text().notNull(),
+    filesystemType: text().notNull(),
+    totalBytes: integer().notNull(),
+    usedBytes: integer().notNull(),
+    availableBytes: integer().notNull(),
+    readBytesDelta: integer().notNull().default(0),
+    writeBytesDelta: integer().notNull().default(0),
+    ioUtilizationPercent: real(),
+    readAwaitMs: real(),
+    writeAwaitMs: real(),
+    weightedIoPercent: real(),
+  },
+  (table) => [index("metric_disks_sample_idx").on(table.metricSampleId)],
+);
 
 export type MetricDiskRow = typeof metricDisks.$inferSelect;
 export type NewMetricDiskRow = typeof metricDisks.$inferInsert;
@@ -268,6 +410,9 @@ export const metricNetworkInterfaces = sqliteTable(
     rxBytesDelta: integer().notNull(),
     txBytesDelta: integer().notNull(),
   },
+  (table) => [
+    index("metric_network_interfaces_sample_idx").on(table.metricSampleId),
+  ],
 );
 
 export type MetricNetworkInterfaceRow =

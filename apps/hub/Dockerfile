@@ -56,6 +56,7 @@ WORKDIR /app
 
 COPY --from=builder --chown=node:node /app/deploy ./
 COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
+COPY --from=builder --chown=node:node /app/apps/hub/drizzle-official-metrics drizzle-official-metrics
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
 COPY apps/hub/docker-entrypoint.sh /usr/local/bin/enoki-hub-entrypoint
