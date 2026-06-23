@@ -96,6 +96,26 @@ export const hosts = sqliteTable(
 export type HostRow = typeof hosts.$inferSelect;
 export type NewHostRow = typeof hosts.$inferInsert;
 
+export const probeRequestNonces = sqliteTable(
+  "probe_request_nonces",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    probeId: text().notNull(),
+    nonce: text().notNull(),
+    expiresAtMs: integer().notNull(),
+  },
+  (table) => [
+    uniqueIndex("probe_request_nonces_probe_nonce_idx").on(
+      table.probeId,
+      table.nonce,
+    ),
+    index("probe_request_nonces_expires_at_idx").on(table.expiresAtMs),
+  ],
+);
+
+export type ProbeRequestNonceRow = typeof probeRequestNonces.$inferSelect;
+export type NewProbeRequestNonceRow = typeof probeRequestNonces.$inferInsert;
+
 export const probeOperations = sqliteTable(
   "probe_operations",
   {

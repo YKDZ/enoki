@@ -1,7 +1,12 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, lte } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
-import { hosts, type HostRow, type NewHostRow } from "./schema.js";
+import {
+  hosts,
+  probeRequestNonces,
+  type HostRow,
+  type NewHostRow,
+} from "./schema.js";
 
 type HostDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
@@ -105,6 +110,12 @@ export type HostRepository = {
   findActiveById: (id: number) => HostRow | null;
   findByProbeId: (probeId: string) => HostRow | null;
   findByProbeSecretHash: (probeSecretHash: string) => HostRow | null;
+  insertProbeRequestNonce: (input: {
+    probeId: string;
+    nonce: string;
+    expiresAtMs: number;
+    nowMs: number;
+  }) => boolean;
   listSummaries: (options?: HostSummaryOptions) => HostSummary[];
   recordReport: (
     id: number,
@@ -194,6 +205,26 @@ export function createHostRepository(database: HostDatabase): HostRepository {
           )
           .get() ?? null
       );
+    },
+    insertProbeRequestNonce(input) {
+      database
+        .delete(probeRequestNonces)
+        .where(lte(probeRequestNonces.expiresAtMs, input.nowMs))
+        .run();
+
+      try {
+        database
+          .insert(probeRequestNonces)
+          .values({
+            expiresAtMs: input.expiresAtMs,
+            nonce: input.nonce,
+            probeId: input.probeId,
+          })
+          .run();
+        return true;
+      } catch {
+        return false;
+      }
     },
     listSummaries(options = {}) {
       const nowMs = options.nowMs ?? Date.now();

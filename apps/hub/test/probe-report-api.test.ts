@@ -284,6 +284,30 @@ describe("Probe report API", () => {
       method: "POST",
     });
     expect(replay.status).toBe(401);
+
+    const replayAfterAppRestart = await createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    }).request("/api/probe/report", {
+      body,
+      headers,
+      method: "POST",
+    });
+    expect(replayAfterAppRestart.status).toBe(401);
+
+    const downgraded = await app.request("/api/probe/report", {
+      body,
+      headers: {
+        authorization: `Bearer ${registration.probeSecret}`,
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+    expect(downgraded.status).toBe(401);
   });
 
   it("validates Probe Operation Tokens on a probe-only API path", async () => {

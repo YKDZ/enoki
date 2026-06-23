@@ -69,6 +69,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
     assert!(bootstrap_config.contains("probe_secret = \"enk_probe_secret\""));
     assert!(bootstrap_config.contains("probe_private_key_pem = \"-----BEGIN PRIVATE KEY-----"));
+    assert!(bootstrap_config.contains("server_time_offset_ms = "));
     assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
     assert!(!bootstrap_config.contains("install_path"));

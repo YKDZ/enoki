@@ -1123,7 +1123,6 @@ function decodeConfigurationRequest(body: Uint8Array): any | null {
 
 const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
 const acceptedProbeRequestClockSkewMs = 5 * 60 * 1000;
-const seenProbeRequestNonces = new Map<string, number>();
 
 type SignedProbeAuthentication =
   | { kind: "absent" }
@@ -1157,7 +1156,12 @@ function authenticateProbe(
     return null;
   }
 
-  return hosts.findByProbeSecretHash(hashSecret(probeSecret));
+  const bearerHost = hosts.findByProbeSecretHash(hashSecret(probeSecret));
+  if (bearerHost?.probePublicKeyPem) {
+    return null;
+  }
+
+  return bearerHost;
 }
 
 function authenticateSignedProbeRequest(
@@ -1207,12 +1211,6 @@ function authenticateSignedProbeRequest(
     return { kind: "invalid" };
   }
 
-  const nonceKey = `${probeId}:${nonce}`;
-  pruneProbeRequestNonces(Date.now());
-  if (seenProbeRequestNonces.has(nonceKey)) {
-    return { kind: "invalid" };
-  }
-
   const url = new URL(request.url);
   const payload = probeRequestSignaturePayload({
     bodySha256,
@@ -1228,10 +1226,18 @@ function authenticateSignedProbeRequest(
     return { kind: "invalid" };
   }
 
-  seenProbeRequestNonces.set(
-    nonceKey,
-    Date.now() + probeRequestSignatureNonceTtlMs,
-  );
+  const nowMs = Date.now();
+  if (
+    !hosts.insertProbeRequestNonce({
+      expiresAtMs: nowMs + probeRequestSignatureNonceTtlMs,
+      nonce,
+      nowMs,
+      probeId,
+    })
+  ) {
+    return { kind: "invalid" };
+  }
+
   return { kind: "authenticated", host };
 }
 
@@ -1263,14 +1269,6 @@ function verifyProbeRequestSignature(
     return verifier.verify(publicKeyPem, Buffer.from(signature, "hex"));
   } catch {
     return false;
-  }
-}
-
-function pruneProbeRequestNonces(nowMs: number) {
-  for (const [nonce, expiresAtMs] of seenProbeRequestNonces) {
-    if (expiresAtMs <= nowMs) {
-      seenProbeRequestNonces.delete(nonce);
-    }
   }
 }
 

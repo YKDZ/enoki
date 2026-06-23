@@ -150,6 +150,7 @@ pub struct ProbeRequestAuth<'a> {
     pub probe_id: &'a str,
     pub probe_private_key_pem: Option<&'a str>,
     pub probe_secret: &'a str,
+    pub server_time_offset_ms: i64,
 }
 
 impl fmt::Display for ReportError {
@@ -243,7 +244,7 @@ fn probe_request_signature_headers(
 
     let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
         .map_err(|error| ReportError::InvalidSigningKey(error.to_string()))?;
-    let timestamp_ms = current_unix_time_ms();
+    let timestamp_ms = current_unix_time_ms(auth.server_time_offset_ms);
     let nonce = random_hex(16);
     let body_sha256 = hex_encode(&Sha256::digest(body));
     let payload = probe_request_signature_payload(
@@ -296,12 +297,12 @@ fn request_path_and_query(url: &str) -> String {
     after_scheme[path_start..].to_string()
 }
 
-fn current_unix_time_ms() -> String {
+fn current_unix_time_ms(server_time_offset_ms: i64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
 
-    now.as_millis().to_string()
+    (now.as_millis() as i128 + server_time_offset_ms as i128).to_string()
 }
 
 fn random_hex(byte_count: usize) -> String {
@@ -424,6 +425,7 @@ fn run_reporting_loop(
         probe_id,
         probe_private_key_pem: bootstrap_config.probe_private_key_pem.as_deref(),
         probe_secret,
+        server_time_offset_ms: bootstrap_config.server_time_offset_ms.unwrap_or(0),
     };
     let hub_url = bootstrap_config
         .hub_url
@@ -1139,6 +1141,7 @@ struct BootstrapConfig {
     probe_private_key_pem: Option<String>,
     probe_secret: Option<String>,
     reporting_batch_interval_seconds: Option<u64>,
+    server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
     upgrader_launch: Option<String>,
 }
@@ -1199,6 +1202,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
             &value,
             "reporting_batch_interval_seconds",
         )?,
+        server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
@@ -1342,6 +1346,17 @@ fn integer_value(value: &toml::Value, key: &'static str) -> Result<Option<u64>, 
         Some(toml::Value::Integer(_)) => Err(ProbeRunError::InvalidConfig(
             "expected positive integer values",
         )),
+        Some(_) => Err(ProbeRunError::InvalidConfig("expected integer values")),
+        None => Ok(None),
+    }
+}
+
+fn signed_integer_value(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<Option<i64>, ProbeRunError> {
+    match value.get(key) {
+        Some(toml::Value::Integer(integer)) => Ok(Some(*integer)),
         Some(_) => Err(ProbeRunError::InvalidConfig("expected integer values")),
         None => Ok(None),
     }

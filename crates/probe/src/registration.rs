@@ -120,6 +120,7 @@ pub fn register_probe(
         ));
     }
 
+    let server_time_offset_ms = response.server_time_ms as i128 - current_unix_time_ms_i128();
     let installer_owned_fields = read_installer_owned_fields(&input.bootstrap_config_path)?;
 
     store_bootstrap_config(
@@ -169,6 +170,7 @@ pub fn register_probe(
             probe_id: response.probe_id.as_str(),
             probe_private_key_pem: signing_key.private_key_pem.as_str(),
             probe_secret: response.probe_secret.as_str(),
+            server_time_offset_ms,
             installer_owned_fields,
         },
     )?;
@@ -209,6 +211,14 @@ fn registration_url(hub_url: &str) -> String {
     format!("{}/api/probe/register", hub_url.trim_end_matches('/'))
 }
 
+fn current_unix_time_ms_i128() -> i128 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    now.as_millis() as i128
+}
+
 struct BootstrapConfig<'a> {
     collect_cpu: Option<bool>,
     collect_disk: Option<bool>,
@@ -223,6 +233,7 @@ struct BootstrapConfig<'a> {
     probe_private_key_pem: &'a str,
     probe_secret: &'a str,
     reporting_batch_interval_seconds: Option<u32>,
+    server_time_offset_ms: i128,
     installer_owned_fields: InstallerOwnedFields,
 }
 
@@ -287,6 +298,10 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
     output.push_str(&format!(
         "probe_private_key_pem = {}\n",
         toml_string(config.probe_private_key_pem)
+    ));
+    output.push_str(&format!(
+        "server_time_offset_ms = {}\n",
+        config.server_time_offset_ms
     ));
     push_optional_string(
         &mut output,
