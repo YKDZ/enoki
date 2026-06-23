@@ -39,16 +39,6 @@ Enoki **有**以下功能：
 >
 > 我们的架构从探针到数据库到 Web UI 全链路都是易于在编译前扩展的；现有签名、资产分发和 Probe 本地边界可作为自定义分发链路的基础。
 
-## 源码级扩展
-
-Source-Level Extension 是 Enoki 面向 fork 维护者的源码级定制方式：在源码中增加 Probe collector、强类型 protobuf、Hub storage/API 和 Metrics Card，然后自行构建、签名、发布自定义 Enoki 分发版。它适合新增 Metrics 域、采集能力和展示边界，不是稳定的运行时扩展 API。
-
-Enoki 默认发行版不会因为这套扩展模型开放新的远程控制面。Enoki 不支持运行时插件、Hub 下发 collector code、Owner 自定义脚本或任意 shell 命令；Probe Configuration 仍然只是观测配置，不是命令通道。新增 Metrics 域应通过强类型 protobuf 生成 Rust / TypeScript 类型，由 Probe collector 采集，Hub storage/API 入库和查询，再由对应 Metrics Card 消费强类型 Metrics 与 Collector Capability。
-
-Collector Capability 是 Probe 上报的 Inventory 事实，用来描述一个 Host 是否具备某个 collector 的采集条件；不可用的采集域不应在 Owner 界面中生成空卡片。需要独立数据库模式演进时，源码级扩展应优先使用独立 Migration Layer，避免和核心 Hub storage 或官方 Metrics storage 混在同一条迁移历史中。
-
-Privileged Collector Runtime 只是一条编译期固定的本地边界：它为已经打包进自定义 Probe 分发版的 collector code 创建临时较高权限环境，并应用编译期声明的超时、网络访问等约束。它不是安全证明，也不是 Hub、Owner、安装命令或 Probe Configuration 可以在运行时放宽的执行策略；fork 维护者需要负责其中 collector 行为的安全性。
-
 ## 界面
 
 ### 卡片主机视图
