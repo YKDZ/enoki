@@ -655,6 +655,7 @@ describe("Host detail API", () => {
             }),
           ],
         }),
+        status: "online",
       }),
     });
 
@@ -667,7 +668,10 @@ describe("Host detail API", () => {
       },
     );
     expect(historyResponse.status).toBe(200);
-    await expect(historyResponse.json()).resolves.toEqual({
+    const history = (await historyResponse.json()) as {
+      metrics: { samples: Array<Record<string, unknown>> };
+    };
+    expect(history).toEqual({
       metrics: expect.objectContaining({
         samples: [
           expect.objectContaining({
@@ -683,6 +687,7 @@ describe("Host detail API", () => {
         ],
       }),
     });
+    expect(history.metrics.samples[1]).not.toHaveProperty("diskHealth");
 
     database.close();
   });

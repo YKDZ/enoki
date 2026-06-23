@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "turbo run build",
-    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run proto:check && pnpm run rust:check",
+    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run e2e && pnpm run proto:check && pnpm run rust:check",
     "dev": "pnpm --filter @enoki/web dev",
     "dev:hub": "pnpm --filter @enoki/hub build && NODE_ENV=development pnpm --filter @enoki/hub start",
     "dev:probe": "node scripts/dev-probe.mjs",

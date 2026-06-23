@@ -38,6 +38,9 @@ describe("Disk details", () => {
   it("renders Disk Health facts inside the disk details area", async () => {
     const html = await renderToString(
       createSSRApp(DiskDetails, {
+        diskHealthCapability: {
+          available: true,
+        },
         latestSample: {
           ...baseSample,
           diskHealth: [

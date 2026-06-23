@@ -216,6 +216,33 @@ fn smartctl_json_fixture_reports_unavailable_when_smart_is_unsupported() {
 }
 
 #[test]
+fn smartctl_json_fixture_parses_warning_disk_health_without_optional_fields() {
+    let metrics = collect_disk_health_metrics_from_smartctl_json(
+        "/dev/sdb",
+        r#"{
+          "smart_status": { "passed": false }
+        }"#,
+    )
+    .expect("warning smartctl fixture parses")
+    .expect("SMART status is available");
+
+    assert_eq!(metrics.device_name, "/dev/sdb");
+    assert_eq!(metrics.model, "");
+    assert_eq!(metrics.serial_number, "");
+    assert!(!metrics.passed);
+    assert_eq!(metrics.temperature_celsius, None);
+    assert_eq!(metrics.power_on_hours, None);
+}
+
+#[test]
+fn smartctl_json_fixture_rejects_malformed_output() {
+    let error = collect_disk_health_metrics_from_smartctl_json("/dev/sdc", "{")
+        .expect_err("malformed smartctl JSON is rejected");
+
+    assert!(error.is_eof() || error.is_syntax());
+}
+
+#[test]
 fn smartctl_capability_detection_distinguishes_parser_errors_from_unavailable_disks() {
     assert_eq!(
         DiskHealthAvailability::from_smartctl_result(Ok(

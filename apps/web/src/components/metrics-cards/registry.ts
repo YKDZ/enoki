@@ -59,6 +59,7 @@ export function officialMetricCardProps(
         latestSample: diskLatestSampleWithLatestKnownHealth(
           data.latestSample,
           data.latestMetric,
+          capabilities?.official?.diskHealth,
         ),
         xAxisMaxMs: data.xAxisMaxMs,
         xAxisMinMs: data.xAxisMinMs,
@@ -149,9 +150,11 @@ function officialMetricCapability(
 function diskLatestSampleWithLatestKnownHealth(
   latestSample: HostMetricSample | null,
   latestMetric: OfficialMetricCardSourceData["latestMetric"],
+  diskHealthCapability: CollectorAvailability | undefined,
 ): HostMetricSample | null {
   if (
     !latestSample ||
+    diskHealthCapability?.available !== true ||
     latestSample.diskHealth !== undefined ||
     !latestMetric?.diskHealth
   ) {

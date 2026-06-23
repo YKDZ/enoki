@@ -332,4 +332,128 @@ describe("Host metric slot grid", () => {
     expect(unavailableHtml).not.toContain("Samsung SSD 870 EVO 1TB");
     expect(unavailableHtml).toContain("挂载点");
   });
+
+  it("hides Disk Health latest-known data when the capability is absent", async () => {
+    const sample: HostMetricSample = {
+      collectedAtMs: 1_725_000_005_000,
+      cpuCores: [],
+      cpuPercent: 30,
+      diskTotalBytes: 100,
+      diskUsedBytes: 60,
+      disks: [
+        {
+          availableBytes: 40,
+          filesystemType: "ext4",
+          mountPoint: "/",
+          totalBytes: 100,
+          usedBytes: 60,
+        },
+      ],
+      memoryTotalBytes: 100,
+      memoryUsedBytes: 50,
+      networkInterfaces: [],
+      networkRxBitsPerSecond: null,
+      networkRxBytesDelta: null,
+      networkTxBitsPerSecond: null,
+      networkTxBytesDelta: null,
+      receivedAtMs: 1_725_000_005_500,
+      sequence: 2,
+      uptimeSeconds: 120,
+    };
+    const html = await renderHostMetricSlotGrid(
+      {
+        ...host,
+        collectorCapabilities: {
+          official: {
+            cpu: { available: true },
+            disk: { available: true },
+            memory: { available: true },
+            network: { available: true },
+          },
+        },
+      },
+      {
+        latestMetric: {
+          ...sample,
+          diskHealth: [
+            {
+              deviceName: "/dev/sda",
+              model: "Samsung SSD 870 EVO 1TB",
+              passed: true,
+              powerOnHours: 12_345,
+              serialNumber: "S6PTEST",
+              temperatureCelsius: 31,
+            },
+          ],
+        },
+        latestSample: sample,
+        samples: [sample],
+      },
+    );
+
+    expect(html).not.toContain("硬盘健康");
+    expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
+    expect(html).toContain("挂载点");
+  });
+
+  it("hides Disk Health current-sample data when the capability is absent", async () => {
+    const sample: HostMetricSample = {
+      collectedAtMs: 1_725_000_005_000,
+      cpuCores: [],
+      cpuPercent: 30,
+      diskHealth: [
+        {
+          deviceName: "/dev/sda",
+          model: "Samsung SSD 870 EVO 1TB",
+          passed: true,
+          powerOnHours: 12_345,
+          serialNumber: "S6PTEST",
+          temperatureCelsius: 31,
+        },
+      ],
+      diskTotalBytes: 100,
+      diskUsedBytes: 60,
+      disks: [
+        {
+          availableBytes: 40,
+          filesystemType: "ext4",
+          mountPoint: "/",
+          totalBytes: 100,
+          usedBytes: 60,
+        },
+      ],
+      memoryTotalBytes: 100,
+      memoryUsedBytes: 50,
+      networkInterfaces: [],
+      networkRxBitsPerSecond: null,
+      networkRxBytesDelta: null,
+      networkTxBitsPerSecond: null,
+      networkTxBytesDelta: null,
+      receivedAtMs: 1_725_000_005_500,
+      sequence: 2,
+      uptimeSeconds: 120,
+    };
+    const html = await renderHostMetricSlotGrid(
+      {
+        ...host,
+        collectorCapabilities: {
+          official: {
+            cpu: { available: true },
+            disk: { available: true },
+            memory: { available: true },
+            network: { available: true },
+          },
+        },
+      },
+      {
+        latestMetric: sample,
+        latestSample: sample,
+        samples: [sample],
+      },
+    );
+
+    expect(html).not.toContain("硬盘健康");
+    expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
+    expect(html).toContain("挂载点");
+  });
 });

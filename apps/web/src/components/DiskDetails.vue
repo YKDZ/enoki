@@ -22,9 +22,9 @@ const diskRows = computed(() =>
   ),
 );
 const diskHealthRows = computed(() =>
-  props.diskHealthCapability?.available === false
-    ? []
-    : (props.latestSample?.diskHealth ?? []),
+  props.diskHealthCapability?.available === true
+    ? (props.latestSample?.diskHealth ?? [])
+    : [],
 );
 
 function diskPercent(usedBytes: number, totalBytes: number) {
