@@ -731,6 +731,7 @@ describe("Host detail data", () => {
                 detected: false,
                 lastDeltaMs: null,
               },
+              collectorCapabilities: null,
               id: 1,
               lastReportAtMs: null,
               latestMetrics: null,
@@ -760,6 +761,13 @@ describe("Host detail data", () => {
     await detail.load();
 
     detail.applyLiveSummary({
+      collectorCapabilities: {
+        official: {
+          disk: {
+            available: false,
+          },
+        },
+      },
       id: 1,
       lastSeenAtMs: 1_725_000_020_000,
       latestMetrics: {
@@ -789,6 +797,13 @@ describe("Host detail data", () => {
           detected: true,
         }),
         lastReportAtMs: 1_725_000_020_000,
+        collectorCapabilities: {
+          official: {
+            disk: {
+              available: false,
+            },
+          },
+        },
         latestMetrics: null,
         status: "online",
         warnings: expect.arrayContaining([

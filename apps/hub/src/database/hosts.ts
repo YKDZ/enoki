@@ -15,6 +15,7 @@ export type HostSummary = {
     detected: boolean;
     lastDeltaMs: number | null;
   };
+  collectorCapabilities: CollectorCapabilities | null;
   connectAddress: string;
   cpu: string;
   cpuModel: string | null;
@@ -62,6 +63,23 @@ export type HostSummary = {
   } | null;
   status: "online" | "stale" | "offline";
   system: string;
+};
+
+export type CollectorCapabilities = {
+  official?: {
+    battery?: CollectorAvailability;
+    cpu?: CollectorAvailability;
+    disk?: CollectorAvailability;
+    load?: CollectorAvailability;
+    memory?: CollectorAvailability;
+    network?: CollectorAvailability;
+    temperature?: CollectorAvailability;
+    uptime?: CollectorAvailability;
+  };
+};
+
+export type CollectorAvailability = {
+  available: boolean;
 };
 
 export type HostStatusThresholds = {
@@ -229,6 +247,9 @@ export function createHostRepository(database: HostDatabase): HostRepository {
               detected: host.clockSkewDetected,
               lastDeltaMs: host.lastClockSkewMs,
             },
+            collectorCapabilities: parseCollectorCapabilities(
+              host.inventoryJson,
+            ),
             cpu: formatCpu(host.cpuCount),
             cpuModel: host.cpuModel,
             description: host.description,
@@ -420,6 +441,57 @@ export function createHostRepository(database: HostDatabase): HostRepository {
 
       return row ?? null;
     },
+  };
+}
+
+function parseCollectorCapabilities(
+  inventoryJson: string | null,
+): CollectorCapabilities | null {
+  if (!inventoryJson) {
+    return null;
+  }
+
+  try {
+    const inventory = JSON.parse(inventoryJson) as {
+      collectorCapabilities?: CollectorCapabilities;
+    };
+
+    return normalizeCollectorCapabilities(inventory.collectorCapabilities);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCollectorCapabilities(
+  capabilities: CollectorCapabilities | null | undefined,
+) {
+  if (!capabilities?.official) {
+    return null;
+  }
+
+  const official = Object.fromEntries(
+    Object.entries(capabilities.official)
+      .map(([key, availability]) => [
+        key,
+        normalizeCollectorAvailability(availability),
+      ])
+      .filter((entry): entry is [string, CollectorAvailability] =>
+        Boolean(entry[1]),
+      ),
+  ) as CollectorCapabilities["official"];
+
+  return official && Object.keys(official).length > 0 ? { official } : null;
+}
+
+function normalizeCollectorAvailability(
+  availability: CollectorAvailability | null | undefined,
+) {
+  if (availability?.available === undefined) {
+    return null;
+  }
+
+  return {
+    available: Boolean(availability.available),
   };
 }
 

@@ -33,6 +33,8 @@ pub struct Inventory {
     pub cpu_socket_count: u32,
     #[prost(uint32, tag = "16")]
     pub cpu_physical_count: u32,
+    #[prost(message, optional, tag = "17")]
+    pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FilesystemInventory {
@@ -51,6 +53,35 @@ pub struct NetworkInterfaceInventory {
     pub name: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "2")]
     pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorAvailability {
+    #[prost(bool, tag = "1")]
+    pub available: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OfficialCollectorCapabilities {
+    #[prost(message, optional, tag = "1")]
+    pub cpu: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "2")]
+    pub memory: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "3")]
+    pub disk: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "4")]
+    pub network: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "5")]
+    pub load: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "6")]
+    pub uptime: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "7")]
+    pub temperature: ::core::option::Option<CollectorAvailability>,
+    #[prost(message, optional, tag = "8")]
+    pub battery: ::core::option::Option<CollectorAvailability>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorCapabilities {
+    #[prost(message, optional, tag = "1")]
+    pub official: ::core::option::Option<OfficialCollectorCapabilities>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProbeRegistrationRequest {

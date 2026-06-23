@@ -9,7 +9,10 @@ use std::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use crate::protocol::enoki::v1::{FilesystemInventory, Inventory, NetworkInterfaceInventory};
+use crate::protocol::enoki::v1::{
+    CollectorAvailability, CollectorCapabilities, FilesystemInventory, Inventory,
+    NetworkInterfaceInventory, OfficialCollectorCapabilities,
+};
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "cgroup", "cgroup2", "debugfs", "devtmpfs", "fusectl", "overlay", "proc", "squashfs", "sysfs",
@@ -19,28 +22,70 @@ const EXCLUDED_FILESYSTEMS: &[&str] = &[
 pub fn collect_local_inventory() -> Inventory {
     let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let process_snapshot = collect_process_snapshot();
+    let cpu_count = std::thread::available_parallelism()
+        .map(|count| count.get() as u32)
+        .unwrap_or(1);
+    let filesystems = collect_filesystems();
+    let memory_total_bytes = read_memory_total_bytes().unwrap_or(0);
+    let network_interfaces = collect_network_interfaces();
 
     Inventory {
         architecture: std::env::consts::ARCH.to_string(),
         cpu_base_frequency_mhz: read_cpu_base_frequency_mhz(&cpuinfo).unwrap_or(0),
         cpu_cache_l3_bytes: read_cpu_l3_cache_bytes(&cpuinfo).unwrap_or(0),
-        cpu_count: std::thread::available_parallelism()
-            .map(|count| count.get() as u32)
-            .unwrap_or(1),
+        cpu_count,
         cpu_model: read_cpu_model(&cpuinfo).unwrap_or_default(),
         cpu_physical_count: read_cpu_physical_count(&cpuinfo).unwrap_or(0),
         cpu_socket_count: read_cpu_socket_count(&cpuinfo).unwrap_or(0),
-        filesystems: collect_filesystems(),
+        collector_capabilities: Some(official_collector_capabilities(
+            cpu_count,
+            memory_total_bytes,
+            &filesystems,
+            &network_interfaces,
+        )),
+        filesystems,
         hostname: read_trimmed("/proc/sys/kernel/hostname")
             .or_else(|| std::env::var("HOSTNAME").ok())
             .unwrap_or_default(),
         kernel: read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default(),
-        memory_total_bytes: read_memory_total_bytes().unwrap_or(0),
-        network_interfaces: collect_network_interfaces(),
+        memory_total_bytes,
+        network_interfaces,
         os: read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string()),
         process_count: process_snapshot.process_count,
         probe_version: crate::version::probe_version().to_string(),
         thread_count: process_snapshot.thread_count,
+    }
+}
+
+fn official_collector_capabilities(
+    cpu_count: u32,
+    memory_total_bytes: u64,
+    filesystems: &[FilesystemInventory],
+    network_interfaces: &[NetworkInterfaceInventory],
+) -> CollectorCapabilities {
+    CollectorCapabilities {
+        official: Some(OfficialCollectorCapabilities {
+            battery: Some(CollectorAvailability {
+                available: Path::new("/sys/class/power_supply").exists(),
+            }),
+            cpu: Some(CollectorAvailability {
+                available: cpu_count > 0,
+            }),
+            disk: Some(CollectorAvailability {
+                available: !filesystems.is_empty(),
+            }),
+            load: Some(CollectorAvailability { available: true }),
+            memory: Some(CollectorAvailability {
+                available: memory_total_bytes > 0,
+            }),
+            network: Some(CollectorAvailability {
+                available: !network_interfaces.is_empty(),
+            }),
+            temperature: Some(CollectorAvailability {
+                available: Path::new("/sys/class/thermal").exists(),
+            }),
+            uptime: Some(CollectorAvailability { available: true }),
+        }),
     }
 }
 

@@ -19,6 +19,7 @@ message Inventory {
   uint32 cpu_base_frequency_mhz = 14;
   uint32 cpu_socket_count = 15;
   uint32 cpu_physical_count = 16;
+  CollectorCapabilities collector_capabilities = 17;
 }
 
 message FilesystemInventory {
@@ -31,6 +32,25 @@ message FilesystemInventory {
 message NetworkInterfaceInventory {
   string name = 1;
   repeated string addresses = 2;
+}
+
+message CollectorAvailability {
+  bool available = 1;
+}
+
+message OfficialCollectorCapabilities {
+  CollectorAvailability cpu = 1;
+  CollectorAvailability memory = 2;
+  CollectorAvailability disk = 3;
+  CollectorAvailability network = 4;
+  CollectorAvailability load = 5;
+  CollectorAvailability uptime = 6;
+  CollectorAvailability temperature = 7;
+  CollectorAvailability battery = 8;
+}
+
+message CollectorCapabilities {
+  OfficialCollectorCapabilities official = 1;
 }
 
 message ProbeRegistrationRequest {

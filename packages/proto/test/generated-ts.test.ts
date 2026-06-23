@@ -47,6 +47,38 @@ describe("generated Probe protocol TypeScript", () => {
     expect(decoded.inventory?.filesystems?.[0]?.mountPoint).toBe("/");
   });
 
+  it("encodes Collector Capability as an Inventory fact", () => {
+    const Inventory = root.enoki.v1.Inventory;
+    const MetricSample = root.enoki.v1.MetricSample;
+
+    const decoded = Inventory.decode(
+      Inventory.encode(
+        Inventory.create({
+          collectorCapabilities: {
+            official: {
+              cpu: { available: true },
+              disk: { available: false },
+              memory: { available: true },
+              network: { available: true },
+            },
+          },
+          hostname: "managed-host-01",
+        }),
+      ).finish(),
+    );
+
+    expect(decoded.collectorCapabilities?.official?.cpu?.available).toBe(true);
+    expect(decoded.collectorCapabilities?.official?.disk?.available).toBe(
+      false,
+    );
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        MetricSample.create({}),
+        "collectorCapabilities",
+      ),
+    ).toBe(false);
+  });
+
   it("encodes and decodes a Probe registration response with initial configuration", () => {
     const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
 

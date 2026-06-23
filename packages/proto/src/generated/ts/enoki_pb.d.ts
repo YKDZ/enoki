@@ -56,6 +56,9 @@ export namespace enoki {
 
             /** Inventory cpuPhysicalCount */
             cpuPhysicalCount?: (number|null);
+
+            /** Inventory collectorCapabilities */
+            collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
         }
 
         /** Represents an Inventory. */
@@ -114,6 +117,9 @@ export namespace enoki {
 
             /** Inventory cpuPhysicalCount. */
             public cpuPhysicalCount: number;
+
+            /** Inventory collectorCapabilities. */
+            public collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
 
             /**
              * Creates a new Inventory instance using the specified properties.
@@ -405,6 +411,339 @@ export namespace enoki {
 
             /**
              * Gets the default type url for NetworkInterfaceInventory
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a CollectorAvailability. */
+        interface ICollectorAvailability {
+
+            /** CollectorAvailability available */
+            available?: (boolean|null);
+        }
+
+        /** Represents a CollectorAvailability. */
+        class CollectorAvailability implements ICollectorAvailability {
+
+            /**
+             * Constructs a new CollectorAvailability.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ICollectorAvailability);
+
+            /** CollectorAvailability available. */
+            public available: boolean;
+
+            /**
+             * Creates a new CollectorAvailability instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns CollectorAvailability instance
+             */
+            public static create(properties?: enoki.v1.ICollectorAvailability): enoki.v1.CollectorAvailability;
+
+            /**
+             * Encodes the specified CollectorAvailability message. Does not implicitly {@link enoki.v1.CollectorAvailability.verify|verify} messages.
+             * @param message CollectorAvailability message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ICollectorAvailability, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified CollectorAvailability message, length delimited. Does not implicitly {@link enoki.v1.CollectorAvailability.verify|verify} messages.
+             * @param message CollectorAvailability message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ICollectorAvailability, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a CollectorAvailability message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns CollectorAvailability
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CollectorAvailability;
+
+            /**
+             * Decodes a CollectorAvailability message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns CollectorAvailability
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CollectorAvailability;
+
+            /**
+             * Verifies a CollectorAvailability message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a CollectorAvailability message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns CollectorAvailability
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.CollectorAvailability;
+
+            /**
+             * Creates a plain object from a CollectorAvailability message. Also converts values to other types if specified.
+             * @param message CollectorAvailability
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.CollectorAvailability, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this CollectorAvailability to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for CollectorAvailability
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of an OfficialCollectorCapabilities. */
+        interface IOfficialCollectorCapabilities {
+
+            /** OfficialCollectorCapabilities cpu */
+            cpu?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities memory */
+            memory?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities disk */
+            disk?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities network */
+            network?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities load */
+            load?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities uptime */
+            uptime?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities temperature */
+            temperature?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities battery */
+            battery?: (enoki.v1.ICollectorAvailability|null);
+        }
+
+        /** Represents an OfficialCollectorCapabilities. */
+        class OfficialCollectorCapabilities implements IOfficialCollectorCapabilities {
+
+            /**
+             * Constructs a new OfficialCollectorCapabilities.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IOfficialCollectorCapabilities);
+
+            /** OfficialCollectorCapabilities cpu. */
+            public cpu?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities memory. */
+            public memory?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities disk. */
+            public disk?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities network. */
+            public network?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities load. */
+            public load?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities uptime. */
+            public uptime?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities temperature. */
+            public temperature?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities battery. */
+            public battery?: (enoki.v1.ICollectorAvailability|null);
+
+            /**
+             * Creates a new OfficialCollectorCapabilities instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns OfficialCollectorCapabilities instance
+             */
+            public static create(properties?: enoki.v1.IOfficialCollectorCapabilities): enoki.v1.OfficialCollectorCapabilities;
+
+            /**
+             * Encodes the specified OfficialCollectorCapabilities message. Does not implicitly {@link enoki.v1.OfficialCollectorCapabilities.verify|verify} messages.
+             * @param message OfficialCollectorCapabilities message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IOfficialCollectorCapabilities, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified OfficialCollectorCapabilities message, length delimited. Does not implicitly {@link enoki.v1.OfficialCollectorCapabilities.verify|verify} messages.
+             * @param message OfficialCollectorCapabilities message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IOfficialCollectorCapabilities, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes an OfficialCollectorCapabilities message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns OfficialCollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.OfficialCollectorCapabilities;
+
+            /**
+             * Decodes an OfficialCollectorCapabilities message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns OfficialCollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.OfficialCollectorCapabilities;
+
+            /**
+             * Verifies an OfficialCollectorCapabilities message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates an OfficialCollectorCapabilities message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns OfficialCollectorCapabilities
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.OfficialCollectorCapabilities;
+
+            /**
+             * Creates a plain object from an OfficialCollectorCapabilities message. Also converts values to other types if specified.
+             * @param message OfficialCollectorCapabilities
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.OfficialCollectorCapabilities, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this OfficialCollectorCapabilities to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for OfficialCollectorCapabilities
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a CollectorCapabilities. */
+        interface ICollectorCapabilities {
+
+            /** CollectorCapabilities official */
+            official?: (enoki.v1.IOfficialCollectorCapabilities|null);
+        }
+
+        /** Represents a CollectorCapabilities. */
+        class CollectorCapabilities implements ICollectorCapabilities {
+
+            /**
+             * Constructs a new CollectorCapabilities.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ICollectorCapabilities);
+
+            /** CollectorCapabilities official. */
+            public official?: (enoki.v1.IOfficialCollectorCapabilities|null);
+
+            /**
+             * Creates a new CollectorCapabilities instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns CollectorCapabilities instance
+             */
+            public static create(properties?: enoki.v1.ICollectorCapabilities): enoki.v1.CollectorCapabilities;
+
+            /**
+             * Encodes the specified CollectorCapabilities message. Does not implicitly {@link enoki.v1.CollectorCapabilities.verify|verify} messages.
+             * @param message CollectorCapabilities message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ICollectorCapabilities, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified CollectorCapabilities message, length delimited. Does not implicitly {@link enoki.v1.CollectorCapabilities.verify|verify} messages.
+             * @param message CollectorCapabilities message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ICollectorCapabilities, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a CollectorCapabilities message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns CollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CollectorCapabilities;
+
+            /**
+             * Decodes a CollectorCapabilities message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns CollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CollectorCapabilities;
+
+            /**
+             * Verifies a CollectorCapabilities message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a CollectorCapabilities message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns CollectorCapabilities
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.CollectorCapabilities;
+
+            /**
+             * Creates a plain object from a CollectorCapabilities message. Also converts values to other types if specified.
+             * @param message CollectorCapabilities
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.CollectorCapabilities, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this CollectorCapabilities to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for CollectorCapabilities
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

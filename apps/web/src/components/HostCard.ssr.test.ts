@@ -10,6 +10,7 @@ const host: HostSummary = {
     detected: true,
     lastDeltaMs: 60_000,
   },
+  collectorCapabilities: null,
   connectAddress: "10.0.0.10",
   cpu: "2 cores",
   cpuModel: null,

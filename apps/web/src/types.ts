@@ -7,6 +7,7 @@ export type HostSummary = {
     detected: boolean;
     lastDeltaMs: number | null;
   };
+  collectorCapabilities: CollectorCapabilities | null;
   connectAddress: string;
   cpu: string;
   cpuModel: string | null;
@@ -47,6 +48,23 @@ export type HostSummary = {
   probeVersion: string;
   status: string;
   system: string;
+};
+
+export type CollectorCapabilities = {
+  official?: {
+    battery?: CollectorAvailability;
+    cpu?: CollectorAvailability;
+    disk?: CollectorAvailability;
+    load?: CollectorAvailability;
+    memory?: CollectorAvailability;
+    network?: CollectorAvailability;
+    temperature?: CollectorAvailability;
+    uptime?: CollectorAvailability;
+  };
+};
+
+export type CollectorAvailability = {
+  available: boolean;
 };
 
 export type HostsResponse = {

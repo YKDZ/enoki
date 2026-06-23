@@ -133,6 +133,7 @@ function createHost(id: number): HostSummary {
       detected: false,
       lastDeltaMs: null,
     },
+    collectorCapabilities: null,
     connectAddress: `10.0.0.${id}`,
     cpu: `${cpuPercent.toFixed(1)}%`,
     cpuModel: "E2E CPU",

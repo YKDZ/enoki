@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use enoki_probe::{
     protocol::enoki::v1::{
+        CollectorAvailability, CollectorCapabilities, Inventory, OfficialCollectorCapabilities,
         ProbeConfigurationRequest, ProbeConfigurationResponse, ProbeOperation,
         ProbeOperationStatus, ProbeRegistrationRequest, ProbeRegistrationResponse,
         ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation, probe_operation::Operation,
@@ -12,9 +13,10 @@ use enoki_probe::{
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
-        ProbeRequestAuth, ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper, ProbeTransport,
-        ReportError, ReportTransport, RunLoopControl, run_loop_control_from_environment, run_probe,
-        run_probe_with_loop_control,
+        InventoryProvider, ProbeRequestAuth, ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper,
+        ProbeTransport, ReportError, ReportTransport, RunLoopControl,
+        run_loop_control_from_environment, run_probe, run_probe_with_loop_control,
+        run_probe_with_loop_control_and_inventory_provider,
     },
 };
 use prost::Message;
@@ -405,6 +407,92 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
     assert!(follow_up.inventory.is_some());
     assert!(!follow_up.inventory_hash.is_empty());
     assert!(follow_up.metrics.is_empty());
+}
+
+#[test]
+fn probe_run_loop_sends_full_inventory_when_collector_capability_changes() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"disabled-v1\"",
+            "metrics_collection_interval_seconds = 1",
+            "reporting_batch_interval_seconds = 1",
+            "collect_cpu = false",
+            "collect_memory = false",
+            "collect_disk = false",
+            "collect_network = false",
+            "collect_load = false",
+            "collect_uptime = false",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response_with_version(1, false, "disabled-v1"),
+            report_response_with_version(2, false, "disabled-v1"),
+            report_response_with_version(3, false, "disabled-v1"),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+    let mut inventory_provider = RecordingInventoryProvider {
+        inventories: vec![
+            inventory_with_disk_capability(true),
+            inventory_with_disk_capability(false),
+            inventory_with_disk_capability(false),
+        ],
+    };
+
+    run_probe_with_loop_control_and_inventory_provider(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(3),
+        },
+        &mut inventory_provider,
+    )
+    .expect("run loop refreshes Inventory facts");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    assert!(reports[0].inventory.is_some());
+    assert_eq!(
+        reports[0]
+            .inventory
+            .as_ref()
+            .and_then(|inventory| inventory.collector_capabilities.as_ref())
+            .and_then(|capabilities| capabilities.official.as_ref())
+            .and_then(|official| official.disk.as_ref())
+            .map(|disk| disk.available),
+        Some(true),
+    );
+    assert_eq!(reports[1].sequence_start, 2);
+    assert_eq!(reports[1].sequence_end, 2);
+    assert_eq!(
+        reports[1]
+            .inventory
+            .as_ref()
+            .and_then(|inventory| inventory.collector_capabilities.as_ref())
+            .and_then(|capabilities| capabilities.official.as_ref())
+            .and_then(|official| official.disk.as_ref())
+            .map(|disk| disk.available),
+        Some(false),
+    );
+    assert_ne!(reports[0].inventory_hash, reports[1].inventory_hash);
+    assert_eq!(reports[2].inventory, None);
+    assert_eq!(reports[2].inventory_hash, reports[1].inventory_hash);
+    assert!(reports.iter().all(|report| report.metrics.is_empty()));
 }
 
 #[test]
@@ -1271,6 +1359,47 @@ impl ReportTransport for RecordingTransport {
 }
 
 impl ProbeTransport for RecordingTransport {}
+
+struct RecordingInventoryProvider {
+    inventories: Vec<Inventory>,
+}
+
+impl InventoryProvider for RecordingInventoryProvider {
+    fn collect_inventory(&mut self) -> Inventory {
+        if self.inventories.len() > 1 {
+            return self.inventories.remove(0);
+        }
+
+        self.inventories
+            .first()
+            .cloned()
+            .expect("Inventory provider has a snapshot")
+    }
+}
+
+fn inventory_with_disk_capability(available: bool) -> Inventory {
+    Inventory {
+        architecture: "x86_64".to_string(),
+        collector_capabilities: Some(CollectorCapabilities {
+            official: Some(OfficialCollectorCapabilities {
+                cpu: Some(CollectorAvailability { available: true }),
+                disk: Some(CollectorAvailability { available }),
+                load: Some(CollectorAvailability { available: true }),
+                memory: Some(CollectorAvailability { available: true }),
+                network: Some(CollectorAvailability { available: true }),
+                uptime: Some(CollectorAvailability { available: true }),
+                ..OfficialCollectorCapabilities::default()
+            }),
+        }),
+        cpu_count: 2,
+        hostname: "managed-host-01".to_string(),
+        kernel: "6.8.0".to_string(),
+        memory_total_bytes: 8_589_934_592,
+        os: "linux".to_string(),
+        probe_version: "test".to_string(),
+        ..Inventory::default()
+    }
+}
 
 #[derive(Default)]
 struct RecordingProbeTransport {

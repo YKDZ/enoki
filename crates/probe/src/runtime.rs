@@ -13,7 +13,7 @@ use crate::{
     inventory::collect_local_inventory,
     metrics::{CollectorCadenceSchedule, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
-        ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
+        Inventory, ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
         ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationRunning,
         ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse, probe_operation::Operation,
         probe_operation_status::Status,
@@ -90,6 +90,18 @@ pub trait ProbeTransport: RegistrationTransport + ReportTransport {}
 
 pub trait ProbeRuntimeSleeper {
     fn sleep(&mut self, duration: Duration);
+}
+
+pub trait InventoryProvider {
+    fn collect_inventory(&mut self) -> Inventory;
+}
+
+pub struct LocalInventoryProvider;
+
+impl InventoryProvider for LocalInventoryProvider {
+    fn collect_inventory(&mut self) -> Inventory {
+        collect_local_inventory()
+    }
 }
 
 pub struct ThreadProbeRuntimeSleeper;
@@ -232,11 +244,30 @@ pub fn run_probe_with_loop_control(
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
 ) -> Result<(), ProbeRunError> {
+    let mut inventory_provider = LocalInventoryProvider;
+
+    run_probe_with_loop_control_and_inventory_provider(
+        input,
+        transport,
+        sleeper,
+        control,
+        &mut inventory_provider,
+    )
+}
+
+pub fn run_probe_with_loop_control_and_inventory_provider(
+    input: ProbeRunInput,
+    transport: &mut impl ProbeTransport,
+    sleeper: &mut impl ProbeRuntimeSleeper,
+    control: RunLoopControl,
+    inventory_provider: &mut impl InventoryProvider,
+) -> Result<(), ProbeRunError> {
     run_probe_with_loop_control_and_runner_factory(
         input,
         transport,
         sleeper,
         control,
+        inventory_provider,
         InstalledProbeOperationRunner::from_bootstrap,
     )
 }
@@ -246,6 +277,7 @@ fn run_probe_with_loop_control_and_runner_factory<Runner>(
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
+    inventory_provider: &mut impl InventoryProvider,
     mut runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
 ) -> Result<(), ProbeRunError>
 where
@@ -261,6 +293,7 @@ where
             transport,
             sleeper,
             control,
+            inventory_provider,
             &mut operation_runner,
         )?;
         return Ok(());
@@ -292,6 +325,7 @@ where
         transport,
         sleeper,
         control,
+        inventory_provider,
         &mut operation_runner,
     )?;
 
@@ -303,6 +337,7 @@ fn run_reporting_loop(
     transport: &mut impl ReportTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
+    inventory_provider: &mut impl InventoryProvider,
     operation_runner: &mut impl ProbeOperationRunner,
 ) -> Result<(), ReportError> {
     if report_limit_reached(0, control) {
@@ -329,7 +364,7 @@ fn run_reporting_loop(
         .probe_configuration_version
         .as_deref()
         .unwrap_or("");
-    let inventory = collect_local_inventory();
+    let mut inventory = inventory_provider.collect_inventory();
     let boot_id = new_boot_id();
     let local_operation_statuses = read_local_operation_statuses(bootstrap_config);
     let mut active_configuration =
@@ -379,6 +414,7 @@ fn run_reporting_loop(
         }
 
         sequence += 1;
+        inventory = inventory_provider.collect_inventory();
         let request = full_inventory_report(
             probe_id,
             &boot_id,
@@ -417,7 +453,12 @@ fn run_reporting_loop(
                 &mut metrics_collector,
             );
 
-            let request = regular_report(
+            let latest_inventory = inventory_provider.collect_inventory();
+            let collector_capability_changed =
+                latest_inventory.collector_capabilities != inventory.collector_capabilities;
+            inventory = latest_inventory;
+
+            let mut request = regular_report(
                 probe_id,
                 &boot_id,
                 sequence_start,
@@ -426,6 +467,9 @@ fn run_reporting_loop(
                 &inventory,
                 metrics,
             );
+            if collector_capability_changed {
+                request.inventory = Some(inventory.clone());
+            }
             let request = with_configuration_error(request, pending_configuration_error.take());
             let request = operation_reports.with_operation_reports(request);
 
@@ -456,6 +500,7 @@ fn run_reporting_loop(
 
         if response.inventory_needed && !report_limit_reached(reports_sent, control) {
             sequence += 1;
+            inventory = inventory_provider.collect_inventory();
             let request = full_inventory_report(
                 probe_id,
                 &boot_id,
@@ -1702,6 +1747,7 @@ mod tests {
         let observed_launches = Rc::new(RefCell::new(Vec::new()));
         let observed_launches_for_factory = Rc::clone(&observed_launches);
         let mut sleeper = NoopSleeper;
+        let mut inventory_provider = LocalInventoryProvider;
 
         run_probe_with_loop_control_and_runner_factory(
             ProbeRunInput {
@@ -1712,6 +1758,7 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(2),
             },
+            &mut inventory_provider,
             move |bootstrap_config, _bootstrap_config_path| {
                 assert_eq!(
                     bootstrap_config.install_path.as_deref(),

@@ -30,6 +30,10 @@ export function applyHostLiveSummary(
         ...host.clockSkew,
         detected: summary.warningFlags.clockSkew,
       },
+      collectorCapabilities:
+        summary.collectorCapabilities === undefined
+          ? host.collectorCapabilities
+          : summary.collectorCapabilities,
       lastReportAtMs: summary.lastSeenAtMs,
       latestMetrics: summary.latestMetrics
         ? {

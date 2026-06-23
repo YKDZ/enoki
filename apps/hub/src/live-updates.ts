@@ -108,6 +108,7 @@ export function liveSummaryFromHost(
   },
 ): HostLiveSummary {
   return {
+    collectorCapabilities: host.collectorCapabilities,
     id: host.id,
     lastSeenAtMs: host.lastReportAtMs,
     latestMetrics: host.latestMetrics

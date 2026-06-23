@@ -144,6 +144,7 @@ function hostDetail(overrides: Partial<HostDetail>) {
       detected: false,
       lastDeltaMs: null,
     },
+    collectorCapabilities: null,
     connectAddress: "10.0.0.1",
     cpu: "1%",
     cpuModel: null,

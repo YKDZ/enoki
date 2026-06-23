@@ -47,6 +47,7 @@ export const enoki = $root.enoki = (() => {
              * @property {number|null} [cpuBaseFrequencyMhz] Inventory cpuBaseFrequencyMhz
              * @property {number|null} [cpuSocketCount] Inventory cpuSocketCount
              * @property {number|null} [cpuPhysicalCount] Inventory cpuPhysicalCount
+             * @property {enoki.v1.ICollectorCapabilities|null} [collectorCapabilities] Inventory collectorCapabilities
              */
 
             /**
@@ -195,6 +196,14 @@ export const enoki = $root.enoki = (() => {
             Inventory.prototype.cpuPhysicalCount = 0;
 
             /**
+             * Inventory collectorCapabilities.
+             * @member {enoki.v1.ICollectorCapabilities|null|undefined} collectorCapabilities
+             * @memberof enoki.v1.Inventory
+             * @instance
+             */
+            Inventory.prototype.collectorCapabilities = null;
+
+            /**
              * Creates a new Inventory instance using the specified properties.
              * @function create
              * @memberof enoki.v1.Inventory
@@ -256,6 +265,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 15, wireType 0 =*/120).uint32(message.cpuSocketCount);
                 if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
                     writer.uint32(/* id 16, wireType 0 =*/128).uint32(message.cpuPhysicalCount);
+                if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities"))
+                    $root.enoki.v1.CollectorCapabilities.encode(message.collectorCapabilities, writer.uint32(/* id 17, wireType 2 =*/138).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -364,6 +375,10 @@ export const enoki = $root.enoki = (() => {
                             message.cpuPhysicalCount = reader.uint32();
                             break;
                         }
+                    case 17: {
+                            message.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -463,6 +478,11 @@ export const enoki = $root.enoki = (() => {
                 if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
                     if (!$util.isInteger(message.cpuPhysicalCount))
                         return "cpuPhysicalCount: integer expected";
+                if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities")) {
+                    let error = $root.enoki.v1.CollectorCapabilities.verify(message.collectorCapabilities, long + 1);
+                    if (error)
+                        return "collectorCapabilities." + error;
+                }
                 return null;
             };
 
@@ -546,6 +566,11 @@ export const enoki = $root.enoki = (() => {
                     message.cpuSocketCount = object.cpuSocketCount >>> 0;
                 if (object.cpuPhysicalCount != null)
                     message.cpuPhysicalCount = object.cpuPhysicalCount >>> 0;
+                if (object.collectorCapabilities != null) {
+                    if (!$util.isObject(object.collectorCapabilities))
+                        throw TypeError(".enoki.v1.Inventory.collectorCapabilities: object expected");
+                    message.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.fromObject(object.collectorCapabilities, long + 1);
+                }
                 return message;
             };
 
@@ -593,6 +618,7 @@ export const enoki = $root.enoki = (() => {
                     object.cpuBaseFrequencyMhz = 0;
                     object.cpuSocketCount = 0;
                     object.cpuPhysicalCount = 0;
+                    object.collectorCapabilities = null;
                 }
                 if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
                     object.hostname = message.hostname;
@@ -642,6 +668,8 @@ export const enoki = $root.enoki = (() => {
                     object.cpuSocketCount = message.cpuSocketCount;
                 if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
                     object.cpuPhysicalCount = message.cpuPhysicalCount;
+                if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities"))
+                    object.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.toObject(message.collectorCapabilities, options, q + 1);
                 return object;
             };
 
@@ -1268,6 +1296,894 @@ export const enoki = $root.enoki = (() => {
             };
 
             return NetworkInterfaceInventory;
+        })();
+
+        v1.CollectorAvailability = (function() {
+
+            /**
+             * Properties of a CollectorAvailability.
+             * @memberof enoki.v1
+             * @interface ICollectorAvailability
+             * @property {boolean|null} [available] CollectorAvailability available
+             */
+
+            /**
+             * Constructs a new CollectorAvailability.
+             * @memberof enoki.v1
+             * @classdesc Represents a CollectorAvailability.
+             * @implements ICollectorAvailability
+             * @constructor
+             * @param {enoki.v1.ICollectorAvailability=} [properties] Properties to set
+             */
+            function CollectorAvailability(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * CollectorAvailability available.
+             * @member {boolean} available
+             * @memberof enoki.v1.CollectorAvailability
+             * @instance
+             */
+            CollectorAvailability.prototype.available = false;
+
+            /**
+             * Creates a new CollectorAvailability instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {enoki.v1.ICollectorAvailability=} [properties] Properties to set
+             * @returns {enoki.v1.CollectorAvailability} CollectorAvailability instance
+             */
+            CollectorAvailability.create = function create(properties) {
+                return new CollectorAvailability(properties);
+            };
+
+            /**
+             * Encodes the specified CollectorAvailability message. Does not implicitly {@link enoki.v1.CollectorAvailability.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {enoki.v1.ICollectorAvailability} message CollectorAvailability message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorAvailability.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.available != null && Object.hasOwnProperty.call(message, "available"))
+                    writer.uint32(/* id 1, wireType 0 =*/8).bool(message.available);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified CollectorAvailability message, length delimited. Does not implicitly {@link enoki.v1.CollectorAvailability.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {enoki.v1.ICollectorAvailability} message CollectorAvailability message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorAvailability.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a CollectorAvailability message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.CollectorAvailability} CollectorAvailability
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorAvailability.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.CollectorAvailability();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.available = reader.bool();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a CollectorAvailability message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.CollectorAvailability} CollectorAvailability
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorAvailability.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a CollectorAvailability message.
+             * @function verify
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            CollectorAvailability.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.available != null && Object.hasOwnProperty.call(message, "available"))
+                    if (typeof message.available !== "boolean")
+                        return "available: boolean expected";
+                return null;
+            };
+
+            /**
+             * Creates a CollectorAvailability message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.CollectorAvailability} CollectorAvailability
+             */
+            CollectorAvailability.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.CollectorAvailability)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.CollectorAvailability: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.CollectorAvailability();
+                if (object.available != null)
+                    message.available = Boolean(object.available);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a CollectorAvailability message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {enoki.v1.CollectorAvailability} message CollectorAvailability
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            CollectorAvailability.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.available = false;
+                if (message.available != null && Object.hasOwnProperty.call(message, "available"))
+                    object.available = message.available;
+                return object;
+            };
+
+            /**
+             * Converts this CollectorAvailability to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.CollectorAvailability
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            CollectorAvailability.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for CollectorAvailability
+             * @function getTypeUrl
+             * @memberof enoki.v1.CollectorAvailability
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            CollectorAvailability.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.CollectorAvailability";
+            };
+
+            return CollectorAvailability;
+        })();
+
+        v1.OfficialCollectorCapabilities = (function() {
+
+            /**
+             * Properties of an OfficialCollectorCapabilities.
+             * @memberof enoki.v1
+             * @interface IOfficialCollectorCapabilities
+             * @property {enoki.v1.ICollectorAvailability|null} [cpu] OfficialCollectorCapabilities cpu
+             * @property {enoki.v1.ICollectorAvailability|null} [memory] OfficialCollectorCapabilities memory
+             * @property {enoki.v1.ICollectorAvailability|null} [disk] OfficialCollectorCapabilities disk
+             * @property {enoki.v1.ICollectorAvailability|null} [network] OfficialCollectorCapabilities network
+             * @property {enoki.v1.ICollectorAvailability|null} [load] OfficialCollectorCapabilities load
+             * @property {enoki.v1.ICollectorAvailability|null} [uptime] OfficialCollectorCapabilities uptime
+             * @property {enoki.v1.ICollectorAvailability|null} [temperature] OfficialCollectorCapabilities temperature
+             * @property {enoki.v1.ICollectorAvailability|null} [battery] OfficialCollectorCapabilities battery
+             */
+
+            /**
+             * Constructs a new OfficialCollectorCapabilities.
+             * @memberof enoki.v1
+             * @classdesc Represents an OfficialCollectorCapabilities.
+             * @implements IOfficialCollectorCapabilities
+             * @constructor
+             * @param {enoki.v1.IOfficialCollectorCapabilities=} [properties] Properties to set
+             */
+            function OfficialCollectorCapabilities(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * OfficialCollectorCapabilities cpu.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} cpu
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.cpu = null;
+
+            /**
+             * OfficialCollectorCapabilities memory.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} memory
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.memory = null;
+
+            /**
+             * OfficialCollectorCapabilities disk.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} disk
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.disk = null;
+
+            /**
+             * OfficialCollectorCapabilities network.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} network
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.network = null;
+
+            /**
+             * OfficialCollectorCapabilities load.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} load
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.load = null;
+
+            /**
+             * OfficialCollectorCapabilities uptime.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} uptime
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.uptime = null;
+
+            /**
+             * OfficialCollectorCapabilities temperature.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} temperature
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.temperature = null;
+
+            /**
+             * OfficialCollectorCapabilities battery.
+             * @member {enoki.v1.ICollectorAvailability|null|undefined} battery
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             */
+            OfficialCollectorCapabilities.prototype.battery = null;
+
+            /**
+             * Creates a new OfficialCollectorCapabilities instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {enoki.v1.IOfficialCollectorCapabilities=} [properties] Properties to set
+             * @returns {enoki.v1.OfficialCollectorCapabilities} OfficialCollectorCapabilities instance
+             */
+            OfficialCollectorCapabilities.create = function create(properties) {
+                return new OfficialCollectorCapabilities(properties);
+            };
+
+            /**
+             * Encodes the specified OfficialCollectorCapabilities message. Does not implicitly {@link enoki.v1.OfficialCollectorCapabilities.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {enoki.v1.IOfficialCollectorCapabilities} message OfficialCollectorCapabilities message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            OfficialCollectorCapabilities.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.cpu != null && Object.hasOwnProperty.call(message, "cpu"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.cpu, writer.uint32(/* id 1, wireType 2 =*/10).fork(), q + 1).ldelim();
+                if (message.memory != null && Object.hasOwnProperty.call(message, "memory"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.memory, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
+                if (message.disk != null && Object.hasOwnProperty.call(message, "disk"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.disk, writer.uint32(/* id 3, wireType 2 =*/26).fork(), q + 1).ldelim();
+                if (message.network != null && Object.hasOwnProperty.call(message, "network"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.network, writer.uint32(/* id 4, wireType 2 =*/34).fork(), q + 1).ldelim();
+                if (message.load != null && Object.hasOwnProperty.call(message, "load"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.load, writer.uint32(/* id 5, wireType 2 =*/42).fork(), q + 1).ldelim();
+                if (message.uptime != null && Object.hasOwnProperty.call(message, "uptime"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.uptime, writer.uint32(/* id 6, wireType 2 =*/50).fork(), q + 1).ldelim();
+                if (message.temperature != null && Object.hasOwnProperty.call(message, "temperature"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.temperature, writer.uint32(/* id 7, wireType 2 =*/58).fork(), q + 1).ldelim();
+                if (message.battery != null && Object.hasOwnProperty.call(message, "battery"))
+                    $root.enoki.v1.CollectorAvailability.encode(message.battery, writer.uint32(/* id 8, wireType 2 =*/66).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified OfficialCollectorCapabilities message, length delimited. Does not implicitly {@link enoki.v1.OfficialCollectorCapabilities.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {enoki.v1.IOfficialCollectorCapabilities} message OfficialCollectorCapabilities message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            OfficialCollectorCapabilities.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes an OfficialCollectorCapabilities message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.OfficialCollectorCapabilities} OfficialCollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            OfficialCollectorCapabilities.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.OfficialCollectorCapabilities();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.cpu = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 2: {
+                            message.memory = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 3: {
+                            message.disk = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 4: {
+                            message.network = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 5: {
+                            message.load = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 6: {
+                            message.uptime = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 7: {
+                            message.temperature = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 8: {
+                            message.battery = $root.enoki.v1.CollectorAvailability.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes an OfficialCollectorCapabilities message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.OfficialCollectorCapabilities} OfficialCollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            OfficialCollectorCapabilities.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies an OfficialCollectorCapabilities message.
+             * @function verify
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            OfficialCollectorCapabilities.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.cpu != null && Object.hasOwnProperty.call(message, "cpu")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.cpu, long + 1);
+                    if (error)
+                        return "cpu." + error;
+                }
+                if (message.memory != null && Object.hasOwnProperty.call(message, "memory")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.memory, long + 1);
+                    if (error)
+                        return "memory." + error;
+                }
+                if (message.disk != null && Object.hasOwnProperty.call(message, "disk")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.disk, long + 1);
+                    if (error)
+                        return "disk." + error;
+                }
+                if (message.network != null && Object.hasOwnProperty.call(message, "network")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.network, long + 1);
+                    if (error)
+                        return "network." + error;
+                }
+                if (message.load != null && Object.hasOwnProperty.call(message, "load")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.load, long + 1);
+                    if (error)
+                        return "load." + error;
+                }
+                if (message.uptime != null && Object.hasOwnProperty.call(message, "uptime")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.uptime, long + 1);
+                    if (error)
+                        return "uptime." + error;
+                }
+                if (message.temperature != null && Object.hasOwnProperty.call(message, "temperature")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.temperature, long + 1);
+                    if (error)
+                        return "temperature." + error;
+                }
+                if (message.battery != null && Object.hasOwnProperty.call(message, "battery")) {
+                    let error = $root.enoki.v1.CollectorAvailability.verify(message.battery, long + 1);
+                    if (error)
+                        return "battery." + error;
+                }
+                return null;
+            };
+
+            /**
+             * Creates an OfficialCollectorCapabilities message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.OfficialCollectorCapabilities} OfficialCollectorCapabilities
+             */
+            OfficialCollectorCapabilities.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.OfficialCollectorCapabilities)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.OfficialCollectorCapabilities: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.OfficialCollectorCapabilities();
+                if (object.cpu != null) {
+                    if (!$util.isObject(object.cpu))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.cpu: object expected");
+                    message.cpu = $root.enoki.v1.CollectorAvailability.fromObject(object.cpu, long + 1);
+                }
+                if (object.memory != null) {
+                    if (!$util.isObject(object.memory))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.memory: object expected");
+                    message.memory = $root.enoki.v1.CollectorAvailability.fromObject(object.memory, long + 1);
+                }
+                if (object.disk != null) {
+                    if (!$util.isObject(object.disk))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.disk: object expected");
+                    message.disk = $root.enoki.v1.CollectorAvailability.fromObject(object.disk, long + 1);
+                }
+                if (object.network != null) {
+                    if (!$util.isObject(object.network))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.network: object expected");
+                    message.network = $root.enoki.v1.CollectorAvailability.fromObject(object.network, long + 1);
+                }
+                if (object.load != null) {
+                    if (!$util.isObject(object.load))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.load: object expected");
+                    message.load = $root.enoki.v1.CollectorAvailability.fromObject(object.load, long + 1);
+                }
+                if (object.uptime != null) {
+                    if (!$util.isObject(object.uptime))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.uptime: object expected");
+                    message.uptime = $root.enoki.v1.CollectorAvailability.fromObject(object.uptime, long + 1);
+                }
+                if (object.temperature != null) {
+                    if (!$util.isObject(object.temperature))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.temperature: object expected");
+                    message.temperature = $root.enoki.v1.CollectorAvailability.fromObject(object.temperature, long + 1);
+                }
+                if (object.battery != null) {
+                    if (!$util.isObject(object.battery))
+                        throw TypeError(".enoki.v1.OfficialCollectorCapabilities.battery: object expected");
+                    message.battery = $root.enoki.v1.CollectorAvailability.fromObject(object.battery, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from an OfficialCollectorCapabilities message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {enoki.v1.OfficialCollectorCapabilities} message OfficialCollectorCapabilities
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            OfficialCollectorCapabilities.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.cpu = null;
+                    object.memory = null;
+                    object.disk = null;
+                    object.network = null;
+                    object.load = null;
+                    object.uptime = null;
+                    object.temperature = null;
+                    object.battery = null;
+                }
+                if (message.cpu != null && Object.hasOwnProperty.call(message, "cpu"))
+                    object.cpu = $root.enoki.v1.CollectorAvailability.toObject(message.cpu, options, q + 1);
+                if (message.memory != null && Object.hasOwnProperty.call(message, "memory"))
+                    object.memory = $root.enoki.v1.CollectorAvailability.toObject(message.memory, options, q + 1);
+                if (message.disk != null && Object.hasOwnProperty.call(message, "disk"))
+                    object.disk = $root.enoki.v1.CollectorAvailability.toObject(message.disk, options, q + 1);
+                if (message.network != null && Object.hasOwnProperty.call(message, "network"))
+                    object.network = $root.enoki.v1.CollectorAvailability.toObject(message.network, options, q + 1);
+                if (message.load != null && Object.hasOwnProperty.call(message, "load"))
+                    object.load = $root.enoki.v1.CollectorAvailability.toObject(message.load, options, q + 1);
+                if (message.uptime != null && Object.hasOwnProperty.call(message, "uptime"))
+                    object.uptime = $root.enoki.v1.CollectorAvailability.toObject(message.uptime, options, q + 1);
+                if (message.temperature != null && Object.hasOwnProperty.call(message, "temperature"))
+                    object.temperature = $root.enoki.v1.CollectorAvailability.toObject(message.temperature, options, q + 1);
+                if (message.battery != null && Object.hasOwnProperty.call(message, "battery"))
+                    object.battery = $root.enoki.v1.CollectorAvailability.toObject(message.battery, options, q + 1);
+                return object;
+            };
+
+            /**
+             * Converts this OfficialCollectorCapabilities to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            OfficialCollectorCapabilities.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for OfficialCollectorCapabilities
+             * @function getTypeUrl
+             * @memberof enoki.v1.OfficialCollectorCapabilities
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            OfficialCollectorCapabilities.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.OfficialCollectorCapabilities";
+            };
+
+            return OfficialCollectorCapabilities;
+        })();
+
+        v1.CollectorCapabilities = (function() {
+
+            /**
+             * Properties of a CollectorCapabilities.
+             * @memberof enoki.v1
+             * @interface ICollectorCapabilities
+             * @property {enoki.v1.IOfficialCollectorCapabilities|null} [official] CollectorCapabilities official
+             */
+
+            /**
+             * Constructs a new CollectorCapabilities.
+             * @memberof enoki.v1
+             * @classdesc Represents a CollectorCapabilities.
+             * @implements ICollectorCapabilities
+             * @constructor
+             * @param {enoki.v1.ICollectorCapabilities=} [properties] Properties to set
+             */
+            function CollectorCapabilities(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * CollectorCapabilities official.
+             * @member {enoki.v1.IOfficialCollectorCapabilities|null|undefined} official
+             * @memberof enoki.v1.CollectorCapabilities
+             * @instance
+             */
+            CollectorCapabilities.prototype.official = null;
+
+            /**
+             * Creates a new CollectorCapabilities instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {enoki.v1.ICollectorCapabilities=} [properties] Properties to set
+             * @returns {enoki.v1.CollectorCapabilities} CollectorCapabilities instance
+             */
+            CollectorCapabilities.create = function create(properties) {
+                return new CollectorCapabilities(properties);
+            };
+
+            /**
+             * Encodes the specified CollectorCapabilities message. Does not implicitly {@link enoki.v1.CollectorCapabilities.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {enoki.v1.ICollectorCapabilities} message CollectorCapabilities message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorCapabilities.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.official != null && Object.hasOwnProperty.call(message, "official"))
+                    $root.enoki.v1.OfficialCollectorCapabilities.encode(message.official, writer.uint32(/* id 1, wireType 2 =*/10).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified CollectorCapabilities message, length delimited. Does not implicitly {@link enoki.v1.CollectorCapabilities.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {enoki.v1.ICollectorCapabilities} message CollectorCapabilities message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorCapabilities.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a CollectorCapabilities message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.CollectorCapabilities} CollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorCapabilities.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.CollectorCapabilities();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.official = $root.enoki.v1.OfficialCollectorCapabilities.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a CollectorCapabilities message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.CollectorCapabilities} CollectorCapabilities
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorCapabilities.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a CollectorCapabilities message.
+             * @function verify
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            CollectorCapabilities.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.official != null && Object.hasOwnProperty.call(message, "official")) {
+                    let error = $root.enoki.v1.OfficialCollectorCapabilities.verify(message.official, long + 1);
+                    if (error)
+                        return "official." + error;
+                }
+                return null;
+            };
+
+            /**
+             * Creates a CollectorCapabilities message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.CollectorCapabilities} CollectorCapabilities
+             */
+            CollectorCapabilities.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.CollectorCapabilities)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.CollectorCapabilities: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.CollectorCapabilities();
+                if (object.official != null) {
+                    if (!$util.isObject(object.official))
+                        throw TypeError(".enoki.v1.CollectorCapabilities.official: object expected");
+                    message.official = $root.enoki.v1.OfficialCollectorCapabilities.fromObject(object.official, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a CollectorCapabilities message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {enoki.v1.CollectorCapabilities} message CollectorCapabilities
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            CollectorCapabilities.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.official = null;
+                if (message.official != null && Object.hasOwnProperty.call(message, "official"))
+                    object.official = $root.enoki.v1.OfficialCollectorCapabilities.toObject(message.official, options, q + 1);
+                return object;
+            };
+
+            /**
+             * Converts this CollectorCapabilities to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.CollectorCapabilities
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            CollectorCapabilities.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for CollectorCapabilities
+             * @function getTypeUrl
+             * @memberof enoki.v1.CollectorCapabilities
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            CollectorCapabilities.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.CollectorCapabilities";
+            };
+
+            return CollectorCapabilities;
         })();
 
         v1.ProbeRegistrationRequest = (function() {

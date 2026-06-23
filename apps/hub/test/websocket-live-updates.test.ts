@@ -123,6 +123,7 @@ async function sendReport(
   options: {
     bootId?: string;
     cpuPercent?: number;
+    diskAvailable?: boolean;
     sequence?: number;
   } = {},
 ) {
@@ -131,6 +132,23 @@ async function sendReport(
   const body = ReportRequest.encode(
     ReportRequest.create({
       bootId: options.bootId ?? "boot-live-summary",
+      inventory:
+        options.diskAvailable === undefined
+          ? undefined
+          : {
+              architecture: "x86_64",
+              collectorCapabilities: {
+                official: {
+                  disk: { available: options.diskAvailable },
+                },
+              },
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              os: "linux",
+              probeVersion: "0.1.0",
+            },
       metrics: [
         {
           collectedAtMs: 1_725_000_009_500,
@@ -445,11 +463,18 @@ describe("WebSocket live updates", () => {
       }),
     );
     const summaryMessage = readWebSocketJson(socket);
-    await sendReport(baseUrl, registration);
+    await sendReport(baseUrl, registration, { diskAvailable: false });
 
     await expect(summaryMessage).resolves.toEqual({
       host: {
         id: 1,
+        collectorCapabilities: {
+          official: {
+            disk: {
+              available: false,
+            },
+          },
+        },
         lastSeenAtMs: 1_725_000_010_000,
         latestMetrics: {
           batteryPercent: null,

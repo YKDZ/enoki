@@ -424,6 +424,10 @@ export function useHostDetail(
         ...host.value.clockSkew,
         detected: summary.warningFlags.clockSkew,
       },
+      collectorCapabilities:
+        summary.collectorCapabilities === undefined
+          ? host.value.collectorCapabilities
+          : summary.collectorCapabilities,
       lastReportAtMs: summary.lastSeenAtMs,
       status: summary.status,
       warnings: liveSummaryWarnings(host.value.warnings, summary),

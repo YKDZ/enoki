@@ -1,5 +1,6 @@
 use enoki_probe::protocol::enoki::v1::{
-    Inventory, MetricSample, ProbeConfigurationResponse, ProbeOperation,
+    CollectorAvailability, CollectorCapabilities, Inventory, MetricSample,
+    OfficialCollectorCapabilities, ProbeConfigurationResponse, ProbeOperation,
     ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationStatus,
     ProbeRegistrationRequest, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
     probe_operation::Operation, probe_operation_status::Status,
@@ -18,6 +19,7 @@ fn generated_rust_protocol_encodes_probe_registration() {
             cpu_model: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz".to_string(),
             cpu_physical_count: 1,
             cpu_socket_count: 1,
+            collector_capabilities: None,
             filesystems: Vec::new(),
             hostname: "managed-host-01".to_string(),
             kernel: "6.8.0".to_string(),
@@ -46,6 +48,33 @@ fn generated_rust_protocol_encodes_probe_registration() {
     );
     assert_eq!(inventory.process_count, 123);
     assert_eq!(inventory.thread_count, 456);
+}
+
+#[test]
+fn generated_rust_protocol_encodes_collector_capabilities_as_inventory() {
+    let inventory = Inventory {
+        collector_capabilities: Some(CollectorCapabilities {
+            official: Some(OfficialCollectorCapabilities {
+                cpu: Some(CollectorAvailability { available: true }),
+                disk: Some(CollectorAvailability { available: false }),
+                memory: Some(CollectorAvailability { available: true }),
+                network: Some(CollectorAvailability { available: true }),
+                ..OfficialCollectorCapabilities::default()
+            }),
+        }),
+        hostname: "managed-host-01".to_string(),
+        ..Inventory::default()
+    };
+
+    let decoded = Inventory::decode(inventory.encode_to_vec().as_slice())
+        .expect("generated Inventory should decode");
+
+    let official = decoded
+        .collector_capabilities
+        .and_then(|capabilities| capabilities.official)
+        .expect("official collector capabilities");
+    assert!(official.cpu.expect("cpu capability").available);
+    assert!(!official.disk.expect("disk capability").available);
 }
 
 #[test]

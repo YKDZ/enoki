@@ -1,7 +1,8 @@
 use enoki_probe::{
     inventory::{collect_local_inventory, inventory_hash, stable_inventory},
     protocol::enoki::v1::{
-        FilesystemInventory, Inventory, MetricSample, NetworkInterfaceInventory,
+        CollectorAvailability, CollectorCapabilities, FilesystemInventory, Inventory, MetricSample,
+        NetworkInterfaceInventory, OfficialCollectorCapabilities,
     },
     report::{regular_report, startup_report},
 };
@@ -69,6 +70,59 @@ fn inventory_hash_uses_stable_inventory_ordering() {
 }
 
 #[test]
+fn collector_capability_changes_are_inventory_changes_not_metric_samples() {
+    let available_inventory = Inventory {
+        collector_capabilities: Some(CollectorCapabilities {
+            official: Some(OfficialCollectorCapabilities {
+                disk: Some(CollectorAvailability { available: true }),
+                ..OfficialCollectorCapabilities::default()
+            }),
+        }),
+        ..sample_inventory()
+    };
+    let unavailable_inventory = Inventory {
+        collector_capabilities: Some(CollectorCapabilities {
+            official: Some(OfficialCollectorCapabilities {
+                disk: Some(CollectorAvailability { available: false }),
+                ..OfficialCollectorCapabilities::default()
+            }),
+        }),
+        ..sample_inventory()
+    };
+
+    assert_ne!(
+        inventory_hash(&available_inventory),
+        inventory_hash(&unavailable_inventory)
+    );
+
+    let report = startup_report(
+        "probe_01",
+        "boot_01",
+        1,
+        "default-v1",
+        unavailable_inventory,
+        vec![MetricSample {
+            collected_at_ms: 1_725_000_000_000,
+            disks: Vec::new(),
+            sequence: 1,
+            ..MetricSample::default()
+        }],
+    );
+
+    assert!(
+        !report
+            .inventory
+            .and_then(|inventory| inventory.collector_capabilities)
+            .and_then(|capabilities| capabilities.official)
+            .and_then(|official| official.disk)
+            .expect("disk capability")
+            .available
+    );
+    assert_eq!(report.metrics.len(), 1);
+    assert!(report.metrics[0].disks.is_empty());
+}
+
+#[test]
 fn inventory_hash_matches_the_cross_runtime_canonical_fixture() {
     let inventory = Inventory {
         filesystems: vec![
@@ -98,7 +152,7 @@ fn inventory_hash_matches_the_cross_runtime_canonical_fixture() {
 
     assert_eq!(
         inventory_hash(&inventory),
-        "659998d328a0f2fa591214691efcde583f2561c6063a84d16cf9d6be3f302dc3",
+        "a7fc5121ed9ae767df33d0bb6e4ca06cbda5d9f2a29e96916719392e70e2b916",
     );
 }
 
@@ -136,6 +190,17 @@ fn sample_inventory() -> Inventory {
         cpu_model: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz".to_string(),
         cpu_physical_count: 1,
         cpu_socket_count: 1,
+        collector_capabilities: Some(CollectorCapabilities {
+            official: Some(OfficialCollectorCapabilities {
+                cpu: Some(CollectorAvailability { available: true }),
+                disk: Some(CollectorAvailability { available: true }),
+                load: Some(CollectorAvailability { available: true }),
+                memory: Some(CollectorAvailability { available: true }),
+                network: Some(CollectorAvailability { available: true }),
+                uptime: Some(CollectorAvailability { available: true }),
+                ..OfficialCollectorCapabilities::default()
+            }),
+        }),
         filesystems: vec![
             FilesystemInventory {
                 available_bytes: 50_000,

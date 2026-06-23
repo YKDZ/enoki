@@ -73,6 +73,16 @@ async function registerProbe(
           architecture: "x86_64",
           cpuCount: 2,
           cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+          collectorCapabilities: {
+            official: {
+              cpu: { available: true },
+              disk: { available: true },
+              load: { available: true },
+              memory: { available: true },
+              network: { available: true },
+              uptime: { available: true },
+            },
+          },
           filesystems: [
             {
               filesystemType: "ext4",
@@ -106,6 +116,69 @@ async function registerProbe(
     new Uint8Array(await response.arrayBuffer()),
   );
   return { ...registration, privateKeyPem: identity.privateKeyPem };
+}
+
+async function reportInventory(
+  app: ReturnType<typeof createHubApp>,
+  registration: RegisteredTestProbe,
+  input: { diskAvailable: boolean | null; sequence: number },
+) {
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: "boot-capability",
+      inventory: {
+        architecture: "x86_64",
+        ...(input.diskAvailable === null
+          ? {}
+          : {
+              collectorCapabilities: {
+                official: {
+                  cpu: { available: true },
+                  disk: { available: input.diskAvailable },
+                  load: { available: true },
+                  memory: { available: true },
+                  network: { available: true },
+                  uptime: { available: true },
+                },
+              },
+            }),
+        cpuCount: 2,
+        cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+        filesystems: input.diskAvailable
+          ? [
+              {
+                filesystemType: "ext4",
+                mountPoint: "/",
+                totalBytes: 20_000,
+              },
+            ]
+          : [],
+        hostname: "managed-host-01",
+        kernel: "6.8.0",
+        memoryTotalBytes: 8_589_934_592,
+        networkInterfaces: [
+          {
+            addresses: ["10.0.0.10"],
+            name: "eth0",
+          },
+        ],
+        os: "linux",
+        probeVersion: "0.1.0",
+      },
+      metrics: [],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: input.sequence,
+      sequenceStart: input.sequence,
+    }),
+  ).finish();
+  const response = await app.request(
+    "/api/probe/report",
+    signedProbeRequest(registration, "/api/probe/report", body),
+  );
+
+  expect(response.status).toBe(200);
 }
 
 function probeAssetManifest(version?: unknown) {
@@ -508,6 +581,126 @@ describe("Host detail API", () => {
     );
 
     expect(invalidWindowResponse.status).toBe(400);
+
+    database.close();
+  });
+
+  it("persists Collector Capability with Inventory and exposes it on Host summary and detail", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    const registeredSummaryResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    expect(registeredSummaryResponse.status).toBe(200);
+    await expect(registeredSummaryResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          collectorCapabilities: expect.objectContaining({
+            official: expect.objectContaining({
+              disk: { available: true },
+            }),
+          }),
+          id: hostId,
+        }),
+      ],
+    });
+
+    await reportInventory(app, registration, {
+      diskAvailable: false,
+      sequence: 1,
+    });
+
+    const summaryResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    expect(summaryResponse.status).toBe(200);
+    await expect(summaryResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          collectorCapabilities: expect.objectContaining({
+            official: expect.objectContaining({
+              disk: { available: false },
+            }),
+          }),
+          id: hostId,
+        }),
+      ],
+    });
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(detailResponse.status).toBe(200);
+    await expect(detailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        collectorCapabilities: expect.objectContaining({
+          official: expect.objectContaining({
+            disk: { available: false },
+          }),
+        }),
+        inventory: expect.objectContaining({
+          collectorCapabilities: expect.objectContaining({
+            official: expect.objectContaining({
+              disk: { available: false },
+            }),
+          }),
+        }),
+      }),
+    });
+
+    await reportInventory(app, registration, {
+      diskAvailable: null,
+      sequence: 2,
+    });
+
+    const disappearedSummaryResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    expect(disappearedSummaryResponse.status).toBe(200);
+    await expect(disappearedSummaryResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          collectorCapabilities: null,
+          id: hostId,
+        }),
+      ],
+    });
+
+    const disappearedDetailResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      {
+        headers: { cookie: ownerSession },
+      },
+    );
+    expect(disappearedDetailResponse.status).toBe(200);
+    await expect(disappearedDetailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        collectorCapabilities: null,
+        inventory: expect.not.objectContaining({
+          collectorCapabilities: expect.anything(),
+        }),
+      }),
+    });
+
+    const counts = database.sqlite
+      .prepare(
+        "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
+      )
+      .get() as { observations: number; samples: number };
+    expect(counts).toEqual({ observations: 2, samples: 0 });
 
     database.close();
   });

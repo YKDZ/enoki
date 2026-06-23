@@ -10,6 +10,7 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
       detected: false,
       lastDeltaMs: null,
     },
+    collectorCapabilities: null,
     connectAddress:
       kind === "dense"
         ? "203.0.113.10 / 2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"

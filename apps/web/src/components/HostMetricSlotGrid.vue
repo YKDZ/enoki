@@ -26,6 +26,13 @@ defineProps<{
   xAxisMinMs: number;
 }>();
 
+function collectorAvailable(
+  host: HostDetail,
+  domain: "cpu" | "disk" | "memory" | "network",
+) {
+  return host.collectorCapabilities?.official?.[domain]?.available !== false;
+}
+
 function inventoryText(host: HostDetail, key: string) {
   const value = host.inventory?.[key];
   return value === null || value === undefined || value === ""
@@ -41,6 +48,7 @@ function panelStorageKey(host: HostDetail, panel: string) {
 <template>
   <div class="grid grid-cols-12 gap-4" data-layout-grid>
     <MetricPanel
+      v-if="collectorAvailable(host, 'cpu')"
       title="CPU"
       :description="`${host.cpuModel || '暂无型号'} / ${inventoryText(host, 'cpuCount')} 核心`"
       size="xl"
@@ -65,6 +73,7 @@ function panelStorageKey(host: HostDetail, panel: string) {
     </MetricPanel>
 
     <MetricPanel
+      v-if="collectorAvailable(host, 'network')"
       title="网络"
       description="公网接口吞吐"
       size="lg"
@@ -93,6 +102,7 @@ function panelStorageKey(host: HostDetail, panel: string) {
     </MetricPanel>
 
     <MetricPanel
+      v-if="collectorAvailable(host, 'memory')"
       title="内存"
       description="使用量、缓存与交换"
       size="lg"
@@ -119,6 +129,7 @@ function panelStorageKey(host: HostDetail, panel: string) {
     </MetricPanel>
 
     <MetricPanel
+      v-if="collectorAvailable(host, 'disk')"
       title="磁盘与 I/O"
       size="xl"
       layout="side"

@@ -9,6 +9,7 @@ const existingHost: HostSummary = {
     detected: false,
     lastDeltaMs: null,
   },
+  collectorCapabilities: null,
   connectAddress: "10.0.0.10",
   cpu: "2 cores",
   cpuModel: null,
@@ -92,6 +93,35 @@ describe("live Host summaries", () => {
       hosts: [existingHost],
       needsReload: true,
     });
+  });
+
+  it("updates Collector Capability from live Host summaries", () => {
+    const result = applyHostLiveSummary([existingHost], {
+      collectorCapabilities: {
+        official: {
+          disk: {
+            available: false,
+          },
+        },
+      },
+      id: 1,
+      lastSeenAtMs: 1_725_000_010_000,
+      latestMetrics: null,
+      status: "online",
+      warningFlags: {
+        clockSkew: false,
+        probeConfigurationError: false,
+      },
+    });
+
+    expect(result.hosts[0]?.collectorCapabilities).toEqual({
+      official: {
+        disk: {
+          available: false,
+        },
+      },
+    });
+    expect(result.needsReload).toBe(false);
   });
 
   it("reloads the typed host list when a WebSocket summary references an unknown host", async () => {

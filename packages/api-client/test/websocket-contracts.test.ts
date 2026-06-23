@@ -52,6 +52,13 @@ describe("WebSocket contracts", () => {
     expect(
       parseWebSocketServerMessage({
         host: {
+          collectorCapabilities: {
+            official: {
+              disk: {
+                available: false,
+              },
+            },
+          },
           id: 1,
           lastSeenAtMs: 1_725_000_010_000,
           latestMetrics: null,
@@ -65,6 +72,13 @@ describe("WebSocket contracts", () => {
       }),
     ).toEqual({
       host: {
+        collectorCapabilities: {
+          official: {
+            disk: {
+              available: false,
+            },
+          },
+        },
         id: 1,
         lastSeenAtMs: 1_725_000_010_000,
         latestMetrics: null,
