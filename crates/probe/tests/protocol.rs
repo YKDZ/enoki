@@ -28,6 +28,8 @@ fn generated_rust_protocol_encodes_probe_registration() {
             probe_version: "0.1.0".to_string(),
             thread_count: 456,
         }),
+        probe_public_key_pem: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----\n"
+            .to_string(),
     };
 
     let encoded = request.encode_to_vec();
@@ -35,6 +37,7 @@ fn generated_rust_protocol_encodes_probe_registration() {
         .expect("generated Probe registration should decode");
 
     assert_eq!(decoded.enrollment_token, "enrollment-token");
+    assert!(decoded.probe_public_key_pem.contains("BEGIN PUBLIC KEY"));
     let inventory = decoded.inventory.expect("inventory");
     assert_eq!(inventory.hostname, "managed-host-01");
     assert_eq!(

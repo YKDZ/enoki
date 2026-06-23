@@ -58,6 +58,8 @@ pub struct ProbeRegistrationRequest {
     pub enrollment_token: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub inventory: ::core::option::Option<Inventory>,
+    #[prost(string, tag = "3")]
+    pub probe_public_key_pem: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeRegistrationResponse {

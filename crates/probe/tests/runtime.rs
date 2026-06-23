@@ -12,8 +12,8 @@ use enoki_probe::{
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
-        ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper, ProbeTransport, ReportError,
-        ReportTransport, RunLoopControl, run_loop_control_from_environment, run_probe,
+        ProbeRequestAuth, ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper, ProbeTransport,
+        ReportError, ReportTransport, RunLoopControl, run_loop_control_from_environment, run_probe,
         run_probe_with_loop_control,
     },
 };
@@ -1233,10 +1233,10 @@ impl RegistrationTransport for NoopTransport {
 }
 
 impl ReportTransport for NoopTransport {
-    fn post_protobuf_with_bearer(
+    fn post_protobuf_with_auth(
         &mut self,
         _url: &str,
-        _bearer_secret: &str,
+        _auth: &ProbeRequestAuth<'_>,
         _body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
         panic!("missing config must fail before reporting");
@@ -1264,10 +1264,10 @@ impl RegistrationTransport for RecordingTransport {
 }
 
 impl ReportTransport for RecordingTransport {
-    fn post_protobuf_with_bearer(
+    fn post_protobuf_with_auth(
         &mut self,
         url: &str,
-        _bearer_secret: &str,
+        _auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
         self.observed_report_url = url.to_string();
@@ -1302,14 +1302,14 @@ impl RegistrationTransport for RecordingProbeTransport {
 }
 
 impl ReportTransport for RecordingProbeTransport {
-    fn post_protobuf_with_bearer(
+    fn post_protobuf_with_auth(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
         self.observed_report_url = url.to_string();
-        self.observed_bearer = bearer_secret.to_string();
+        self.observed_bearer = auth.probe_secret.to_string();
         self.observed_calls.push(ObservedBearerCall {
             body: body.clone(),
             url: url.to_string(),

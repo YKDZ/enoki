@@ -25,6 +25,14 @@ use crate::{
     },
 };
 use prost::Message;
+use rsa::{
+    RsaPrivateKey,
+    pkcs1v15::SigningKey,
+    pkcs8::DecodePrivateKey,
+    rand_core::{OsRng, RngCore},
+    signature::{RandomizedSigner, SignatureEncoding},
+};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
@@ -76,10 +84,10 @@ impl From<ReportError> for ProbeRunError {
 }
 
 pub trait ReportTransport {
-    fn post_protobuf_with_bearer(
+    fn post_protobuf_with_auth(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError>;
 }
@@ -134,7 +142,14 @@ pub enum ReportError {
     Decode(String),
     Http(String),
     InvalidResponse(&'static str),
+    InvalidSigningKey(String),
     Io(std::io::Error),
+}
+
+pub struct ProbeRequestAuth<'a> {
+    pub probe_id: &'a str,
+    pub probe_private_key_pem: Option<&'a str>,
+    pub probe_secret: &'a str,
 }
 
 impl fmt::Display for ReportError {
@@ -147,6 +162,9 @@ impl fmt::Display for ReportError {
             Self::InvalidResponse(message) => {
                 write!(formatter, "invalid report response: {message}")
             }
+            Self::InvalidSigningKey(message) => {
+                write!(formatter, "invalid Probe signing key: {message}")
+            }
             Self::Io(error) => write!(formatter, "failed to read report response: {error}"),
         }
     }
@@ -156,7 +174,10 @@ impl Error for ReportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::Decode(_) | Self::Http(_) | Self::InvalidResponse(_) => None,
+            Self::Decode(_)
+            | Self::Http(_)
+            | Self::InvalidResponse(_)
+            | Self::InvalidSigningKey(_) => None,
         }
     }
 }
@@ -170,16 +191,23 @@ impl From<std::io::Error> for ReportError {
 pub struct HttpReportTransport;
 
 impl ReportTransport for HttpReportTransport {
-    fn post_protobuf_with_bearer(
+    fn post_protobuf_with_auth(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
-        let response = ureq::post(url)
+        let mut request = ureq::post(url)
             .set("accept", "application/x-protobuf")
-            .set("authorization", &format!("Bearer {bearer_secret}"))
-            .set("content-type", "application/x-protobuf")
+            .set("authorization", &format!("Bearer {}", auth.probe_secret))
+            .set("content-type", "application/x-protobuf");
+        if let Some(signature_headers) = probe_request_signature_headers("POST", url, auth, &body)?
+        {
+            for (name, value) in signature_headers {
+                request = request.set(name, &value);
+            }
+        }
+        let response = request
             .send_bytes(&body)
             .map_err(|error| ReportError::Http(error.to_string()))?;
         let mut bytes = Vec::new();
@@ -190,18 +218,104 @@ impl ReportTransport for HttpReportTransport {
 }
 
 impl ReportTransport for HttpRegistrationTransport {
-    fn post_protobuf_with_bearer(
+    fn post_protobuf_with_auth(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
         let mut transport = HttpReportTransport;
-        transport.post_protobuf_with_bearer(url, bearer_secret, body)
+        transport.post_protobuf_with_auth(url, auth, body)
     }
 }
 
 impl ProbeTransport for HttpRegistrationTransport {}
+
+fn probe_request_signature_headers(
+    method: &str,
+    url: &str,
+    auth: &ProbeRequestAuth<'_>,
+    body: &[u8],
+) -> Result<Option<Vec<(&'static str, String)>>, ReportError> {
+    let Some(private_key_pem) = auth.probe_private_key_pem else {
+        return Ok(None);
+    };
+
+    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+        .map_err(|error| ReportError::InvalidSigningKey(error.to_string()))?;
+    let timestamp_ms = current_unix_time_ms();
+    let nonce = random_hex(16);
+    let body_sha256 = hex_encode(&Sha256::digest(body));
+    let payload = probe_request_signature_payload(
+        method,
+        &request_path_and_query(url),
+        &timestamp_ms,
+        &nonce,
+        &body_sha256,
+    );
+    let signing_key = SigningKey::<Sha256>::new(private_key);
+    let signature = signing_key.sign_with_rng(&mut OsRng, payload.as_bytes());
+
+    Ok(Some(vec![
+        ("x-enoki-probe-id", auth.probe_id.to_string()),
+        ("x-enoki-timestamp-ms", timestamp_ms),
+        ("x-enoki-nonce", nonce),
+        ("x-enoki-body-sha256", body_sha256),
+        (
+            "x-enoki-signature",
+            hex_encode(signature.to_bytes().as_ref()),
+        ),
+    ]))
+}
+
+fn probe_request_signature_payload(
+    method: &str,
+    path_and_query: &str,
+    timestamp_ms: &str,
+    nonce: &str,
+    body_sha256: &str,
+) -> String {
+    [
+        method.to_ascii_uppercase(),
+        path_and_query.to_string(),
+        timestamp_ms.to_string(),
+        nonce.to_string(),
+        body_sha256.to_string(),
+    ]
+    .join("\n")
+}
+
+fn request_path_and_query(url: &str) -> String {
+    let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
+        return url.to_string();
+    };
+    let Some(path_start) = after_scheme.find('/') else {
+        return "/".to_string();
+    };
+
+    after_scheme[path_start..].to_string()
+}
+
+fn current_unix_time_ms() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+
+    now.as_millis().to_string()
+}
+
+fn random_hex(byte_count: usize) -> String {
+    let mut bytes = vec![0; byte_count];
+    OsRng.fill_bytes(&mut bytes);
+    hex_encode(&bytes)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
 
 pub fn run_probe(
     input: ProbeRunInput,
@@ -306,6 +420,11 @@ fn run_reporting_loop(
             .ok_or(ReportError::InvalidResponse(
                 "missing Probe Identity secret",
             ))?;
+    let request_auth = ProbeRequestAuth {
+        probe_id,
+        probe_private_key_pem: bootstrap_config.probe_private_key_pem.as_deref(),
+        probe_secret,
+    };
     let hub_url = bootstrap_config
         .hub_url
         .as_deref()
@@ -341,14 +460,14 @@ fn run_reporting_loop(
             });
     }
     request.operation_statuses = local_operation_statuses;
-    let response = post_report(transport, hub_url, probe_secret, request.encode_to_vec())?;
+    let response = post_report(transport, hub_url, &request_auth, request.encode_to_vec())?;
     reports_sent += 1;
     if !report_limit_reached(reports_sent, control) {
         let outcome = apply_newer_configuration_if_needed(
             transport,
             hub_url,
             probe_id,
-            probe_secret,
+            &request_auth,
             active_configuration,
             &response,
         )?;
@@ -371,14 +490,14 @@ fn run_reporting_loop(
             inventory.clone(),
             Vec::new(),
         );
-        let response = post_report(transport, hub_url, probe_secret, request.encode_to_vec())?;
+        let response = post_report(transport, hub_url, &request_auth, request.encode_to_vec())?;
         reports_sent += 1;
         if !report_limit_reached(reports_sent, control) {
             let outcome = apply_newer_configuration_if_needed(
                 transport,
                 hub_url,
                 probe_id,
-                probe_secret,
+                &request_auth,
                 active_configuration,
                 &response,
             )?;
@@ -414,7 +533,7 @@ fn run_reporting_loop(
 
             request.encode_to_vec()
         };
-        let response = match post_report(transport, hub_url, probe_secret, request_body.clone()) {
+        let response = match post_report(transport, hub_url, &request_auth, request_body.clone()) {
             Ok(response) => response,
             Err(_) => {
                 pending_report_body = Some(request_body);
@@ -427,7 +546,7 @@ fn run_reporting_loop(
                 transport,
                 hub_url,
                 probe_id,
-                probe_secret,
+                &request_auth,
                 active_configuration,
                 &response,
             )?;
@@ -449,21 +568,21 @@ fn run_reporting_loop(
             let request = with_configuration_error(request, pending_configuration_error.take());
             let request = operation_reports.with_operation_reports(request);
             let request_body = request.encode_to_vec();
-            let response = match post_report(transport, hub_url, probe_secret, request_body.clone())
-            {
-                Ok(response) => response,
-                Err(_) => {
-                    pending_report_body = Some(request_body);
-                    continue;
-                }
-            };
+            let response =
+                match post_report(transport, hub_url, &request_auth, request_body.clone()) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        pending_report_body = Some(request_body);
+                        continue;
+                    }
+                };
             reports_sent += 1;
             if !report_limit_reached(reports_sent, control) {
                 let outcome = apply_newer_configuration_if_needed(
                     transport,
                     hub_url,
                     probe_id,
-                    probe_secret,
+                    &request_auth,
                     active_configuration,
                     &response,
                 )?;
@@ -807,11 +926,10 @@ fn report_limit_reached(reports_sent: usize, control: RunLoopControl) -> bool {
 fn post_report(
     transport: &mut impl ReportTransport,
     hub_url: &str,
-    probe_secret: &str,
+    auth: &ProbeRequestAuth<'_>,
     body: Vec<u8>,
 ) -> Result<ProbeReportResponse, ReportError> {
-    let response_body =
-        transport.post_protobuf_with_bearer(&report_url(hub_url), probe_secret, body)?;
+    let response_body = transport.post_protobuf_with_auth(&report_url(hub_url), auth, body)?;
 
     ProbeReportResponse::decode(response_body.as_slice())
         .map_err(|error| ReportError::Decode(error.to_string()))
@@ -859,7 +977,7 @@ fn apply_newer_configuration_if_needed(
     transport: &mut impl ReportTransport,
     hub_url: &str,
     probe_id: &str,
-    probe_secret: &str,
+    auth: &ProbeRequestAuth<'_>,
     active_configuration: ActiveProbeConfiguration,
     response: &ProbeReportResponse,
 ) -> Result<ConfigurationApplyOutcome, ReportError> {
@@ -876,7 +994,7 @@ fn apply_newer_configuration_if_needed(
         transport,
         hub_url,
         probe_id,
-        probe_secret,
+        auth,
         &active_configuration.version,
     ) {
         Ok(configuration) => configuration,
@@ -925,18 +1043,15 @@ fn post_probe_configuration(
     transport: &mut impl ReportTransport,
     hub_url: &str,
     probe_id: &str,
-    probe_secret: &str,
+    auth: &ProbeRequestAuth<'_>,
     current_version: &str,
 ) -> Result<ProbeConfigurationResponse, ReportError> {
     let request = ProbeConfigurationRequest {
         current_version: current_version.to_string(),
         probe_id: probe_id.to_string(),
     };
-    let response_body = transport.post_protobuf_with_bearer(
-        &config_url(hub_url),
-        probe_secret,
-        request.encode_to_vec(),
-    )?;
+    let response_body =
+        transport.post_protobuf_with_auth(&config_url(hub_url), auth, request.encode_to_vec())?;
 
     ProbeConfigurationResponse::decode(response_body.as_slice())
         .map_err(|error| ReportError::Decode(error.to_string()))
@@ -1021,6 +1136,7 @@ struct BootstrapConfig {
     operation_status_path: Option<String>,
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
+    probe_private_key_pem: Option<String>,
     probe_secret: Option<String>,
     reporting_batch_interval_seconds: Option<u64>,
     state_dir: Option<String>,
@@ -1077,6 +1193,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         operation_status_path: string_value(&value, "operation_status_path")?,
         probe_configuration_version: string_value(&value, "probe_configuration_version")?,
         probe_id: string_value(&value, "probe_id")?,
+        probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
         probe_secret: string_value(&value, "probe_secret")?,
         reporting_batch_interval_seconds: integer_value(
             &value,
@@ -1592,10 +1709,10 @@ mod tests {
     }
 
     impl ReportTransport for RegistrationThenOperationTransport {
-        fn post_protobuf_with_bearer(
+        fn post_protobuf_with_auth(
             &mut self,
             _url: &str,
-            _bearer_secret: &str,
+            _auth: &ProbeRequestAuth<'_>,
             body: Vec<u8>,
         ) -> Result<Vec<u8>, ReportError> {
             self.observed_report_bodies.push(body);

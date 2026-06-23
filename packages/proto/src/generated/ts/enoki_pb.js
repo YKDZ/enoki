@@ -1278,6 +1278,7 @@ export const enoki = $root.enoki = (() => {
              * @interface IProbeRegistrationRequest
              * @property {string|null} [enrollmentToken] ProbeRegistrationRequest enrollmentToken
              * @property {enoki.v1.IInventory|null} [inventory] ProbeRegistrationRequest inventory
+             * @property {string|null} [probePublicKeyPem] ProbeRegistrationRequest probePublicKeyPem
              */
 
             /**
@@ -1312,6 +1313,14 @@ export const enoki = $root.enoki = (() => {
             ProbeRegistrationRequest.prototype.inventory = null;
 
             /**
+             * ProbeRegistrationRequest probePublicKeyPem.
+             * @member {string} probePublicKeyPem
+             * @memberof enoki.v1.ProbeRegistrationRequest
+             * @instance
+             */
+            ProbeRegistrationRequest.prototype.probePublicKeyPem = "";
+
+            /**
              * Creates a new ProbeRegistrationRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeRegistrationRequest
@@ -1343,6 +1352,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 1, wireType 2 =*/10).string(message.enrollmentToken);
                 if (message.inventory != null && Object.hasOwnProperty.call(message, "inventory"))
                     $root.enoki.v1.Inventory.encode(message.inventory, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
+                if (message.probePublicKeyPem != null && Object.hasOwnProperty.call(message, "probePublicKeyPem"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.probePublicKeyPem);
                 return writer;
             };
 
@@ -1389,6 +1400,10 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 2: {
                             message.inventory = $root.enoki.v1.Inventory.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 3: {
+                            message.probePublicKeyPem = reader.string();
                             break;
                         }
                     default:
@@ -1438,6 +1453,9 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "inventory." + error;
                 }
+                if (message.probePublicKeyPem != null && Object.hasOwnProperty.call(message, "probePublicKeyPem"))
+                    if (!$util.isString(message.probePublicKeyPem))
+                        return "probePublicKeyPem: string expected";
                 return null;
             };
 
@@ -1466,6 +1484,8 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeRegistrationRequest.inventory: object expected");
                     message.inventory = $root.enoki.v1.Inventory.fromObject(object.inventory, long + 1);
                 }
+                if (object.probePublicKeyPem != null)
+                    message.probePublicKeyPem = String(object.probePublicKeyPem);
                 return message;
             };
 
@@ -1489,11 +1509,14 @@ export const enoki = $root.enoki = (() => {
                 if (options.defaults) {
                     object.enrollmentToken = "";
                     object.inventory = null;
+                    object.probePublicKeyPem = "";
                 }
                 if (message.enrollmentToken != null && Object.hasOwnProperty.call(message, "enrollmentToken"))
                     object.enrollmentToken = message.enrollmentToken;
                 if (message.inventory != null && Object.hasOwnProperty.call(message, "inventory"))
                     object.inventory = $root.enoki.v1.Inventory.toObject(message.inventory, options, q + 1);
+                if (message.probePublicKeyPem != null && Object.hasOwnProperty.call(message, "probePublicKeyPem"))
+                    object.probePublicKeyPem = message.probePublicKeyPem;
                 return object;
             };
 

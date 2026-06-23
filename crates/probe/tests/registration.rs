@@ -56,6 +56,11 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
         .expect("registration request decodes");
     assert_eq!(request.enrollment_token, "enk_enroll_secret");
+    assert!(
+        request
+            .probe_public_key_pem
+            .starts_with("-----BEGIN PUBLIC KEY-----")
+    );
     assert_eq!(request.inventory.expect("inventory").probe_version, "dev");
 
     let bootstrap_config =
@@ -63,6 +68,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     assert!(bootstrap_config.contains("hub_url = \"https://hub.example/base/\""));
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
     assert!(bootstrap_config.contains("probe_secret = \"enk_probe_secret\""));
+    assert!(bootstrap_config.contains("probe_private_key_pem = \"-----BEGIN PRIVATE KEY-----"));
     assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
     assert!(!bootstrap_config.contains("install_path"));

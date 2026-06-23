@@ -1,3 +1,4 @@
+import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +60,7 @@ async function createEnrollmentToken(
 async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
+  probePublicKeyPem = "",
 ) {
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
@@ -75,6 +77,7 @@ async function registerProbe(
           os: "linux",
           probeVersion: "0.1.0",
         },
+        probePublicKeyPem,
       }),
     ).finish(),
     headers: {
@@ -87,6 +90,37 @@ async function registerProbe(
   return RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+}
+
+function signedProbeHeaders(input: {
+  body: Uint8Array;
+  method: string;
+  pathAndQuery: string;
+  privateKeyPem: string;
+  probeId: string;
+  timestampMs: string;
+  nonce: string;
+}) {
+  const bodySha256 = createHash("sha256").update(input.body).digest("hex");
+  const payload = [
+    input.method.toUpperCase(),
+    input.pathAndQuery,
+    input.timestampMs,
+    input.nonce,
+    bodySha256,
+  ].join("\n");
+  const signer = createSign("RSA-SHA256");
+  signer.update(payload);
+  signer.end();
+
+  return {
+    "content-type": "application/x-protobuf",
+    "x-enoki-body-sha256": bodySha256,
+    "x-enoki-nonce": input.nonce,
+    "x-enoki-probe-id": input.probeId,
+    "x-enoki-signature": signer.sign(input.privateKeyPem).toString("hex"),
+    "x-enoki-timestamp-ms": input.timestampMs,
+  };
 }
 
 function requestWithStreamBody(
@@ -179,6 +213,77 @@ describe("Probe report API", () => {
         "",
       );
     }
+  });
+
+  it("authenticates signed Probe report requests and rejects nonce replay", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+    });
+    const privateKeyPem = privateKey.export({
+      format: "pem",
+      type: "pkcs8",
+    }) as string;
+    const publicKeyPem = publicKey.export({
+      format: "pem",
+      type: "spki",
+    }) as string;
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(
+      app,
+      enrollmentToken,
+      publicKeyPem,
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-01",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const headers = signedProbeHeaders({
+      body,
+      method: "POST",
+      nonce: "0123456789abcdef0123456789abcdef",
+      pathAndQuery: "/api/probe/report",
+      privateKeyPem,
+      probeId: registration.probeId,
+      timestampMs: String(Date.now()),
+    });
+
+    const response = await app.request("/api/probe/report", {
+      body,
+      headers,
+      method: "POST",
+    });
+    expect(response.status).toBe(200);
+    expect(
+      String(
+        ReportResponse.decode(new Uint8Array(await response.arrayBuffer()))
+          .acceptedSequenceEnd,
+      ),
+    ).toBe("1");
+
+    const replay = await app.request("/api/probe/report", {
+      body,
+      headers,
+      method: "POST",
+    });
+    expect(replay.status).toBe(401);
   });
 
   it("validates Probe Operation Tokens on a probe-only API path", async () => {

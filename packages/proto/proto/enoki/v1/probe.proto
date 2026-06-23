@@ -36,6 +36,7 @@ message NetworkInterfaceInventory {
 message ProbeRegistrationRequest {
   string enrollment_token = 1;
   Inventory inventory = 2;
+  string probe_public_key_pem = 3;
 }
 
 message ProbeRegistrationResponse {

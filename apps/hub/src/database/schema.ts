@@ -47,6 +47,7 @@ export const hosts = sqliteTable(
     id: integer().primaryKey({ autoIncrement: true }),
     probeId: text().notNull(),
     probeSecretHash: text().notNull(),
+    probePublicKeyPem: text(),
     displayName: text().notNull(),
     displayNameEdited: integer({
       mode: "boolean",

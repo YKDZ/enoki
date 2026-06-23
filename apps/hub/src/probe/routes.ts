@@ -1,4 +1,9 @@
-import { createHash, randomBytes } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  createVerify,
+  randomBytes,
+} from "node:crypto";
 
 import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
@@ -42,6 +47,7 @@ const InventoryMessage = enoki.v1.Inventory as any;
 const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest as any;
 const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse as any;
 const maxProbeReportPayloadBytes = 1024 * 1024;
+const maxProbeOperationPayloadBytes = 16 * 1024;
 const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
 const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
@@ -124,6 +130,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         ? Number(inventory.memoryTotalBytes)
         : null,
       observedIp,
+      probePublicKeyPem: validProbePublicKeyPem(request.probePublicKeyPem)
+        ? request.probePublicKeyPem
+        : null,
       os: inventory?.os || null,
       probeConfigurationVersion: defaultProbeConfiguration.version,
       probeId,
@@ -153,15 +162,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_report_too_large", 413);
     }
 
-    const host = authenticateProbe(
-      services.hosts,
-      context.req.raw.headers.get("authorization"),
-    );
-
-    if (!host) {
-      return probeJsonError("probe_identity_required", 401);
-    }
-
     const requestBody = await readCappedRequestBody(
       context.req.raw,
       maxProbeReportPayloadBytes,
@@ -169,6 +169,16 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     if (!requestBody) {
       return probeJsonError("probe_report_too_large", 413);
+    }
+
+    const host = authenticateProbe(
+      services.hosts,
+      context.req.raw,
+      requestBody,
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
     }
 
     const request = decodeReportRequest(requestBody);
@@ -414,9 +424,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   });
 
   routes.post("/operations/:operationId/token/validate", async (context) => {
+    const requestBody = await readCappedRequestBody(
+      context.req.raw,
+      maxProbeOperationPayloadBytes,
+    );
+
+    if (!requestBody) {
+      return probeJsonError("probe_report_too_large", 413);
+    }
+
     const host = authenticateProbe(
       services.hosts,
-      context.req.raw.headers.get("authorization"),
+      context.req.raw,
+      requestBody,
     );
 
     if (!host) {
@@ -437,7 +457,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_operation_token_probe_mismatch", 403);
     }
 
-    const body = await readTokenValidationBody(context);
+    const body = readTokenValidationBody(requestBody);
     if (!body) {
       return probeJsonError("malformed_probe_operation_token_validation", 400);
     }
@@ -461,9 +481,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   });
 
   routes.post("/operations/:operationId/status", async (context) => {
+    const requestBody = await readCappedRequestBody(
+      context.req.raw,
+      maxProbeOperationPayloadBytes,
+    );
+
+    if (!requestBody) {
+      return probeJsonError("probe_report_too_large", 413);
+    }
+
     const host = authenticateProbe(
       services.hosts,
-      context.req.raw.headers.get("authorization"),
+      context.req.raw,
+      requestBody,
     );
 
     if (!host) {
@@ -484,7 +514,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_operation_token_probe_mismatch", 403);
     }
 
-    const body = await readOperationStatusBody(context);
+    const body = readOperationStatusBody(requestBody);
     if (!body) {
       return probeJsonError("malformed_probe_operation_status", 400);
     }
@@ -535,18 +565,26 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   });
 
   routes.post("/config", async (context) => {
+    const requestBody = await readCappedRequestBody(
+      context.req.raw,
+      maxProbeOperationPayloadBytes,
+    );
+
+    if (!requestBody) {
+      return probeJsonError("probe_report_too_large", 413);
+    }
+
     const host = authenticateProbe(
       services.hosts,
-      context.req.raw.headers.get("authorization"),
+      context.req.raw,
+      requestBody,
     );
 
     if (!host) {
       return probeJsonError("probe_identity_required", 401);
     }
 
-    const request = decodeConfigurationRequest(
-      new Uint8Array(await context.req.arrayBuffer()),
-    );
+    const request = decodeConfigurationRequest(requestBody);
 
     if (!request || request.probeId !== host.probeId) {
       return probeJsonError("probe_identity_required", 401);
@@ -627,9 +665,9 @@ function probeOperationTokenSecret(services: ProbeRouteServices) {
   return services.probeOperationTokenSecret ?? defaultProbeOperationTokenSecret;
 }
 
-async function readTokenValidationBody(context: Context) {
+function readTokenValidationBody(requestBody: Uint8Array) {
   try {
-    const body = (await context.req.json()) as {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as {
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -655,9 +693,9 @@ async function readTokenValidationBody(context: Context) {
   }
 }
 
-async function readOperationStatusBody(context: Context) {
+function readOperationStatusBody(requestBody: Uint8Array) {
   try {
-    const body = (await context.req.json()) as {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as {
       errorCode?: unknown;
       message?: unknown;
       status?: unknown;
@@ -1083,17 +1121,170 @@ function decodeConfigurationRequest(body: Uint8Array): any | null {
   }
 }
 
+const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
+const acceptedProbeRequestClockSkewMs = 5 * 60 * 1000;
+const seenProbeRequestNonces = new Map<string, number>();
+
+type SignedProbeAuthentication =
+  | { kind: "absent" }
+  | {
+      kind: "authenticated";
+      host: NonNullable<ReturnType<HostRepository["findByProbeId"]>>;
+    }
+  | { kind: "invalid" };
+
 function authenticateProbe(
   hosts: HostRepository,
-  authorization: string | null,
+  request: Request,
+  body: Uint8Array,
 ) {
-  const probeSecret = parseBearerSecret(authorization);
+  const signedAuthentication = authenticateSignedProbeRequest(
+    hosts,
+    request,
+    body,
+  );
+  if (signedAuthentication.kind === "authenticated") {
+    return signedAuthentication.host;
+  }
+
+  if (signedAuthentication.kind === "invalid") {
+    return null;
+  }
+
+  const probeSecret = parseBearerSecret(request.headers.get("authorization"));
 
   if (!probeSecret) {
     return null;
   }
 
   return hosts.findByProbeSecretHash(hashSecret(probeSecret));
+}
+
+function authenticateSignedProbeRequest(
+  hosts: HostRepository,
+  request: Request,
+  body: Uint8Array,
+): SignedProbeAuthentication {
+  const headers = request.headers;
+  const probeId = headers.get("x-enoki-probe-id")?.trim() ?? "";
+  const timestamp = headers.get("x-enoki-timestamp-ms")?.trim() ?? "";
+  const nonce = headers.get("x-enoki-nonce")?.trim() ?? "";
+  const bodySha256 = headers.get("x-enoki-body-sha256")?.trim() ?? "";
+  const signature = headers.get("x-enoki-signature")?.trim() ?? "";
+
+  if (!probeId && !timestamp && !nonce && !bodySha256 && !signature) {
+    return { kind: "absent" };
+  }
+
+  if (
+    !probeId ||
+    !timestamp ||
+    !nonce ||
+    !bodySha256 ||
+    !signature ||
+    !/^\d+$/.test(timestamp) ||
+    !/^[0-9a-fA-F]{32}$/.test(nonce) ||
+    !/^[0-9a-fA-F]{64}$/.test(bodySha256) ||
+    !/^[0-9a-fA-F]+$/.test(signature)
+  ) {
+    return { kind: "invalid" };
+  }
+
+  const host = hosts.findByProbeId(probeId);
+  if (!host?.probePublicKeyPem) {
+    return { kind: "invalid" };
+  }
+
+  const timestampMs = Number(timestamp);
+  if (
+    !Number.isSafeInteger(timestampMs) ||
+    Math.abs(Date.now() - timestampMs) > acceptedProbeRequestClockSkewMs
+  ) {
+    return { kind: "invalid" };
+  }
+
+  if (bodySha256 !== createHash("sha256").update(body).digest("hex")) {
+    return { kind: "invalid" };
+  }
+
+  const nonceKey = `${probeId}:${nonce}`;
+  pruneProbeRequestNonces(Date.now());
+  if (seenProbeRequestNonces.has(nonceKey)) {
+    return { kind: "invalid" };
+  }
+
+  const url = new URL(request.url);
+  const payload = probeRequestSignaturePayload({
+    bodySha256,
+    method: request.method,
+    nonce,
+    pathAndQuery: `${url.pathname}${url.search}`,
+    timestampMs: timestamp,
+  });
+
+  if (
+    !verifyProbeRequestSignature(host.probePublicKeyPem, payload, signature)
+  ) {
+    return { kind: "invalid" };
+  }
+
+  seenProbeRequestNonces.set(
+    nonceKey,
+    Date.now() + probeRequestSignatureNonceTtlMs,
+  );
+  return { kind: "authenticated", host };
+}
+
+function probeRequestSignaturePayload(input: {
+  bodySha256: string;
+  method: string;
+  nonce: string;
+  pathAndQuery: string;
+  timestampMs: string;
+}) {
+  return [
+    input.method.toUpperCase(),
+    input.pathAndQuery,
+    input.timestampMs,
+    input.nonce,
+    input.bodySha256,
+  ].join("\n");
+}
+
+function verifyProbeRequestSignature(
+  publicKeyPem: string,
+  payload: string,
+  signature: string,
+) {
+  try {
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update(payload);
+    verifier.end();
+    return verifier.verify(publicKeyPem, Buffer.from(signature, "hex"));
+  } catch {
+    return false;
+  }
+}
+
+function pruneProbeRequestNonces(nowMs: number) {
+  for (const [nonce, expiresAtMs] of seenProbeRequestNonces) {
+    if (expiresAtMs <= nowMs) {
+      seenProbeRequestNonces.delete(nonce);
+    }
+  }
+}
+
+function validProbePublicKeyPem(publicKeyPem: string | null | undefined) {
+  if (!publicKeyPem) {
+    return false;
+  }
+
+  try {
+    createPublicKey(publicKeyPem);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function parseBearerSecret(authorization: string | null) {

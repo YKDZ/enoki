@@ -103,6 +103,7 @@ export type HostRepository = {
   create: (input: NewHostRow) => HostRow;
   exists: (id: number) => boolean;
   findActiveById: (id: number) => HostRow | null;
+  findByProbeId: (probeId: string) => HostRow | null;
   findByProbeSecretHash: (probeSecretHash: string) => HostRow | null;
   listSummaries: (options?: HostSummaryOptions) => HostSummary[];
   recordReport: (
@@ -168,6 +169,15 @@ export function createHostRepository(database: HostDatabase): HostRepository {
           .select()
           .from(hosts)
           .where(and(eq(hosts.id, id), isNull(hosts.deletedAtMs)))
+          .get() ?? null
+      );
+    },
+    findByProbeId(probeId) {
+      return (
+        database
+          .select()
+          .from(hosts)
+          .where(and(eq(hosts.probeId, probeId), isNull(hosts.deletedAtMs)))
           .get() ?? null
       );
     },

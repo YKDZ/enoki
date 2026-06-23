@@ -419,6 +419,9 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest inventory */
             inventory?: (enoki.v1.IInventory|null);
+
+            /** ProbeRegistrationRequest probePublicKeyPem */
+            probePublicKeyPem?: (string|null);
         }
 
         /** Represents a ProbeRegistrationRequest. */
@@ -435,6 +438,9 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest inventory. */
             public inventory?: (enoki.v1.IInventory|null);
+
+            /** ProbeRegistrationRequest probePublicKeyPem. */
+            public probePublicKeyPem: string;
 
             /**
              * Creates a new ProbeRegistrationRequest instance using the specified properties.

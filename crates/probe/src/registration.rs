@@ -6,6 +6,11 @@ use std::{
 };
 
 use prost::Message;
+use rsa::{
+    RsaPrivateKey,
+    pkcs8::{EncodePrivateKey, EncodePublicKey},
+    rand_core::OsRng,
+};
 
 use crate::{
     inventory::collect_local_inventory,
@@ -35,6 +40,7 @@ pub enum RegistrationError {
     Http(String),
     InvalidResponse(&'static str),
     Io(std::io::Error),
+    KeyGeneration(String),
 }
 
 impl fmt::Display for RegistrationError {
@@ -49,6 +55,9 @@ impl fmt::Display for RegistrationError {
                 write!(formatter, "invalid registration response: {message}")
             }
             Self::Io(error) => write!(formatter, "failed to store Probe bootstrap config: {error}"),
+            Self::KeyGeneration(message) => {
+                write!(formatter, "failed to generate Probe signing key: {message}")
+            }
         }
     }
 }
@@ -57,7 +66,9 @@ impl Error for RegistrationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::Decode(_) | Self::Http(_) | Self::InvalidResponse(_) => None,
+            Self::Decode(_) | Self::Http(_) | Self::InvalidResponse(_) | Self::KeyGeneration(_) => {
+                None
+            }
         }
     }
 }
@@ -88,9 +99,11 @@ pub fn register_probe(
     input: ProbeRegistrationInput,
     transport: &mut impl RegistrationTransport,
 ) -> Result<ProbeRegistrationOutcome, RegistrationError> {
+    let signing_key = generate_probe_signing_key()?;
     let request = ProbeRegistrationRequest {
         enrollment_token: input.enrollment_token,
         inventory: Some(collect_local_inventory()),
+        probe_public_key_pem: signing_key.public_key_pem.clone(),
     };
     let response_body =
         transport.post_protobuf(&registration_url(&input.hub_url), request.encode_to_vec())?;
@@ -154,6 +167,7 @@ pub fn register_probe(
                 },
             ),
             probe_id: response.probe_id.as_str(),
+            probe_private_key_pem: signing_key.private_key_pem.as_str(),
             probe_secret: response.probe_secret.as_str(),
             installer_owned_fields,
         },
@@ -164,6 +178,30 @@ pub fn register_probe(
             .initial_configuration
             .map(|configuration| configuration.version),
         probe_id: response.probe_id,
+    })
+}
+
+struct GeneratedProbeSigningKey {
+    private_key_pem: String,
+    public_key_pem: String,
+}
+
+fn generate_probe_signing_key() -> Result<GeneratedProbeSigningKey, RegistrationError> {
+    let mut rng = OsRng;
+    let private_key = RsaPrivateKey::new(&mut rng, 2048)
+        .map_err(|error| RegistrationError::KeyGeneration(error.to_string()))?;
+    let public_key = private_key.to_public_key();
+    let private_key_pem = private_key
+        .to_pkcs8_pem(Default::default())
+        .map_err(|error| RegistrationError::KeyGeneration(error.to_string()))?
+        .to_string();
+    let public_key_pem = public_key
+        .to_public_key_pem(Default::default())
+        .map_err(|error| RegistrationError::KeyGeneration(error.to_string()))?;
+
+    Ok(GeneratedProbeSigningKey {
+        private_key_pem,
+        public_key_pem,
     })
 }
 
@@ -182,6 +220,7 @@ struct BootstrapConfig<'a> {
     metrics_collection_interval_seconds: Option<u32>,
     probe_configuration_version: Option<&'a str>,
     probe_id: &'a str,
+    probe_private_key_pem: &'a str,
     probe_secret: &'a str,
     reporting_batch_interval_seconds: Option<u32>,
     installer_owned_fields: InstallerOwnedFields,
@@ -244,6 +283,10 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
     output.push_str(&format!(
         "probe_secret = {}\n",
         toml_string(config.probe_secret)
+    ));
+    output.push_str(&format!(
+        "probe_private_key_pem = {}\n",
+        toml_string(config.probe_private_key_pem)
     ));
     push_optional_string(
         &mut output,
