@@ -109,7 +109,7 @@ pub fn collect_disk_health_metrics_with_smartctl() -> Result<Vec<DiskHealthMetri
 
     for device in devices {
         let output = Command::new("smartctl")
-            .args(["--json", &device])
+            .args(["-a", "--json", &device])
             .output()
             .map_err(|error| {
                 CollectorError::new(format!("smartctl failed for {device}: {error}"))
