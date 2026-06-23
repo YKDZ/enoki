@@ -629,23 +629,60 @@ async function saveHostMetadata() {
       throw new Error(((await response.json()) as { error?: string }).error);
     }
 
-    await response.json();
-    const refreshes = [loadHosts()];
-    if (activeDetailHostId.value) {
-      refreshes.push(detail.load());
-    }
-    await Promise.allSettled(refreshes);
+    const metadata = (await response.json()) as HostMetadataDraft & {
+      id: number;
+    };
+    applyHostMetadataUpdate(targetHostId, metadata);
 
     if (activeHostMetadataId.value === targetHostId) {
       activeHostMetadataId.value = null;
       hostMetadataDraft.value = null;
       hostMetadataOriginal.value = null;
     }
+    if (activeHostConfigurationId.value === targetHostId) {
+      activeHostConfigurationId.value = null;
+      hostConfigurationDraft.value = null;
+    }
+    void loadHosts();
   } catch {
     hostMetadataError.value = "无法保存主机信息，请检查输入后重试。";
   } finally {
     isSavingHostMetadata.value = false;
   }
+}
+
+function applyHostMetadataUpdate(
+  targetHostId: number,
+  metadata: HostMetadataDraft,
+) {
+  hosts.value = hosts.value.map((host) =>
+    host.id === targetHostId
+      ? {
+          ...host,
+          connectAddress: metadata.connectAddress,
+          description: metadata.description,
+          displayName: metadata.displayName,
+        }
+      : host,
+  );
+
+  const currentHost = detail.host.value;
+  if (!currentHost || currentHost.id !== targetHostId) {
+    return;
+  }
+
+  detail.applyHostDetail({
+    ...currentHost,
+    connectAddress: metadata.connectAddress,
+    description: metadata.description,
+    displayName: metadata.displayName,
+    hostMetadata: {
+      ...currentHost.hostMetadata,
+      connectAddress: metadata.connectAddress,
+      description: metadata.description,
+      displayName: metadata.displayName,
+    },
+  });
 }
 
 async function deleteHost(

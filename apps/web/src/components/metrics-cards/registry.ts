@@ -6,12 +6,15 @@ import type {
   HostMetricSample,
 } from "../../types";
 import CpuMetricsCard from "./CpuMetricsCard.vue";
+import DiskHealthMetricsCard from "./DiskHealthMetricsCard.vue";
 import DiskMetricsCard from "./DiskMetricsCard.vue";
 import MemoryMetricsCard from "./MemoryMetricsCard.vue";
 import NetworkMetricsCard from "./NetworkMetricsCard.vue";
 import type {
   CpuMetricCardData,
   CpuMetricCardProps,
+  DiskHealthMetricCardData,
+  DiskHealthMetricCardProps,
   DiskMetricCardData,
   DiskMetricCardProps,
   MemoryMetricCardData,
@@ -33,6 +36,7 @@ export const officialMetricsCards: OfficialMetricsCardDefinition[] = [
   { component: NetworkMetricsCard, domain: "network" },
   { component: MemoryMetricsCard, domain: "memory" },
   { component: DiskMetricsCard, domain: "disk" },
+  { component: DiskHealthMetricsCard, domain: "diskHealth" },
 ];
 
 export function officialMetricCardProps(
@@ -54,15 +58,18 @@ export function officialMetricCardProps(
       return diskMetricCardProps(capability, {
         chartData: data.chartData.disk,
         chartStartContinuityGapMs: data.chartStartContinuityGapMs,
-        diskHealthCapability: capabilities?.official?.diskHealth,
         hostId: data.hostFacts.id,
-        latestSample: diskLatestSampleWithLatestKnownHealth(
-          data.latestSample,
-          data.latestMetric,
-          capabilities?.official?.diskHealth,
-        ),
+        latestSample: data.latestSample,
         xAxisMaxMs: data.xAxisMaxMs,
         xAxisMinMs: data.xAxisMinMs,
+      });
+    case "diskHealth":
+      return diskHealthMetricCardProps(capability, {
+        hostId: data.hostFacts.id,
+        latestDiskHealth: latestKnownDiskHealth(
+          data.latestSample,
+          data.latestMetric,
+        ),
       });
     case "memory":
       return memoryMetricCardProps(capability, {
@@ -114,6 +121,19 @@ export function diskMetricCardProps(
   };
 }
 
+export function diskHealthMetricCardProps(
+  capability: CollectorAvailability | undefined,
+  data: DiskHealthMetricCardData,
+): DiskHealthMetricCardProps | null {
+  if (capability?.available !== true) {
+    return null;
+  }
+  return {
+    capability,
+    data,
+  };
+}
+
 export function memoryMetricCardProps(
   capability: CollectorAvailability | undefined,
   data: MemoryMetricCardData,
@@ -147,22 +167,14 @@ function officialMetricCapability(
   return capabilities?.official?.[domain];
 }
 
-function diskLatestSampleWithLatestKnownHealth(
+function latestKnownDiskHealth(
   latestSample: HostMetricSample | null,
   latestMetric: OfficialMetricCardSourceData["latestMetric"],
-  diskHealthCapability: CollectorAvailability | undefined,
-): HostMetricSample | null {
-  if (
-    !latestSample ||
-    diskHealthCapability?.available !== true ||
-    latestSample.diskHealth !== undefined ||
-    !latestMetric?.diskHealth
-  ) {
-    return latestSample;
+): NonNullable<HostMetricSample["diskHealth"]> | null {
+  const sampleDiskHealth = latestSample?.diskHealth;
+  if (sampleDiskHealth !== undefined) {
+    return sampleDiskHealth;
   }
 
-  return {
-    ...latestSample,
-    diskHealth: latestMetric.diskHealth,
-  };
+  return latestMetric?.diskHealth ?? null;
 }

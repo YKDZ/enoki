@@ -2,11 +2,17 @@ import type { MetricsChartData } from "@/lib/metrics-chart-data";
 
 import type {
   CollectorAvailability,
+  DiskHealthMetric,
   HostDetail,
   HostMetricSample,
 } from "../../types";
 
-export type OfficialMetricDomain = "cpu" | "disk" | "memory" | "network";
+export type OfficialMetricDomain =
+  | "cpu"
+  | "disk"
+  | "diskHealth"
+  | "memory"
+  | "network";
 
 export type MetricCardHostFacts = {
   cpuModel: string | null;
@@ -56,11 +62,15 @@ export type NetworkMetricCardData = {
 export type DiskMetricCardData = {
   chartData: MetricsChartData["disk"];
   chartStartContinuityGapMs: number;
-  diskHealthCapability?: CollectorAvailability;
   hostId: number;
   latestSample: HostMetricSample | null;
   xAxisMaxMs: number;
   xAxisMinMs: number;
+};
+
+export type DiskHealthMetricCardData = {
+  hostId: number;
+  latestDiskHealth: DiskHealthMetric[] | null;
 };
 
 export type MetricCardProps<TData> = {
@@ -72,9 +82,12 @@ export type CpuMetricCardProps = MetricCardProps<CpuMetricCardData>;
 export type MemoryMetricCardProps = MetricCardProps<MemoryMetricCardData>;
 export type NetworkMetricCardProps = MetricCardProps<NetworkMetricCardData>;
 export type DiskMetricCardProps = MetricCardProps<DiskMetricCardData>;
+export type DiskHealthMetricCardProps =
+  MetricCardProps<DiskHealthMetricCardData>;
 
 export type OfficialMetricCardProps =
   | CpuMetricCardProps
+  | DiskHealthMetricCardProps
   | MemoryMetricCardProps
   | NetworkMetricCardProps
   | DiskMetricCardProps;

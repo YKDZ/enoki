@@ -1,0 +1,94 @@
+<script setup lang="ts">
+import { Activity, Clock3, HardDrive, Thermometer } from "@lucide/vue";
+import { computed } from "vue";
+
+import { Badge } from "@/components/ui/badge";
+import { formatDuration, formatTemperature } from "@/lib/format";
+
+import MetricPanel from "../MetricPanel.vue";
+import { Skeleton } from "../ui/skeleton";
+import { panelStorageKey } from "./card-utils";
+import type { DiskHealthMetricCardProps } from "./types";
+
+const props = defineProps<DiskHealthMetricCardProps>();
+
+const disks = computed(() =>
+  [...(props.data.latestDiskHealth ?? [])].sort((left, right) =>
+    left.deviceName.localeCompare(right.deviceName),
+  ),
+);
+
+function powerOnDuration(hours: number | null) {
+  return hours === null ? null : formatDuration(hours * 60 * 60);
+}
+</script>
+
+<template>
+  <MetricPanel
+    title="硬盘健康"
+    description="硬盘自检状态"
+    size="lg"
+    :storage-key="panelStorageKey(data.hostId, 'disk-health')"
+    collapsible
+  >
+    <div v-if="disks.length" class="grid gap-3">
+      <div
+        v-for="disk in disks"
+        :key="disk.deviceName"
+        class="border-border/70 bg-background/40 grid gap-3 rounded-md border p-3"
+      >
+        <div class="flex min-w-0 items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex min-w-0 items-center gap-2">
+              <HardDrive
+                class="text-muted-foreground size-4 shrink-0"
+                aria-hidden="true"
+              />
+              <span class="min-w-0 text-sm font-medium wrap-break-word">
+                {{ disk.model || disk.deviceName }}
+              </span>
+            </div>
+            <p class="text-muted-foreground mt-1 text-xs wrap-break-word">
+              {{ disk.deviceName }}
+            </p>
+          </div>
+          <Badge :variant="disk.passed ? 'secondary' : 'destructive'">
+            {{ disk.passed ? "健康" : "需关注" }}
+          </Badge>
+        </div>
+
+        <div class="grid gap-2 text-sm sm:grid-cols-2">
+          <div
+            v-if="disk.temperatureCelsius !== null"
+            class="text-muted-foreground flex items-center gap-2"
+          >
+            <Thermometer class="size-4" aria-hidden="true" />
+            <span>{{ formatTemperature(disk.temperatureCelsius) }}</span>
+          </div>
+          <div
+            v-if="powerOnDuration(disk.powerOnHours)"
+            class="text-muted-foreground flex items-center gap-2"
+          >
+            <Clock3 class="size-4" aria-hidden="true" />
+            <span>通电 {{ powerOnDuration(disk.powerOnHours) }}</span>
+          </div>
+        </div>
+
+        <p
+          v-if="disk.serialNumber"
+          class="text-muted-foreground text-xs wrap-break-word"
+        >
+          序列号 {{ disk.serialNumber }}
+        </p>
+      </div>
+    </div>
+    <div v-else aria-label="正在加载指标" class="grid gap-3" role="status">
+      <span class="sr-only">正在加载指标</span>
+      <Skeleton class="h-24 w-full" />
+      <div class="text-muted-foreground flex items-center gap-2 text-sm">
+        <Activity class="size-4" aria-hidden="true" />
+        等待硬盘健康数据
+      </div>
+    </div>
+  </MetricPanel>
+</template>

@@ -35,12 +35,9 @@ const baseSample: HostMetricSample = {
 };
 
 describe("Disk details", () => {
-  it("renders Disk Health facts inside the disk details area", async () => {
+  it("renders only filesystem usage facts", async () => {
     const html = await renderToString(
       createSSRApp(DiskDetails, {
-        diskHealthCapability: {
-          available: true,
-        },
         latestSample: {
           ...baseSample,
           diskHealth: [
@@ -57,15 +54,14 @@ describe("Disk details", () => {
       }),
     );
 
-    expect(html).toContain("硬盘健康");
-    expect(html).toContain("Samsung SSD 870 EVO 1TB");
-    expect(html).toContain("健康");
-    expect(html).toContain("/dev/sda");
-    expect(html).toContain("31 °C");
-    expect(html).toContain("通电 12345 小时");
+    expect(html).toContain("挂载点");
+    expect(html).toContain("/");
+    expect(html).toContain("读取");
+    expect(html).not.toContain("硬盘健康");
+    expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
   });
 
-  it("does not render an empty Disk Health block when metrics are absent", async () => {
+  it("does not render an empty Disk Health block", async () => {
     const html = await renderToString(
       createSSRApp(DiskDetails, {
         latestSample: baseSample,
@@ -76,30 +72,16 @@ describe("Disk details", () => {
     expect(html.toLowerCase()).not.toContain("n/a");
   });
 
-  it("hides latest-known Disk Health when capability is unavailable", async () => {
+  it("renders an empty state when disk metrics are absent", async () => {
     const html = await renderToString(
       createSSRApp(DiskDetails, {
-        diskHealthCapability: {
-          available: false,
-        },
         latestSample: {
           ...baseSample,
-          diskHealth: [
-            {
-              deviceName: "/dev/sda",
-              model: "Samsung SSD 870 EVO 1TB",
-              passed: true,
-              powerOnHours: 12_345,
-              serialNumber: "S6PTEST",
-              temperatureCelsius: 31,
-            },
-          ],
+          disks: [],
         },
       }),
     );
 
-    expect(html).not.toContain("硬盘健康");
-    expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
-    expect(html).toContain("挂载点");
+    expect(html).toContain("暂无磁盘数据");
   });
 });
