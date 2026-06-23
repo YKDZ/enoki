@@ -152,7 +152,12 @@ describe("Probe systemd installer", () => {
       serviceUserExists: true,
     });
     const bootstrapPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    const operationStatusPath = path.join(
+      root,
+      "var/lib/enoki-probe/probe-operation-status.toml",
+    );
     await mkdir(path.dirname(bootstrapPath), { recursive: true });
+    await mkdir(path.dirname(operationStatusPath), { recursive: true });
     await writeFile(
       bootstrapPath,
       [
@@ -165,6 +170,15 @@ describe("Probe systemd installer", () => {
         "metrics_collection_interval_seconds = 1",
         "collect_cpu = true",
         "collect_network = false",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      operationStatusPath,
+      [
+        'operation_id = "30"',
+        'target_probe_version = "0.1.45"',
+        'status = "running"',
         "",
       ].join("\n"),
     );
@@ -225,7 +239,12 @@ describe("Probe systemd installer", () => {
       serviceUserExists: true,
     });
     const bootstrapPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    const operationStatusPath = path.join(
+      root,
+      "var/lib/enoki-probe/probe-operation-status.toml",
+    );
     await mkdir(path.dirname(bootstrapPath), { recursive: true });
+    await mkdir(path.dirname(operationStatusPath), { recursive: true });
     await writeFile(
       bootstrapPath,
       [
@@ -234,6 +253,15 @@ describe("Probe systemd installer", () => {
         'probe_secret = "enk_probe_existing"',
         'probe_configuration_version = "default-v2"',
         "reporting_batch_interval_seconds = 3",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      operationStatusPath,
+      [
+        'operation_id = "30"',
+        'target_probe_version = "0.1.45"',
+        'status = "running"',
         "",
       ].join("\n"),
     );
@@ -255,6 +283,9 @@ describe("Probe systemd installer", () => {
     expect(bootstrapConfig).not.toContain("probe_existing");
     expect(bootstrapConfig).not.toContain("enk_probe_existing");
     expect(bootstrapConfig).not.toContain("probe_configuration_version");
+    await expect(stat(operationStatusPath)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("uses a new enrollment token when reinstalling for a different Hub", async () => {

@@ -352,6 +352,7 @@ write_bootstrap_config() {
       printf 'probe_secret = "%s"\n' "$existing_probe_secret"
       printf 'probe_private_key_pem = "%s"\n' "$existing_probe_private_key_pem"
     else
+      rm -f "$(rooted_path "${STATE_DIR}/probe-operation-status.toml")"
       printf 'enrollment_token = '
       toml_string "$ENOKI_ENROLLMENT_TOKEN"
       printf '\n'
