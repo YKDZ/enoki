@@ -1,4 +1,3 @@
-import { createHash, createSign, generateKeyPairSync } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +12,12 @@ import {
   createProbeUpgradeRequest,
 } from "../src/probe/operation";
 import { validateProbeOperationToken } from "../src/probe/operation-token";
+import {
+  createTestProbeIdentity,
+  signedProbeHeaders,
+  signedJsonProbeRequest,
+  signedProbeRequest,
+} from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 
@@ -60,8 +65,8 @@ async function createEnrollmentToken(
 async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
-  probePublicKeyPem = "",
 ) {
+  const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
   const response = await app.request("/api/probe/register", {
@@ -77,7 +82,7 @@ async function registerProbe(
           os: "linux",
           probeVersion: "0.1.0",
         },
-        probePublicKeyPem,
+        probePublicKeyPem: identity.publicKeyPem,
       }),
     ).finish(),
     headers: {
@@ -87,39 +92,13 @@ async function registerProbe(
   });
 
   expect(response.status).toBe(200);
-  return RegistrationResponse.decode(
+  const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
-}
-
-function signedProbeHeaders(input: {
-  body: Uint8Array;
-  method: string;
-  pathAndQuery: string;
-  privateKeyPem: string;
-  probeId: string;
-  timestampMs: string;
-  nonce: string;
-}) {
-  const bodySha256 = createHash("sha256").update(input.body).digest("hex");
-  const payload = [
-    input.method.toUpperCase(),
-    input.pathAndQuery,
-    input.timestampMs,
-    input.nonce,
-    bodySha256,
-  ].join("\n");
-  const signer = createSign("RSA-SHA256");
-  signer.update(payload);
-  signer.end();
 
   return {
-    "content-type": "application/x-protobuf",
-    "x-enoki-body-sha256": bodySha256,
-    "x-enoki-nonce": input.nonce,
-    "x-enoki-probe-id": input.probeId,
-    "x-enoki-signature": signer.sign(input.privateKeyPem).toString("hex"),
-    "x-enoki-timestamp-ms": input.timestampMs,
+    ...registration,
+    privateKeyPem: identity.privateKeyPem,
   };
 }
 
@@ -174,22 +153,19 @@ describe("Probe report API", () => {
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
 
     async function report(sequence: number) {
-      const response = await app.request("/api/probe/report", {
-        body: ReportRequest.encode(
-          ReportRequest.create({
-            bootId: "boot-01",
-            probeConfigurationVersion: "default-v1",
-            probeId: registration.probeId,
-            sequenceEnd: sequence,
-            sequenceStart: sequence,
-          }),
-        ).finish(),
-        headers: {
-          authorization: `Bearer ${registration.probeSecret}`,
-          "content-type": "application/x-protobuf",
-        },
-        method: "POST",
-      });
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-01",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+        }),
+      ).finish();
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
 
       expect(response.status).toBe(200);
       return ReportResponse.decode(
@@ -216,17 +192,6 @@ describe("Probe report API", () => {
   });
 
   it("authenticates signed Probe report requests and rejects nonce replay", async () => {
-    const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-    });
-    const privateKeyPem = privateKey.export({
-      format: "pem",
-      type: "pkcs8",
-    }) as string;
-    const publicKeyPem = publicKey.export({
-      format: "pem",
-      type: "spki",
-    }) as string;
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -239,11 +204,7 @@ describe("Probe report API", () => {
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(
-      app,
-      enrollmentToken,
-      publicKeyPem,
-    );
+    const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
     const body = ReportRequest.encode(
@@ -260,7 +221,7 @@ describe("Probe report API", () => {
       method: "POST",
       nonce: "0123456789abcdef0123456789abcdef",
       pathAndQuery: "/api/probe/report",
-      privateKeyPem,
+      privateKeyPem: registration.privateKeyPem,
       probeId: registration.probeId,
       timestampMs: String(Date.now()),
     });
@@ -302,7 +263,6 @@ describe("Probe report API", () => {
     const downgraded = await app.request("/api/probe/report", {
       body,
       headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
         "content-type": "application/x-protobuf",
       },
       method: "POST",
@@ -342,22 +302,22 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
 
-    const delivery = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const delivery = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
     expect(delivery.status).toBe(200);
     const token = ReportResponse.decode(
       new Uint8Array(await delivery.arrayBuffer()),
@@ -376,6 +336,20 @@ describe("Probe report API", () => {
 
     const accepted = await app.request(
       `/api/probe/operations/${operation.id}/token/validate`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/token/validate`,
+        JSON.stringify({
+          targetProbeVersion: "0.2.0",
+          token,
+        }),
+      ),
+    );
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toEqual({ valid: true });
+
+    const legacyBearer = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
       {
         body: JSON.stringify({
           targetProbeVersion: "0.2.0",
@@ -388,10 +362,12 @@ describe("Probe report API", () => {
         method: "POST",
       },
     );
-    expect(accepted.status).toBe(200);
-    await expect(accepted.json()).resolves.toEqual({ valid: true });
+    expect(legacyBearer.status).toBe(401);
+    await expect(legacyBearer.json()).resolves.toEqual({
+      error: "probe_identity_required",
+    });
 
-    const wrongProbe = await app.request(
+    const unsigned = await app.request(
       `/api/probe/operations/${operation.id}/token/validate`,
       {
         body: JSON.stringify({
@@ -399,11 +375,26 @@ describe("Probe report API", () => {
           token,
         }),
         headers: {
-          authorization: `Bearer ${otherRegistration.probeSecret}`,
           "content-type": "application/json",
         },
         method: "POST",
       },
+    );
+    expect(unsigned.status).toBe(401);
+    await expect(unsigned.json()).resolves.toEqual({
+      error: "probe_identity_required",
+    });
+
+    const wrongProbe = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
+      signedJsonProbeRequest(
+        otherRegistration,
+        `/api/probe/operations/${operation.id}/token/validate`,
+        JSON.stringify({
+          targetProbeVersion: "0.2.0",
+          token,
+        }),
+      ),
     );
     expect(wrongProbe.status).toBe(403);
     await expect(wrongProbe.json()).resolves.toEqual({
@@ -412,17 +403,14 @@ describe("Probe report API", () => {
 
     const wrongTarget = await app.request(
       `/api/probe/operations/${operation.id}/token/validate`,
-      {
-        body: JSON.stringify({
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/token/validate`,
+        JSON.stringify({
           targetProbeVersion: "0.3.0",
           token,
         }),
-        headers: {
-          authorization: `Bearer ${registration.probeSecret}`,
-          "content-type": "application/json",
-        },
-        method: "POST",
-      },
+      ),
     );
     expect(wrongTarget.status).toBe(403);
     await expect(wrongTarget.json()).resolves.toEqual({
@@ -437,17 +425,14 @@ describe("Probe report API", () => {
     });
     const canceled = await app.request(
       `/api/probe/operations/${operation.id}/token/validate`,
-      {
-        body: JSON.stringify({
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/token/validate`,
+        JSON.stringify({
           targetProbeVersion: "0.2.0",
           token,
         }),
-        headers: {
-          authorization: `Bearer ${registration.probeSecret}`,
-          "content-type": "application/json",
-        },
-        method: "POST",
-      },
+      ),
     );
     expect(canceled.status).toBe(403);
     await expect(canceled.json()).resolves.toEqual({
@@ -484,23 +469,23 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
 
-    const acknowledged = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const acknowledged = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationAcknowledgements: [{ operationId: String(operation.id) }],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(acknowledged.status).toBe(200);
     expect(
@@ -514,28 +499,28 @@ describe("Probe report API", () => {
       }),
     );
 
-    const running = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationStatuses: [
-            {
-              operationId: String(operation.id),
-              running: {},
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const running = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationStatuses: [
+              {
+                operationId: String(operation.id),
+                running: {},
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(running.status).toBe(200);
     expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
@@ -546,31 +531,31 @@ describe("Probe report API", () => {
     );
 
     for (const sequence of [3, 3]) {
-      const failed = await app.request("/api/probe/report", {
-        body: ReportRequest.encode(
-          ReportRequest.create({
-            bootId: "boot-01",
-            operationStatuses: [
-              {
-                failed: {
-                  errorCode: "unsupported_installation",
-                  message: "systemd is unavailable",
+      const failed = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "/api/probe/report",
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-01",
+              operationStatuses: [
+                {
+                  failed: {
+                    errorCode: "unsupported_installation",
+                    message: "systemd is unavailable",
+                  },
+                  operationId: String(operation.id),
                 },
-                operationId: String(operation.id),
-              },
-            ],
-            probeConfigurationVersion: "default-v1",
-            probeId: registration.probeId,
-            sequenceEnd: sequence,
-            sequenceStart: sequence,
-          }),
-        ).finish(),
-        headers: {
-          authorization: `Bearer ${registration.probeSecret}`,
-          "content-type": "application/x-protobuf",
-        },
-        method: "POST",
-      });
+              ],
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: sequence,
+              sequenceStart: sequence,
+            }),
+          ).finish(),
+        ),
+      );
 
       expect(failed.status).toBe(200);
     }
@@ -612,29 +597,29 @@ describe("Probe report API", () => {
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const running = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-after-upgrade",
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          operationStatuses: [
-            {
-              operationId: String(operation.id),
-              running: {},
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const running = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-after-upgrade",
+            operationAcknowledgements: [{ operationId: String(operation.id) }],
+            operationStatuses: [
+              {
+                operationId: String(operation.id),
+                running: {},
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
     expect(running.status).toBe(200);
     expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
       expect.objectContaining({
@@ -642,31 +627,31 @@ describe("Probe report API", () => {
       }),
     );
 
-    const targetInventory = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-after-upgrade",
-          inventory: {
-            architecture: "x86_64",
-            cpuCount: 2,
-            hostname: "managed-host-01",
-            kernel: "6.8.0",
-            memoryTotalBytes: 2_147_483_648,
-            os: "linux",
-            probeVersion: "0.2.0",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const targetInventory = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-after-upgrade",
+            inventory: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              os: "linux",
+              probeVersion: "0.2.0",
+            },
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
     expect(targetInventory.status).toBe(200);
     expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
       expect.objectContaining({
@@ -692,45 +677,45 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const badAck = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationAcknowledgements: [{ operationId: "operation-missing" }],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const badAck = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationAcknowledgements: [{ operationId: "operation-missing" }],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
     expect(badAck.status).toBe(400);
     await expect(badAck.json()).resolves.toEqual({
       error: "malformed_probe_operation_acknowledgement",
     });
 
-    const badStatus = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationStatuses: [{ operationId: "" }],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const badStatus = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationStatuses: [{ operationId: "" }],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
     expect(badStatus.status).toBe(400);
     await expect(badStatus.json()).resolves.toEqual({
       error: "malformed_probe_operation_status",
@@ -765,24 +750,24 @@ describe("Probe report API", () => {
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationAcknowledgements: [{ operationId: String(operation.id) }],
-          operationStatuses: [{ operationId: "" }],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationAcknowledgements: [{ operationId: String(operation.id) }],
+            operationStatuses: [{ operationId: "" }],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
@@ -827,29 +812,29 @@ describe("Probe report API", () => {
     });
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationStatuses: [
-            {
-              operationId: String(operation.id),
-              running: {},
-            },
-            { operationId: "" },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationStatuses: [
+              {
+                operationId: String(operation.id),
+                running: {},
+              },
+              { operationId: "" },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
@@ -894,31 +879,31 @@ describe("Probe report API", () => {
     });
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationStatuses: [
-            {
-              failed: {
-                errorCode: "unsupported_installation",
-                message: "late local status",
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "unsupported_installation",
+                  message: "late local status",
+                },
+                operationId: String(staleOperation.id),
               },
-              operationId: String(staleOperation.id),
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(200);
     expect(database.probeOperations.findById(staleOperation.id ?? 0)).toEqual(
@@ -946,66 +931,66 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          inventoryHash: "",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_009_500,
-              cpuCores: [
-                {
-                  idle: 850,
-                  name: "cpu0",
-                  nice: 10,
-                  softirq: 2,
-                  steal: 1,
-                  system: 40,
-                  usagePercent: 15,
-                  user: 100,
-                },
-              ],
-              cpuPercent: 42.5,
-              disks: [
-                {
-                  availableBytes: 512,
-                  filesystemType: "ext4",
-                  mountPoint: "/",
-                  totalBytes: 2_048,
-                  usedBytes: 1_536,
-                },
-              ],
-              load_1: 0.12,
-              load_5: 0.34,
-              load_15: 0.56,
-              memoryTotalBytes: 2_147_483_648,
-              memoryUsedBytes: 1_073_741_824,
-              networkInterfaces: [
-                {
-                  name: "eth0",
-                  rxBytes: 9_000,
-                  rxBytesDelta: 4_000,
-                  txBytes: 11_000,
-                  txBytesDelta: 2_000,
-                },
-              ],
-              sequence: 1,
-              uptimeSeconds: 86_400,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            inventoryHash: "",
+            metrics: [
+              {
+                collectedAtMs: 1_725_000_009_500,
+                cpuCores: [
+                  {
+                    idle: 850,
+                    name: "cpu0",
+                    nice: 10,
+                    softirq: 2,
+                    steal: 1,
+                    system: 40,
+                    usagePercent: 15,
+                    user: 100,
+                  },
+                ],
+                cpuPercent: 42.5,
+                disks: [
+                  {
+                    availableBytes: 512,
+                    filesystemType: "ext4",
+                    mountPoint: "/",
+                    totalBytes: 2_048,
+                    usedBytes: 1_536,
+                  },
+                ],
+                load_1: 0.12,
+                load_5: 0.34,
+                load_15: 0.56,
+                memoryTotalBytes: 2_147_483_648,
+                memoryUsedBytes: 1_073_741_824,
+                networkInterfaces: [
+                  {
+                    name: "eth0",
+                    rxBytes: 9_000,
+                    rxBytesDelta: 4_000,
+                    txBytes: 11_000,
+                    txBytesDelta: 2_000,
+                  },
+                ],
+                sequence: 1,
+                uptimeSeconds: 86_400,
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(200);
     const acknowledgement = ReportResponse.decode(
@@ -1154,30 +1139,30 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-partial-metrics",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_009_500,
-              memoryTotalBytes: 2_147_483_648,
-              memoryUsedBytes: 1_073_741_824,
-              sequence: 1,
-            },
-          ],
-          probeConfigurationVersion: "memory-only-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-partial-metrics",
+            metrics: [
+              {
+                collectedAtMs: 1_725_000_009_500,
+                memoryTotalBytes: 2_147_483_648,
+                memoryUsedBytes: 1_073_741_824,
+                sequence: 1,
+              },
+            ],
+            probeConfigurationVersion: "memory-only-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(200);
 
@@ -1263,14 +1248,10 @@ describe("Probe report API", () => {
     ).finish();
 
     const sendReport = () =>
-      app.request("/api/probe/report", {
-        body: reportBody,
-        headers: {
-          authorization: `Bearer ${registration.probeSecret}`,
-          "content-type": "application/x-protobuf",
-        },
-        method: "POST",
-      });
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", reportBody),
+      );
 
     const firstResponse = await sendReport();
     const duplicateResponse = await sendReport();
@@ -1328,24 +1309,21 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-empty",
-          inventoryHash: "",
-          metrics: [],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-empty",
+        inventoryHash: "",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportBody),
+    );
 
     expect(response.status).toBe(200);
 
@@ -1407,30 +1385,30 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-skew",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_000_000,
-              cpuPercent: 12.5,
-              memoryUsedBytes: 512,
-              sequence: 1,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-skew",
+            metrics: [
+              {
+                collectedAtMs: 1_725_000_000_000,
+                cpuPercent: 12.5,
+                memoryUsedBytes: 512,
+                sequence: 1,
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(200);
 
@@ -1470,28 +1448,28 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-config-error",
-          metrics: [],
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: "global-1725000700000-1",
-            message: "report request failed: 503 Service Unavailable",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-config-error",
+            metrics: [],
+            probeConfigurationError: {
+              errorCode: "probe_configuration_fetch_failed",
+              failedVersion: "global-1725000700000-1",
+              message: "report request failed: 503 Service Unavailable",
+            },
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(200);
 
@@ -1532,47 +1510,47 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const errorResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-config-error-cleared",
-          metrics: [],
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: "global-1725000700000-1",
-            message: "report request failed: 503 Service Unavailable",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const errorResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-config-error-cleared",
+            metrics: [],
+            probeConfigurationError: {
+              errorCode: "probe_configuration_fetch_failed",
+              failedVersion: "global-1725000700000-1",
+              message: "report request failed: 503 Service Unavailable",
+            },
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
     expect(errorResponse.status).toBe(200);
 
-    const cleanResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-config-error-cleared",
-          metrics: [],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const cleanResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-config-error-cleared",
+            metrics: [],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
     expect(cleanResponse.status).toBe(200);
 
     const hostsResponse = await app.request("/api/web/hosts", {
@@ -1625,14 +1603,11 @@ describe("Probe report API", () => {
     expect(unauthorized.status).toBe(401);
     expect(unauthorized.headers.get("cache-control")).toBe("no-store");
 
-    const malformed = await app.request("/api/probe/report", {
-      body: new Uint8Array([0xff, 0xff, 0xff]),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const malformedBody = new Uint8Array([0xff, 0xff, 0xff]);
+    const malformed = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", malformedBody),
+    );
     expect(malformed.status).toBe(400);
     expect(malformed.headers.get("cache-control")).toBe("no-store");
     await expect(malformed.json()).resolves.toEqual({
@@ -1642,7 +1617,6 @@ describe("Probe report API", () => {
     const compressed = await app.request("/api/probe/report", {
       body: validBody,
       headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
         "content-encoding": "gzip",
         "content-type": "application/x-protobuf",
       },
@@ -1657,7 +1631,6 @@ describe("Probe report API", () => {
     const contentLengthOversized = await app.request("/api/probe/report", {
       body: validBody,
       headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
         "content-length": String(1024 * 1024 + 1),
         "content-type": "application/x-protobuf",
       },
@@ -1674,7 +1647,6 @@ describe("Probe report API", () => {
     const oversized = await app.request("/api/probe/report", {
       body: new Uint8Array(1024 * 1024 + 1),
       headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
         "content-type": "application/x-protobuf",
       },
       method: "POST",
@@ -1700,7 +1672,7 @@ describe("Probe report API", () => {
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    const registration = await registerProbe(app, enrollmentToken);
+    await registerProbe(app, enrollmentToken);
     let pullCount = 0;
     let canceled = false;
     const body = new ReadableStream<Uint8Array>({
@@ -1728,7 +1700,6 @@ describe("Probe report API", () => {
       requestWithStreamBody("/api/probe/report", {
         body,
         headers: {
-          authorization: `Bearer ${registration.probeSecret}`,
           "content-type": "application/x-protobuf",
         },
         method: "POST",
@@ -1764,29 +1735,26 @@ describe("Probe report API", () => {
       .prepare("select count(*) as count from audit_log")
       .get() as { count: number };
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-audit-boundary",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_079_500,
-              cpuPercent: 42.5,
-              sequence: 1,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-audit-boundary",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_079_500,
+            cpuPercent: 42.5,
+            sequence: 1,
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
 
     expect(response.status).toBe(200);
     expect(
@@ -1811,33 +1779,33 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-bad-inventory-hash",
-          inventory: {
-            architecture: "x86_64",
-            cpuCount: 4,
-            hostname: "managed-host-renamed",
-            kernel: "6.8.0",
-            memoryTotalBytes: 4_294_967_296,
-            os: "linux",
-            probeVersion: "0.1.0",
-          },
-          inventoryHash: "not-the-canonical-inventory-hash",
-          metrics: [],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-bad-inventory-hash",
+            inventory: {
+              architecture: "x86_64",
+              cpuCount: 4,
+              hostname: "managed-host-renamed",
+              kernel: "6.8.0",
+              memoryTotalBytes: 4_294_967_296,
+              os: "linux",
+              probeVersion: "0.1.0",
+            },
+            inventoryHash: "not-the-canonical-inventory-hash",
+            metrics: [],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
@@ -1877,36 +1845,36 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-missing-sequence",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_009_500,
-              cpuPercent: 20,
-              memoryUsedBytes: 1_024,
-              sequence: 10,
-            },
-            {
-              collectedAtMs: 1_725_000_009_700,
-              cpuPercent: 30,
-              memoryUsedBytes: 2_048,
-              sequence: 12,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 12,
-          sequenceStart: 10,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-missing-sequence",
+            metrics: [
+              {
+                collectedAtMs: 1_725_000_009_500,
+                cpuPercent: 20,
+                memoryUsedBytes: 1_024,
+                sequence: 10,
+              },
+              {
+                collectedAtMs: 1_725_000_009_700,
+                cpuPercent: 30,
+                memoryUsedBytes: 2_048,
+                sequence: 12,
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 12,
+            sequenceStart: 10,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
@@ -1967,22 +1935,22 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(200);
     const body = ReportResponse.decode(
@@ -2027,56 +1995,56 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
 
-    const delivery = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const delivery = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
     const token = ReportResponse.decode(
       new Uint8Array(await delivery.arrayBuffer()),
     ).pendingOperation?.probeUninstall?.operationToken;
 
-    const runningReport = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          operationAcknowledgements: [
-            {
-              operationId: String(operation.id),
-            },
-          ],
-          operationStatuses: [
-            {
-              operationId: String(operation.id),
-              running: {},
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const runningReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-01",
+            operationAcknowledgements: [
+              {
+                operationId: String(operation.id),
+              },
+            ],
+            operationStatuses: [
+              {
+                operationId: String(operation.id),
+                running: {},
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
     expect(runningReport.status).toBe(200);
 
-    const status = await app.request(
+    const legacyBearerStatus = await app.request(
       `/api/probe/operations/${operation.id}/status`,
       {
         body: JSON.stringify({
@@ -2089,6 +2057,22 @@ describe("Probe report API", () => {
         },
         method: "POST",
       },
+    );
+    expect(legacyBearerStatus.status).toBe(401);
+    await expect(legacyBearerStatus.json()).resolves.toEqual({
+      error: "probe_identity_required",
+    });
+
+    const status = await app.request(
+      `/api/probe/operations/${operation.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/status`,
+        JSON.stringify({
+          status: "succeeded",
+          token,
+        }),
+      ),
     );
     expect(status.status).toBe(200);
 
@@ -2121,36 +2105,36 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-duplicate-sample",
-          metrics: [
-            {
-              collectedAtMs: 1_725_000_009_500,
-              cpuPercent: 20,
-              memoryUsedBytes: 1_024,
-              sequence: 10,
-            },
-            {
-              collectedAtMs: 1_725_000_009_700,
-              cpuPercent: 30,
-              memoryUsedBytes: 2_048,
-              sequence: 10,
-            },
-          ],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 11,
-          sequenceStart: 10,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-duplicate-sample",
+            metrics: [
+              {
+                collectedAtMs: 1_725_000_009_500,
+                cpuPercent: 20,
+                memoryUsedBytes: 1_024,
+                sequence: 10,
+              },
+              {
+                collectedAtMs: 1_725_000_009_700,
+                cpuPercent: 30,
+                memoryUsedBytes: 2_048,
+                sequence: 10,
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 11,
+            sequenceStart: 10,
+          }),
+        ).finish(),
+      ),
+    );
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({

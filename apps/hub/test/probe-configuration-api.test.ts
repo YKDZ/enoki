@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 
@@ -55,6 +56,7 @@ async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
 ) {
+  const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
   const response = await app.request("/api/probe/register", {
@@ -70,6 +72,7 @@ async function registerProbe(
           os: "linux",
           probeVersion: "0.1.0",
         },
+        probePublicKeyPem: identity.publicKeyPem,
       }),
     ).finish(),
     headers: {
@@ -79,9 +82,10 @@ async function registerProbe(
   });
 
   expect(response.status).toBe(200);
-  return RegistrationResponse.decode(
+  const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
 describe("Probe Configuration API", () => {
@@ -151,24 +155,21 @@ describe("Probe Configuration API", () => {
 
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const reportResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          inventoryHash: "",
-          metrics: [],
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-01",
+        inventoryHash: "",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const reportResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportBody),
+    );
 
     expect(reportResponse.status).toBe(200);
     const acknowledgement = ReportResponse.decode(
@@ -180,19 +181,16 @@ describe("Probe Configuration API", () => {
 
     const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
     const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
-    const configResponse = await app.request("/api/probe/config", {
-      body: ConfigurationRequest.encode(
-        ConfigurationRequest.create({
-          currentVersion: "default-v1",
-          probeId: registration.probeId,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const configBody = ConfigurationRequest.encode(
+      ConfigurationRequest.create({
+        currentVersion: "default-v1",
+        probeId: registration.probeId,
+      }),
+    ).finish();
+    const configResponse = await app.request(
+      "/api/probe/config",
+      signedProbeRequest(registration, "/api/probe/config", configBody),
+    );
 
     expect(configResponse.status).toBe(200);
     expect(configResponse.headers.get("cache-control")).toBe("no-store");
@@ -470,19 +468,16 @@ describe("Probe Configuration API", () => {
 
     const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
     const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
-    const configResponse = await app.request("/api/probe/config", {
-      body: ConfigurationRequest.encode(
-        ConfigurationRequest.create({
-          currentVersion: globalVersion,
-          probeId: registration.probeId,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const configBody = ConfigurationRequest.encode(
+      ConfigurationRequest.create({
+        currentVersion: globalVersion,
+        probeId: registration.probeId,
+      }),
+    ).finish();
+    const configResponse = await app.request(
+      "/api/probe/config",
+      signedProbeRequest(registration, "/api/probe/config", configBody),
+    );
     const probeConfiguration = ConfigurationResponse.decode(
       new Uint8Array(await configResponse.arrayBuffer()),
     );

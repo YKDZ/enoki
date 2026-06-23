@@ -11,9 +11,11 @@ import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { hashSecret } from "../src/enrollment/routes";
+import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 const Inventory = root.enoki.v1.Inventory;
+const testProbePrivateKeys = new WeakMap<Response, string>();
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-probe-db-"));
@@ -61,14 +63,18 @@ async function registerProbe(
   enrollmentToken: string,
   hostname = "managed-host-01",
   headers: Record<string, string> = {},
+  options: { publicKey?: boolean; publicKeyPem?: string } = {},
 ) {
+  const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+  const probePublicKeyPem = options.publicKeyPem ?? identity.publicKeyPem;
 
-  return app.request("/api/probe/register", {
+  const response = await app.request("/api/probe/register", {
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
         inventory: sampleInventory({ hostname }),
+        ...(options.publicKey === false ? {} : { probePublicKeyPem }),
       }),
     ).finish(),
     headers: {
@@ -77,6 +83,26 @@ async function registerProbe(
     },
     method: "POST",
   });
+
+  if (options.publicKey !== false) {
+    testProbePrivateKeys.set(response, identity.privateKeyPem);
+  }
+
+  return response;
+}
+
+async function decodeRegisteredProbe(response: Response) {
+  const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
+  const privateKeyPem = testProbePrivateKeys.get(response);
+  const registration = RegistrationResponse.decode(
+    new Uint8Array(await response.arrayBuffer()),
+  );
+
+  if (!privateKeyPem) {
+    throw new Error("missing test Probe private key");
+  }
+
+  return { ...registration, privateKeyPem };
 }
 
 function sampleInventory(
@@ -402,6 +428,49 @@ describe("Probe registration API", () => {
     database.close();
   });
 
+  it("rejects Probe registration without consuming the Enrollment Token when the public key is invalid", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+
+    const missingKey = await registerProbe(
+      app,
+      enrollmentToken,
+      "managed-host-01",
+      {},
+      { publicKey: false },
+    );
+    expect(missingKey.status).toBe(400);
+    await expect(missingKey.json()).resolves.toEqual({
+      error: "probe_public_key_required",
+    });
+
+    const invalidKey = await registerProbe(
+      app,
+      enrollmentToken,
+      "managed-host-01",
+      {},
+      { publicKeyPem: "not-a-public-key" },
+    );
+    expect(invalidKey.status).toBe(400);
+    await expect(invalidKey.json()).resolves.toEqual({
+      error: "probe_public_key_required",
+    });
+
+    const response = await registerProbe(app, enrollmentToken);
+    expect(response.status).toBe(200);
+
+    database.close();
+  });
+
   it("rejects Probe registration with an expired Enrollment Token", async () => {
     const database = await createTemporaryDatabase();
     let now = 1_725_000_000_000;
@@ -450,26 +519,20 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
     const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
     const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
-    const response = await app.request("/api/probe/config", {
-      body: ConfigurationRequest.encode(
-        ConfigurationRequest.create({
-          currentVersion: "",
-          probeId: registration.probeId,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const configBody = ConfigurationRequest.encode(
+      ConfigurationRequest.create({
+        currentVersion: "",
+        probeId: registration.probeId,
+      }),
+    ).finish();
+    const response = await app.request(
+      "/api/probe/config",
+      signedProbeRequest(registration, "/api/probe/config", configBody),
+    );
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -507,31 +570,25 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          inventoryHash:
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-01",
+        inventoryHash:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportBody),
+    );
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("no-store");
@@ -560,7 +617,6 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
     const Inventory = root.enoki.v1.Inventory;
@@ -591,28 +647,23 @@ describe("Probe registration API", () => {
     const changedInventoryHash = createHash("sha256")
       .update(Inventory.encode(changedInventory).finish())
       .digest("hex");
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
-    const response = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          inventory: changedInventory,
-          inventoryHash: changedInventoryHash,
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-01",
+        inventory: changedInventory,
+        inventoryHash: changedInventoryHash,
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportBody),
+    );
 
     expect(response.status).toBe(200);
     const acknowledgement = ReportResponse.decode(
@@ -687,7 +738,6 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
     const shuffledInventory = sampleInventory({
@@ -716,28 +766,23 @@ describe("Probe registration API", () => {
     expect(canonicalHash).toBe(
       "81b44963b7d5790b078d36ad59ac8ffa3da60b6684b58ca152252dfb5574c013",
     );
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
-    const fullSnapshotResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          inventory: shuffledInventory,
-          inventoryHash: canonicalHash,
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const fullSnapshotBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-01",
+        inventory: shuffledInventory,
+        inventoryHash: canonicalHash,
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const fullSnapshotResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", fullSnapshotBody),
+    );
 
     expect(fullSnapshotResponse.status).toBe(200);
     const fullSnapshotAck = ReportResponse.decode(
@@ -745,23 +790,20 @@ describe("Probe registration API", () => {
     );
     expect(fullSnapshotAck.inventoryNeeded).toBe(false);
 
-    const hashOnlyResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-01",
-          inventoryHash: canonicalHash,
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 3,
-          sequenceStart: 3,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const hashOnlyBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-01",
+        inventoryHash: canonicalHash,
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 3,
+        sequenceStart: 3,
+      }),
+    ).finish();
+    const hashOnlyResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", hashOnlyBody),
+    );
 
     expect(hashOnlyResponse.status).toBe(200);
     const hashOnlyAck = ReportResponse.decode(
@@ -848,6 +890,7 @@ describe("Probe registration API", () => {
       tokenHash: hashSecret(enrollmentToken),
     });
     const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+    const identity = createTestProbeIdentity();
 
     await withHubServer(app, async (origin) => {
       const response = await fetch(`${origin}/api/probe/register`, {
@@ -855,6 +898,7 @@ describe("Probe registration API", () => {
           RegistrationRequest.create({
             enrollmentToken,
             inventory: sampleInventory(),
+            probePublicKeyPem: identity.publicKeyPem,
           }),
         ).finish(),
         headers: {
@@ -989,11 +1033,8 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
     const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
     const response = await app.request("/api/probe/config", {
       body: ConfigurationRequest.encode(
@@ -1032,11 +1073,8 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
     const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
     const response = await app.request("/api/probe/config", {
       body: ConfigurationRequest.encode(
@@ -1073,10 +1111,7 @@ describe("Probe registration API", () => {
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
     const registrationResponse = await registerProbe(app, enrollmentToken);
-    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
-    const registration = RegistrationResponse.decode(
-      new Uint8Array(await registrationResponse.arrayBuffer()),
-    );
+    const registration = await decodeRegisteredProbe(registrationResponse);
 
     const storedHost = database.sqlite
       .prepare("select probe_secret_hash from managed_hosts")

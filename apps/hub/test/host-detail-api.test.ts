@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 
@@ -56,6 +57,7 @@ async function registerProbe(
   enrollmentToken: string,
   input: { probeVersion?: string | null } = {},
 ) {
+  const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
   const probeVersion = input.probeVersion ?? "0.1.0";
@@ -86,6 +88,7 @@ async function registerProbe(
           os: "linux",
           ...(input.probeVersion === null ? {} : { probeVersion }),
         },
+        probePublicKeyPem: identity.publicKeyPem,
       }),
     ).finish(),
     headers: {
@@ -95,9 +98,10 @@ async function registerProbe(
   });
 
   expect(response.status).toBe(200);
-  return RegistrationResponse.decode(
+  const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
 function probeAssetManifest(version?: unknown) {
@@ -196,86 +200,83 @@ async function sendReport(
   },
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
-  const response = await app.request("/api/probe/report", {
-    body: ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-detail-history",
-        metrics: [
-          {
-            collectedAtMs: input.collectedAtMs,
-            cpuCores: [
-              {
-                idle: 850,
-                name: "cpu0",
-                nice: 0,
-                softirq: 2,
-                steal: 1,
-                system: 40,
-                usagePercent: input.cpuPercent - 1,
-                user: 100,
-              },
-              {
-                idle: 820,
-                name: "cpu1",
-                nice: 0,
-                softirq: 2,
-                steal: 1,
-                system: 45,
-                usagePercent: input.cpuPercent + 1,
-                user: 110,
-              },
-            ],
-            cpuPercent: input.cpuPercent,
-            disks: [
-              {
-                availableBytes: 4_000,
-                filesystemType: "ext4",
-                mountPoint: "/",
-                totalBytes: 20_000,
-                usedBytes: 16_000,
-              },
-              {
-                availableBytes: 2_000,
-                filesystemType: "xfs",
-                mountPoint: "/data",
-                totalBytes: 10_000,
-                usedBytes: 8_000,
-              },
-            ],
-            memoryTotalBytes: 8_589_934_592,
-            memoryUsedBytes: 4_294_967_296,
-            networkInterfaces: [
-              {
-                name: "eth0",
-                rxBytes: 20_000,
-                rxBytesDelta: 3_000,
-                txBytes: 30_000,
-                txBytesDelta: 1_000,
-              },
-              {
-                name: "eth1",
-                rxBytes: 10_000,
-                rxBytesDelta: 2_000,
-                txBytes: 12_000,
-                txBytesDelta: 500,
-              },
-            ],
-            sequence: input.sequence,
-            uptimeSeconds: 3600,
-          },
-        ],
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: input.sequence,
-        sequenceStart: input.sequence,
-      }),
-    ).finish(),
-    headers: {
-      authorization: `Bearer ${registration.probeSecret}`,
-      "content-type": "application/x-protobuf",
-    },
-    method: "POST",
-  });
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: "boot-detail-history",
+      metrics: [
+        {
+          collectedAtMs: input.collectedAtMs,
+          cpuCores: [
+            {
+              idle: 850,
+              name: "cpu0",
+              nice: 0,
+              softirq: 2,
+              steal: 1,
+              system: 40,
+              usagePercent: input.cpuPercent - 1,
+              user: 100,
+            },
+            {
+              idle: 820,
+              name: "cpu1",
+              nice: 0,
+              softirq: 2,
+              steal: 1,
+              system: 45,
+              usagePercent: input.cpuPercent + 1,
+              user: 110,
+            },
+          ],
+          cpuPercent: input.cpuPercent,
+          disks: [
+            {
+              availableBytes: 4_000,
+              filesystemType: "ext4",
+              mountPoint: "/",
+              totalBytes: 20_000,
+              usedBytes: 16_000,
+            },
+            {
+              availableBytes: 2_000,
+              filesystemType: "xfs",
+              mountPoint: "/data",
+              totalBytes: 10_000,
+              usedBytes: 8_000,
+            },
+          ],
+          memoryTotalBytes: 8_589_934_592,
+          memoryUsedBytes: 4_294_967_296,
+          networkInterfaces: [
+            {
+              name: "eth0",
+              rxBytes: 20_000,
+              rxBytesDelta: 3_000,
+              txBytes: 30_000,
+              txBytesDelta: 1_000,
+            },
+            {
+              name: "eth1",
+              rxBytes: 10_000,
+              rxBytesDelta: 2_000,
+              txBytes: 12_000,
+              txBytesDelta: 500,
+            },
+          ],
+          sequence: input.sequence,
+          uptimeSeconds: 3600,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: input.sequence,
+      sequenceStart: input.sequence,
+    }),
+  ).finish();
+  const response = await app.request(
+    "/api/probe/report",
+    signedProbeRequest(registration, "/api/probe/report", body),
+  );
 
   expect(response.status).toBe(200);
 }
@@ -523,28 +524,25 @@ describe("Host detail API", () => {
     const hostId = await firstHostId(app, ownerSession);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
 
-    const reportResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-config-error-detail",
-          metrics: [],
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: "global-1725000700000-1",
-            message: "report request failed: 503 Service Unavailable",
-          },
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 1,
-          sequenceStart: 1,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-config-error-detail",
+        metrics: [],
+        probeConfigurationError: {
+          errorCode: "probe_configuration_fetch_failed",
+          failedVersion: "global-1725000700000-1",
+          message: "report request failed: 503 Service Unavailable",
+        },
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const reportResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportBody),
+    );
     expect(reportResponse.status).toBe(200);
 
     const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {

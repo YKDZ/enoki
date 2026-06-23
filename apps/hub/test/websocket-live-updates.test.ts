@@ -10,6 +10,7 @@ import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
+import { createTestProbeIdentity, signedProbeHeaders } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 const openServers: Array<{ close: () => Promise<void> }> = [];
@@ -81,6 +82,7 @@ async function createEnrollmentToken(baseUrl: string, ownerSession: string) {
 }
 
 async function registerProbe(baseUrl: string, enrollmentToken: string) {
+  const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
   const response = await fetch(`${baseUrl}/api/probe/register`, {
@@ -96,6 +98,7 @@ async function registerProbe(baseUrl: string, enrollmentToken: string) {
           os: "linux",
           probeVersion: "0.1.0",
         },
+        probePublicKeyPem: identity.publicKeyPem,
       }),
     ).finish(),
     headers: {
@@ -105,14 +108,16 @@ async function registerProbe(baseUrl: string, enrollmentToken: string) {
   });
 
   expect(response.status).toBe(200);
-  return RegistrationResponse.decode(
+  const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
 async function sendReport(
   baseUrl: string,
   registration: {
+    privateKeyPem: string;
     probeId: string;
     probeSecret: string;
   },
@@ -124,60 +129,63 @@ async function sendReport(
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
   const sequence = options.sequence ?? 1;
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: options.bootId ?? "boot-live-summary",
+      metrics: [
+        {
+          collectedAtMs: 1_725_000_009_500,
+          cpuCores: [
+            {
+              idle: 850,
+              name: "cpu0",
+              nice: 10,
+              softirq: 2,
+              steal: 1,
+              system: 40,
+              usagePercent: 15,
+              user: 100,
+            },
+          ],
+          cpuPercent: options.cpuPercent ?? 42.5,
+          disks: [
+            {
+              availableBytes: 512,
+              filesystemType: "ext4",
+              mountPoint: "/",
+              totalBytes: 2_048,
+              usedBytes: 1_536,
+            },
+          ],
+          memoryTotalBytes: 2_147_483_648,
+          memoryUsedBytes: 1_073_741_824,
+          networkInterfaces: [
+            {
+              name: "eth0",
+              rxBytes: 9_000,
+              rxBytesDelta: 4_000,
+              txBytes: 11_000,
+              txBytesDelta: 2_000,
+            },
+          ],
+          sequence,
+          uptimeSeconds: 86_400,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+    }),
+  ).finish();
   const response = await fetch(`${baseUrl}/api/probe/report`, {
-    body: ReportRequest.encode(
-      ReportRequest.create({
-        bootId: options.bootId ?? "boot-live-summary",
-        metrics: [
-          {
-            collectedAtMs: 1_725_000_009_500,
-            cpuCores: [
-              {
-                idle: 850,
-                name: "cpu0",
-                nice: 10,
-                softirq: 2,
-                steal: 1,
-                system: 40,
-                usagePercent: 15,
-                user: 100,
-              },
-            ],
-            cpuPercent: options.cpuPercent ?? 42.5,
-            disks: [
-              {
-                availableBytes: 512,
-                filesystemType: "ext4",
-                mountPoint: "/",
-                totalBytes: 2_048,
-                usedBytes: 1_536,
-              },
-            ],
-            memoryTotalBytes: 2_147_483_648,
-            memoryUsedBytes: 1_073_741_824,
-            networkInterfaces: [
-              {
-                name: "eth0",
-                rxBytes: 9_000,
-                rxBytesDelta: 4_000,
-                txBytes: 11_000,
-                txBytesDelta: 2_000,
-              },
-            ],
-            sequence,
-            uptimeSeconds: 86_400,
-          },
-        ],
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: sequence,
-        sequenceStart: sequence,
-      }),
-    ).finish(),
-    headers: {
-      authorization: `Bearer ${registration.probeSecret}`,
-      "content-type": "application/x-protobuf",
-    },
+    body,
+    headers: signedProbeHeaders({
+      body,
+      pathAndQuery: "/api/probe/report",
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
     method: "POST",
   });
 

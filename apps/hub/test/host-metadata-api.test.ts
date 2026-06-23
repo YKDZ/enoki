@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 
@@ -55,6 +56,7 @@ async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
 ) {
+  const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
   const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
   const response = await app.request("/api/probe/register", {
@@ -76,6 +78,7 @@ async function registerProbe(
           os: "linux",
           probeVersion: "0.1.0",
         },
+        probePublicKeyPem: identity.publicKeyPem,
       }),
     ).finish(),
     headers: {
@@ -85,14 +88,16 @@ async function registerProbe(
   });
 
   expect(response.status).toBe(200);
-  return RegistrationResponse.decode(
+  const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
 async function reportInventory(
   app: ReturnType<typeof createHubApp>,
   registration: {
+    privateKeyPem: string;
     probeId: string;
     probeSecret: string;
   },
@@ -104,38 +109,35 @@ async function reportInventory(
   },
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
-  const response = await app.request("/api/probe/report", {
-    body: ReportRequest.encode(
-      ReportRequest.create({
-        bootId: input.bootId,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          hostname: input.hostname,
-          kernel: "6.8.0",
-          memoryTotalBytes: 2_147_483_648,
-          networkInterfaces: [
-            {
-              addresses: [input.address],
-              name: "eth0",
-            },
-          ],
-          os: "linux",
-          probeVersion: "0.1.0",
-        },
-        metrics: [],
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: input.sequence,
-        sequenceStart: input.sequence,
-      }),
-    ).finish(),
-    headers: {
-      authorization: `Bearer ${registration.probeSecret}`,
-      "content-type": "application/x-protobuf",
-    },
-    method: "POST",
-  });
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: input.bootId,
+      inventory: {
+        architecture: "x86_64",
+        cpuCount: 2,
+        hostname: input.hostname,
+        kernel: "6.8.0",
+        memoryTotalBytes: 2_147_483_648,
+        networkInterfaces: [
+          {
+            addresses: [input.address],
+            name: "eth0",
+          },
+        ],
+        os: "linux",
+        probeVersion: "0.1.0",
+      },
+      metrics: [],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: input.sequence,
+      sequenceStart: input.sequence,
+    }),
+  ).finish();
+  const response = await app.request(
+    "/api/probe/report",
+    signedProbeRequest(registration, "/api/probe/report", body),
+  );
 
   expect(response.status).toBe(200);
 }
@@ -143,6 +145,7 @@ async function reportInventory(
 async function reportMetric(
   app: ReturnType<typeof createHubApp>,
   registration: {
+    privateKeyPem: string;
     probeId: string;
     probeSecret: string;
   },
@@ -150,29 +153,28 @@ async function reportMetric(
   observedIp?: string,
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: "boot-soft-delete",
+      metrics: [
+        {
+          collectedAtMs: 1_725_000_059_500,
+          cpuPercent: 12.5,
+          sequence,
+        },
+      ],
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: sequence,
+      sequenceStart: sequence,
+    }),
+  ).finish();
   const response = await app.request("/api/probe/report", {
-    body: ReportRequest.encode(
-      ReportRequest.create({
-        bootId: "boot-soft-delete",
-        metrics: [
-          {
-            collectedAtMs: 1_725_000_059_500,
-            cpuPercent: 12.5,
-            sequence,
-          },
-        ],
-        probeConfigurationVersion: "default-v1",
-        probeId: registration.probeId,
-        sequenceEnd: sequence,
-        sequenceStart: sequence,
-      }),
-    ).finish(),
+    ...signedProbeRequest(registration, "/api/probe/report", body),
     headers: {
-      authorization: `Bearer ${registration.probeSecret}`,
-      "content-type": "application/x-protobuf",
+      ...signedProbeRequest(registration, "/api/probe/report", body).headers,
       ...(observedIp ? { "x-forwarded-for": observedIp } : {}),
     },
-    method: "POST",
   });
 
   expect(response.status).toBe(200);
@@ -304,19 +306,16 @@ describe("Host Metadata API", () => {
 
     const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
     const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
-    const configResponse = await app.request("/api/probe/config", {
-      body: ConfigurationRequest.encode(
-        ConfigurationRequest.create({
-          currentVersion: "default-v1",
-          probeId: registration.probeId,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const configBody = ConfigurationRequest.encode(
+      ConfigurationRequest.create({
+        currentVersion: "default-v1",
+        probeId: registration.probeId,
+      }),
+    ).finish();
+    const configResponse = await app.request(
+      "/api/probe/config",
+      signedProbeRequest(registration, "/api/probe/config", configBody),
+    );
 
     expect(configResponse.status).toBe(200);
     const configuration = ConfigurationResponse.toObject(
@@ -645,22 +644,19 @@ describe("Host Metadata API", () => {
 
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const reportResponse = await app.request("/api/probe/report", {
-      body: ReportRequest.encode(
-        ReportRequest.create({
-          bootId: "boot-soft-delete",
-          probeConfigurationVersion: "default-v1",
-          probeId: registration.probeId,
-          sequenceEnd: 2,
-          sequenceStart: 2,
-        }),
-      ).finish(),
-      headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
-        "content-type": "application/x-protobuf",
-      },
-      method: "POST",
-    });
+    const reportRequestBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-soft-delete",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const reportResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportRequestBody),
+    );
     expect(reportResponse.status).toBe(200);
     const reportBody = ReportResponse.decode(
       new Uint8Array(await reportResponse.arrayBuffer()),

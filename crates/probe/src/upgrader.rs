@@ -17,6 +17,8 @@ use rsa::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::probe_auth::{ProbeRequestAuth, signed_probe_request_headers};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderRunInput {
     pub bootstrap_config_path: PathBuf,
@@ -47,6 +49,7 @@ pub enum ProbeUpgraderRunError {
     InvalidInstallMetadata(&'static str),
     InvalidManifest(&'static str),
     InvalidMetadata(&'static str),
+    InvalidSigningKey(String),
     Io(std::io::Error),
     MissingToken,
     PostReplacementRestartFailure(String),
@@ -84,6 +87,9 @@ impl fmt::Display for ProbeUpgraderRunError {
                     formatter,
                     "invalid Probe Upgrader operation metadata: {message}"
                 )
+            }
+            Self::InvalidSigningKey(message) => {
+                write!(formatter, "invalid Probe signing key: {message}")
             }
             Self::Io(_) => write!(formatter, "failed to read Probe bootstrap config"),
             Self::MissingToken => write!(formatter, "missing Probe Operation Token on stdin"),
@@ -138,6 +144,7 @@ impl Error for ProbeUpgraderRunError {
             | Self::ChecksumFailure
             | Self::InvalidManifest(_)
             | Self::InvalidMetadata(_)
+            | Self::InvalidSigningKey(_)
             | Self::MissingToken
             | Self::PostReplacementRestartFailure(_)
             | Self::PostReplacementStatusWriteFailure(_)
@@ -160,23 +167,19 @@ impl From<std::io::Error> for ProbeUpgraderRunError {
 }
 
 pub trait ProbeUpgraderValidationTransport {
-    fn get_asset(
-        &mut self,
-        url: &str,
-        bearer_secret: &str,
-    ) -> Result<Vec<u8>, ProbeUpgraderRunError>;
+    fn get_asset(&mut self, url: &str) -> Result<Vec<u8>, ProbeUpgraderRunError>;
 
     fn post_token_validation(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: &str,
     ) -> Result<(), ProbeUpgraderRunError>;
 
     fn post_operation_status(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: &str,
     ) -> Result<(), ProbeUpgraderRunError>;
 }
@@ -184,14 +187,9 @@ pub trait ProbeUpgraderValidationTransport {
 pub struct HttpProbeUpgraderValidationTransport;
 
 impl ProbeUpgraderValidationTransport for HttpProbeUpgraderValidationTransport {
-    fn get_asset(
-        &mut self,
-        url: &str,
-        bearer_secret: &str,
-    ) -> Result<Vec<u8>, ProbeUpgraderRunError> {
+    fn get_asset(&mut self, url: &str) -> Result<Vec<u8>, ProbeUpgraderRunError> {
         let response = ureq::get(url)
             .set("accept", "application/octet-stream")
-            .set("authorization", &format!("Bearer {bearer_secret}"))
             .call()
             .map_err(|_error| ProbeUpgraderRunError::AssetMissing)?;
         let mut bytes = Vec::new();
@@ -206,13 +204,18 @@ impl ProbeUpgraderValidationTransport for HttpProbeUpgraderValidationTransport {
     fn post_token_validation(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: &str,
     ) -> Result<(), ProbeUpgraderRunError> {
-        ureq::post(url)
+        let mut request = ureq::post(url)
             .set("accept", "application/json")
-            .set("authorization", &format!("Bearer {bearer_secret}"))
-            .set("content-type", "application/json")
+            .set("content-type", "application/json");
+        for (name, value) in signed_probe_request_headers("POST", url, auth, body.as_bytes())
+            .map_err(ProbeUpgraderRunError::InvalidSigningKey)?
+        {
+            request = request.set(name, &value);
+        }
+        request
             .send_string(body)
             .map_err(|error| ProbeUpgraderRunError::TokenValidation(error.to_string()))?;
 
@@ -222,17 +225,20 @@ impl ProbeUpgraderValidationTransport for HttpProbeUpgraderValidationTransport {
     fn post_operation_status(
         &mut self,
         url: &str,
-        bearer_secret: &str,
+        auth: &ProbeRequestAuth<'_>,
         body: &str,
     ) -> Result<(), ProbeUpgraderRunError> {
-        ureq::post(url)
+        let mut request = ureq::post(url)
             .set("accept", "application/json")
-            .set("authorization", &format!("Bearer {bearer_secret}"))
-            .set("content-type", "application/json")
-            .send_string(body)
-            .map_err(|error| {
-                ProbeUpgraderRunError::UninstallStatusReportFailure(error.to_string())
-            })?;
+            .set("content-type", "application/json");
+        for (name, value) in signed_probe_request_headers("POST", url, auth, body.as_bytes())
+            .map_err(ProbeUpgraderRunError::InvalidSigningKey)?
+        {
+            request = request.set(name, &value);
+        }
+        request.send_string(body).map_err(|error| {
+            ProbeUpgraderRunError::UninstallStatusReportFailure(error.to_string())
+        })?;
 
         Ok(())
     }
@@ -353,13 +359,7 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
         .hub_url
         .as_ref()
         .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?;
-    let probe_secret =
-        bootstrap_config
-            .probe_secret
-            .as_ref()
-            .ok_or(ProbeUpgraderRunError::InvalidConfig(
-                "missing Probe Identity secret",
-            ))?;
+    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
     let body = format!(
         "{{\"targetProbeVersion\":\"{}\",\"token\":\"{}\"}}",
         json_string_fragment(&operation.target_probe_version),
@@ -372,7 +372,7 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
             hub_url.trim_end_matches('/'),
             operation.operation_id,
         ),
-        probe_secret,
+        &request_auth,
         &body,
     )?;
 
@@ -445,13 +445,7 @@ fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
         .as_ref()
         .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?
         .clone();
-    let probe_secret = bootstrap_config
-        .probe_secret
-        .as_ref()
-        .ok_or(ProbeUpgraderRunError::InvalidConfig(
-            "missing Probe Identity secret",
-        ))?
-        .clone();
+    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
     validate_bootstrap_config_matches_trusted_install_metadata(
         &bootstrap_config,
         install_metadata,
@@ -467,7 +461,7 @@ fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
             hub_url.trim_end_matches('/'),
             operation.operation_id,
         ),
-        &probe_secret,
+        &request_auth,
         &token_body,
     )?;
 
@@ -480,12 +474,12 @@ fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
     if let Err(error) = execute_probe_uninstall(&input, install_metadata, systemd) {
         let failed = failed_probe_uninstaller_result(&operation, &error);
         let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
-        let _ = transport.post_operation_status(&status_url, &probe_secret, &body);
+        let _ = transport.post_operation_status(&status_url, &request_auth, &body);
         return Ok(failed);
     }
 
     let body = render_operation_status_body(&operation.token, "succeeded", None);
-    transport.post_operation_status(&status_url, &probe_secret, &body)?;
+    transport.post_operation_status(&status_url, &request_auth, &body)?;
 
     Ok(ProbeUpgraderResult {
         error_code: None,
@@ -669,7 +663,9 @@ struct ProbeUpgraderBootstrapConfig {
     install_path: Option<String>,
     operation_status_path: Option<String>,
     probe_asset_public_key_sha256: Option<String>,
-    probe_secret: Option<String>,
+    probe_id: Option<String>,
+    probe_private_key_pem: Option<String>,
+    server_time_offset_ms: Option<i64>,
     service_name: Option<String>,
     state_dir: Option<String>,
 }
@@ -698,9 +694,26 @@ fn read_upgrader_bootstrap_config(
         install_path: string_value(&value, "install_path")?,
         operation_status_path: string_value(&value, "operation_status_path")?,
         probe_asset_public_key_sha256: string_value(&value, "probe_asset_public_key_sha256")?,
-        probe_secret: string_value(&value, "probe_secret")?,
+        probe_id: string_value(&value, "probe_id")?,
+        probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
+        server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         service_name: string_value(&value, "service_name")?,
         state_dir: string_value(&value, "state_dir")?,
+    })
+}
+
+fn probe_request_auth_from_bootstrap_config(
+    bootstrap_config: &ProbeUpgraderBootstrapConfig,
+) -> Result<ProbeRequestAuth<'_>, ProbeUpgraderRunError> {
+    Ok(ProbeRequestAuth {
+        probe_id: bootstrap_config
+            .probe_id
+            .as_deref()
+            .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Probe ID"))?,
+        probe_private_key_pem: bootstrap_config.probe_private_key_pem.as_deref().ok_or(
+            ProbeUpgraderRunError::InvalidConfig("missing Probe signing key"),
+        )?,
+        server_time_offset_ms: bootstrap_config.server_time_offset_ms.unwrap_or(0),
     })
 }
 
@@ -839,6 +852,19 @@ fn string_value(
     }
 }
 
+fn signed_integer_value(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<Option<i64>, ProbeUpgraderRunError> {
+    match value.get(key) {
+        Some(toml::Value::Integer(integer)) => Ok(Some(*integer)),
+        Some(_) => Err(ProbeUpgraderRunError::InvalidConfig(
+            "expected integer values",
+        )),
+        None => Ok(None),
+    }
+}
+
 fn json_string_fragment(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -882,19 +908,11 @@ fn execute_probe_upgrade(
         .hub_url
         .as_deref()
         .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?;
-    let probe_secret =
-        bootstrap_config
-            .probe_secret
-            .as_deref()
-            .ok_or(ProbeUpgraderRunError::InvalidConfig(
-                "missing Probe Identity secret",
-            ))?;
     validate_bootstrap_config_matches_trusted_install_metadata(bootstrap_config, install_metadata)?;
 
-    let manifest_bytes = download_hub_asset(transport, hub_url, probe_secret, "manifest.json")?;
-    let signature_bytes =
-        download_hub_asset(transport, hub_url, probe_secret, "manifest.json.sig")?;
-    let public_key_bytes = download_hub_asset(transport, hub_url, probe_secret, "signing-key.pem")?;
+    let manifest_bytes = download_hub_asset(transport, hub_url, "manifest.json")?;
+    let signature_bytes = download_hub_asset(transport, hub_url, "manifest.json.sig")?;
+    let public_key_bytes = download_hub_asset(transport, hub_url, "signing-key.pem")?;
 
     verify_public_key_trust(
         &public_key_bytes,
@@ -926,7 +944,7 @@ fn execute_probe_upgrade(
         .ok_or(ProbeUpgraderRunError::ArchitectureMissing)?;
     validate_asset_metadata(asset)?;
 
-    let archive = download_hub_asset(transport, hub_url, probe_secret, &asset.file)?;
+    let archive = download_hub_asset(transport, hub_url, &asset.file)?;
     verify_archive_sha256(&archive, &asset.sha256)?;
     preflight_local_operation_status_writable(install_metadata)?;
     replace_installed_probe_binary(&archive, &install_metadata.install_path)?;
@@ -1045,21 +1063,17 @@ fn validate_optional_bootstrap_path(
 fn download_hub_asset(
     transport: &mut impl ProbeUpgraderValidationTransport,
     hub_url: &str,
-    probe_secret: &str,
     file_name: &str,
 ) -> Result<Vec<u8>, ProbeUpgraderRunError> {
     if !is_safe_asset_file_name(file_name) {
         return Err(ProbeUpgraderRunError::AssetMissing);
     }
 
-    transport.get_asset(
-        &format!(
-            "{}/api/probe/assets/{}",
-            hub_url.trim_end_matches('/'),
-            file_name,
-        ),
-        probe_secret,
-    )
+    transport.get_asset(&format!(
+        "{}/api/probe/assets/{}",
+        hub_url.trim_end_matches('/'),
+        file_name,
+    ))
 }
 
 fn verify_public_key_trust(public_key: &[u8], expected: &str) -> Result<(), ProbeUpgraderRunError> {
@@ -1328,6 +1342,7 @@ fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
         | ProbeUpgraderRunError::InvalidInstallMetadata(_)
         | ProbeUpgraderRunError::InvalidManifest(_)
         | ProbeUpgraderRunError::InvalidMetadata(_)
+        | ProbeUpgraderRunError::InvalidSigningKey(_)
         | ProbeUpgraderRunError::Io(_)
         | ProbeUpgraderRunError::MissingToken
         | ProbeUpgraderRunError::TokenValidation(_) => "probe_upgrader_failed",
@@ -1706,8 +1721,8 @@ mod tests {
     struct RecordingValidationTransport {
         assets: HashMap<String, Vec<u8>>,
         body: String,
-        bearer_secret: String,
         downloads: Vec<String>,
+        probe_id: String,
         status_body: String,
         status_url: String,
         url: String,
@@ -1721,12 +1736,8 @@ mod tests {
     }
 
     impl ProbeUpgraderValidationTransport for RecordingValidationTransport {
-        fn get_asset(
-            &mut self,
-            url: &str,
-            bearer_secret: &str,
-        ) -> Result<Vec<u8>, ProbeUpgraderRunError> {
-            self.downloads.push(format!("{bearer_secret} {url}"));
+        fn get_asset(&mut self, url: &str) -> Result<Vec<u8>, ProbeUpgraderRunError> {
+            self.downloads.push(url.to_string());
             self.assets
                 .get(url)
                 .cloned()
@@ -1736,11 +1747,11 @@ mod tests {
         fn post_token_validation(
             &mut self,
             url: &str,
-            bearer_secret: &str,
+            auth: &ProbeRequestAuth<'_>,
             body: &str,
         ) -> Result<(), ProbeUpgraderRunError> {
             self.url = url.to_string();
-            self.bearer_secret = bearer_secret.to_string();
+            self.probe_id = auth.probe_id.to_string();
             self.body = body.to_string();
 
             Ok(())
@@ -1749,11 +1760,11 @@ mod tests {
         fn post_operation_status(
             &mut self,
             url: &str,
-            bearer_secret: &str,
+            auth: &ProbeRequestAuth<'_>,
             body: &str,
         ) -> Result<(), ProbeUpgraderRunError> {
             self.status_url = url.to_string();
-            self.bearer_secret = bearer_secret.to_string();
+            self.probe_id = auth.probe_id.to_string();
             self.status_body = body.to_string();
 
             Ok(())
@@ -1908,6 +1919,8 @@ mod tests {
             &bootstrap_config_path,
             [
                 "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
                 "probe_secret = \"enk_probe_secret\"",
                 "",
             ]
@@ -1946,6 +1959,8 @@ mod tests {
             &bootstrap_config_path,
             [
                 "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
                 "probe_secret = \"probe-secret\"",
                 &format!(
                     "install_path = {}",
@@ -2086,6 +2101,8 @@ mod tests {
             &bootstrap_config_path,
             [
                 "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
                 "probe_secret = \"enk_probe_secret\"",
                 "",
             ]
@@ -2121,7 +2138,7 @@ mod tests {
             transport.url,
             "https://hub.example/api/probe/operations/42/token/validate",
         );
-        assert_eq!(transport.bearer_secret, "enk_probe_secret");
+        assert_eq!(transport.probe_id, "probe_01");
         assert_eq!(
             transport.body,
             "{\"targetProbeVersion\":\"0.2.0\",\"token\":\"probe-operation-token\"}",
@@ -2137,7 +2154,7 @@ mod tests {
         );
         assert_eq!(
             transport.downloads,
-            vec!["enk_probe_secret https://hub.example/api/probe/assets/manifest.json"],
+            vec!["https://hub.example/api/probe/assets/manifest.json"],
         );
     }
 
@@ -2176,6 +2193,7 @@ mod tests {
             [
                 "hub_url = \"https://hub.example/base\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
                 "probe_secret = \"enk_probe_secret\"".to_string(),
                 format!(
                     "state_dir = {}",
@@ -2249,11 +2267,11 @@ mod tests {
         assert_eq!(
             transport.downloads,
             vec![
-                "enk_probe_secret https://hub.example/base/api/probe/assets/manifest.json",
-                "enk_probe_secret https://hub.example/base/api/probe/assets/manifest.json.sig",
-                "enk_probe_secret https://hub.example/base/api/probe/assets/signing-key.pem",
+                "https://hub.example/base/api/probe/assets/manifest.json",
+                "https://hub.example/base/api/probe/assets/manifest.json.sig",
+                "https://hub.example/base/api/probe/assets/signing-key.pem",
                 &format!(
-                    "enk_probe_secret https://hub.example/base/api/probe/assets/enoki-probe-{}.tar.gz",
+                    "https://hub.example/base/api/probe/assets/enoki-probe-{}.tar.gz",
                     host_probe_asset_target().expect("supported test architecture"),
                 ),
             ],
@@ -2282,6 +2300,8 @@ mod tests {
             &bootstrap_config_path,
             [
                 "hub_url = \"https://hub.example\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
                 "probe_secret = \"enk_probe_secret\"".to_string(),
                 format!(
                     "state_dir = {}",
@@ -2540,6 +2560,8 @@ mod tests {
             &bootstrap_config_path,
             [
                 "hub_url = \"https://hub.example\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
                 "probe_secret = \"enk_probe_secret\"".to_string(),
                 "install_path = \"/tmp/attacker-controlled-probe\"".to_string(),
                 format!(
@@ -2827,6 +2849,8 @@ mod tests {
             bootstrap_config_path,
             [
                 "hub_url = \"https://hub.example\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
                 "probe_secret = \"enk_probe_secret\"".to_string(),
                 format!(
                     "state_dir = {}",

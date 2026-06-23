@@ -38,6 +38,12 @@ fn probe_run_fails_when_bootstrap_config_is_missing() {
 }
 
 fn write_secure_bootstrap_config(path: &Path, contents: String) {
+    let contents =
+        if contents.contains("probe_id = ") && !contents.contains("probe_private_key_pem = ") {
+            format!("{contents}probe_private_key_pem = \"test-private-key\"\n")
+        } else {
+            contents
+        };
     fs::write(path, contents).expect("write bootstrap config");
 
     #[cfg(unix)]
@@ -180,7 +186,7 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
         transport.observed_report_url,
         "https://hub.example/api/probe/report",
     );
-    assert_eq!(transport.observed_bearer, "enk_probe_secret");
+    assert_eq!(transport.observed_probe_id, "probe_01");
     let request = ProbeReportRequest::decode(transport.observed_report_bodies[0].as_slice())
         .expect("report request decodes");
     assert_eq!(request.probe_id, "probe_01");
@@ -794,6 +800,9 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             "https://hub.example/api/probe/report",
         ],
     );
+    assert_eq!(transport.observed_calls[0].auth_server_time_offset_ms, 0);
+    assert!(transport.observed_calls[1].auth_server_time_offset_ms < -1_000_000_000);
+    assert!(transport.observed_calls[2].auth_server_time_offset_ms < -1_000_000_000);
     let config_request =
         ProbeConfigurationRequest::decode(transport.observed_calls[1].body.as_slice())
             .expect("configuration request decodes");
@@ -1281,8 +1290,8 @@ impl ProbeTransport for RecordingTransport {}
 
 #[derive(Default)]
 struct RecordingProbeTransport {
-    observed_calls: Vec<ObservedBearerCall>,
-    observed_bearer: String,
+    observed_calls: Vec<ObservedProbeCall>,
+    observed_probe_id: String,
     observed_report_bodies: Vec<Vec<u8>>,
     observed_report_url: String,
     response: Vec<u8>,
@@ -1290,7 +1299,8 @@ struct RecordingProbeTransport {
     responses: Vec<Vec<u8>>,
 }
 
-struct ObservedBearerCall {
+struct ObservedProbeCall {
+    auth_server_time_offset_ms: i64,
     body: Vec<u8>,
     url: String,
 }
@@ -1309,8 +1319,9 @@ impl ReportTransport for RecordingProbeTransport {
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
         self.observed_report_url = url.to_string();
-        self.observed_bearer = auth.probe_secret.to_string();
-        self.observed_calls.push(ObservedBearerCall {
+        self.observed_probe_id = auth.probe_id.to_string();
+        self.observed_calls.push(ObservedProbeCall {
+            auth_server_time_offset_ms: auth.server_time_offset_ms,
             body: body.clone(),
             url: url.to_string(),
         });

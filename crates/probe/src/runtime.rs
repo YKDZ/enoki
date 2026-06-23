@@ -3,6 +3,8 @@ use std::{collections::HashSet, error::Error, fmt, fs, io::Read, path::PathBuf, 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+pub use crate::probe_auth::ProbeRequestAuth;
+use crate::probe_auth::signed_probe_request_headers;
 use crate::registration::{
     HttpRegistrationTransport, ProbeRegistrationInput, RegistrationError, RegistrationTransport,
     register_probe,
@@ -25,14 +27,6 @@ use crate::{
     },
 };
 use prost::Message;
-use rsa::{
-    RsaPrivateKey,
-    pkcs1v15::SigningKey,
-    pkcs8::DecodePrivateKey,
-    rand_core::{OsRng, RngCore},
-    signature::{RandomizedSigner, SignatureEncoding},
-};
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
@@ -146,13 +140,6 @@ pub enum ReportError {
     Io(std::io::Error),
 }
 
-pub struct ProbeRequestAuth<'a> {
-    pub probe_id: &'a str,
-    pub probe_private_key_pem: Option<&'a str>,
-    pub probe_secret: &'a str,
-    pub server_time_offset_ms: i64,
-}
-
 impl fmt::Display for ReportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -200,13 +187,11 @@ impl ReportTransport for HttpReportTransport {
     ) -> Result<Vec<u8>, ReportError> {
         let mut request = ureq::post(url)
             .set("accept", "application/x-protobuf")
-            .set("authorization", &format!("Bearer {}", auth.probe_secret))
             .set("content-type", "application/x-protobuf");
-        if let Some(signature_headers) = probe_request_signature_headers("POST", url, auth, &body)?
+        for (name, value) in signed_probe_request_headers("POST", url, auth, &body)
+            .map_err(ReportError::InvalidSigningKey)?
         {
-            for (name, value) in signature_headers {
-                request = request.set(name, &value);
-            }
+            request = request.set(name, &value);
         }
         let response = request
             .send_bytes(&body)
@@ -231,92 +216,6 @@ impl ReportTransport for HttpRegistrationTransport {
 }
 
 impl ProbeTransport for HttpRegistrationTransport {}
-
-fn probe_request_signature_headers(
-    method: &str,
-    url: &str,
-    auth: &ProbeRequestAuth<'_>,
-    body: &[u8],
-) -> Result<Option<Vec<(&'static str, String)>>, ReportError> {
-    let Some(private_key_pem) = auth.probe_private_key_pem else {
-        return Ok(None);
-    };
-
-    let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
-        .map_err(|error| ReportError::InvalidSigningKey(error.to_string()))?;
-    let timestamp_ms = current_unix_time_ms(auth.server_time_offset_ms);
-    let nonce = random_hex(16);
-    let body_sha256 = hex_encode(&Sha256::digest(body));
-    let payload = probe_request_signature_payload(
-        method,
-        &request_path_and_query(url),
-        &timestamp_ms,
-        &nonce,
-        &body_sha256,
-    );
-    let signing_key = SigningKey::<Sha256>::new(private_key);
-    let signature = signing_key.sign_with_rng(&mut OsRng, payload.as_bytes());
-
-    Ok(Some(vec![
-        ("x-enoki-probe-id", auth.probe_id.to_string()),
-        ("x-enoki-timestamp-ms", timestamp_ms),
-        ("x-enoki-nonce", nonce),
-        ("x-enoki-body-sha256", body_sha256),
-        (
-            "x-enoki-signature",
-            hex_encode(signature.to_bytes().as_ref()),
-        ),
-    ]))
-}
-
-fn probe_request_signature_payload(
-    method: &str,
-    path_and_query: &str,
-    timestamp_ms: &str,
-    nonce: &str,
-    body_sha256: &str,
-) -> String {
-    [
-        method.to_ascii_uppercase(),
-        path_and_query.to_string(),
-        timestamp_ms.to_string(),
-        nonce.to_string(),
-        body_sha256.to_string(),
-    ]
-    .join("\n")
-}
-
-fn request_path_and_query(url: &str) -> String {
-    let Some(after_scheme) = url.split_once("://").map(|(_, rest)| rest) else {
-        return url.to_string();
-    };
-    let Some(path_start) = after_scheme.find('/') else {
-        return "/".to_string();
-    };
-
-    after_scheme[path_start..].to_string()
-}
-
-fn current_unix_time_ms(server_time_offset_ms: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-
-    (now.as_millis() as i128 + server_time_offset_ms as i128).to_string()
-}
-
-fn random_hex(byte_count: usize) -> String {
-    let mut bytes = vec![0; byte_count];
-    OsRng.fill_bytes(&mut bytes);
-    hex_encode(&bytes)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()
-}
 
 pub fn run_probe(
     input: ProbeRunInput,
@@ -414,17 +313,12 @@ fn run_reporting_loop(
         .probe_id
         .as_deref()
         .ok_or(ReportError::InvalidResponse("missing Probe ID"))?;
-    let probe_secret =
-        bootstrap_config
-            .probe_secret
-            .as_deref()
-            .ok_or(ReportError::InvalidResponse(
-                "missing Probe Identity secret",
-            ))?;
-    let request_auth = ProbeRequestAuth {
+    let mut request_auth = ProbeRequestAuth {
         probe_id,
-        probe_private_key_pem: bootstrap_config.probe_private_key_pem.as_deref(),
-        probe_secret,
+        probe_private_key_pem: bootstrap_config
+            .probe_private_key_pem
+            .as_deref()
+            .ok_or(ReportError::InvalidResponse("missing Probe signing key"))?,
         server_time_offset_ms: bootstrap_config.server_time_offset_ms.unwrap_or(0),
     };
     let hub_url = bootstrap_config
@@ -463,6 +357,7 @@ fn run_reporting_loop(
     }
     request.operation_statuses = local_operation_statuses;
     let response = post_report(transport, hub_url, &request_auth, request.encode_to_vec())?;
+    refresh_probe_request_auth(&mut request_auth, &response);
     reports_sent += 1;
     if !report_limit_reached(reports_sent, control) {
         let outcome = apply_newer_configuration_if_needed(
@@ -493,6 +388,7 @@ fn run_reporting_loop(
             Vec::new(),
         );
         let response = post_report(transport, hub_url, &request_auth, request.encode_to_vec())?;
+        refresh_probe_request_auth(&mut request_auth, &response);
         reports_sent += 1;
         if !report_limit_reached(reports_sent, control) {
             let outcome = apply_newer_configuration_if_needed(
@@ -542,6 +438,7 @@ fn run_reporting_loop(
                 continue;
             }
         };
+        refresh_probe_request_auth(&mut request_auth, &response);
         reports_sent += 1;
         if !report_limit_reached(reports_sent, control) {
             let outcome = apply_newer_configuration_if_needed(
@@ -578,6 +475,7 @@ fn run_reporting_loop(
                         continue;
                     }
                 };
+            refresh_probe_request_auth(&mut request_auth, &response);
             reports_sent += 1;
             if !report_limit_reached(reports_sent, control) {
                 let outcome = apply_newer_configuration_if_needed(
@@ -596,6 +494,25 @@ fn run_reporting_loop(
     }
 
     Ok(())
+}
+
+fn refresh_probe_request_auth(auth: &mut ProbeRequestAuth<'_>, response: &ProbeReportResponse) {
+    if response.server_time_ms == 0 {
+        return;
+    }
+
+    let Some(now_ms) = current_unix_time_ms_i128() else {
+        return;
+    };
+    let offset = i128::from(response.server_time_ms) - now_ms;
+    auth.server_time_offset_ms = offset.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+}
+
+fn current_unix_time_ms_i128() -> Option<i128> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i128::try_from(duration.as_millis()).ok())
 }
 
 fn input_bootstrap_path(bootstrap_config: &BootstrapConfig) -> PathBuf {
@@ -1139,7 +1056,6 @@ struct BootstrapConfig {
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
     probe_private_key_pem: Option<String>,
-    probe_secret: Option<String>,
     reporting_batch_interval_seconds: Option<u64>,
     server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
@@ -1152,7 +1068,7 @@ impl BootstrapConfig {
             .as_deref()
             .is_some_and(|value| !value.is_empty())
             && self
-                .probe_secret
+                .probe_private_key_pem
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
     }
@@ -1197,7 +1113,6 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         probe_configuration_version: string_value(&value, "probe_configuration_version")?,
         probe_id: string_value(&value, "probe_id")?,
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
-        probe_secret: string_value(&value, "probe_secret")?,
         reporting_batch_interval_seconds: integer_value(
             &value,
             "reporting_batch_interval_seconds",

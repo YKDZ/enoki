@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod inventory;
 pub mod metrics;
+pub mod probe_auth;
 pub mod protocol;
 pub mod registration;
 pub mod report;

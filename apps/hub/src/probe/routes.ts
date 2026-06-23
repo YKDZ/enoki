@@ -89,6 +89,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("invalid_enrollment_token", 401);
     }
 
+    if (!validProbePublicKeyPem(request.probePublicKeyPem)) {
+      return probeJsonError("probe_public_key_required", 400);
+    }
+
     const registeredAtMs = now();
     const enrollment = services.enrollments.consume(
       hashSecret(request.enrollmentToken),
@@ -130,9 +134,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         ? Number(inventory.memoryTotalBytes)
         : null,
       observedIp,
-      probePublicKeyPem: validProbePublicKeyPem(request.probePublicKeyPem)
-        ? request.probePublicKeyPem
-        : null,
+      probePublicKeyPem: request.probePublicKeyPem,
       os: inventory?.os || null,
       probeConfigurationVersion: defaultProbeConfiguration.version,
       probeId,
@@ -1125,7 +1127,6 @@ const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
 const acceptedProbeRequestClockSkewMs = 5 * 60 * 1000;
 
 type SignedProbeAuthentication =
-  | { kind: "absent" }
   | {
       kind: "authenticated";
       host: NonNullable<ReturnType<HostRepository["findByProbeId"]>>;
@@ -1146,22 +1147,7 @@ function authenticateProbe(
     return signedAuthentication.host;
   }
 
-  if (signedAuthentication.kind === "invalid") {
-    return null;
-  }
-
-  const probeSecret = parseBearerSecret(request.headers.get("authorization"));
-
-  if (!probeSecret) {
-    return null;
-  }
-
-  const bearerHost = hosts.findByProbeSecretHash(hashSecret(probeSecret));
-  if (bearerHost?.probePublicKeyPem) {
-    return null;
-  }
-
-  return bearerHost;
+  return null;
 }
 
 function authenticateSignedProbeRequest(
@@ -1175,10 +1161,6 @@ function authenticateSignedProbeRequest(
   const nonce = headers.get("x-enoki-nonce")?.trim() ?? "";
   const bodySha256 = headers.get("x-enoki-body-sha256")?.trim() ?? "";
   const signature = headers.get("x-enoki-signature")?.trim() ?? "";
-
-  if (!probeId && !timestamp && !nonce && !bodySha256 && !signature) {
-    return { kind: "absent" };
-  }
 
   if (
     !probeId ||
@@ -1278,21 +1260,14 @@ function validProbePublicKeyPem(publicKeyPem: string | null | undefined) {
   }
 
   try {
-    createPublicKey(publicKeyPem);
-    return true;
+    const publicKey = createPublicKey(publicKeyPem);
+    return (
+      publicKey.asymmetricKeyType === "rsa" &&
+      (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) >= 2048
+    );
   } catch {
     return false;
   }
-}
-
-function parseBearerSecret(authorization: string | null) {
-  const [scheme, secret, extra] = authorization?.split(/\s+/) ?? [];
-
-  if (scheme !== "Bearer" || !secret || extra) {
-    return null;
-  }
-
-  return secret;
 }
 
 function isIdentityContentEncoding(headers: Headers) {
