@@ -114,12 +114,6 @@ pub fn register_probe(
         return Err(RegistrationError::InvalidResponse("missing Probe ID"));
     }
 
-    if response.probe_secret.is_empty() {
-        return Err(RegistrationError::InvalidResponse(
-            "missing Probe Identity secret",
-        ));
-    }
-
     let server_time_offset_ms = response.server_time_ms as i128 - current_unix_time_ms_i128();
     let installer_owned_fields = read_installer_owned_fields(&input.bootstrap_config_path)?;
 
@@ -169,7 +163,6 @@ pub fn register_probe(
             ),
             probe_id: response.probe_id.as_str(),
             probe_private_key_pem: signing_key.private_key_pem.as_str(),
-            probe_secret: response.probe_secret.as_str(),
             server_time_offset_ms,
             installer_owned_fields,
         },
@@ -231,7 +224,6 @@ struct BootstrapConfig<'a> {
     probe_configuration_version: Option<&'a str>,
     probe_id: &'a str,
     probe_private_key_pem: &'a str,
-    probe_secret: &'a str,
     reporting_batch_interval_seconds: Option<u32>,
     server_time_offset_ms: i128,
     installer_owned_fields: InstallerOwnedFields,
@@ -291,10 +283,6 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
     let mut output = String::new();
     output.push_str(&format!("hub_url = {}\n", toml_string(&config.hub_url)));
     output.push_str(&format!("probe_id = {}\n", toml_string(config.probe_id)));
-    output.push_str(&format!(
-        "probe_secret = {}\n",
-        toml_string(config.probe_secret)
-    ));
     output.push_str(&format!(
         "probe_private_key_pem = {}\n",
         toml_string(config.probe_private_key_pem)

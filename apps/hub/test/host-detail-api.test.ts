@@ -4,10 +4,14 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
+import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
-import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
+import {
+  createTestProbeIdentity,
+  signedProbeRequest,
+  type RegisteredTestProbe,
+} from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 
@@ -184,15 +188,16 @@ async function firstHostId(
 
   expect(response.status).toBe(200);
   const body = (await response.json()) as { hosts: { id: number }[] };
-  return body.hosts[0]?.id;
+  const hostId = body.hosts[0]?.id;
+  if (hostId === undefined) {
+    throw new Error("expected at least one Host");
+  }
+  return hostId;
 }
 
 async function sendReport(
   app: ReturnType<typeof createHubApp>,
-  registration: {
-    probeId: string;
-    probeSecret: string;
-  },
+  registration: RegisteredTestProbe,
   input: {
     collectedAtMs: number;
     cpuPercent: number;

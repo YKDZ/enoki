@@ -78,7 +78,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
             version: "default-v1".to_string(),
         }),
         probe_id: "probe_01".to_string(),
-        probe_secret: "enk_probe_secret".to_string(),
+        probe_secret: String::new(),
         server_time_ms: 1_725_000_000_000,
     }
     .encode_to_vec();
@@ -116,7 +116,6 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
     assert!(bootstrap_config.contains("hub_url = \"https://hub.example\""));
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
-    assert!(bootstrap_config.contains("probe_secret = \"enk_probe_secret\""));
     assert!(bootstrap_config.contains("probe_configuration_version = \"default-v1\""));
     assert!(bootstrap_config.contains("metrics_collection_interval_seconds = 5"));
     assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
@@ -150,7 +149,6 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "",
         ]
@@ -234,7 +232,6 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             &format!("operation_status_path = \"{}\"", status_path.display()),
             "",
@@ -302,7 +299,6 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             &format!("operation_status_path = \"{}\"", status_path.display()),
             "",
@@ -356,7 +352,6 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "",
         ]
@@ -421,7 +416,6 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
             "reporting_batch_interval_seconds = 7",
@@ -510,7 +504,6 @@ fn probe_run_loop_omits_disabled_individual_metric_fields() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"memory-only-v1\"",
             "metrics_collection_interval_seconds = 7",
             "reporting_batch_interval_seconds = 7",
@@ -566,7 +559,6 @@ fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 2",
             "reporting_batch_interval_seconds = 6",
@@ -623,7 +615,6 @@ fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 1",
             "reporting_batch_interval_seconds = 1",
@@ -673,7 +664,6 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"disabled-v1\"",
             "reporting_batch_interval_seconds = 7",
             "collect_cpu = false",
@@ -733,7 +723,6 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
             "reporting_batch_interval_seconds = 7",
@@ -829,7 +818,6 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
             "reporting_batch_interval_seconds = 7",
@@ -917,7 +905,6 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
             "reporting_batch_interval_seconds = 7",
@@ -1006,7 +993,6 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
             "reporting_batch_interval_seconds = 7",
@@ -1074,7 +1060,6 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 1",
             "reporting_batch_interval_seconds = 1",
@@ -1132,7 +1117,6 @@ fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
         [
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
-            "probe_secret = \"enk_probe_secret\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 5",
             "reporting_batch_interval_seconds = 5",

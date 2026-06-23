@@ -27,7 +27,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
             version: "default-v1".to_string(),
         }),
         probe_id: "probe_01".to_string(),
-        probe_secret: "enk_probe_secret".to_string(),
+        probe_secret: String::new(),
         server_time_ms: 1_725_000_000_000,
     }
     .encode_to_vec();
@@ -67,7 +67,6 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
     assert!(bootstrap_config.contains("hub_url = \"https://hub.example/base/\""));
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
-    assert!(bootstrap_config.contains("probe_secret = \"enk_probe_secret\""));
     assert!(bootstrap_config.contains("probe_private_key_pem = \"-----BEGIN PRIVATE KEY-----"));
     assert!(bootstrap_config.contains("server_time_offset_ms = "));
     assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
@@ -112,7 +111,7 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
             version: "default-v1".to_string(),
         }),
         probe_id: "probe_01".to_string(),
-        probe_secret: "enk_probe_secret".to_string(),
+        probe_secret: String::new(),
         server_time_ms: 1_725_000_000_000,
     }
     .encode_to_vec();

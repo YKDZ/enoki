@@ -163,7 +163,6 @@ describe("Probe systemd installer", () => {
       [
         'hub_url = "https://hub.example/"',
         'probe_id = "probe_existing"',
-        'probe_secret = "enk_probe_existing"',
         'probe_private_key_pem = "existing-private-key"',
         'probe_configuration_version = "default-v2"',
         "reporting_batch_interval_seconds = 3",
@@ -197,7 +196,6 @@ describe("Probe systemd installer", () => {
       [
         'hub_url = "https://hub.example"',
         'probe_id = "probe_existing"',
-        'probe_secret = "enk_probe_existing"',
         'probe_private_key_pem = "existing-private-key"',
         'state_dir = "/var/lib/enoki-probe"',
         'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
@@ -250,7 +248,6 @@ describe("Probe systemd installer", () => {
       [
         'hub_url = "https://hub.example/"',
         'probe_id = "probe_existing"',
-        'probe_secret = "enk_probe_existing"',
         'probe_configuration_version = "default-v2"',
         "reporting_batch_interval_seconds = 3",
         "",
@@ -299,7 +296,6 @@ describe("Probe systemd installer", () => {
       [
         'hub_url = "https://old-hub.example"',
         'probe_id = "probe_existing"',
-        'probe_secret = "enk_probe_existing"',
         "",
       ].join("\n"),
     );

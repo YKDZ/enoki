@@ -104,7 +104,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const probeId = createProbeId();
-    const probeSecret = createProbeSecret();
+    const probeSecretPlaceholder = createProbeSecret();
     const inventory = request.inventory;
     const inventoryJson = inventory ? serializeInventory(inventory) : null;
     const inventoryHash = inventory ? hashInventory(inventory) : null;
@@ -138,7 +138,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       os: inventory?.os || null,
       probeConfigurationVersion: defaultProbeConfiguration.version,
       probeId,
-      probeSecretHash: hashSecret(probeSecret),
+      probeSecretHash: hashSecret(probeSecretPlaceholder),
       probeVersion: inventory?.probeVersion || null,
     });
 
@@ -146,7 +146,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       RegistrationResponse.create({
         initialConfiguration: defaultProbeConfiguration,
         probeId,
-        probeSecret,
         serverTimeMs: registeredAtMs,
       }),
     ).finish();

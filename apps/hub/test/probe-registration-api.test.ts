@@ -7,7 +7,7 @@ import path from "node:path";
 import { serve } from "@hono/node-server";
 import { afterEach, describe, expect, it } from "vitest";
 
-import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
+import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { hashSecret } from "../src/enrollment/routes";
@@ -278,7 +278,7 @@ describe("Probe registration API", () => {
       new Uint8Array(await response.arrayBuffer()),
     );
     expect(decoded.probeId).toMatch(/^probe_/);
-    expect(decoded.probeSecret).toMatch(/^enk_probe_/);
+    expect(decoded.probeSecret).toBe("");
     expect(decoded.initialConfiguration?.version).toBe("default-v1");
     expect(decoded.initialConfiguration?.metricsCollectionIntervalSeconds).toBe(
       5,
@@ -1044,7 +1044,7 @@ describe("Probe registration API", () => {
         }),
       ).finish(),
       headers: {
-        authorization: `Bearer ${registration.probeSecret}`,
+        authorization: "Bearer enk_probe_legacy",
         "content-encoding": "gzip",
         "content-type": "application/x-protobuf",
       },
@@ -1098,7 +1098,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("stores only a hash of the issued Probe Identity secret in the Hub database", async () => {
+  it("does not issue legacy Probe Identity secrets", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1117,10 +1117,8 @@ describe("Probe registration API", () => {
       .prepare("select probe_secret_hash from managed_hosts")
       .get() as { probe_secret_hash: string };
 
-    expect(storedHost.probe_secret_hash).not.toBe(registration.probeSecret);
-    expect(storedHost.probe_secret_hash).toBe(
-      createHash("sha256").update(registration.probeSecret).digest("hex"),
-    );
+    expect(registration.probeSecret).toBeUndefined();
+    expect(storedHost.probe_secret_hash).toMatch(/^[0-9a-f]{64}$/);
 
     database.close();
   });

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
+import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";

@@ -1,8 +1,10 @@
 {
-  "extends": ["@tsconfig/node24/tsconfig.json", "../../tsconfig.base.json"],
+  "extends": "./tsconfig.build.json",
   "compilerOptions": {
-    "outDir": "dist",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "*.ts"]
 }

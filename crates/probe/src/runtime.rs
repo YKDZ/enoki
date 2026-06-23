@@ -1351,7 +1351,6 @@ mod tests {
             [
                 "hub_url = \"https://hub.example\"",
                 "probe_id = \"probe_01\"",
-                "probe_secret = \"enk_probe_secret\"",
                 "",
             ]
             .join("\n"),
@@ -1394,7 +1393,6 @@ mod tests {
             [
                 "hub_url = \"https://hub.example\"",
                 "probe_id = \"probe_01\"",
-                "probe_secret = \"enk_probe_secret\"",
                 "",
             ]
             .join("\n"),
@@ -1538,7 +1536,7 @@ mod tests {
                     version: "default-v1".to_string(),
                 }),
                 probe_id: "probe_01".to_string(),
-                probe_secret: "enk_probe_secret".to_string(),
+                probe_secret: String::new(),
                 server_time_ms: 1,
             }
             .encode_to_vec(),

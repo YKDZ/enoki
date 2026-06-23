@@ -109,7 +109,6 @@ export type HostRepository = {
   exists: (id: number) => boolean;
   findActiveById: (id: number) => HostRow | null;
   findByProbeId: (probeId: string) => HostRow | null;
-  findByProbeSecretHash: (probeSecretHash: string) => HostRow | null;
   insertProbeRequestNonce: (input: {
     probeId: string;
     nonce: string;
@@ -189,20 +188,6 @@ export function createHostRepository(database: HostDatabase): HostRepository {
           .select()
           .from(hosts)
           .where(and(eq(hosts.probeId, probeId), isNull(hosts.deletedAtMs)))
-          .get() ?? null
-      );
-    },
-    findByProbeSecretHash(probeSecretHash) {
-      return (
-        database
-          .select()
-          .from(hosts)
-          .where(
-            and(
-              eq(hosts.probeSecretHash, probeSecretHash),
-              isNull(hosts.deletedAtMs),
-            ),
-          )
           .get() ?? null
       );
     },

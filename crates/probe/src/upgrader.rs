@@ -1921,7 +1921,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"",
                 "probe_id = \"probe_01\"",
                 "probe_private_key_pem = \"test-private-key\"",
-                "probe_secret = \"enk_probe_secret\"",
                 "",
             ]
             .join("\n"),
@@ -1961,7 +1960,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"",
                 "probe_id = \"probe_01\"",
                 "probe_private_key_pem = \"test-private-key\"",
-                "probe_secret = \"probe-secret\"",
                 &format!(
                     "install_path = {}",
                     toml_string(install_path.to_str().expect("install path")),
@@ -2103,7 +2101,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"",
                 "probe_id = \"probe_01\"",
                 "probe_private_key_pem = \"test-private-key\"",
-                "probe_secret = \"enk_probe_secret\"",
                 "",
             ]
             .join("\n"),
@@ -2194,7 +2191,6 @@ mod tests {
                 "hub_url = \"https://hub.example/base\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
-                "probe_secret = \"enk_probe_secret\"".to_string(),
                 format!(
                     "state_dir = {}",
                     toml_string(state_dir.to_str().expect("state dir"))
@@ -2279,7 +2275,6 @@ mod tests {
         let bootstrap_config =
             fs::read_to_string(bootstrap_config_path).expect("bootstrap config remains");
         assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
-        assert!(bootstrap_config.contains("probe_secret = \"enk_probe_secret\""));
     }
 
     #[test]
@@ -2302,7 +2297,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
-                "probe_secret = \"enk_probe_secret\"".to_string(),
                 format!(
                     "state_dir = {}",
                     toml_string(temp.path().join("state").to_str().expect("state dir")),
@@ -2562,7 +2556,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
-                "probe_secret = \"enk_probe_secret\"".to_string(),
                 "install_path = \"/tmp/attacker-controlled-probe\"".to_string(),
                 format!(
                     "probe_asset_public_key_sha256 = \"{}\"",
@@ -2851,7 +2844,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
-                "probe_secret = \"enk_probe_secret\"".to_string(),
                 format!(
                     "state_dir = {}",
                     toml_string(install_metadata.state_dir.to_str().expect("state dir")),

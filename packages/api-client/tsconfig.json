@@ -1,8 +1,8 @@
 {
-  "extends": ["@tsconfig/node24/tsconfig.json", "../../tsconfig.base.json"],
+  "extends": "./tsconfig.build.json",
   "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src"
+    "noEmit": true,
+    "rootDir": "."
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

@@ -57,6 +57,20 @@ export type CreateProbeUninstallRequestResult =
     };
 
 export function createProbeUpgradeRequest(input: {
+  activeOperation: null;
+  currentProbeVersion: string | null;
+  hostId: number;
+  nowMs: number;
+  targetProbeVersion: string;
+}): Extract<CreateProbeUpgradeRequestResult, { error: null }>;
+export function createProbeUpgradeRequest(input: {
+  activeOperation: ProbeUpgradeRequest | null;
+  currentProbeVersion: string | null;
+  hostId: number;
+  nowMs: number;
+  targetProbeVersion: string;
+}): CreateProbeUpgradeRequestResult;
+export function createProbeUpgradeRequest(input: {
   activeOperation: ProbeUpgradeRequest | null;
   currentProbeVersion: string | null;
   hostId: number;
@@ -123,6 +137,16 @@ export function createProbeUpgradeRequest(input: {
   };
 }
 
+export function createProbeUninstallRequest(input: {
+  activeOperation: null;
+  hostId: number;
+  nowMs: number;
+}): Extract<CreateProbeUninstallRequestResult, { error: null }>;
+export function createProbeUninstallRequest(input: {
+  activeOperation: ProbeUpgradeRequest | null;
+  hostId: number;
+  nowMs: number;
+}): CreateProbeUninstallRequestResult;
 export function createProbeUninstallRequest(input: {
   activeOperation: ProbeUpgradeRequest | null;
   hostId: number;

@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
-import root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
+import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
@@ -119,7 +119,6 @@ async function sendReport(
   registration: {
     privateKeyPem: string;
     probeId: string;
-    probeSecret: string;
   },
   options: {
     bootId?: string;

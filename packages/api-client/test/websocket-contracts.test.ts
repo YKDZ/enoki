@@ -4,7 +4,7 @@ import {
   parseWebSocketServerMessage,
   parseWebSocketClientMessage,
   webSocketClientMessageSchema,
-} from "../src/websocket";
+} from "../src/websocket.js";
 
 describe("WebSocket contracts", () => {
   it("validates browser detail subscription messages", () => {
