@@ -1,8 +1,13 @@
 use std::path::PathBuf;
 
+use crate::privileged_runtime::PrivilegedCollectorId;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeCommand {
     Help,
+    InternalPrivilegedCollector {
+        collector_id: PrivilegedCollectorId,
+    },
     InternalUpgrader {
         bootstrap_config_path: PathBuf,
     },
@@ -25,12 +30,35 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
     let _binary = args.next();
 
     match args.next().as_deref() {
+        Some("internal-privileged-collector") => parse_internal_privileged_collector_command(args),
         Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
         Some("internal-upgrader") => parse_internal_upgrader_command(args),
         Some("register") => parse_register_command(args),
         Some("run") => parse_run_command(args),
         Some("--version" | "-V") => ProbeCommand::Version,
         _ => ProbeCommand::Help,
+    }
+}
+
+fn parse_internal_privileged_collector_command(
+    mut args: impl Iterator<Item = String>,
+) -> ProbeCommand {
+    let mut collector_id = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--collector" => {
+                collector_id = args
+                    .next()
+                    .and_then(|value| PrivilegedCollectorId::from_internal_arg(&value));
+            }
+            _ => return ProbeCommand::Help,
+        }
+    }
+
+    match collector_id {
+        Some(collector_id) => ProbeCommand::InternalPrivilegedCollector { collector_id },
+        None => ProbeCommand::Help,
     }
 }
 
@@ -143,6 +171,9 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
+        ProbeCommand::InternalPrivilegedCollector { .. } => {
+            "Privileged Collector Runtime executes a compiled collector entrypoint.\n".to_string()
+        }
         ProbeCommand::InternalUpgrader { .. } => {
             "Probe Upgrader performs privileged Probe Upgrade execution.\n".to_string()
         }

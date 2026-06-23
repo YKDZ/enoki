@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod inventory;
 pub mod metrics;
+pub mod privileged_runtime;
 pub mod probe_auth;
 pub mod protocol;
 pub mod registration;

@@ -19,6 +19,12 @@ fn main() {
         ProbeCommand::Version => {
             print!("{}", render_probe_output(ProbeCommand::Version));
         }
+        ProbeCommand::InternalPrivilegedCollector { collector_id } => {
+            eprintln!(
+                "Privileged Collector failed: no compiled entrypoint linked for {collector_id:?}"
+            );
+            std::process::exit(1);
+        }
         ProbeCommand::InternalUpgrader {
             bootstrap_config_path,
         } => {
