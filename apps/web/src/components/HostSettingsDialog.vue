@@ -89,14 +89,24 @@ function updateOpen(open: boolean) {
         </DialogDescription>
       </DialogHeader>
 
-      <Tabs default-value="metadata" class="grid gap-4">
+      <Tabs
+        :default-value="activeHostMetadataId === host.id ? 'metadata' : 'probe'"
+        class="grid gap-4"
+      >
         <TabsList class="grid w-full grid-cols-2">
           <TabsTrigger value="metadata">主机资料</TabsTrigger>
           <TabsTrigger value="probe">探针配置</TabsTrigger>
         </TabsList>
 
         <TabsContent value="metadata">
-          <div v-if="!hostMetadataDraft" class="grid gap-4">
+          <div
+            v-if="
+              activeHostMetadataId === host.id &&
+              !hostMetadataDraft &&
+              !isSavingHostMetadata
+            "
+            class="grid gap-4"
+          >
             <div class="grid gap-4 sm:grid-cols-2">
               <div class="grid gap-2">
                 <Skeleton class="h-4 w-20" />
@@ -116,7 +126,7 @@ function updateOpen(open: boolean) {
             </div>
           </div>
           <form
-            v-else
+            v-else-if="hostMetadataDraft"
             class="grid gap-4"
             @submit.prevent="$emit('saveHostMetadata')"
           >
@@ -169,7 +179,14 @@ function updateOpen(open: boolean) {
         </TabsContent>
 
         <TabsContent value="probe">
-          <div v-if="!hostConfigurationDraft" class="grid min-h-72 gap-4">
+          <div
+            v-if="
+              activeHostConfigurationId === host.id &&
+              !hostConfigurationDraft &&
+              !isSavingHostConfiguration
+            "
+            class="grid min-h-72 gap-4"
+          >
             <div class="flex gap-3">
               <Skeleton class="h-5 w-20" />
               <Skeleton class="h-5 w-20" />
@@ -193,7 +210,7 @@ function updateOpen(open: boolean) {
             </div>
           </div>
           <form
-            v-else
+            v-else-if="hostConfigurationDraft"
             class="grid gap-4"
             @submit.prevent="$emit('saveHostConfiguration')"
           >

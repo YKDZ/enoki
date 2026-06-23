@@ -1024,7 +1024,7 @@ fn write_probe_operation_sudoers(
                 bootstrap_config_path.display(),
             ),
             format!(
-                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes {} internal-privileged-collector --collector disk-health.smartctl",
+                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes {} internal-privileged-collector --collector disk-health.smartctl",
                 install_metadata.service_user,
                 install_metadata.install_path.display(),
             ),

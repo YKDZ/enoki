@@ -274,6 +274,7 @@ impl PrivilegedRuntimeProcessRunner for SystemdPrivilegedRuntimeProcessRunner {
             "-n",
             "/usr/bin/systemd-run",
             "--quiet",
+            "--pipe",
             "--wait",
             "--collect",
         ]);
