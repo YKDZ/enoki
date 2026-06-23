@@ -1,28 +1,23 @@
 use std::fs;
 
 use crate::metrics::{
-    CollectorCadenceClass, CollectorError, MetricCollector, MetricsCollectionConfig,
+    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
     collect_memory_metrics_from_proc_meminfo,
 };
 use crate::protocol::enoki::v1::MetricSample;
+
+pub const DEFINITION: CollectorDefinition =
+    CollectorDefinition::new(CollectorId::Memory, CollectorCadence::EveryTick);
 
 #[derive(Default)]
 pub struct MemoryMetricCollector;
 
 impl MetricCollector for MemoryMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
+    fn definition(&self) -> CollectorDefinition {
+        DEFINITION
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_memory {
-            return Ok(false);
-        }
-
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         let Some(metrics) = fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|contents| collect_memory_metrics_from_proc_meminfo(&contents))

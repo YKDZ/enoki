@@ -1,28 +1,23 @@
 use std::fs;
 
 use crate::metrics::{
-    CollectorCadenceClass, CollectorError, MetricCollector, MetricsCollectionConfig,
+    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
     collect_load_metrics_from_proc_loadavg,
 };
 use crate::protocol::enoki::v1::MetricSample;
+
+pub const DEFINITION: CollectorDefinition =
+    CollectorDefinition::new(CollectorId::Load, CollectorCadence::EveryTick);
 
 #[derive(Default)]
 pub struct LoadMetricCollector;
 
 impl MetricCollector for LoadMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
+    fn definition(&self) -> CollectorDefinition {
+        DEFINITION
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_load {
-            return Ok(false);
-        }
-
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         let Some(metrics) = fs::read_to_string("/proc/loadavg")
             .ok()
             .and_then(|contents| collect_load_metrics_from_proc_loadavg(&contents))

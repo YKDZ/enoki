@@ -1,7 +1,7 @@
 use enoki_probe::metrics::disk_health::PrivilegedDiskHealthMetricsRunner;
 use enoki_probe::metrics::{
-    CollectorCadenceClass, CollectorCadenceSchedule, CollectorError, CollectorRegistry,
-    DiskHealthMetricsRunner, MetricCollector, MetricsCollectionConfig,
+    CollectorCadence, CollectorCadenceSchedule, CollectorDefinition, CollectorError, CollectorId,
+    CollectorRegistry, DiskHealthMetricsRunner, MetricCollector, MetricsCollectionConfig,
 };
 use enoki_probe::privileged_runtime::{
     CollectorRuntimeProfile, LocalPrivilegedRuntimeRunner, NetworkAccess, PrivilegedCollector,
@@ -252,8 +252,8 @@ fn privileged_runtime_failures_are_isolated_as_collector_failures() {
         .collect_due(
             9,
             Duration::from_secs(5),
-            CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(60)),
-            MetricsCollectionConfig::all_enabled(),
+            CollectorCadenceSchedule::new(Duration::from_secs(5)),
+            &MetricsCollectionConfig::all_enabled(),
         )
         .expect("successful collector still emits after privileged runtime failure");
 
@@ -396,15 +396,11 @@ where
     R: PrivilegedRuntimeRunner,
     C: PrivilegedCollector,
 {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::EveryTick)
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         self.runtime
             .run(&self.collector)
             .map_err(|error| CollectorError::new(format!("{error:?}")))?;
@@ -433,15 +429,11 @@ impl PrivilegedRuntimeProcessRunner for HangingChildProcessRunner {
 struct MemoryMetricCollector;
 
 impl MetricCollector for MemoryMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Memory, CollectorCadence::EveryTick)
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         sample.memory_used_bytes = Some(2048);
         Ok(true)
     }

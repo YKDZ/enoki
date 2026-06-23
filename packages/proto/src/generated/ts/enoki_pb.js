@@ -9317,13 +9317,7 @@ export const enoki = $root.enoki = (() => {
              * @interface IProbeConfigurationResponse
              * @property {string|null} [version] ProbeConfigurationResponse version
              * @property {number|null} [metricsCollectionIntervalSeconds] ProbeConfigurationResponse metricsCollectionIntervalSeconds
-             * @property {number|null} [reportingBatchIntervalSeconds] ProbeConfigurationResponse reportingBatchIntervalSeconds
-             * @property {boolean|null} [collectCpu] ProbeConfigurationResponse collectCpu
-             * @property {boolean|null} [collectMemory] ProbeConfigurationResponse collectMemory
-             * @property {boolean|null} [collectDisk] ProbeConfigurationResponse collectDisk
-             * @property {boolean|null} [collectNetwork] ProbeConfigurationResponse collectNetwork
-             * @property {boolean|null} [collectLoad] ProbeConfigurationResponse collectLoad
-             * @property {boolean|null} [collectUptime] ProbeConfigurationResponse collectUptime
+             * @property {Array.<string>|null} [enabledCollectorIds] ProbeConfigurationResponse enabledCollectorIds
              */
 
             /**
@@ -9335,6 +9329,7 @@ export const enoki = $root.enoki = (() => {
              * @param {enoki.v1.IProbeConfigurationResponse=} [properties] Properties to set
              */
             function ProbeConfigurationResponse(properties) {
+                this.enabledCollectorIds = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -9358,60 +9353,12 @@ export const enoki = $root.enoki = (() => {
             ProbeConfigurationResponse.prototype.metricsCollectionIntervalSeconds = 0;
 
             /**
-             * ProbeConfigurationResponse reportingBatchIntervalSeconds.
-             * @member {number} reportingBatchIntervalSeconds
+             * ProbeConfigurationResponse enabledCollectorIds.
+             * @member {Array.<string>} enabledCollectorIds
              * @memberof enoki.v1.ProbeConfigurationResponse
              * @instance
              */
-            ProbeConfigurationResponse.prototype.reportingBatchIntervalSeconds = 0;
-
-            /**
-             * ProbeConfigurationResponse collectCpu.
-             * @member {boolean} collectCpu
-             * @memberof enoki.v1.ProbeConfigurationResponse
-             * @instance
-             */
-            ProbeConfigurationResponse.prototype.collectCpu = false;
-
-            /**
-             * ProbeConfigurationResponse collectMemory.
-             * @member {boolean} collectMemory
-             * @memberof enoki.v1.ProbeConfigurationResponse
-             * @instance
-             */
-            ProbeConfigurationResponse.prototype.collectMemory = false;
-
-            /**
-             * ProbeConfigurationResponse collectDisk.
-             * @member {boolean} collectDisk
-             * @memberof enoki.v1.ProbeConfigurationResponse
-             * @instance
-             */
-            ProbeConfigurationResponse.prototype.collectDisk = false;
-
-            /**
-             * ProbeConfigurationResponse collectNetwork.
-             * @member {boolean} collectNetwork
-             * @memberof enoki.v1.ProbeConfigurationResponse
-             * @instance
-             */
-            ProbeConfigurationResponse.prototype.collectNetwork = false;
-
-            /**
-             * ProbeConfigurationResponse collectLoad.
-             * @member {boolean} collectLoad
-             * @memberof enoki.v1.ProbeConfigurationResponse
-             * @instance
-             */
-            ProbeConfigurationResponse.prototype.collectLoad = false;
-
-            /**
-             * ProbeConfigurationResponse collectUptime.
-             * @member {boolean} collectUptime
-             * @memberof enoki.v1.ProbeConfigurationResponse
-             * @instance
-             */
-            ProbeConfigurationResponse.prototype.collectUptime = false;
+            ProbeConfigurationResponse.prototype.enabledCollectorIds = $util.emptyArray;
 
             /**
              * Creates a new ProbeConfigurationResponse instance using the specified properties.
@@ -9445,20 +9392,9 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 1, wireType 2 =*/10).string(message.version);
                 if (message.metricsCollectionIntervalSeconds != null && Object.hasOwnProperty.call(message, "metricsCollectionIntervalSeconds"))
                     writer.uint32(/* id 2, wireType 0 =*/16).uint32(message.metricsCollectionIntervalSeconds);
-                if (message.reportingBatchIntervalSeconds != null && Object.hasOwnProperty.call(message, "reportingBatchIntervalSeconds"))
-                    writer.uint32(/* id 3, wireType 0 =*/24).uint32(message.reportingBatchIntervalSeconds);
-                if (message.collectCpu != null && Object.hasOwnProperty.call(message, "collectCpu"))
-                    writer.uint32(/* id 4, wireType 0 =*/32).bool(message.collectCpu);
-                if (message.collectMemory != null && Object.hasOwnProperty.call(message, "collectMemory"))
-                    writer.uint32(/* id 5, wireType 0 =*/40).bool(message.collectMemory);
-                if (message.collectDisk != null && Object.hasOwnProperty.call(message, "collectDisk"))
-                    writer.uint32(/* id 6, wireType 0 =*/48).bool(message.collectDisk);
-                if (message.collectNetwork != null && Object.hasOwnProperty.call(message, "collectNetwork"))
-                    writer.uint32(/* id 7, wireType 0 =*/56).bool(message.collectNetwork);
-                if (message.collectLoad != null && Object.hasOwnProperty.call(message, "collectLoad"))
-                    writer.uint32(/* id 8, wireType 0 =*/64).bool(message.collectLoad);
-                if (message.collectUptime != null && Object.hasOwnProperty.call(message, "collectUptime"))
-                    writer.uint32(/* id 9, wireType 0 =*/72).bool(message.collectUptime);
+                if (message.enabledCollectorIds != null && message.enabledCollectorIds.length)
+                    for (let i = 0; i < message.enabledCollectorIds.length; ++i)
+                        writer.uint32(/* id 10, wireType 2 =*/82).string(message.enabledCollectorIds[i]);
                 return writer;
             };
 
@@ -9507,32 +9443,10 @@ export const enoki = $root.enoki = (() => {
                             message.metricsCollectionIntervalSeconds = reader.uint32();
                             break;
                         }
-                    case 3: {
-                            message.reportingBatchIntervalSeconds = reader.uint32();
-                            break;
-                        }
-                    case 4: {
-                            message.collectCpu = reader.bool();
-                            break;
-                        }
-                    case 5: {
-                            message.collectMemory = reader.bool();
-                            break;
-                        }
-                    case 6: {
-                            message.collectDisk = reader.bool();
-                            break;
-                        }
-                    case 7: {
-                            message.collectNetwork = reader.bool();
-                            break;
-                        }
-                    case 8: {
-                            message.collectLoad = reader.bool();
-                            break;
-                        }
-                    case 9: {
-                            message.collectUptime = reader.bool();
+                    case 10: {
+                            if (!(message.enabledCollectorIds && message.enabledCollectorIds.length))
+                                message.enabledCollectorIds = [];
+                            message.enabledCollectorIds.push(reader.string());
                             break;
                         }
                     default:
@@ -9580,27 +9494,13 @@ export const enoki = $root.enoki = (() => {
                 if (message.metricsCollectionIntervalSeconds != null && Object.hasOwnProperty.call(message, "metricsCollectionIntervalSeconds"))
                     if (!$util.isInteger(message.metricsCollectionIntervalSeconds))
                         return "metricsCollectionIntervalSeconds: integer expected";
-                if (message.reportingBatchIntervalSeconds != null && Object.hasOwnProperty.call(message, "reportingBatchIntervalSeconds"))
-                    if (!$util.isInteger(message.reportingBatchIntervalSeconds))
-                        return "reportingBatchIntervalSeconds: integer expected";
-                if (message.collectCpu != null && Object.hasOwnProperty.call(message, "collectCpu"))
-                    if (typeof message.collectCpu !== "boolean")
-                        return "collectCpu: boolean expected";
-                if (message.collectMemory != null && Object.hasOwnProperty.call(message, "collectMemory"))
-                    if (typeof message.collectMemory !== "boolean")
-                        return "collectMemory: boolean expected";
-                if (message.collectDisk != null && Object.hasOwnProperty.call(message, "collectDisk"))
-                    if (typeof message.collectDisk !== "boolean")
-                        return "collectDisk: boolean expected";
-                if (message.collectNetwork != null && Object.hasOwnProperty.call(message, "collectNetwork"))
-                    if (typeof message.collectNetwork !== "boolean")
-                        return "collectNetwork: boolean expected";
-                if (message.collectLoad != null && Object.hasOwnProperty.call(message, "collectLoad"))
-                    if (typeof message.collectLoad !== "boolean")
-                        return "collectLoad: boolean expected";
-                if (message.collectUptime != null && Object.hasOwnProperty.call(message, "collectUptime"))
-                    if (typeof message.collectUptime !== "boolean")
-                        return "collectUptime: boolean expected";
+                if (message.enabledCollectorIds != null && Object.hasOwnProperty.call(message, "enabledCollectorIds")) {
+                    if (!Array.isArray(message.enabledCollectorIds))
+                        return "enabledCollectorIds: array expected";
+                    for (let i = 0; i < message.enabledCollectorIds.length; ++i)
+                        if (!$util.isString(message.enabledCollectorIds[i]))
+                            return "enabledCollectorIds: string[] expected";
+                }
                 return null;
             };
 
@@ -9626,20 +9526,13 @@ export const enoki = $root.enoki = (() => {
                     message.version = String(object.version);
                 if (object.metricsCollectionIntervalSeconds != null)
                     message.metricsCollectionIntervalSeconds = object.metricsCollectionIntervalSeconds >>> 0;
-                if (object.reportingBatchIntervalSeconds != null)
-                    message.reportingBatchIntervalSeconds = object.reportingBatchIntervalSeconds >>> 0;
-                if (object.collectCpu != null)
-                    message.collectCpu = Boolean(object.collectCpu);
-                if (object.collectMemory != null)
-                    message.collectMemory = Boolean(object.collectMemory);
-                if (object.collectDisk != null)
-                    message.collectDisk = Boolean(object.collectDisk);
-                if (object.collectNetwork != null)
-                    message.collectNetwork = Boolean(object.collectNetwork);
-                if (object.collectLoad != null)
-                    message.collectLoad = Boolean(object.collectLoad);
-                if (object.collectUptime != null)
-                    message.collectUptime = Boolean(object.collectUptime);
+                if (object.enabledCollectorIds) {
+                    if (!Array.isArray(object.enabledCollectorIds))
+                        throw TypeError(".enoki.v1.ProbeConfigurationResponse.enabledCollectorIds: array expected");
+                    message.enabledCollectorIds = [];
+                    for (let i = 0; i < object.enabledCollectorIds.length; ++i)
+                        message.enabledCollectorIds[i] = String(object.enabledCollectorIds[i]);
+                }
                 return message;
             };
 
@@ -9660,35 +9553,21 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
+                if (options.arrays || options.defaults)
+                    object.enabledCollectorIds = [];
                 if (options.defaults) {
                     object.version = "";
                     object.metricsCollectionIntervalSeconds = 0;
-                    object.reportingBatchIntervalSeconds = 0;
-                    object.collectCpu = false;
-                    object.collectMemory = false;
-                    object.collectDisk = false;
-                    object.collectNetwork = false;
-                    object.collectLoad = false;
-                    object.collectUptime = false;
                 }
                 if (message.version != null && Object.hasOwnProperty.call(message, "version"))
                     object.version = message.version;
                 if (message.metricsCollectionIntervalSeconds != null && Object.hasOwnProperty.call(message, "metricsCollectionIntervalSeconds"))
                     object.metricsCollectionIntervalSeconds = message.metricsCollectionIntervalSeconds;
-                if (message.reportingBatchIntervalSeconds != null && Object.hasOwnProperty.call(message, "reportingBatchIntervalSeconds"))
-                    object.reportingBatchIntervalSeconds = message.reportingBatchIntervalSeconds;
-                if (message.collectCpu != null && Object.hasOwnProperty.call(message, "collectCpu"))
-                    object.collectCpu = message.collectCpu;
-                if (message.collectMemory != null && Object.hasOwnProperty.call(message, "collectMemory"))
-                    object.collectMemory = message.collectMemory;
-                if (message.collectDisk != null && Object.hasOwnProperty.call(message, "collectDisk"))
-                    object.collectDisk = message.collectDisk;
-                if (message.collectNetwork != null && Object.hasOwnProperty.call(message, "collectNetwork"))
-                    object.collectNetwork = message.collectNetwork;
-                if (message.collectLoad != null && Object.hasOwnProperty.call(message, "collectLoad"))
-                    object.collectLoad = message.collectLoad;
-                if (message.collectUptime != null && Object.hasOwnProperty.call(message, "collectUptime"))
-                    object.collectUptime = message.collectUptime;
+                if (message.enabledCollectorIds && message.enabledCollectorIds.length) {
+                    object.enabledCollectorIds = [];
+                    for (let j = 0; j < message.enabledCollectorIds.length; ++j)
+                        object.enabledCollectorIds[j] = message.enabledCollectorIds[j];
+                }
                 return object;
             };
 

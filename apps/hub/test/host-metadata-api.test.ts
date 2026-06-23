@@ -325,7 +325,6 @@ describe("Host Metadata API", () => {
     expect(configuration).toEqual(
       expect.objectContaining({
         metricsCollectionIntervalSeconds: 5,
-        reportingBatchIntervalSeconds: 15,
         version: "default-v1",
       }),
     );

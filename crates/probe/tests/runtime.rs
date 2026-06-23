@@ -4,6 +4,7 @@ use std::{fs, path::Path, time::Duration};
 use std::os::unix::fs::PermissionsExt;
 
 use enoki_probe::{
+    metrics::CollectorId,
     protocol::enoki::v1::{
         CollectorAvailability, CollectorCapabilities, Inventory, OfficialCollectorCapabilities,
         ProbeConfigurationRequest, ProbeConfigurationResponse, ProbeOperation,
@@ -52,6 +53,13 @@ fn write_secure_bootstrap_config(path: &Path, contents: String) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("set permissions");
 }
 
+fn all_collector_ids() -> Vec<String> {
+    CollectorId::all_official()
+        .iter()
+        .map(|collector_id| collector_id.as_config_id().to_string())
+        .collect()
+}
+
 #[test]
 fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     let temp = tempfile::tempdir().expect("temp dir");
@@ -69,14 +77,8 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     );
     let response = ProbeRegistrationResponse {
         initial_configuration: Some(ProbeConfigurationResponse {
-            collect_cpu: true,
-            collect_disk: true,
-            collect_load: true,
-            collect_memory: true,
-            collect_network: true,
-            collect_uptime: true,
+            enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
-            reporting_batch_interval_seconds: 15,
             version: "default-v1".to_string(),
         }),
         probe_id: "probe_01".to_string(),
@@ -120,13 +122,9 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
     assert!(bootstrap_config.contains("probe_configuration_version = \"default-v1\""));
     assert!(bootstrap_config.contains("metrics_collection_interval_seconds = 5"));
-    assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
-    assert!(bootstrap_config.contains("collect_cpu = true"));
-    assert!(bootstrap_config.contains("collect_memory = true"));
-    assert!(bootstrap_config.contains("collect_disk = true"));
-    assert!(bootstrap_config.contains("collect_network = true"));
-    assert!(bootstrap_config.contains("collect_load = true"));
-    assert!(bootstrap_config.contains("collect_uptime = true"));
+    assert!(bootstrap_config.contains("enabled_collector_ids = ["));
+    assert!(bootstrap_config.contains("\"official.cpu\""));
+    assert!(bootstrap_config.contains("\"official.disk-health\""));
     assert!(!bootstrap_config.contains("enrollment_token"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
 
@@ -420,13 +418,7 @@ fn probe_run_loop_sends_full_inventory_when_collector_capability_changes() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"disabled-v1\"",
             "metrics_collection_interval_seconds = 1",
-            "reporting_batch_interval_seconds = 1",
-            "collect_cpu = false",
-            "collect_memory = false",
-            "collect_disk = false",
-            "collect_network = false",
-            "collect_load = false",
-            "collect_uptime = false",
+            "enabled_collector_ids = []",
             "",
         ]
         .join("\n"),
@@ -506,7 +498,6 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
-            "reporting_batch_interval_seconds = 7",
             "",
         ]
         .join("\n"),
@@ -533,7 +524,7 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     )
     .expect("run loop reports deterministically");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 2]);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 6]);
     assert!(
         transport
             .observed_calls
@@ -552,7 +543,7 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
             .iter()
             .map(|report| (report.sequence_start, report.sequence_end))
             .collect::<Vec<_>>(),
-        vec![(1, 1), (2, 2), (3, 3)],
+        vec![(1, 1), (2, 4), (5, 7)],
     );
     assert!(reports[0].inventory.is_some());
     assert_eq!(reports[1].boot_id, boot_id);
@@ -560,13 +551,13 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     assert!(reports[1].inventory.is_none());
     assert!(reports[2].inventory.is_none());
     assert!(reports[0].metrics.is_empty());
-    assert_eq!(reports[1].metrics.len(), 1);
+    assert_eq!(reports[1].metrics.len(), 3);
     assert_eq!(reports[1].metrics[0].sequence, 2);
     assert!(reports[1].metrics[0].collected_at_ms > 0);
     assert!(reports[1].metrics[0].cpu_percent.unwrap_or(-1.0) >= 0.0);
     assert!(reports[1].metrics[0].memory_used_bytes.unwrap_or(0) > 0);
-    assert_eq!(reports[2].metrics.len(), 1);
-    assert_eq!(reports[2].metrics[0].sequence, 3);
+    assert_eq!(reports[2].metrics.len(), 3);
+    assert_eq!(reports[2].metrics[0].sequence, 5);
 }
 
 #[test]
@@ -594,13 +585,7 @@ fn probe_run_loop_omits_disabled_individual_metric_fields() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"memory-only-v1\"",
             "metrics_collection_interval_seconds = 7",
-            "reporting_batch_interval_seconds = 7",
-            "collect_cpu = false",
-            "collect_memory = true",
-            "collect_disk = false",
-            "collect_network = false",
-            "collect_load = false",
-            "collect_uptime = false",
+            "enabled_collector_ids = [\"official.memory\"]",
             "",
         ]
         .join("\n"),
@@ -649,7 +634,6 @@ fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 2",
-            "reporting_batch_interval_seconds = 6",
             "",
         ]
         .join("\n"),
@@ -695,7 +679,7 @@ fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
 }
 
 #[test]
-fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
+fn probe_run_loop_uses_a_derived_three_sample_reporting_window_at_one_second_collection() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -705,7 +689,6 @@ fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 1",
-            "reporting_batch_interval_seconds = 1",
             "",
         ]
         .join("\n"),
@@ -728,18 +711,18 @@ fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
     )
     .expect("run loop allows one-second intervals");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1)]);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1); 3]);
     let report = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
         .expect("report decodes");
     assert_eq!(report.sequence_start, 2);
-    assert_eq!(report.sequence_end, 2);
+    assert_eq!(report.sequence_end, 4);
     assert_eq!(
         report
             .metrics
             .iter()
             .map(|sample| sample.sequence)
             .collect::<Vec<_>>(),
-        vec![2],
+        vec![2, 3, 4],
     );
 }
 
@@ -753,13 +736,7 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
             "hub_url = \"https://hub.example\"",
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"disabled-v1\"",
-            "reporting_batch_interval_seconds = 7",
-            "collect_cpu = false",
-            "collect_memory = false",
-            "collect_disk = false",
-            "collect_network = false",
-            "collect_load = false",
-            "collect_uptime = false",
+            "enabled_collector_ids = []",
             "",
         ]
         .join("\n"),
@@ -785,7 +762,7 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
     )
     .expect("run loop reports deterministically");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7)]);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(15)]);
     let reports = transport
         .observed_report_bodies
         .iter()
@@ -813,7 +790,6 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
-            "reporting_batch_interval_seconds = 7",
             "",
         ]
         .join("\n"),
@@ -829,14 +805,8 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             }
             .encode_to_vec(),
             ProbeConfigurationResponse {
-                collect_cpu: false,
-                collect_disk: false,
-                collect_load: false,
-                collect_memory: false,
-                collect_network: false,
-                collect_uptime: false,
+                enabled_collector_ids: Vec::new(),
                 metrics_collection_interval_seconds: 10,
-                reporting_batch_interval_seconds: 11,
                 version: "global-2".to_string(),
             }
             .encode_to_vec(),
@@ -885,7 +855,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             .expect("configuration request decodes");
     assert_eq!(config_request.probe_id, "probe_01");
     assert_eq!(config_request.current_version, "default-v1");
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(11)]);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(30)]);
 
     let reports = transport
         .observed_report_bodies
@@ -908,7 +878,6 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
-            "reporting_batch_interval_seconds = 7",
             "",
         ]
         .join("\n"),
@@ -924,14 +893,8 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             }
             .encode_to_vec(),
             ProbeConfigurationResponse {
-                collect_cpu: true,
-                collect_disk: true,
-                collect_load: true,
-                collect_memory: true,
-                collect_network: true,
-                collect_uptime: true,
-                metrics_collection_interval_seconds: 60,
-                reporting_batch_interval_seconds: 30,
+                enabled_collector_ids: all_collector_ids(),
+                metrics_collection_interval_seconds: 201,
                 version: "global-bad".to_string(),
             }
             .encode_to_vec(),
@@ -960,7 +923,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
     )
     .expect("run loop keeps reporting after rejected Probe Configuration");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7)]);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 3]);
     let reports = transport
         .observed_report_bodies
         .iter()
@@ -995,7 +958,6 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
-            "reporting_batch_interval_seconds = 7",
             "",
         ]
         .join("\n"),
@@ -1048,7 +1010,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
             "https://hub.example/api/probe/report",
         ],
     );
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7)]);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 3]);
     let reports = transport
         .observed_report_bodies
         .iter()
@@ -1083,7 +1045,6 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 7",
-            "reporting_batch_interval_seconds = 7",
             "",
         ]
         .join("\n"),
@@ -1150,7 +1111,6 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 1",
-            "reporting_batch_interval_seconds = 1",
             "",
         ]
         .join("\n"),
@@ -1179,7 +1139,12 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
 
     assert_eq!(
         sleeper.observed_sleeps,
-        vec![Duration::from_secs(1), Duration::from_secs(1)],
+        vec![
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        ],
     );
     assert_eq!(transport.observed_report_bodies.len(), 3);
     let reports = transport
@@ -1192,7 +1157,7 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
             .iter()
             .map(|report| (report.sequence_start, report.sequence_end))
             .collect::<Vec<_>>(),
-        vec![(1, 1), (2, 2), (2, 2)],
+        vec![(1, 1), (2, 4), (2, 4)],
     );
 }
 
@@ -1207,13 +1172,7 @@ fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "metrics_collection_interval_seconds = 5",
-            "reporting_batch_interval_seconds = 5",
-            "collect_cpu = false",
-            "collect_memory = false",
-            "collect_disk = false",
-            "collect_network = false",
-            "collect_load = false",
-            "collect_uptime = false",
+            "enabled_collector_ids = []",
             "",
         ]
         .join("\n"),

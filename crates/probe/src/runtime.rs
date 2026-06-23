@@ -11,7 +11,7 @@ use crate::registration::{
 };
 use crate::{
     inventory::collect_local_inventory,
-    metrics::{CollectorCadenceSchedule, MetricsCollectionConfig, MetricsCollector},
+    metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
         Inventory, ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
         ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationRunning,
@@ -27,6 +27,8 @@ use crate::{
     },
 };
 use prost::Message;
+
+const REPORTING_WINDOW_TICKS: u64 = 3;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
@@ -914,36 +916,22 @@ fn collect_observation_batch(
         return (sequence_start, *sequence, Vec::new());
     }
 
-    let reporting_seconds = active_configuration.reporting_interval.as_secs();
-    let collection_seconds = active_configuration
-        .metrics_collection_interval
-        .as_secs()
-        .max(1);
-    let sample_count = (reporting_seconds / collection_seconds).max(1);
-    let schedule = CollectorCadenceSchedule::for_runtime_collection_interval(
+    let schedule = CollectorCadenceSchedule::for_tick_interval(
         active_configuration.metrics_collection_interval,
     );
-    let mut elapsed_seconds = 0;
     let mut metrics = Vec::new();
 
-    for _ in 0..sample_count {
+    for _ in 0..REPORTING_WINDOW_TICKS {
         sleeper.sleep(active_configuration.metrics_collection_interval);
-        elapsed_seconds += collection_seconds;
         *sequence += 1;
         if let Some(sample) = metrics_collector.collect_after(
             *sequence,
             active_configuration.metrics_collection_interval,
             schedule,
-            active_configuration.metrics_config,
+            &active_configuration.metrics_config,
         ) {
             metrics.push(sample);
         }
-    }
-
-    if elapsed_seconds < reporting_seconds {
-        let leftover = Duration::from_secs(reporting_seconds - elapsed_seconds);
-        sleeper.sleep(leftover);
-        metrics_collector.advance_time(leftover);
     }
 
     (sequence_start, *sequence, metrics)
@@ -1046,14 +1034,11 @@ impl ActiveProbeConfiguration {
         let metrics_collection_interval = bootstrap_config
             .metrics_collection_interval_seconds
             .unwrap_or(default_metrics_collection_interval_seconds());
-        let reporting_batch_interval = bootstrap_config
-            .reporting_batch_interval_seconds
-            .unwrap_or(default_reporting_batch_interval_seconds());
+        let reporting_batch_interval =
+            derived_reporting_batch_interval_seconds(metrics_collection_interval);
 
         Self {
-            metrics_collection_interval: Duration::from_secs(
-                metrics_collection_interval.min(reporting_batch_interval),
-            ),
+            metrics_collection_interval: Duration::from_secs(metrics_collection_interval),
             metrics_config: bootstrap_config.metrics_collection_config(),
             reporting_interval: Duration::from_secs(reporting_batch_interval),
             version: version.to_string(),
@@ -1067,30 +1052,18 @@ impl ActiveProbeConfiguration {
 
         let metrics_collection_interval =
             u64::from(configuration.metrics_collection_interval_seconds);
-        let reporting_batch_interval = u64::from(configuration.reporting_batch_interval_seconds);
+        let reporting_batch_interval =
+            derived_reporting_batch_interval_seconds(metrics_collection_interval);
 
-        if !(1..=300).contains(&metrics_collection_interval) {
+        if !(1..=200).contains(&metrics_collection_interval) {
             return Err("Metrics collection interval out of range");
-        }
-
-        if !(1..=600).contains(&reporting_batch_interval) {
-            return Err("reporting batch interval out of range");
-        }
-
-        if reporting_batch_interval < metrics_collection_interval {
-            return Err("reporting batch interval shorter than collection interval");
         }
 
         Ok(Self {
             metrics_collection_interval: Duration::from_secs(metrics_collection_interval),
-            metrics_config: MetricsCollectionConfig {
-                collect_cpu: configuration.collect_cpu,
-                collect_disk: configuration.collect_disk,
-                collect_load: configuration.collect_load,
-                collect_memory: configuration.collect_memory,
-                collect_network: configuration.collect_network,
-                collect_uptime: configuration.collect_uptime,
-            },
+            metrics_config: metrics_collection_config_from_config_ids(
+                &configuration.enabled_collector_ids,
+            )?,
             reporting_interval: Duration::from_secs(reporting_batch_interval),
             version: configuration.version,
         })
@@ -1099,12 +1072,7 @@ impl ActiveProbeConfiguration {
 
 struct BootstrapConfig {
     bootstrap_config_path: Option<PathBuf>,
-    collect_cpu: Option<bool>,
-    collect_disk: Option<bool>,
-    collect_load: Option<bool>,
-    collect_memory: Option<bool>,
-    collect_network: Option<bool>,
-    collect_uptime: Option<bool>,
+    enabled_collector_ids: Option<Vec<String>>,
     enrollment_token: Option<String>,
     hub_url: Option<String>,
     install_path: Option<String>,
@@ -1113,7 +1081,6 @@ struct BootstrapConfig {
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
     probe_private_key_pem: Option<String>,
-    reporting_batch_interval_seconds: Option<u64>,
     server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
     upgrader_launch: Option<String>,
@@ -1131,17 +1098,28 @@ impl BootstrapConfig {
     }
 
     fn metrics_collection_config(&self) -> MetricsCollectionConfig {
-        let defaults = MetricsCollectionConfig::all_enabled();
-
-        MetricsCollectionConfig {
-            collect_cpu: self.collect_cpu.unwrap_or(defaults.collect_cpu),
-            collect_disk: self.collect_disk.unwrap_or(defaults.collect_disk),
-            collect_load: self.collect_load.unwrap_or(defaults.collect_load),
-            collect_memory: self.collect_memory.unwrap_or(defaults.collect_memory),
-            collect_network: self.collect_network.unwrap_or(defaults.collect_network),
-            collect_uptime: self.collect_uptime.unwrap_or(defaults.collect_uptime),
+        match self.enabled_collector_ids.as_deref() {
+            Some(collector_ids) => metrics_collection_config_from_config_ids(collector_ids)
+                .unwrap_or_else(|_| MetricsCollectionConfig::all_enabled()),
+            None => MetricsCollectionConfig::all_enabled(),
         }
     }
+}
+
+fn metrics_collection_config_from_config_ids(
+    collector_ids: &[String],
+) -> Result<MetricsCollectionConfig, &'static str> {
+    let mut enabled_collectors = Vec::with_capacity(collector_ids.len());
+
+    for collector_id in collector_ids {
+        let collector_id = CollectorId::from_config_id(collector_id)
+            .ok_or("unknown Probe Configuration collector ID")?;
+        enabled_collectors.push(collector_id);
+    }
+
+    Ok(MetricsCollectionConfig::from_enabled_collectors(
+        enabled_collectors,
+    ))
 }
 
 fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunError> {
@@ -1153,12 +1131,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
 
     Ok(BootstrapConfig {
         bootstrap_config_path: Some(path.clone()),
-        collect_cpu: bool_value(&value, "collect_cpu")?,
-        collect_disk: bool_value(&value, "collect_disk")?,
-        collect_load: bool_value(&value, "collect_load")?,
-        collect_memory: bool_value(&value, "collect_memory")?,
-        collect_network: bool_value(&value, "collect_network")?,
-        collect_uptime: bool_value(&value, "collect_uptime")?,
+        enabled_collector_ids: string_array_value(&value, "enabled_collector_ids")?,
         enrollment_token: string_value(&value, "enrollment_token")?,
         hub_url: string_value(&value, "hub_url")?,
         install_path: string_value(&value, "install_path")?,
@@ -1170,10 +1143,6 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         probe_configuration_version: string_value(&value, "probe_configuration_version")?,
         probe_id: string_value(&value, "probe_id")?,
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
-        reporting_batch_interval_seconds: integer_value(
-            &value,
-            "reporting_batch_interval_seconds",
-        )?,
         server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
@@ -1259,12 +1228,12 @@ fn local_status_string(value: &toml::Value, key: &str) -> Option<String> {
     value.get(key)?.as_str().map(ToString::to_string)
 }
 
-fn default_reporting_batch_interval_seconds() -> u64 {
-    15
-}
-
 fn default_metrics_collection_interval_seconds() -> u64 {
     5
+}
+
+fn derived_reporting_batch_interval_seconds(metrics_collection_interval_seconds: u64) -> u64 {
+    metrics_collection_interval_seconds.saturating_mul(REPORTING_WINDOW_TICKS)
 }
 
 fn report_url(hub_url: &str) -> String {
@@ -1312,6 +1281,24 @@ fn string_value(value: &toml::Value, key: &'static str) -> Result<Option<String>
     }
 }
 
+fn string_array_value(
+    value: &toml::Value,
+    key: &'static str,
+) -> Result<Option<Vec<String>>, ProbeRunError> {
+    match value.get(key) {
+        Some(toml::Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                toml::Value::String(string) => Ok(string.clone()),
+                _ => Err(ProbeRunError::InvalidConfig("expected string array values")),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(ProbeRunError::InvalidConfig("expected string array values")),
+        None => Ok(None),
+    }
+}
+
 fn integer_value(value: &toml::Value, key: &'static str) -> Result<Option<u64>, ProbeRunError> {
     match value.get(key) {
         Some(toml::Value::Integer(integer)) if *integer > 0 => Ok(Some(*integer as u64)),
@@ -1330,14 +1317,6 @@ fn signed_integer_value(
     match value.get(key) {
         Some(toml::Value::Integer(integer)) => Ok(Some(*integer)),
         Some(_) => Err(ProbeRunError::InvalidConfig("expected integer values")),
-        None => Ok(None),
-    }
-}
-
-fn bool_value(value: &toml::Value, key: &'static str) -> Result<Option<bool>, ProbeRunError> {
-    match value.get(key) {
-        Some(toml::Value::Boolean(boolean)) => Ok(Some(*boolean)),
-        Some(_) => Err(ProbeRunError::InvalidConfig("expected boolean values")),
         None => Ok(None),
     }
 }
@@ -1366,11 +1345,11 @@ mod tests {
         let mut metrics_collector = MetricsCollector::from_registry(
             crate::metrics::CollectorRegistry::from_collectors(vec![
                 Box::new(FakeMetricCollector {
-                    cadence_class: crate::metrics::CollectorCadenceClass::HighFrequency,
+                    cadence: crate::metrics::CollectorCadence::EveryTick,
                     metric_field: FakeMetricField::Cpu,
                 }),
                 Box::new(FakeMetricCollector {
-                    cadence_class: crate::metrics::CollectorCadenceClass::LowFrequency,
+                    cadence: crate::metrics::CollectorCadence::Every12Ticks,
                     metric_field: FakeMetricField::Load,
                 }),
             ]),
@@ -1399,11 +1378,11 @@ mod tests {
     }
 
     #[test]
-    fn observation_batch_counts_reporting_leftover_sleep_toward_collector_cadence() {
+    fn observation_batch_collects_low_frequency_metrics_every_four_reporting_windows() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(7),
             metrics_config: MetricsCollectionConfig::all_enabled(),
-            reporting_interval: Duration::from_secs(68),
+            reporting_interval: Duration::from_secs(21),
             version: "default-v1".to_string(),
         };
         let mut sequence = 0;
@@ -1411,7 +1390,7 @@ mod tests {
         let mut metrics_collector =
             MetricsCollector::from_registry(crate::metrics::CollectorRegistry::from_collectors(
                 vec![Box::new(FakeMetricCollector {
-                    cadence_class: crate::metrics::CollectorCadenceClass::LowFrequency,
+                    cadence: crate::metrics::CollectorCadence::Every12Ticks,
                     metric_field: FakeMetricField::Load,
                 })],
             ));
@@ -1428,20 +1407,28 @@ mod tests {
             &mut sequence,
             &mut metrics_collector,
         );
-
-        assert_eq!(
-            first_metrics
-                .iter()
-                .map(|sample| sample.sequence)
-                .collect::<Vec<_>>(),
-            vec![9],
+        let (_, _, third_metrics) = collect_observation_batch(
+            &mut sleeper,
+            &active_configuration,
+            &mut sequence,
+            &mut metrics_collector,
         );
+        let (_, _, fourth_metrics) = collect_observation_batch(
+            &mut sleeper,
+            &active_configuration,
+            &mut sequence,
+            &mut metrics_collector,
+        );
+
+        assert!(first_metrics.is_empty());
+        assert!(second_metrics.is_empty());
+        assert!(third_metrics.is_empty());
         assert_eq!(
-            second_metrics
+            fourth_metrics
                 .iter()
                 .map(|sample| sample.sequence)
                 .collect::<Vec<_>>(),
-            vec![17],
+            vec![12],
         );
     }
 
@@ -1451,19 +1438,18 @@ mod tests {
     }
 
     struct FakeMetricCollector {
-        cadence_class: crate::metrics::CollectorCadenceClass,
+        cadence: crate::metrics::CollectorCadence,
         metric_field: FakeMetricField,
     }
 
     impl crate::metrics::MetricCollector for FakeMetricCollector {
-        fn cadence_class(&self) -> crate::metrics::CollectorCadenceClass {
-            self.cadence_class
+        fn definition(&self) -> crate::metrics::CollectorDefinition {
+            crate::metrics::CollectorDefinition::new(self.metric_field.collector_id(), self.cadence)
         }
 
         fn collect(
             &mut self,
             sample: &mut crate::protocol::enoki::v1::MetricSample,
-            _config: MetricsCollectionConfig,
         ) -> Result<bool, crate::metrics::CollectorError> {
             match self.metric_field {
                 FakeMetricField::Cpu => sample.cpu_percent = Some(42.0),
@@ -1471,6 +1457,15 @@ mod tests {
             }
 
             Ok(true)
+        }
+    }
+
+    impl FakeMetricField {
+        fn collector_id(&self) -> crate::metrics::CollectorId {
+            match self {
+                FakeMetricField::Cpu => crate::metrics::CollectorId::Cpu,
+                FakeMetricField::Load => crate::metrics::CollectorId::Load,
+            }
         }
     }
 
@@ -1703,14 +1698,8 @@ mod tests {
             observed_report_bodies: Vec::new(),
             registration_response: ProbeRegistrationResponse {
                 initial_configuration: Some(ProbeConfigurationResponse {
-                    collect_cpu: false,
-                    collect_disk: false,
-                    collect_load: false,
-                    collect_memory: false,
-                    collect_network: false,
-                    collect_uptime: false,
+                    enabled_collector_ids: Vec::new(),
                     metrics_collection_interval_seconds: 1,
-                    reporting_batch_interval_seconds: 1,
                     version: "default-v1".to_string(),
                 }),
                 probe_id: "probe_01".to_string(),

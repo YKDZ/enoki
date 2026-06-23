@@ -1,10 +1,13 @@
 use std::fs;
 
 use crate::metrics::{
-    CollectorCadenceClass, CollectorError, CpuCounterSnapshot, MetricCollector,
-    MetricsCollectionConfig, collect_cpu_metrics_from_proc_stat,
+    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, CpuCounterSnapshot,
+    MetricCollector, collect_cpu_metrics_from_proc_stat,
 };
 use crate::protocol::enoki::v1::MetricSample;
+
+pub const DEFINITION: CollectorDefinition =
+    CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::EveryTick);
 
 #[derive(Default)]
 pub struct CpuMetricCollector {
@@ -12,19 +15,11 @@ pub struct CpuMetricCollector {
 }
 
 impl MetricCollector for CpuMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
+    fn definition(&self) -> CollectorDefinition {
+        DEFINITION
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
-        if !config.collect_cpu {
-            return Ok(false);
-        }
-
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         let Some(metrics) = fs::read_to_string("/proc/stat").ok().and_then(|contents| {
             collect_cpu_metrics_from_proc_stat(&contents, self.previous.as_ref())
         }) else {

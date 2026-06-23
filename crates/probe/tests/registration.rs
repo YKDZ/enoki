@@ -1,6 +1,7 @@
 use std::fs;
 
 use enoki_probe::{
+    metrics::CollectorId,
     protocol::enoki::v1::{
         ProbeConfigurationResponse, ProbeRegistrationRequest, ProbeRegistrationResponse,
     },
@@ -16,14 +17,8 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         initial_configuration: Some(ProbeConfigurationResponse {
-            collect_cpu: true,
-            collect_disk: true,
-            collect_load: true,
-            collect_memory: true,
-            collect_network: true,
-            collect_uptime: true,
+            enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
-            reporting_batch_interval_seconds: 15,
             version: "default-v1".to_string(),
         }),
         probe_id: "probe_01".to_string(),
@@ -69,7 +64,6 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
     assert!(bootstrap_config.contains("probe_private_key_pem = \"-----BEGIN PRIVATE KEY-----"));
     assert!(bootstrap_config.contains("server_time_offset_ms = "));
-    assert!(bootstrap_config.contains("reporting_batch_interval_seconds = 15"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
     assert!(!bootstrap_config.contains("install_path"));
     assert!(!bootstrap_config.contains("operation_status_path"));
@@ -100,14 +94,8 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     .expect("write installer bootstrap config");
     let response = ProbeRegistrationResponse {
         initial_configuration: Some(ProbeConfigurationResponse {
-            collect_cpu: true,
-            collect_disk: true,
-            collect_load: true,
-            collect_memory: true,
-            collect_network: true,
-            collect_uptime: true,
+            enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
-            reporting_batch_interval_seconds: 15,
             version: "default-v1".to_string(),
         }),
         probe_id: "probe_01".to_string(),
@@ -148,6 +136,13 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     assert!(bootstrap_config.contains("log_level = \"debug\""));
     assert!(!bootstrap_config.contains("enrollment_token"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
+}
+
+fn all_collector_ids() -> Vec<String> {
+    CollectorId::all_official()
+        .iter()
+        .map(|collector_id| collector_id.as_config_id().to_string())
+        .collect()
 }
 
 struct RecordingTransport {

@@ -449,13 +449,7 @@ export const probeConfigurationGlobalDefaults = sqliteTable(
     version: text().notNull(),
     updatedAtMs: integer().notNull(),
     metricsCollectionIntervalSeconds: integer().notNull(),
-    reportingBatchIntervalSeconds: integer().notNull(),
-    collectCpu: integer({ mode: "boolean" }).notNull(),
-    collectMemory: integer({ mode: "boolean" }).notNull(),
-    collectDisk: integer({ mode: "boolean" }).notNull(),
-    collectNetwork: integer({ mode: "boolean" }).notNull(),
-    collectLoad: integer({ mode: "boolean" }).notNull(),
-    collectUptime: integer({ mode: "boolean" }).notNull(),
+    enabledCollectorIdsJson: text().notNull(),
   },
 );
 
@@ -471,13 +465,7 @@ export const probeConfigurationHostOverrides = sqliteTable(
     version: text().notNull(),
     updatedAtMs: integer().notNull(),
     metricsCollectionIntervalSeconds: integer().notNull(),
-    reportingBatchIntervalSeconds: integer().notNull(),
-    collectCpu: integer({ mode: "boolean" }).notNull(),
-    collectMemory: integer({ mode: "boolean" }).notNull(),
-    collectDisk: integer({ mode: "boolean" }).notNull(),
-    collectNetwork: integer({ mode: "boolean" }).notNull(),
-    collectLoad: integer({ mode: "boolean" }).notNull(),
-    collectUptime: integer({ mode: "boolean" }).notNull(),
+    enabledCollectorIdsJson: text().notNull(),
   },
 );
 

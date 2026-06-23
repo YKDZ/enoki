@@ -2,28 +2,25 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicI8, Ordering},
-    time::Duration,
 };
 
 use serde::Deserialize;
 
 use crate::metrics::{
-    CollectorCadenceClass, CollectorError, MetricCollector, MetricsCollectionConfig,
+    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
 };
 use crate::privileged_runtime::{
-    CollectorRuntimeProfile, LocalPrivilegedRuntimeRunner, NetworkAccess, PrivilegedCollector,
-    PrivilegedCollectorId, PrivilegedCollectorRuntime, PrivilegedRuntimeRunner,
-    SystemdPrivilegedRuntimeProcessRunner,
+    CollectorRuntimeProfile, DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE, LocalPrivilegedRuntimeRunner,
+    PrivilegedCollector, PrivilegedCollectorId, PrivilegedCollectorRuntime,
+    PrivilegedRuntimeRunner, SystemdPrivilegedRuntimeProcessRunner,
 };
 use crate::protocol::enoki::v1::{DiskHealthMetric, MetricSample};
 
 const DISK_HEALTH_AVAILABILITY_UNKNOWN: i8 = -1;
 const DISK_HEALTH_AVAILABILITY_UNAVAILABLE: i8 = 0;
 const DISK_HEALTH_AVAILABILITY_AVAILABLE: i8 = 1;
-const DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE: CollectorRuntimeProfile = CollectorRuntimeProfile {
-    timeout: Duration::from_secs(10),
-    network_access: NetworkAccess::Disabled,
-};
+pub const DEFINITION: CollectorDefinition =
+    CollectorDefinition::new(CollectorId::DiskHealth, CollectorCadence::Every12Ticks);
 
 static LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY: AtomicI8 =
     AtomicI8::new(DISK_HEALTH_AVAILABILITY_UNKNOWN);
@@ -172,15 +169,11 @@ impl<R> MetricCollector for DiskHealthMetricCollector<R>
 where
     R: DiskHealthMetricsRunner,
 {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::LowFrequency
+    fn definition(&self) -> CollectorDefinition {
+        DEFINITION
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         let metrics = match self.runner.collect_disk_health_metrics() {
             Ok(metrics) => metrics,
             Err(error) => {

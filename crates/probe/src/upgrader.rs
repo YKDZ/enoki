@@ -17,7 +17,13 @@ use rsa::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::probe_auth::{ProbeRequestAuth, signed_probe_request_headers};
+use crate::{
+    privileged_runtime::{
+        PrivilegedRuntimeExecutionPlan, PrivilegedRuntimeInvocation,
+        compiled_privileged_collector_specs,
+    },
+    probe_auth::{ProbeRequestAuth, signed_probe_request_headers},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderRunInput {
@@ -1005,36 +1011,65 @@ fn write_probe_operation_sudoers(
     if let Some(parent) = sudoers_path.parent() {
         fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
     }
-    fs::write(
-        sudoers_path,
-        [
-            "# Managed by Enoki Probe installer.".to_string(),
-            format!(
-                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-upgrader --property=Type=exec -- {} internal-upgrader --config {}",
-                install_metadata.service_user,
-                install_metadata.service_name,
-                install_metadata.install_path.display(),
-                bootstrap_config_path.display(),
-            ),
-            format!(
-                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-uninstaller --property=Type=exec -- {} internal-uninstaller --config {}",
-                install_metadata.service_user,
-                install_metadata.service_name,
-                install_metadata.install_path.display(),
-                bootstrap_config_path.display(),
-            ),
-            format!(
-                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes {} internal-privileged-collector --collector disk-health.smartctl",
-                install_metadata.service_user,
-                install_metadata.install_path.display(),
-            ),
-            String::new(),
-        ]
-        .join("\n"),
-    )
-    .map_err(ProbeUpgraderRunError::Io)?;
+    let mut lines = vec![
+        "# Managed by Enoki Probe installer.".to_string(),
+        format!(
+            "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-upgrader --property=Type=exec -- {} internal-upgrader --config {}",
+            install_metadata.service_user,
+            install_metadata.service_name,
+            install_metadata.install_path.display(),
+            bootstrap_config_path.display(),
+        ),
+        format!(
+            "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={}-uninstaller --property=Type=exec -- {} internal-uninstaller --config {}",
+            install_metadata.service_user,
+            install_metadata.service_name,
+            install_metadata.install_path.display(),
+            bootstrap_config_path.display(),
+        ),
+    ];
+    lines.extend(render_compiled_privileged_collector_sudoers_lines(
+        install_metadata,
+    ));
+    lines.push(String::new());
+
+    fs::write(sudoers_path, lines.join("\n")).map_err(ProbeUpgraderRunError::Io)?;
     fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
         .map_err(ProbeUpgraderRunError::Io)
+}
+
+fn render_compiled_privileged_collector_sudoers_lines(
+    install_metadata: &TrustedProbeInstallMetadata,
+) -> Vec<String> {
+    compiled_privileged_collector_specs()
+        .iter()
+        .map(|spec| {
+            let plan = PrivilegedRuntimeExecutionPlan::new(
+                &install_metadata.install_path,
+                PrivilegedRuntimeInvocation {
+                    collector_id: spec.id,
+                    profile: spec.profile,
+                },
+            );
+            let mut line = format!(
+                "{} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect",
+                install_metadata.service_user,
+            );
+
+            for property in &plan.systemd_properties {
+                line.push_str(&format!(" --property={property}"));
+            }
+
+            line.push(' ');
+            line.push_str(&plan.probe_binary.display().to_string());
+            for arg in &plan.probe_args {
+                line.push(' ');
+                line.push_str(arg);
+            }
+
+            line
+        })
+        .collect()
 }
 
 fn normalized_probe_version(value: &str) -> &str {

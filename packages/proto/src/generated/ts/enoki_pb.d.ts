@@ -3088,26 +3088,8 @@ export namespace enoki {
             /** ProbeConfigurationResponse metricsCollectionIntervalSeconds */
             metricsCollectionIntervalSeconds?: (number|null);
 
-            /** ProbeConfigurationResponse reportingBatchIntervalSeconds */
-            reportingBatchIntervalSeconds?: (number|null);
-
-            /** ProbeConfigurationResponse collectCpu */
-            collectCpu?: (boolean|null);
-
-            /** ProbeConfigurationResponse collectMemory */
-            collectMemory?: (boolean|null);
-
-            /** ProbeConfigurationResponse collectDisk */
-            collectDisk?: (boolean|null);
-
-            /** ProbeConfigurationResponse collectNetwork */
-            collectNetwork?: (boolean|null);
-
-            /** ProbeConfigurationResponse collectLoad */
-            collectLoad?: (boolean|null);
-
-            /** ProbeConfigurationResponse collectUptime */
-            collectUptime?: (boolean|null);
+            /** ProbeConfigurationResponse enabledCollectorIds */
+            enabledCollectorIds?: (string[]|null);
         }
 
         /** Represents a ProbeConfigurationResponse. */
@@ -3125,26 +3107,8 @@ export namespace enoki {
             /** ProbeConfigurationResponse metricsCollectionIntervalSeconds. */
             public metricsCollectionIntervalSeconds: number;
 
-            /** ProbeConfigurationResponse reportingBatchIntervalSeconds. */
-            public reportingBatchIntervalSeconds: number;
-
-            /** ProbeConfigurationResponse collectCpu. */
-            public collectCpu: boolean;
-
-            /** ProbeConfigurationResponse collectMemory. */
-            public collectMemory: boolean;
-
-            /** ProbeConfigurationResponse collectDisk. */
-            public collectDisk: boolean;
-
-            /** ProbeConfigurationResponse collectNetwork. */
-            public collectNetwork: boolean;
-
-            /** ProbeConfigurationResponse collectLoad. */
-            public collectLoad: boolean;
-
-            /** ProbeConfigurationResponse collectUptime. */
-            public collectUptime: boolean;
+            /** ProbeConfigurationResponse enabledCollectorIds. */
+            public enabledCollectorIds: string[];
 
             /**
              * Creates a new ProbeConfigurationResponse instance using the specified properties.

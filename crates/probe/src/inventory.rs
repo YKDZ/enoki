@@ -9,7 +9,10 @@ use std::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use crate::metrics::{DiskHealthAvailability, last_disk_health_collector_availability};
+use crate::metrics::{
+    CollectorCadence, CollectorDefinition, CollectorId, DiskHealthAvailability,
+    last_disk_health_collector_availability,
+};
 use crate::protocol::enoki::v1::{
     CollectorAvailability, CollectorCapabilities, FilesystemInventory, Inventory,
     NetworkInterfaceInventory, OfficialCollectorCapabilities,
@@ -21,40 +24,180 @@ const EXCLUDED_FILESYSTEMS: &[&str] = &[
 ];
 
 pub fn collect_local_inventory() -> Inventory {
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
-    let process_snapshot = collect_process_snapshot();
-    let cpu_count = std::thread::available_parallelism()
-        .map(|count| count.get() as u32)
-        .unwrap_or(1);
-    let filesystems = collect_filesystems();
-    let memory_total_bytes = read_memory_total_bytes().unwrap_or(0);
-    let network_interfaces = collect_network_interfaces();
+    InventoryCollectorRegistry::official().collect_startup()
+}
 
-    Inventory {
-        architecture: std::env::consts::ARCH.to_string(),
-        cpu_base_frequency_mhz: read_cpu_base_frequency_mhz(&cpuinfo).unwrap_or(0),
-        cpu_cache_l3_bytes: read_cpu_l3_cache_bytes(&cpuinfo).unwrap_or(0),
-        cpu_count,
-        cpu_model: read_cpu_model(&cpuinfo).unwrap_or_default(),
-        cpu_physical_count: read_cpu_physical_count(&cpuinfo).unwrap_or(0),
-        cpu_socket_count: read_cpu_socket_count(&cpuinfo).unwrap_or(0),
-        collector_capabilities: Some(official_collector_capabilities(
+trait InventoryCollector {
+    fn definition(&self) -> CollectorDefinition;
+
+    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory);
+}
+
+struct RegisteredInventoryCollector {
+    definition: CollectorDefinition,
+    collector: Box<dyn InventoryCollector>,
+}
+
+struct InventoryCollectorRegistry {
+    collectors: Vec<RegisteredInventoryCollector>,
+}
+
+impl InventoryCollectorRegistry {
+    fn official() -> Self {
+        Self::from_collectors(vec![
+            Box::new(SystemInventoryCollector),
+            Box::new(CpuInventoryCollector),
+            Box::new(MemoryInventoryCollector),
+            Box::new(DiskInventoryCollector),
+            Box::new(NetworkInventoryCollector),
+            Box::new(ProcessInventoryCollector),
+        ])
+    }
+
+    fn from_collectors(collectors: Vec<Box<dyn InventoryCollector>>) -> Self {
+        Self {
+            collectors: collectors
+                .into_iter()
+                .map(|collector| RegisteredInventoryCollector {
+                    definition: collector.definition(),
+                    collector,
+                })
+                .collect(),
+        }
+    }
+
+    fn collect_startup(mut self) -> Inventory {
+        let context = InventoryCollectionContext::read();
+        let mut inventory = Inventory::default();
+
+        for collector in &mut self.collectors {
+            if collector.definition.cadence != CollectorCadence::Startup {
+                continue;
+            }
+
+            collector.collector.collect(&context, &mut inventory);
+        }
+
+        inventory.collector_capabilities = Some(official_collector_capabilities(
+            inventory.cpu_count,
+            inventory.memory_total_bytes,
+            &inventory.filesystems,
+            &inventory.network_interfaces,
+        ));
+
+        inventory
+    }
+}
+
+struct InventoryCollectionContext {
+    cpu_count: u32,
+    cpuinfo: String,
+    filesystems: Vec<FilesystemInventory>,
+    memory_total_bytes: u64,
+    network_interfaces: Vec<NetworkInterfaceInventory>,
+    process_snapshot: ProcessSnapshot,
+}
+
+impl InventoryCollectionContext {
+    fn read() -> Self {
+        let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+        let cpu_count = std::thread::available_parallelism()
+            .map(|count| count.get() as u32)
+            .unwrap_or(1);
+
+        Self {
             cpu_count,
-            memory_total_bytes,
-            &filesystems,
-            &network_interfaces,
-        )),
-        filesystems,
-        hostname: read_trimmed("/proc/sys/kernel/hostname")
+            cpuinfo,
+            filesystems: collect_filesystems(),
+            memory_total_bytes: read_memory_total_bytes().unwrap_or(0),
+            network_interfaces: collect_network_interfaces(),
+            process_snapshot: collect_process_snapshot(),
+        }
+    }
+}
+
+struct SystemInventoryCollector;
+
+impl InventoryCollector for SystemInventoryCollector {
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Uptime, CollectorCadence::Startup)
+    }
+
+    fn collect(&mut self, _context: &InventoryCollectionContext, inventory: &mut Inventory) {
+        inventory.architecture = std::env::consts::ARCH.to_string();
+        inventory.hostname = read_trimmed("/proc/sys/kernel/hostname")
             .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_default(),
-        kernel: read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default(),
-        memory_total_bytes,
-        network_interfaces,
-        os: read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string()),
-        process_count: process_snapshot.process_count,
-        probe_version: crate::version::probe_version().to_string(),
-        thread_count: process_snapshot.thread_count,
+            .unwrap_or_default();
+        inventory.kernel = read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default();
+        inventory.os = read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string());
+        inventory.probe_version = crate::version::probe_version().to_string();
+    }
+}
+
+struct CpuInventoryCollector;
+
+impl InventoryCollector for CpuInventoryCollector {
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::Startup)
+    }
+
+    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
+        inventory.cpu_base_frequency_mhz =
+            read_cpu_base_frequency_mhz(&context.cpuinfo).unwrap_or(0);
+        inventory.cpu_cache_l3_bytes = read_cpu_l3_cache_bytes(&context.cpuinfo).unwrap_or(0);
+        inventory.cpu_count = context.cpu_count;
+        inventory.cpu_model = read_cpu_model(&context.cpuinfo).unwrap_or_default();
+        inventory.cpu_physical_count = read_cpu_physical_count(&context.cpuinfo).unwrap_or(0);
+        inventory.cpu_socket_count = read_cpu_socket_count(&context.cpuinfo).unwrap_or(0);
+    }
+}
+
+struct MemoryInventoryCollector;
+
+impl InventoryCollector for MemoryInventoryCollector {
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Memory, CollectorCadence::Startup)
+    }
+
+    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
+        inventory.memory_total_bytes = context.memory_total_bytes;
+    }
+}
+
+struct DiskInventoryCollector;
+
+impl InventoryCollector for DiskInventoryCollector {
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Disk, CollectorCadence::Startup)
+    }
+
+    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
+        inventory.filesystems = context.filesystems.clone();
+    }
+}
+
+struct NetworkInventoryCollector;
+
+impl InventoryCollector for NetworkInventoryCollector {
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Network, CollectorCadence::Startup)
+    }
+
+    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
+        inventory.network_interfaces = context.network_interfaces.clone();
+    }
+}
+
+struct ProcessInventoryCollector;
+
+impl InventoryCollector for ProcessInventoryCollector {
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(CollectorId::Load, CollectorCadence::Startup)
+    }
+
+    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
+        inventory.process_count = context.process_snapshot.process_count;
+        inventory.thread_count = context.process_snapshot.thread_count;
     }
 }
 

@@ -82,14 +82,8 @@ export type EnrollmentResponse = {
 };
 
 export type ProbeConfiguration = {
-  collectCpu: boolean;
-  collectDisk: boolean;
-  collectLoad: boolean;
-  collectMemory: boolean;
-  collectNetwork: boolean;
-  collectUptime: boolean;
+  enabledCollectorIds: string[];
   metricsCollectionIntervalSeconds: number;
-  reportingBatchIntervalSeconds: number;
   version: string;
 };
 

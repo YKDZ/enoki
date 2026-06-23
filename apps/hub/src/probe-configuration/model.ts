@@ -1,12 +1,28 @@
+export const probeCollectorCatalog = [
+  { id: "official.cpu" },
+  { id: "official.memory" },
+  { id: "official.disk" },
+  { id: "official.network" },
+  { id: "official.load" },
+  { id: "official.uptime" },
+  { id: "official.temperature" },
+  { id: "official.battery" },
+  { id: "official.disk-health" },
+] as const;
+
+export type ProbeCollectorId = (typeof probeCollectorCatalog)[number]["id"];
+
+const probeCollectorIdSet = new Set<string>(
+  probeCollectorCatalog.map((collector) => collector.id),
+);
+
+export const defaultEnabledCollectorIds = probeCollectorCatalog.map(
+  (collector) => collector.id,
+);
+
 export type ProbeConfigurationValues = {
-  collectCpu: boolean;
-  collectDisk: boolean;
-  collectLoad: boolean;
-  collectMemory: boolean;
-  collectNetwork: boolean;
-  collectUptime: boolean;
+  enabledCollectorIds: string[];
   metricsCollectionIntervalSeconds: number;
-  reportingBatchIntervalSeconds: number;
 };
 
 export type ProbeConfigurationRecord = ProbeConfigurationValues & {
@@ -14,14 +30,8 @@ export type ProbeConfigurationRecord = ProbeConfigurationValues & {
 };
 
 export const defaultProbeConfiguration: ProbeConfigurationRecord = {
-  collectCpu: true,
-  collectDisk: true,
-  collectLoad: true,
-  collectMemory: true,
-  collectNetwork: true,
-  collectUptime: true,
+  enabledCollectorIds: [...defaultEnabledCollectorIds],
   metricsCollectionIntervalSeconds: 5,
-  reportingBatchIntervalSeconds: 15,
   version: "default-v1",
 };
 
@@ -33,32 +43,25 @@ export function parseProbeConfigurationValues(
   }
 
   const candidate = input as Record<string, unknown>;
-  const values = {
-    collectCpu: candidate.collectCpu,
-    collectDisk: candidate.collectDisk,
-    collectLoad: candidate.collectLoad,
-    collectMemory: candidate.collectMemory,
-    collectNetwork: candidate.collectNetwork,
-    collectUptime: candidate.collectUptime,
-    metricsCollectionIntervalSeconds:
-      candidate.metricsCollectionIntervalSeconds,
-    reportingBatchIntervalSeconds: candidate.reportingBatchIntervalSeconds,
-  };
+  const enabledCollectorIds = candidate.enabledCollectorIds;
+  const metricsCollectionIntervalSeconds =
+    candidate.metricsCollectionIntervalSeconds;
 
   if (
-    typeof values.collectCpu !== "boolean" ||
-    typeof values.collectDisk !== "boolean" ||
-    typeof values.collectLoad !== "boolean" ||
-    typeof values.collectMemory !== "boolean" ||
-    typeof values.collectNetwork !== "boolean" ||
-    typeof values.collectUptime !== "boolean" ||
-    !Number.isInteger(values.metricsCollectionIntervalSeconds) ||
-    !Number.isInteger(values.reportingBatchIntervalSeconds)
+    !Array.isArray(enabledCollectorIds) ||
+    !enabledCollectorIds.every((collectorId) => {
+      return typeof collectorId === "string";
+    }) ||
+    typeof metricsCollectionIntervalSeconds !== "number" ||
+    !Number.isInteger(metricsCollectionIntervalSeconds)
   ) {
     return null;
   }
 
-  return values as ProbeConfigurationValues;
+  return {
+    enabledCollectorIds: [...new Set(enabledCollectorIds)],
+    metricsCollectionIntervalSeconds,
+  };
 }
 
 export function validateProbeConfigurationValues(
@@ -66,26 +69,39 @@ export function validateProbeConfigurationValues(
 ) {
   if (
     values.metricsCollectionIntervalSeconds < 1 ||
-    values.metricsCollectionIntervalSeconds > 300
+    values.metricsCollectionIntervalSeconds > 200
   ) {
     return "metrics_collection_interval_out_of_range";
   }
 
   if (
-    values.reportingBatchIntervalSeconds < 1 ||
-    values.reportingBatchIntervalSeconds > 600
+    values.enabledCollectorIds.some((collectorId) => {
+      return !probeCollectorIdSet.has(collectorId);
+    })
   ) {
-    return "reporting_batch_interval_out_of_range";
-  }
-
-  if (
-    values.reportingBatchIntervalSeconds <
-    values.metricsCollectionIntervalSeconds
-  ) {
-    return "reporting_batch_interval_shorter_than_collection_interval";
+    return "unknown_collector_id";
   }
 
   return null;
+}
+
+export function normalizeProbeConfigurationValues(
+  values: ProbeConfigurationValues,
+): ProbeConfigurationValues {
+  return {
+    enabledCollectorIds: normalizeEnabledCollectorIds(
+      values.enabledCollectorIds,
+    ),
+    metricsCollectionIntervalSeconds: values.metricsCollectionIntervalSeconds,
+  };
+}
+
+export function normalizeEnabledCollectorIds(enabledCollectorIds: string[]) {
+  const enabled = new Set(enabledCollectorIds);
+
+  return probeCollectorCatalog
+    .filter((collector) => enabled.has(collector.id))
+    .map((collector) => collector.id);
 }
 
 export function nextProbeConfigurationVersion(

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createSSRApp, computed, ref } from "vue";
 
 import type { useHostDetail } from "@/composables/useHostDetail";
+import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
 
 import HostDetailPage from "./HostDetailPage.vue";
 
@@ -48,14 +49,8 @@ describe("Host detail page", () => {
         memory: "2 GB",
         probeConfiguration: {
           configuration: {
-            collectCpu: true,
-            collectDisk: true,
-            collectLoad: true,
-            collectMemory: true,
-            collectNetwork: true,
-            collectUptime: true,
+            enabledCollectorIds: [...defaultEnabledCollectorIds],
             metricsCollectionIntervalSeconds: 5,
-            reportingBatchIntervalSeconds: 30,
             version: "default-v1",
           },
           mode: "inherit",
@@ -233,14 +228,8 @@ describe("Host detail page", () => {
         memory: "2 GB",
         probeConfiguration: {
           configuration: {
-            collectCpu: true,
-            collectDisk: true,
-            collectLoad: true,
-            collectMemory: true,
-            collectNetwork: true,
-            collectUptime: true,
+            enabledCollectorIds: [...defaultEnabledCollectorIds],
             metricsCollectionIntervalSeconds: 5,
-            reportingBatchIntervalSeconds: 30,
             version: "default-v1",
           },
           mode: "inherit",
@@ -329,14 +318,8 @@ describe("Host detail page", () => {
         memory: "2 GB",
         probeConfiguration: {
           configuration: {
-            collectCpu: true,
-            collectDisk: true,
-            collectLoad: true,
-            collectMemory: true,
-            collectNetwork: true,
-            collectUptime: true,
+            enabledCollectorIds: [...defaultEnabledCollectorIds],
             metricsCollectionIntervalSeconds: 5,
-            reportingBatchIntervalSeconds: 30,
             version: "default-v1",
           },
           mode: "inherit",

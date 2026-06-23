@@ -11,7 +11,7 @@
     "dev:probe": "node scripts/dev-probe.mjs",
     "e2e": "playwright test",
     "format:check": "oxfmt --check .",
-    "lint": "oxlint . --ignore-pattern '**/dist/**' --ignore-pattern '**/src/generated/**'",
+    "lint": "oxlint --format=agent --fix --type-aware . ",
     "proto:check": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
     "test": "vitest run scripts/*.test.mjs && turbo run test",

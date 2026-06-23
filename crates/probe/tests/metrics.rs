@@ -1,13 +1,14 @@
 use enoki_probe::inventory::collect_local_inventory;
 use enoki_probe::metrics::{
-    CollectorCadenceClass, CollectorCadenceSchedule, CollectorError, CollectorRegistry,
-    DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner, FilesystemCapacity,
-    MetricCollector, MetricsCollectionConfig, collect_battery_metrics_from_sysfs,
-    collect_cpu_metrics_from_proc_stat, collect_default_route_interfaces_from_proc_routes,
-    collect_disk_counters_from_proc_diskstats, collect_disk_health_metrics_from_smartctl_json,
-    collect_disk_metrics_from_mounts, collect_load_metrics_from_proc_loadavg,
-    collect_memory_metrics_from_proc_meminfo, collect_network_metrics_from_proc_net_dev,
-    collect_temperature_celsius_from_sysfs, collect_uptime_seconds_from_proc_uptime,
+    CollectorCadence, CollectorCadenceSchedule, CollectorDefinition, CollectorError, CollectorId,
+    CollectorRegistry, DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner,
+    FilesystemCapacity, MetricCollector, MetricsCollectionConfig,
+    collect_battery_metrics_from_sysfs, collect_cpu_metrics_from_proc_stat,
+    collect_default_route_interfaces_from_proc_routes, collect_disk_counters_from_proc_diskstats,
+    collect_disk_health_metrics_from_smartctl_json, collect_disk_metrics_from_mounts,
+    collect_load_metrics_from_proc_loadavg, collect_memory_metrics_from_proc_meminfo,
+    collect_network_metrics_from_proc_net_dev, collect_temperature_celsius_from_sysfs,
+    collect_uptime_seconds_from_proc_uptime,
 };
 use enoki_probe::protocol::enoki::v1::DiskHealthMetric;
 use enoki_probe::protocol::enoki::v1::MetricSample;
@@ -17,31 +18,31 @@ use std::time::Duration;
 fn collector_registry_reports_only_collectors_due_for_their_cadence_class() {
     let mut registry = CollectorRegistry::from_collectors(vec![
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::HighFrequency,
+            cadence: CollectorCadence::EveryTick,
             field: FakeMetricField::Cpu,
             calls: 0,
             fail: false,
         }),
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::LowFrequency,
+            cadence: CollectorCadence::Every12Ticks,
             field: FakeMetricField::Load,
             calls: 0,
             fail: false,
         }),
     ]);
-    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(15));
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
     let config = MetricsCollectionConfig::all_enabled();
 
     let first = registry
-        .collect_due(2, Duration::from_secs(5), schedule, config)
+        .collect_due(2, Duration::from_secs(5), schedule, &config)
         .expect("high-frequency collector emits the first sample");
     assert_eq!(first.sequence, 2);
     assert_eq!(first.cpu_percent, Some(42.0));
     assert_eq!(first.load_1, None);
 
     let second = registry
-        .collect_due(3, Duration::from_secs(15), schedule, config)
-        .expect("both cadence classes emit when due");
+        .collect_due(3, Duration::from_secs(60), schedule, &config)
+        .expect("every-tick and every-12-ticks collectors emit when due");
     assert_eq!(second.sequence, 3);
     assert_eq!(second.cpu_percent, Some(43.0));
     assert_eq!(second.load_1, Some(1.0));
@@ -50,30 +51,82 @@ fn collector_registry_reports_only_collectors_due_for_their_cadence_class() {
 #[test]
 fn collector_registry_returns_no_sample_when_no_collector_produces_new_data() {
     let mut registry = CollectorRegistry::from_collectors(vec![Box::new(FakeCollector {
-        cadence_class: CollectorCadenceClass::LowFrequency,
+        cadence: CollectorCadence::Every12Ticks,
         field: FakeMetricField::Load,
         calls: 0,
         fail: false,
     })]);
-    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(15));
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
     let config = MetricsCollectionConfig::all_enabled();
 
     assert!(
         registry
-            .collect_due(2, Duration::from_secs(5), schedule, config)
+            .collect_due(2, Duration::from_secs(5), schedule, &config)
             .is_none()
     );
 
     assert_eq!(
         registry
-            .collect_due(3, Duration::from_secs(15), schedule, config)
-            .expect("low-frequency collector is due")
+            .collect_due(3, Duration::from_secs(60), schedule, &config)
+            .expect("every-12-ticks collector is due")
             .load_1,
         Some(1.0),
     );
     assert!(
         registry
-            .collect_due(4, Duration::from_secs(20), schedule, config)
+            .collect_due(4, Duration::from_secs(65), schedule, &config)
+            .is_none()
+    );
+}
+
+#[test]
+fn collector_registry_skips_collectors_not_enabled_by_id() {
+    let mut registry = CollectorRegistry::from_collectors(vec![
+        Box::new(FakeCollector {
+            cadence: CollectorCadence::EveryTick,
+            field: FakeMetricField::Cpu,
+            calls: 0,
+            fail: false,
+        }),
+        Box::new(FakeCollector {
+            cadence: CollectorCadence::EveryTick,
+            field: FakeMetricField::Memory,
+            calls: 0,
+            fail: false,
+        }),
+    ]);
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
+    let config = MetricsCollectionConfig::from_enabled_collectors([CollectorId::Memory]);
+
+    let sample = registry
+        .collect_due(2, Duration::from_secs(5), schedule, &config)
+        .expect("enabled collector emits");
+
+    assert_eq!(sample.cpu_percent, None);
+    assert_eq!(sample.memory_used_bytes, Some(1024));
+}
+
+#[test]
+fn startup_collectors_emit_only_on_the_first_tick() {
+    let mut registry = CollectorRegistry::from_collectors(vec![Box::new(FakeCollector {
+        cadence: CollectorCadence::Startup,
+        field: FakeMetricField::Load,
+        calls: 0,
+        fail: false,
+    })]);
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
+    let config = MetricsCollectionConfig::all_enabled();
+
+    assert_eq!(
+        registry
+            .collect_due(2, Duration::from_secs(5), schedule, &config)
+            .expect("startup collector emits on the first tick")
+            .load_1,
+        Some(1.0),
+    );
+    assert!(
+        registry
+            .collect_due(3, Duration::from_secs(10), schedule, &config)
             .is_none()
     );
 }
@@ -82,26 +135,26 @@ fn collector_registry_returns_no_sample_when_no_collector_produces_new_data() {
 fn collector_registry_isolates_failed_collectors_from_successful_collectors() {
     let mut registry = CollectorRegistry::from_collectors(vec![
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::HighFrequency,
+            cadence: CollectorCadence::EveryTick,
             field: FakeMetricField::Cpu,
             calls: 0,
             fail: true,
         }),
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::HighFrequency,
+            cadence: CollectorCadence::EveryTick,
             field: FakeMetricField::Memory,
             calls: 0,
             fail: false,
         }),
     ]);
-    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(60));
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
 
     let sample = registry
         .collect_due(
             2,
             Duration::from_secs(5),
             schedule,
-            MetricsCollectionConfig::all_enabled(),
+            &MetricsCollectionConfig::all_enabled(),
         )
         .expect("successful collector still emits");
 
@@ -113,36 +166,36 @@ fn collector_registry_isolates_failed_collectors_from_successful_collectors() {
 fn failed_collectors_wait_for_their_cadence_before_retrying() {
     let mut registry = CollectorRegistry::from_collectors(vec![
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::HighFrequency,
+            cadence: CollectorCadence::EveryTick,
             field: FakeMetricField::Cpu,
             calls: 0,
             fail: false,
         }),
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::LowFrequency,
+            cadence: CollectorCadence::Every12Ticks,
             field: FakeMetricField::Load,
             calls: 0,
             fail: true,
         }),
     ]);
-    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(15));
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
     let config = MetricsCollectionConfig::all_enabled();
 
     let first = registry
-        .collect_due(2, Duration::from_secs(15), schedule, config)
-        .expect("high-frequency collector still emits");
+        .collect_due(2, Duration::from_secs(60), schedule, &config)
+        .expect("every-tick collector still emits");
     assert_eq!(first.cpu_percent, Some(42.0));
     assert_eq!(first.load_1, None);
 
     let second = registry
-        .collect_due(3, Duration::from_secs(20), schedule, config)
-        .expect("only high-frequency collector is retried before low-frequency cadence");
+        .collect_due(3, Duration::from_secs(65), schedule, &config)
+        .expect("only every-tick collector is retried before every-12-ticks cadence");
     assert_eq!(second.cpu_percent, Some(43.0));
     assert_eq!(second.load_1, None);
 
     let third = registry
-        .collect_due(4, Duration::from_secs(30), schedule, config)
-        .expect("low-frequency collector is retried once its cadence elapses");
+        .collect_due(4, Duration::from_secs(120), schedule, &config)
+        .expect("every-12-ticks collector is retried once its cadence elapses");
     assert_eq!(third.cpu_percent, Some(44.0));
     assert_eq!(third.load_1, None);
 }
@@ -151,26 +204,26 @@ fn failed_collectors_wait_for_their_cadence_before_retrying() {
 fn failed_collector_partial_writes_do_not_leak_into_successful_sample() {
     let mut registry = CollectorRegistry::from_collectors(vec![
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::HighFrequency,
+            cadence: CollectorCadence::EveryTick,
             field: FakeMetricField::Cpu,
             calls: 0,
             fail: true,
         }),
         Box::new(FakeCollector {
-            cadence_class: CollectorCadenceClass::HighFrequency,
+            cadence: CollectorCadence::EveryTick,
             field: FakeMetricField::Memory,
             calls: 0,
             fail: false,
         }),
     ]);
-    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(60));
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
 
     let sample = registry
         .collect_due(
             2,
             Duration::from_secs(5),
             schedule,
-            MetricsCollectionConfig::all_enabled(),
+            &MetricsCollectionConfig::all_enabled(),
         )
         .expect("successful collector still emits");
 
@@ -280,7 +333,7 @@ fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results
             }]],
         }),
     )]);
-    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5), Duration::from_secs(60));
+    let schedule = CollectorCadenceSchedule::new(Duration::from_secs(5));
 
     assert!(
         registry
@@ -288,7 +341,7 @@ fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results
                 1,
                 Duration::from_secs(5),
                 schedule,
-                MetricsCollectionConfig::all_enabled(),
+                &MetricsCollectionConfig::all_enabled(),
             )
             .is_none()
     );
@@ -298,7 +351,7 @@ fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results
             2,
             Duration::from_secs(60),
             schedule,
-            MetricsCollectionConfig::all_enabled(),
+            &MetricsCollectionConfig::all_enabled(),
         )
         .expect("Disk Health emits when the low-frequency cadence is due");
     assert_eq!(low_frequency_sample.disk_health.len(), 1);
@@ -310,7 +363,7 @@ fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results
                 3,
                 Duration::from_secs(65),
                 schedule,
-                MetricsCollectionConfig::all_enabled(),
+                &MetricsCollectionConfig::all_enabled(),
             )
             .is_none()
     );
@@ -332,7 +385,7 @@ fn disk_health_collector_result_updates_inventory_capability() {
 
     assert!(
         successful_collector
-            .collect(&mut sample, MetricsCollectionConfig::all_enabled())
+            .collect(&mut sample)
             .expect("successful disk health collection emits metrics")
     );
     assert_eq!(local_disk_health_capability(), Some(true));
@@ -342,17 +395,13 @@ fn disk_health_collector_result_updates_inventory_capability() {
     });
     assert!(
         !unsupported_collector
-            .collect(&mut sample, MetricsCollectionConfig::all_enabled())
+            .collect(&mut sample)
             .expect("unsupported SMART is a successful unavailable result")
     );
     assert_eq!(local_disk_health_capability(), Some(false));
 
     let mut failing_collector = DiskHealthMetricCollector::new(FailingDiskHealthRunner);
-    assert!(
-        failing_collector
-            .collect(&mut sample, MetricsCollectionConfig::all_enabled())
-            .is_err()
-    );
+    assert!(failing_collector.collect(&mut sample).is_err());
     assert_eq!(local_disk_health_capability(), Some(false));
 }
 
@@ -390,22 +439,18 @@ enum FakeMetricField {
 }
 
 struct FakeCollector {
-    cadence_class: CollectorCadenceClass,
+    cadence: CollectorCadence,
     field: FakeMetricField,
     calls: u32,
     fail: bool,
 }
 
 impl MetricCollector for FakeCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        self.cadence_class
+    fn definition(&self) -> CollectorDefinition {
+        CollectorDefinition::new(self.field.collector_id(), self.cadence)
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         self.calls += 1;
         match self.field {
             FakeMetricField::Cpu => sample.cpu_percent = Some(41.0 + f64::from(self.calls)),
@@ -418,6 +463,16 @@ impl MetricCollector for FakeCollector {
         }
 
         Ok(true)
+    }
+}
+
+impl FakeMetricField {
+    fn collector_id(self) -> CollectorId {
+        match self {
+            FakeMetricField::Cpu => CollectorId::Cpu,
+            FakeMetricField::Load => CollectorId::Load,
+            FakeMetricField::Memory => CollectorId::Memory,
+        }
     }
 }
 

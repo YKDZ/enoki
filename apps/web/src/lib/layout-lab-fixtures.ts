@@ -1,4 +1,5 @@
 import { buildMetricsChartData } from "@/lib/metrics-chart-data";
+import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
 
 import type { HostDetail, HostMetricSample } from "../types";
 
@@ -61,14 +62,8 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
     memory: "61.9 GiB",
     probeConfiguration: {
       configuration: {
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
+        enabledCollectorIds: [...defaultEnabledCollectorIds],
         metricsCollectionIntervalSeconds: 1,
-        reportingBatchIntervalSeconds: 3,
         version: "fixture-v1",
       },
       mode: "inherit",

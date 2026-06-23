@@ -85,71 +85,179 @@ pub struct FilesystemCapacity {
     pub total_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum CollectorId {
+    Cpu,
+    Memory,
+    Disk,
+    Network,
+    Load,
+    Uptime,
+    Temperature,
+    Battery,
+    DiskHealth,
+}
+
+impl CollectorId {
+    const ALL_OFFICIAL: &'static [CollectorId] = &[
+        CollectorId::Cpu,
+        CollectorId::Memory,
+        CollectorId::Disk,
+        CollectorId::Network,
+        CollectorId::Load,
+        CollectorId::Uptime,
+        CollectorId::Temperature,
+        CollectorId::Battery,
+        CollectorId::DiskHealth,
+    ];
+
+    pub fn all_official() -> &'static [CollectorId] {
+        Self::ALL_OFFICIAL
+    }
+
+    pub fn as_config_id(self) -> &'static str {
+        match self {
+            CollectorId::Cpu => "official.cpu",
+            CollectorId::Memory => "official.memory",
+            CollectorId::Disk => "official.disk",
+            CollectorId::Network => "official.network",
+            CollectorId::Load => "official.load",
+            CollectorId::Uptime => "official.uptime",
+            CollectorId::Temperature => "official.temperature",
+            CollectorId::Battery => "official.battery",
+            CollectorId::DiskHealth => "official.disk-health",
+        }
+    }
+
+    pub fn from_config_id(value: &str) -> Option<Self> {
+        match value {
+            "official.cpu" => Some(CollectorId::Cpu),
+            "official.memory" => Some(CollectorId::Memory),
+            "official.disk" => Some(CollectorId::Disk),
+            "official.network" => Some(CollectorId::Network),
+            "official.load" => Some(CollectorId::Load),
+            "official.uptime" => Some(CollectorId::Uptime),
+            "official.temperature" => Some(CollectorId::Temperature),
+            "official.battery" => Some(CollectorId::Battery),
+            "official.disk-health" => Some(CollectorId::DiskHealth),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectorCadence {
+    EveryTick,
+    Every12Ticks,
+    Startup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CollectorDefinition {
+    pub id: CollectorId,
+    pub cadence: CollectorCadence,
+}
+
+impl CollectorDefinition {
+    pub const fn new(id: CollectorId, cadence: CollectorCadence) -> Self {
+        Self { id, cadence }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MetricsCollectionConfig {
-    pub collect_cpu: bool,
-    pub collect_disk: bool,
-    pub collect_load: bool,
-    pub collect_memory: bool,
-    pub collect_network: bool,
-    pub collect_uptime: bool,
+    enabled_collectors: BTreeSet<CollectorId>,
 }
 
 impl MetricsCollectionConfig {
     pub fn all_enabled() -> Self {
+        Self::from_enabled_collectors(CollectorId::all_official().iter().copied())
+    }
+
+    pub fn none_enabled() -> Self {
         Self {
-            collect_cpu: true,
-            collect_disk: true,
-            collect_load: true,
-            collect_memory: true,
-            collect_network: true,
-            collect_uptime: true,
+            enabled_collectors: BTreeSet::new(),
+        }
+    }
+
+    pub fn from_enabled_collectors(collector_ids: impl IntoIterator<Item = CollectorId>) -> Self {
+        Self {
+            enabled_collectors: collector_ids.into_iter().collect(),
         }
     }
 
     pub fn any_enabled(&self) -> bool {
-        self.collect_cpu
-            || self.collect_disk
-            || self.collect_load
-            || self.collect_memory
-            || self.collect_network
-            || self.collect_uptime
+        !self.enabled_collectors.is_empty()
     }
-}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CollectorCadenceClass {
-    HighFrequency,
-    LowFrequency,
+    pub fn collector_enabled(&self, collector_id: CollectorId) -> bool {
+        self.enabled_collectors.contains(&collector_id)
+    }
+
+    pub fn set_collector_enabled(&mut self, collector_id: CollectorId, enabled: bool) {
+        if enabled {
+            self.enabled_collectors.insert(collector_id);
+        } else {
+            self.enabled_collectors.remove(&collector_id);
+        }
+    }
+
+    pub fn enabled_collectors(&self) -> &BTreeSet<CollectorId> {
+        &self.enabled_collectors
+    }
+
+    pub fn enabled_collector_config_ids(&self) -> Vec<&'static str> {
+        self.enabled_collectors
+            .iter()
+            .map(|collector_id| collector_id.as_config_id())
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectorCadenceSchedule {
-    high_frequency: Duration,
-    low_frequency: Duration,
+    tick_interval: Duration,
 }
 
 impl CollectorCadenceSchedule {
-    pub fn new(high_frequency: Duration, low_frequency: Duration) -> Self {
+    pub fn new(tick_interval: Duration) -> Self {
         Self {
-            high_frequency: high_frequency.max(Duration::from_secs(1)),
-            low_frequency: low_frequency.max(Duration::from_secs(1)),
+            tick_interval: tick_interval.max(Duration::from_secs(1)),
         }
     }
 
-    pub fn for_high_frequency_interval(high_frequency: Duration) -> Self {
-        Self::new(high_frequency, high_frequency)
+    pub fn for_tick_interval(tick_interval: Duration) -> Self {
+        Self::new(tick_interval)
     }
 
-    pub fn for_runtime_collection_interval(high_frequency: Duration) -> Self {
-        Self::new(high_frequency, Duration::from_secs(60))
+    pub fn for_high_frequency_interval(tick_interval: Duration) -> Self {
+        Self::new(tick_interval)
     }
 
-    pub fn interval_for(&self, class: CollectorCadenceClass) -> Duration {
-        match class {
-            CollectorCadenceClass::HighFrequency => self.high_frequency,
-            CollectorCadenceClass::LowFrequency => self.low_frequency,
-        }
+    pub fn for_runtime_collection_interval(tick_interval: Duration) -> Self {
+        Self::new(tick_interval)
+    }
+
+    fn tick_for(&self, elapsed: Duration) -> u64 {
+        let tick = elapsed.as_nanos() / self.tick_interval.as_nanos().max(1);
+
+        tick.min(u128::from(u64::MAX)) as u64
+    }
+}
+
+fn collector_is_due(
+    last_collected_tick: Option<u64>,
+    current_tick: u64,
+    cadence: CollectorCadence,
+) -> bool {
+    if current_tick == 0 || last_collected_tick == Some(current_tick) {
+        return false;
+    }
+
+    match cadence {
+        CollectorCadence::EveryTick => true,
+        CollectorCadence::Every12Ticks => current_tick.is_multiple_of(12),
+        CollectorCadence::Startup => current_tick == 1 && last_collected_tick.is_none(),
     }
 }
 
@@ -166,19 +274,34 @@ impl CollectorError {
     }
 }
 
-pub trait MetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass;
+impl std::fmt::Display for CollectorError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError>;
+pub trait MetricCollector {
+    fn definition(&self) -> CollectorDefinition;
+
+    fn collector_id(&self) -> CollectorId {
+        self.definition().id
+    }
+
+    fn cadence(&self) -> CollectorCadence {
+        self.definition().cadence
+    }
+
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError>;
+}
+
+struct RegisteredCollector {
+    definition: CollectorDefinition,
+    collector: Box<dyn MetricCollector>,
 }
 
 pub struct CollectorRegistry {
-    collectors: Vec<Box<dyn MetricCollector>>,
-    last_collected_at: Vec<Option<Duration>>,
+    collectors: Vec<RegisteredCollector>,
+    last_collected_tick: Vec<Option<u64>>,
 }
 
 impl CollectorRegistry {
@@ -190,11 +313,18 @@ impl CollectorRegistry {
     }
 
     pub fn from_collectors(collectors: Vec<Box<dyn MetricCollector>>) -> Self {
-        let last_collected_at = vec![None; collectors.len()];
+        let collectors = collectors
+            .into_iter()
+            .map(|collector| RegisteredCollector {
+                definition: collector.definition(),
+                collector,
+            })
+            .collect::<Vec<_>>();
+        let last_collected_tick = vec![None; collectors.len()];
 
         Self {
             collectors,
-            last_collected_at,
+            last_collected_tick,
         }
     }
 
@@ -203,7 +333,7 @@ impl CollectorRegistry {
         sequence: u64,
         elapsed: Duration,
         schedule: CollectorCadenceSchedule,
-        config: MetricsCollectionConfig,
+        config: &MetricsCollectionConfig,
     ) -> Option<MetricSample> {
         let mut sample = MetricSample {
             collected_at_ms: unix_time_millis(),
@@ -211,41 +341,38 @@ impl CollectorRegistry {
             ..MetricSample::default()
         };
         let mut produced = false;
+        let current_tick = schedule.tick_for(elapsed);
 
         for (index, collector) in self.collectors.iter_mut().enumerate() {
-            let interval = schedule.interval_for(collector.cadence_class());
-            if !collector_is_due(self.last_collected_at[index], elapsed, interval) {
+            if !config.collector_enabled(collector.definition.id) {
+                continue;
+            }
+
+            if !collector_is_due(
+                self.last_collected_tick[index],
+                current_tick,
+                collector.definition.cadence,
+            ) {
                 continue;
             }
 
             let sample_before_collection = sample.clone();
-            match collector.collect(&mut sample, config) {
+            match collector.collector.collect(&mut sample) {
                 Ok(true) => {
                     produced = true;
-                    self.last_collected_at[index] = Some(elapsed);
+                    self.last_collected_tick[index] = Some(current_tick);
                 }
                 Ok(false) => {
-                    self.last_collected_at[index] = Some(elapsed);
+                    self.last_collected_tick[index] = Some(current_tick);
                 }
                 Err(_) => {
                     sample = sample_before_collection;
-                    self.last_collected_at[index] = Some(elapsed);
+                    self.last_collected_tick[index] = Some(current_tick);
                 }
             }
         }
 
         produced.then_some(sample)
-    }
-}
-
-fn collector_is_due(
-    last_collected_at: Option<Duration>,
-    elapsed: Duration,
-    interval: Duration,
-) -> bool {
-    match last_collected_at {
-        Some(last_collected_at) => elapsed.saturating_sub(last_collected_at) >= interval,
-        None => elapsed >= interval,
     }
 }
 
@@ -277,7 +404,7 @@ impl MetricsCollector {
             sequence,
             self.elapsed,
             CollectorCadenceSchedule::for_high_frequency_interval(Duration::from_secs(1)),
-            config,
+            &config,
         )
         .unwrap_or_else(|| MetricSample {
             collected_at_ms: unix_time_millis(),
@@ -291,7 +418,7 @@ impl MetricsCollector {
         sequence: u64,
         elapsed: Duration,
         schedule: CollectorCadenceSchedule,
-        config: MetricsCollectionConfig,
+        config: &MetricsCollectionConfig,
     ) -> Option<MetricSample> {
         self.elapsed = elapsed;
         self.registry
@@ -303,7 +430,7 @@ impl MetricsCollector {
         sequence: u64,
         elapsed_since_last_collection: Duration,
         schedule: CollectorCadenceSchedule,
-        config: MetricsCollectionConfig,
+        config: &MetricsCollectionConfig,
     ) -> Option<MetricSample> {
         self.elapsed += elapsed_since_last_collection;
         self.registry

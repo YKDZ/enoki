@@ -216,11 +216,8 @@ message ProbeConfigurationRequest {
 message ProbeConfigurationResponse {
   string version = 1;
   uint32 metrics_collection_interval_seconds = 2;
-  uint32 reporting_batch_interval_seconds = 3;
-  bool collect_cpu = 4;
-  bool collect_memory = 5;
-  bool collect_disk = 6;
-  bool collect_network = 7;
-  bool collect_load = 8;
-  bool collect_uptime = 9;
+  repeated string enabled_collector_ids = 10;
+
+  reserved 3, 4 to 9;
+  reserved "reporting_batch_interval_seconds", "collect_cpu", "collect_memory", "collect_disk", "collect_network", "collect_load", "collect_uptime";
 }

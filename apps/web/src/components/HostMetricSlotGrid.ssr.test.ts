@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createSSRApp } from "vue";
 
 import type { MetricsChartData } from "@/lib/metrics-chart-data";
+import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
 
 import type { HostDetail, HostMetricSample } from "../types";
 import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
@@ -59,14 +60,8 @@ const host: HostDetail = {
   memory: "8 GB",
   probeConfiguration: {
     configuration: {
-      collectCpu: true,
-      collectDisk: true,
-      collectLoad: true,
-      collectMemory: true,
-      collectNetwork: true,
-      collectUptime: true,
+      enabledCollectorIds: [...defaultEnabledCollectorIds],
       metricsCollectionIntervalSeconds: 5,
-      reportingBatchIntervalSeconds: 15,
       version: "default-v1",
     },
     mode: "inherit",
@@ -253,6 +248,7 @@ describe("Host metric slot grid", () => {
       collectedAtMs: 1_725_000_005_000,
       cpuCores: [],
       cpuPercent: 30,
+      diskHealth: [],
       diskTotalBytes: 100,
       diskUsedBytes: 60,
       disks: [

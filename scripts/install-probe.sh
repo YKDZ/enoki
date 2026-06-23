@@ -383,14 +383,8 @@ write_bootstrap_config() {
 
     if can_reuse_existing_identity "$existing_config_path"; then
       write_preserved_optional_string "$existing_config_path" probe_configuration_version
-      write_preserved_optional_raw "$existing_config_path" reporting_batch_interval_seconds
       write_preserved_optional_raw "$existing_config_path" metrics_collection_interval_seconds
-      write_preserved_optional_raw "$existing_config_path" collect_cpu
-      write_preserved_optional_raw "$existing_config_path" collect_memory
-      write_preserved_optional_raw "$existing_config_path" collect_disk
-      write_preserved_optional_raw "$existing_config_path" collect_network
-      write_preserved_optional_raw "$existing_config_path" collect_load
-      write_preserved_optional_raw "$existing_config_path" collect_uptime
+      write_preserved_optional_raw "$existing_config_path" enabled_collector_ids
     fi
   } >"$config_path_rooted"
   rm -f "$existing_config_path"

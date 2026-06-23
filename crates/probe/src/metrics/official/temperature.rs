@@ -1,22 +1,21 @@
 use crate::metrics::{
-    CollectorCadenceClass, CollectorError, MetricCollector, MetricsCollectionConfig,
+    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
     collect_temperature_celsius_from_sysfs,
 };
 use crate::protocol::enoki::v1::MetricSample;
+
+pub const DEFINITION: CollectorDefinition =
+    CollectorDefinition::new(CollectorId::Temperature, CollectorCadence::EveryTick);
 
 #[derive(Default)]
 pub struct TemperatureMetricCollector;
 
 impl MetricCollector for TemperatureMetricCollector {
-    fn cadence_class(&self) -> CollectorCadenceClass {
-        CollectorCadenceClass::HighFrequency
+    fn definition(&self) -> CollectorDefinition {
+        DEFINITION
     }
 
-    fn collect(
-        &mut self,
-        sample: &mut MetricSample,
-        _config: MetricsCollectionConfig,
-    ) -> Result<bool, CollectorError> {
+    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
         let Some(temperature_celsius) = collect_temperature_celsius_from_sysfs("/sys/class/hwmon")
         else {
             return Ok(false);

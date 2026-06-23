@@ -167,10 +167,8 @@ describe("Probe systemd installer", () => {
         'probe_id = "probe_existing"',
         'probe_private_key_pem = "existing-private-key"',
         'probe_configuration_version = "default-v2"',
-        "reporting_batch_interval_seconds = 3",
         "metrics_collection_interval_seconds = 1",
-        "collect_cpu = true",
-        "collect_network = false",
+        'enabled_collector_ids = ["official.cpu", "official.memory"]',
         "",
       ].join("\n"),
     );
@@ -209,10 +207,8 @@ describe("Probe systemd installer", () => {
         'upgrader_launch = "systemd"',
         'log_level = "info"',
         'probe_configuration_version = "default-v2"',
-        "reporting_batch_interval_seconds = 3",
         "metrics_collection_interval_seconds = 1",
-        "collect_cpu = true",
-        "collect_network = false",
+        'enabled_collector_ids = ["official.cpu", "official.memory"]',
         "",
       ].join("\n"),
     );
@@ -251,7 +247,6 @@ describe("Probe systemd installer", () => {
         'hub_url = "https://hub.example/"',
         'probe_id = "probe_existing"',
         'probe_configuration_version = "default-v2"',
-        "reporting_batch_interval_seconds = 3",
         "",
       ].join("\n"),
     );

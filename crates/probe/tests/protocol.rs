@@ -242,15 +242,10 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
 
 #[test]
 fn generated_rust_protocol_encodes_all_probe_configuration_toggles() {
+    let enabled_collector_ids = vec!["official.cpu".to_string(), "official.memory".to_string()];
     let configuration = ProbeConfigurationResponse {
-        collect_cpu: true,
-        collect_disk: true,
-        collect_load: true,
-        collect_memory: true,
-        collect_network: true,
-        collect_uptime: true,
+        enabled_collector_ids: enabled_collector_ids.clone(),
         metrics_collection_interval_seconds: 5,
-        reporting_batch_interval_seconds: 15,
         version: "default-v1".to_string(),
     };
 
@@ -258,10 +253,5 @@ fn generated_rust_protocol_encodes_all_probe_configuration_toggles() {
     let decoded = ProbeConfigurationResponse::decode(encoded.as_slice())
         .expect("generated Probe Configuration should decode");
 
-    assert!(decoded.collect_cpu);
-    assert!(decoded.collect_load);
-    assert!(decoded.collect_memory);
-    assert!(decoded.collect_disk);
-    assert!(decoded.collect_network);
-    assert!(decoded.collect_uptime);
+    assert_eq!(decoded.enabled_collector_ids, enabled_collector_ids);
 }

@@ -360,18 +360,6 @@ pub struct ProbeConfigurationResponse {
     pub version: ::prost::alloc::string::String,
     #[prost(uint32, tag = "2")]
     pub metrics_collection_interval_seconds: u32,
-    #[prost(uint32, tag = "3")]
-    pub reporting_batch_interval_seconds: u32,
-    #[prost(bool, tag = "4")]
-    pub collect_cpu: bool,
-    #[prost(bool, tag = "5")]
-    pub collect_memory: bool,
-    #[prost(bool, tag = "6")]
-    pub collect_disk: bool,
-    #[prost(bool, tag = "7")]
-    pub collect_network: bool,
-    #[prost(bool, tag = "8")]
-    pub collect_load: bool,
-    #[prost(bool, tag = "9")]
-    pub collect_uptime: bool,
+    #[prost(string, repeated, tag = "10")]
+    pub enabled_collector_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }

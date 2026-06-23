@@ -23,6 +23,11 @@ pub const DEFAULT_COLLECTOR_RUNTIME_PROFILE: CollectorRuntimeProfile = Collector
     network_access: NetworkAccess::Disabled,
 };
 
+pub const DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE: CollectorRuntimeProfile = CollectorRuntimeProfile {
+    timeout: Duration::from_secs(10),
+    network_access: NetworkAccess::Disabled,
+};
+
 impl Default for CollectorRuntimeProfile {
     fn default() -> Self {
         DEFAULT_COLLECTOR_RUNTIME_PROFILE
@@ -56,6 +61,30 @@ impl PrivilegedCollectorId {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompiledPrivilegedCollectorSpec {
+    pub id: PrivilegedCollectorId,
+    pub profile: CollectorRuntimeProfile,
+}
+
+pub const COMPILED_PRIVILEGED_COLLECTOR_SPECS: &[CompiledPrivilegedCollectorSpec] =
+    &[CompiledPrivilegedCollectorSpec {
+        id: PrivilegedCollectorId::DiskHealthSmartctl,
+        profile: DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE,
+    }];
+
+pub fn compiled_privileged_collector_specs() -> &'static [CompiledPrivilegedCollectorSpec] {
+    COMPILED_PRIVILEGED_COLLECTOR_SPECS
+}
+
+pub fn compiled_privileged_collector_spec(
+    collector_id: PrivilegedCollectorId,
+) -> Option<&'static CompiledPrivilegedCollectorSpec> {
+    COMPILED_PRIVILEGED_COLLECTOR_SPECS
+        .iter()
+        .find(|spec| spec.id == collector_id)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

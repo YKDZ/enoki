@@ -283,17 +283,13 @@ describe("Probe registration API", () => {
     expect(decoded.initialConfiguration?.metricsCollectionIntervalSeconds).toBe(
       5,
     );
-    expect(decoded.initialConfiguration?.reportingBatchIntervalSeconds).toBe(
-      15,
-    );
     expect(decoded.initialConfiguration).toEqual(
       expect.objectContaining({
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
+        enabledCollectorIds: expect.arrayContaining([
+          "official.cpu",
+          "official.memory",
+          "official.disk-health",
+        ]),
       }),
     );
 
@@ -541,15 +537,13 @@ describe("Probe registration API", () => {
     );
     expect(configuration.version).toBe("default-v1");
     expect(configuration.metricsCollectionIntervalSeconds).toBe(5);
-    expect(configuration.reportingBatchIntervalSeconds).toBe(15);
     expect(configuration).toEqual(
       expect.objectContaining({
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
+        enabledCollectorIds: expect.arrayContaining([
+          "official.cpu",
+          "official.memory",
+          "official.disk-health",
+        ]),
       }),
     );
 

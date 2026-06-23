@@ -14,6 +14,7 @@ use rsa::{
 
 use crate::{
     inventory::collect_local_inventory,
+    metrics::MetricsCollectionConfig,
     protocol::enoki::v1::{ProbeRegistrationRequest, ProbeRegistrationResponse},
 };
 
@@ -120,30 +121,10 @@ pub fn register_probe(
     store_bootstrap_config(
         &input.bootstrap_config_path,
         &BootstrapConfig {
-            collect_cpu: response
+            enabled_collector_ids: response
                 .initial_configuration
                 .as_ref()
-                .map(|configuration| configuration.collect_cpu),
-            collect_disk: response
-                .initial_configuration
-                .as_ref()
-                .map(|configuration| configuration.collect_disk),
-            collect_load: response
-                .initial_configuration
-                .as_ref()
-                .map(|configuration| configuration.collect_load),
-            collect_memory: response
-                .initial_configuration
-                .as_ref()
-                .map(|configuration| configuration.collect_memory),
-            collect_network: response
-                .initial_configuration
-                .as_ref()
-                .map(|configuration| configuration.collect_network),
-            collect_uptime: response
-                .initial_configuration
-                .as_ref()
-                .map(|configuration| configuration.collect_uptime),
+                .map(|configuration| configuration.enabled_collector_ids.clone()),
             hub_url: input.hub_url,
             metrics_collection_interval_seconds: response.initial_configuration.as_ref().and_then(
                 |configuration| {
@@ -155,12 +136,6 @@ pub fn register_probe(
                 .initial_configuration
                 .as_ref()
                 .map(|configuration| configuration.version.as_str()),
-            reporting_batch_interval_seconds: response.initial_configuration.as_ref().and_then(
-                |configuration| {
-                    (configuration.reporting_batch_interval_seconds > 0)
-                        .then_some(configuration.reporting_batch_interval_seconds)
-                },
-            ),
             probe_id: response.probe_id.as_str(),
             probe_private_key_pem: signing_key.private_key_pem.as_str(),
             server_time_offset_ms,
@@ -213,18 +188,12 @@ fn current_unix_time_ms_i128() -> i128 {
 }
 
 struct BootstrapConfig<'a> {
-    collect_cpu: Option<bool>,
-    collect_disk: Option<bool>,
-    collect_load: Option<bool>,
-    collect_memory: Option<bool>,
-    collect_network: Option<bool>,
-    collect_uptime: Option<bool>,
+    enabled_collector_ids: Option<Vec<String>>,
     hub_url: String,
     metrics_collection_interval_seconds: Option<u32>,
     probe_configuration_version: Option<&'a str>,
     probe_id: &'a str,
     probe_private_key_pem: &'a str,
-    reporting_batch_interval_seconds: Option<u32>,
     server_time_offset_ms: i128,
     installer_owned_fields: InstallerOwnedFields,
 }
@@ -340,32 +309,42 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
         ));
     }
 
-    if let Some(reporting_batch_interval_seconds) = config.reporting_batch_interval_seconds {
-        output.push_str(&format!(
-            "reporting_batch_interval_seconds = {reporting_batch_interval_seconds}\n",
-        ));
-    }
-
     if let Some(metrics_collection_interval_seconds) = config.metrics_collection_interval_seconds {
         output.push_str(&format!(
             "metrics_collection_interval_seconds = {metrics_collection_interval_seconds}\n",
         ));
     }
 
-    push_optional_bool(&mut output, "collect_cpu", config.collect_cpu);
-    push_optional_bool(&mut output, "collect_memory", config.collect_memory);
-    push_optional_bool(&mut output, "collect_disk", config.collect_disk);
-    push_optional_bool(&mut output, "collect_network", config.collect_network);
-    push_optional_bool(&mut output, "collect_load", config.collect_load);
-    push_optional_bool(&mut output, "collect_uptime", config.collect_uptime);
+    let default_collector_ids;
+    let enabled_collector_ids = match config.enabled_collector_ids.as_deref() {
+        Some(collector_ids) => collector_ids,
+        None => {
+            default_collector_ids = default_enabled_collector_ids();
+            &default_collector_ids
+        }
+    };
+    push_collector_ids(&mut output, enabled_collector_ids);
 
     output
 }
 
-fn push_optional_bool(output: &mut String, key: &str, value: Option<bool>) {
-    if let Some(value) = value {
-        output.push_str(&format!("{key} = {value}\n"));
+fn default_enabled_collector_ids() -> Vec<String> {
+    MetricsCollectionConfig::all_enabled()
+        .enabled_collector_config_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn push_collector_ids(output: &mut String, collector_ids: &[String]) {
+    output.push_str("enabled_collector_ids = [");
+    for (index, collector_id) in collector_ids.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&toml_string(collector_id));
     }
+    output.push_str("]\n");
 }
 
 fn push_optional_string(output: &mut String, key: &str, value: Option<&str>) {

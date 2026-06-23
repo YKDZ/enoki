@@ -5,6 +5,7 @@ import type {
 import { computed, onScopeDispose, ref, unref, type MaybeRef } from "vue";
 
 import { apiGet, apiMutate, isUnauthorizedError } from "@/lib/api";
+import { latestMetricsFromSample } from "@/lib/latest-metrics";
 import {
   useHostMetricsWindowStore,
   type HostMetricsWindowPreferences,
@@ -445,32 +446,7 @@ export function useHostDetail(
         host.value.lastReportAtMs ?? 0,
         sample.receivedAtMs,
       ),
-      latestMetrics: {
-        batteryPercent: sample.batteryPercent,
-        batteryState: sample.batteryState,
-        collectedAtMs: sample.collectedAtMs,
-        cpuIdlePercent: sample.cpuIdlePercent,
-        cpuIowaitPercent: sample.cpuIowaitPercent,
-        cpuPercent: sample.cpuPercent,
-        cpuStealPercent: sample.cpuStealPercent,
-        cpuSystemPercent: sample.cpuSystemPercent,
-        cpuUserPercent: sample.cpuUserPercent,
-        diskHealth: sample.diskHealth ?? host.value.latestMetrics?.diskHealth,
-        diskTotalBytes: sample.diskTotalBytes,
-        diskUsedBytes: sample.diskUsedBytes,
-        memoryCacheBytes: sample.memoryCacheBytes,
-        memoryTotalBytes: sample.memoryTotalBytes,
-        memoryUsedBytes: sample.memoryUsedBytes,
-        networkRxBitsPerSecond: sample.networkRxBitsPerSecond,
-        networkRxBytesDelta: sample.networkRxBytesDelta,
-        networkTxBitsPerSecond: sample.networkTxBitsPerSecond,
-        networkTxBytesDelta: sample.networkTxBytesDelta,
-        receivedAtMs: sample.receivedAtMs,
-        swapTotalBytes: sample.swapTotalBytes,
-        swapUsedBytes: sample.swapUsedBytes,
-        temperatureCelsius: sample.temperatureCelsius,
-        uptimeSeconds: sample.uptimeSeconds,
-      },
+      latestMetrics: latestMetricsFromSample(sample, host.value.latestMetrics),
       status: "online",
     };
   }

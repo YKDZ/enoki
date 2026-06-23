@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
+
 import type { HostDetail } from "../types";
 import {
   probeUpgradeToastTitle,
@@ -163,14 +165,8 @@ function hostDetail(overrides: Partial<HostDetail>) {
     memory: "n/a",
     probeConfiguration: {
       configuration: {
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
+        enabledCollectorIds: [...defaultEnabledCollectorIds],
         metricsCollectionIntervalSeconds: 1,
-        reportingBatchIntervalSeconds: 3,
         version: "default",
       },
       mode: "inherit",

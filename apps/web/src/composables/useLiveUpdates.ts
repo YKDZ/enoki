@@ -6,6 +6,8 @@ import {
 } from "@enoki/api-client/websocket";
 import type { Ref } from "vue";
 
+import { mergeLatestMetrics } from "@/lib/latest-metrics";
+
 import type { HostSummary } from "../types";
 
 export type LiveSummaryApplyResult = {
@@ -36,36 +38,7 @@ export function applyHostLiveSummary(
           : summary.collectorCapabilities,
       lastReportAtMs: summary.lastSeenAtMs,
       latestMetrics: summary.latestMetrics
-        ? {
-            batteryPercent: summary.latestMetrics.batteryPercent,
-            batteryState: summary.latestMetrics.batteryState,
-            collectedAtMs: summary.latestMetrics.collectedAtMs,
-            cpuIdlePercent: summary.latestMetrics.cpuIdlePercent,
-            cpuIowaitPercent: summary.latestMetrics.cpuIowaitPercent,
-            cpuPercent: summary.latestMetrics.cpuPercent,
-            cpuStealPercent: summary.latestMetrics.cpuStealPercent,
-            cpuSystemPercent: summary.latestMetrics.cpuSystemPercent,
-            cpuUserPercent: summary.latestMetrics.cpuUserPercent,
-            diskHealth:
-              summary.latestMetrics.diskHealth ??
-              host.latestMetrics?.diskHealth,
-            diskTotalBytes: summary.latestMetrics.diskTotalBytes,
-            diskUsedBytes: summary.latestMetrics.diskUsedBytes,
-            memoryCacheBytes: summary.latestMetrics.memoryCacheBytes,
-            memoryTotalBytes: summary.latestMetrics.memoryTotalBytes,
-            memoryUsedBytes: summary.latestMetrics.memoryUsedBytes,
-            networkRxBitsPerSecond:
-              summary.latestMetrics.networkRxBitsPerSecond,
-            networkRxBytesDelta: summary.latestMetrics.networkRxBytesDelta,
-            networkTxBitsPerSecond:
-              summary.latestMetrics.networkTxBitsPerSecond,
-            networkTxBytesDelta: summary.latestMetrics.networkTxBytesDelta,
-            receivedAtMs: summary.latestMetrics.receivedAtMs,
-            swapTotalBytes: summary.latestMetrics.swapTotalBytes,
-            swapUsedBytes: summary.latestMetrics.swapUsedBytes,
-            temperatureCelsius: summary.latestMetrics.temperatureCelsius,
-            uptimeSeconds: summary.latestMetrics.uptimeSeconds,
-          }
+        ? mergeLatestMetrics(host.latestMetrics, summary.latestMetrics)
         : null,
       status: summary.status,
     };

@@ -85,14 +85,8 @@ describe("generated Probe protocol TypeScript", () => {
     const encoded = RegistrationResponse.encode(
       RegistrationResponse.create({
         initialConfiguration: {
-          collectCpu: true,
-          collectDisk: true,
-          collectLoad: true,
-          collectMemory: true,
-          collectNetwork: true,
-          collectUptime: true,
+          enabledCollectorIds: ["official.cpu", "official.memory"],
           metricsCollectionIntervalSeconds: 5,
-          reportingBatchIntervalSeconds: 15,
           version: "default-v1",
         },
         probeId: "probe-01",
@@ -110,12 +104,7 @@ describe("generated Probe protocol TypeScript", () => {
     );
     expect(decoded.initialConfiguration).toEqual(
       expect.objectContaining({
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
+        enabledCollectorIds: ["official.cpu", "official.memory"],
       }),
     );
   });

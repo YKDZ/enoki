@@ -2,8 +2,10 @@ import { eq } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
+  defaultEnabledCollectorIds,
   defaultProbeConfiguration,
   nextProbeConfigurationVersion,
+  normalizeProbeConfigurationValues,
   type ProbeConfigurationRecord,
   type ProbeConfigurationValues,
 } from "../probe-configuration/model.js";
@@ -75,7 +77,7 @@ export function createProbeConfigurationRepository(
     updateGlobal(values, updatedAtMs) {
       const previous = this.getGlobal();
       const configuration = {
-        ...values,
+        ...normalizeProbeConfigurationValues(values),
         version: nextProbeConfigurationVersion(
           "global",
           updatedAtMs,
@@ -86,13 +88,13 @@ export function createProbeConfigurationRepository(
       database
         .insert(probeConfigurationGlobalDefaults)
         .values({
-          ...configuration,
+          ...configurationValuesToRow(configuration),
           id: 1,
           updatedAtMs,
         })
         .onConflictDoUpdate({
           set: {
-            ...configuration,
+            ...configurationValuesToRow(configuration),
             updatedAtMs,
           },
           target: probeConfigurationGlobalDefaults.id,
@@ -104,7 +106,7 @@ export function createProbeConfigurationRepository(
     updateHostOverride(hostId, values, updatedAtMs) {
       const previous = this.getEffectiveForHost(hostId).configuration;
       const configuration = {
-        ...values,
+        ...normalizeProbeConfigurationValues(values),
         version: nextProbeConfigurationVersion(
           `host-${hostId}`,
           updatedAtMs,
@@ -115,13 +117,13 @@ export function createProbeConfigurationRepository(
       database
         .insert(probeConfigurationHostOverrides)
         .values({
-          ...configuration,
+          ...configurationValuesToRow(configuration),
           hostId,
           updatedAtMs,
         })
         .onConflictDoUpdate({
           set: {
-            ...configuration,
+            ...configurationValuesToRow(configuration),
             updatedAtMs,
           },
           target: probeConfigurationHostOverrides.hostId,
@@ -134,21 +136,55 @@ export function createProbeConfigurationRepository(
 }
 
 function rowToConfiguration(
-  row: (ProbeConfigurationValues & { version: string }) | null | undefined,
+  row:
+    | {
+        enabledCollectorIdsJson: string;
+        metricsCollectionIntervalSeconds: number;
+        version: string;
+      }
+    | null
+    | undefined,
 ): ProbeConfigurationRecord {
   if (!row) {
-    return defaultProbeConfiguration;
+    return {
+      ...defaultProbeConfiguration,
+      enabledCollectorIds: [...defaultProbeConfiguration.enabledCollectorIds],
+    };
   }
 
   return {
-    collectCpu: row.collectCpu,
-    collectDisk: row.collectDisk,
-    collectLoad: row.collectLoad,
-    collectMemory: row.collectMemory,
-    collectNetwork: row.collectNetwork,
-    collectUptime: row.collectUptime,
+    enabledCollectorIds: parseEnabledCollectorIdsJson(
+      row.enabledCollectorIdsJson,
+    ),
     metricsCollectionIntervalSeconds: row.metricsCollectionIntervalSeconds,
-    reportingBatchIntervalSeconds: row.reportingBatchIntervalSeconds,
     version: row.version,
   };
+}
+
+function configurationValuesToRow(values: ProbeConfigurationRecord) {
+  return {
+    enabledCollectorIdsJson: JSON.stringify(values.enabledCollectorIds),
+    metricsCollectionIntervalSeconds: values.metricsCollectionIntervalSeconds,
+    version: values.version,
+  };
+}
+
+function parseEnabledCollectorIdsJson(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((collectorId) => typeof collectorId === "string")
+    ) {
+      return normalizeProbeConfigurationValues({
+        enabledCollectorIds: parsed,
+        metricsCollectionIntervalSeconds: 1,
+      }).enabledCollectorIds;
+    }
+  } catch {
+    // Fall through to the catalog default for corrupted local state.
+  }
+
+  return [...defaultEnabledCollectorIds];
 }

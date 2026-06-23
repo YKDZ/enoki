@@ -15,8 +15,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
-  metricToggleFields,
-  type MetricToggleKey,
+  derivedLowFrequencyIntervalSeconds,
+  derivedReportingBatchIntervalSeconds,
+  collectorEnabled,
+  probeCollectorCatalog,
+  updateEnabledCollectorIds,
+  type ProbeCollectorId,
 } from "@/lib/probe-configuration";
 
 import type { HostProbeConfigurationResponse, HostDetail } from "../types";
@@ -34,15 +38,20 @@ const emit = defineEmits<{
   saveHostConfiguration: [];
 }>();
 
-function setMetricToggle(
-  key: MetricToggleKey,
+function setCollectorToggle(
+  collectorId: ProbeCollectorId,
   value: boolean | "indeterminate",
 ) {
   if (!props.hostConfigurationDraft) {
     return;
   }
 
-  props.hostConfigurationDraft.configuration[key] = value === true;
+  props.hostConfigurationDraft.configuration.enabledCollectorIds =
+    updateEnabledCollectorIds(
+      props.hostConfigurationDraft.configuration.enabledCollectorIds,
+      collectorId,
+      value === true,
+    );
 }
 
 function updateOpen(open: boolean) {
@@ -88,9 +97,9 @@ function updateOpen(open: boolean) {
           v-if="hostConfigurationDraft.mode === 'override'"
           class="grid gap-4"
         >
-          <div class="grid gap-4 sm:grid-cols-2">
+          <div class="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
             <Label class="grid gap-2 text-sm font-medium">
-              采集间隔
+              基础采样间隔
               <Input
                 v-model.number="
                   hostConfigurationDraft.configuration
@@ -98,35 +107,58 @@ function updateOpen(open: boolean) {
                 "
                 type="number"
                 min="1"
-                max="300"
+                max="200"
               />
             </Label>
-            <Label class="grid gap-2 text-sm font-medium">
-              上报间隔
-              <Input
-                v-model.number="
-                  hostConfigurationDraft.configuration
-                    .reportingBatchIntervalSeconds
-                "
-                type="number"
-                min="1"
-                max="600"
-              />
-            </Label>
+            <div class="grid gap-2 text-sm">
+              <span class="font-medium">节拍映射</span>
+              <div class="text-muted-foreground grid gap-1">
+                <span>
+                  高频采集：{{
+                    hostConfigurationDraft.configuration
+                      .metricsCollectionIntervalSeconds
+                  }}
+                  秒
+                </span>
+                <span>
+                  低频采集：{{
+                    derivedLowFrequencyIntervalSeconds(
+                      hostConfigurationDraft.configuration
+                        .metricsCollectionIntervalSeconds,
+                    )
+                  }}
+                  秒
+                </span>
+                <span>
+                  上报窗口：{{
+                    derivedReportingBatchIntervalSeconds(
+                      hostConfigurationDraft.configuration
+                        .metricsCollectionIntervalSeconds,
+                    )
+                  }}
+                  秒
+                </span>
+              </div>
+            </div>
           </div>
 
           <fieldset class="grid gap-3 sm:grid-cols-2">
             <legend class="sr-only">指标采集项</legend>
             <Label
-              v-for="[key, label] in metricToggleFields"
-              :key="key"
+              v-for="collector in probeCollectorCatalog"
+              :key="collector.id"
               class="flex items-center gap-2 text-sm"
             >
               <Checkbox
-                :model-value="hostConfigurationDraft.configuration[key]"
-                @update:model-value="setMetricToggle(key, $event)"
+                :model-value="
+                  collectorEnabled(
+                    hostConfigurationDraft.configuration.enabledCollectorIds,
+                    collector.id,
+                  )
+                "
+                @update:model-value="setCollectorToggle(collector.id, $event)"
               />
-              {{ label }}
+              {{ collector.label }}
             </Label>
           </fieldset>
         </div>

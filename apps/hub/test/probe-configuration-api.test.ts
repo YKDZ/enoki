@@ -7,9 +7,30 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { defaultEnabledCollectorIds } from "../src/probe-configuration/model";
 import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
+const collectorIdsWithoutDiskAndNetwork = defaultEnabledCollectorIds.filter(
+  (collectorId) => {
+    return !["official.disk", "official.network"].includes(collectorId);
+  },
+);
+
+function probeConfigurationInput(
+  overrides: Partial<{
+    enabledCollectorIds: string[];
+    metricsCollectionIntervalSeconds: number;
+  }> = {},
+) {
+  return {
+    enabledCollectorIds: [
+      ...(overrides.enabledCollectorIds ?? defaultEnabledCollectorIds),
+    ],
+    metricsCollectionIntervalSeconds:
+      overrides.metricsCollectionIntervalSeconds ?? 10,
+  };
+}
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-config-db-"));
@@ -175,16 +196,11 @@ describe("Probe Configuration API", () => {
     const registration = await registerProbe(app, enrollmentToken);
 
     const updateResponse = await app.request("/api/web/probe-configuration", {
-      body: JSON.stringify({
-        collectCpu: true,
-        collectDisk: false,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: false,
-        collectUptime: true,
-        metricsCollectionIntervalSeconds: 10,
-        reportingBatchIntervalSeconds: 30,
-      }),
+      body: JSON.stringify(
+        probeConfigurationInput({
+          enabledCollectorIds: collectorIdsWithoutDiskAndNetwork,
+        }),
+      ),
       headers: {
         "content-type": "application/json",
         cookie: ownerSession,
@@ -261,14 +277,8 @@ describe("Probe Configuration API", () => {
     );
     expect(configuration).toEqual(
       expect.objectContaining({
-        collectCpu: true,
-        collectDisk: false,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: false,
-        collectUptime: true,
+        enabledCollectorIds: collectorIdsWithoutDiskAndNetwork,
         metricsCollectionIntervalSeconds: 10,
-        reportingBatchIntervalSeconds: 30,
         version: updated.configuration.version,
       }),
     );
@@ -293,16 +303,10 @@ describe("Probe Configuration API", () => {
 
     const updateResponse = await app.request("/api/web/probe-configuration", {
       body: JSON.stringify({
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
+        ...probeConfigurationInput(),
         metricsCollectionIntervalSeconds: 10,
         privilegedRuntime: privilegedRuntimeInjectionPayload,
         ...privilegedRuntimeInjectionPayload,
-        reportingBatchIntervalSeconds: 30,
       }),
       headers: {
         "content-type": "application/json",
@@ -354,16 +358,10 @@ describe("Probe Configuration API", () => {
       {
         body: JSON.stringify({
           configuration: {
-            collectCpu: true,
-            collectDisk: true,
-            collectLoad: true,
-            collectMemory: true,
-            collectNetwork: true,
-            collectUptime: true,
+            ...probeConfigurationInput(),
             metricsCollectionIntervalSeconds: 10,
             privilegedRuntime: privilegedRuntimeInjectionPayload,
             ...privilegedRuntimeInjectionPayload,
-            reportingBatchIntervalSeconds: 30,
           },
           mode: "override",
         }),
@@ -430,16 +428,11 @@ describe("Probe Configuration API", () => {
 
     now += 1;
     const globalResponse = await app.request("/api/web/probe-configuration", {
-      body: JSON.stringify({
-        collectCpu: true,
-        collectDisk: false,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: false,
-        collectUptime: true,
-        metricsCollectionIntervalSeconds: 10,
-        reportingBatchIntervalSeconds: 30,
-      }),
+      body: JSON.stringify(
+        probeConfigurationInput({
+          enabledCollectorIds: collectorIdsWithoutDiskAndNetwork,
+        }),
+      ),
       headers: {
         "content-type": "application/json",
         cookie: ownerSession,
@@ -453,16 +446,10 @@ describe("Probe Configuration API", () => {
       `/api/web/hosts/${hostId}/probe-configuration`,
       {
         body: JSON.stringify({
-          configuration: {
-            collectCpu: false,
-            collectDisk: false,
-            collectLoad: false,
-            collectMemory: false,
-            collectNetwork: false,
-            collectUptime: false,
+          configuration: probeConfigurationInput({
+            enabledCollectorIds: [],
             metricsCollectionIntervalSeconds: 60,
-            reportingBatchIntervalSeconds: 120,
-          },
+          }),
           mode: "override",
         }),
         headers: {
@@ -533,16 +520,9 @@ describe("Probe Configuration API", () => {
 
     const updateGlobal = async (metricsCollectionIntervalSeconds: number) => {
       const response = await app.request("/api/web/probe-configuration", {
-        body: JSON.stringify({
-          collectCpu: true,
-          collectDisk: true,
-          collectLoad: true,
-          collectMemory: true,
-          collectNetwork: true,
-          collectUptime: true,
-          metricsCollectionIntervalSeconds,
-          reportingBatchIntervalSeconds: 30,
-        }),
+        body: JSON.stringify(
+          probeConfigurationInput({ metricsCollectionIntervalSeconds }),
+        ),
         headers: {
           "content-type": "application/json",
           cookie: ownerSession,
@@ -588,16 +568,7 @@ describe("Probe Configuration API", () => {
 
     now += 1;
     const globalResponse = await app.request("/api/web/probe-configuration", {
-      body: JSON.stringify({
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
-        metricsCollectionIntervalSeconds: 10,
-        reportingBatchIntervalSeconds: 30,
-      }),
+      body: JSON.stringify(probeConfigurationInput()),
       headers: {
         "content-type": "application/json",
         cookie: ownerSession,
@@ -615,16 +586,10 @@ describe("Probe Configuration API", () => {
       `/api/web/hosts/${hostId}/probe-configuration`,
       {
         body: JSON.stringify({
-          configuration: {
-            collectCpu: false,
-            collectDisk: false,
-            collectLoad: false,
-            collectMemory: false,
-            collectNetwork: false,
-            collectUptime: false,
+          configuration: probeConfigurationInput({
+            enabledCollectorIds: [],
             metricsCollectionIntervalSeconds: 60,
-            reportingBatchIntervalSeconds: 120,
-          },
+          }),
           mode: "override",
         }),
         headers: {
@@ -638,10 +603,8 @@ describe("Probe Configuration API", () => {
     expect(overrideResponse.status).toBe(200);
     const override = (await overrideResponse.json()) as {
       configuration: {
-        collectCpu: boolean;
-        collectMemory: boolean;
+        enabledCollectorIds: string[];
         metricsCollectionIntervalSeconds: number;
-        reportingBatchIntervalSeconds: number;
         version: string;
       };
       mode: "override";
@@ -650,10 +613,8 @@ describe("Probe Configuration API", () => {
     expect(override.configuration.version).not.toBe(globalVersion);
     expect(override.configuration).toEqual(
       expect.objectContaining({
-        collectCpu: false,
-        collectMemory: false,
+        enabledCollectorIds: [],
         metricsCollectionIntervalSeconds: 60,
-        reportingBatchIntervalSeconds: 120,
       }),
     );
 
@@ -674,9 +635,7 @@ describe("Probe Configuration API", () => {
     );
     expect(probeConfiguration.version).toBe(override.configuration.version);
     expect(probeConfiguration.metricsCollectionIntervalSeconds).toBe(60);
-    expect(probeConfiguration.reportingBatchIntervalSeconds).toBe(120);
-    expect(probeConfiguration.collectCpu).toBe(false);
-    expect(probeConfiguration.collectUptime).toBe(false);
+    expect(probeConfiguration.enabledCollectorIds).toEqual([]);
 
     const inheritResponse = await app.request(
       `/api/web/hosts/${hostId}/probe-configuration`,
@@ -720,16 +679,7 @@ describe("Probe Configuration API", () => {
       "/api/web/hosts/999/probe-configuration",
       {
         body: JSON.stringify({
-          configuration: {
-            collectCpu: true,
-            collectDisk: true,
-            collectLoad: true,
-            collectMemory: true,
-            collectNetwork: true,
-            collectUptime: true,
-            metricsCollectionIntervalSeconds: 10,
-            reportingBatchIntervalSeconds: 30,
-          },
+          configuration: probeConfigurationInput(),
           mode: "override",
         }),
         headers: {
@@ -772,21 +722,12 @@ describe("Probe Configuration API", () => {
         error: "metrics_collection_interval_out_of_range",
         input: {
           metricsCollectionIntervalSeconds: 0,
-          reportingBatchIntervalSeconds: 30,
         },
       },
       {
-        error: "reporting_batch_interval_out_of_range",
+        error: "metrics_collection_interval_out_of_range",
         input: {
-          metricsCollectionIntervalSeconds: 10,
-          reportingBatchIntervalSeconds: 601,
-        },
-      },
-      {
-        error: "reporting_batch_interval_shorter_than_collection_interval",
-        input: {
-          metricsCollectionIntervalSeconds: 60,
-          reportingBatchIntervalSeconds: 30,
+          metricsCollectionIntervalSeconds: 201,
         },
       },
     ];
@@ -794,12 +735,7 @@ describe("Probe Configuration API", () => {
     for (const invalid of invalidInputs) {
       const response = await app.request("/api/web/probe-configuration", {
         body: JSON.stringify({
-          collectCpu: true,
-          collectDisk: true,
-          collectLoad: true,
-          collectMemory: true,
-          collectNetwork: true,
-          collectUptime: true,
+          enabledCollectorIds: [...defaultEnabledCollectorIds],
           ...invalid.input,
         }),
         headers: {
@@ -824,7 +760,6 @@ describe("Probe Configuration API", () => {
     await expect(currentResponse.json()).resolves.toEqual({
       configuration: expect.objectContaining({
         metricsCollectionIntervalSeconds: 5,
-        reportingBatchIntervalSeconds: 15,
         version: "default-v1",
       }),
     });
@@ -846,16 +781,9 @@ describe("Probe Configuration API", () => {
     const ownerSession = await loginOwner(app);
 
     const response = await app.request("/api/web/probe-configuration", {
-      body: JSON.stringify({
-        collectCpu: true,
-        collectDisk: true,
-        collectLoad: true,
-        collectMemory: true,
-        collectNetwork: true,
-        collectUptime: true,
-        metricsCollectionIntervalSeconds: 1,
-        reportingBatchIntervalSeconds: 1,
-      }),
+      body: JSON.stringify(
+        probeConfigurationInput({ metricsCollectionIntervalSeconds: 1 }),
+      ),
       headers: {
         "content-type": "application/json",
         cookie: ownerSession,
@@ -867,7 +795,6 @@ describe("Probe Configuration API", () => {
     await expect(response.json()).resolves.toEqual({
       configuration: expect.objectContaining({
         metricsCollectionIntervalSeconds: 1,
-        reportingBatchIntervalSeconds: 1,
       }),
     });
 
