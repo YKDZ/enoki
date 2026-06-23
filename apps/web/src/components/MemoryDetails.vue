@@ -4,7 +4,7 @@ import { formatBytes, formatByteUsage } from "@/lib/format";
 import type { HostDetail, HostMetricSample } from "../types";
 
 defineProps<{
-  host: HostDetail;
+  inventory: Record<string, unknown> | null;
   latestMetric: HostMetricSample | HostDetail["latestMetrics"] | null;
 }>();
 </script>
@@ -25,7 +25,7 @@ defineProps<{
     <div class="min-w-0">
       <p class="text-muted-foreground text-xs">RAM 总量</p>
       <p class="font-semibold break-words">
-        {{ formatBytes(Number(host.inventory?.memoryTotalBytes ?? 0) || null) }}
+        {{ formatBytes(Number(inventory?.memoryTotalBytes ?? 0) || null) }}
       </p>
     </div>
     <div
