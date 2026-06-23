@@ -210,6 +210,45 @@ describe("Owner authentication API", () => {
     });
   });
 
+  it("allows browser data requests without a session when no-password Web UI mode is enabled", async () => {
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        noPasswordWebUi: true,
+        sessionCookieName: "enoki_owner_session",
+      },
+    });
+
+    const sessionResponse = await app.request("/api/web/auth/session");
+    expect(sessionResponse.status).toBe(200);
+    await expect(sessionResponse.json()).resolves.toEqual({
+      authenticated: true,
+    });
+
+    const hostsResponse = await app.request("/api/web/hosts");
+    expect(hostsResponse.status).toBe(200);
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [],
+    });
+
+    const loginResponse = await app.request("/api/web/auth/login", {
+      method: "POST",
+    });
+    expect(loginResponse.status).toBe(200);
+    expect(loginResponse.headers.get("set-cookie")).toBeNull();
+    await expect(loginResponse.json()).resolves.toEqual({
+      authenticated: true,
+    });
+
+    const logoutResponse = await app.request("/api/web/auth/logout", {
+      method: "POST",
+    });
+    expect(logoutResponse.status).toBe(200);
+    await expect(logoutResponse.json()).resolves.toEqual({
+      authenticated: true,
+    });
+  });
+
   it("does not expose command-like browser or Probe API endpoints", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

@@ -2018,6 +2018,67 @@ mod tests {
     }
 
     #[test]
+    fn trusted_install_metadata_rejects_unsafe_service_user_for_sudoers() {
+        let contents = [
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "service_name = \"enoki-probe\"",
+            "service_user = \"enoki-probe\\nALL=(root) NOPASSWD: ALL\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "",
+        ]
+        .join("\n");
+
+        let error = parse_trusted_probe_install_metadata(&contents)
+            .expect_err("unsafe service user is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata("service user is not safe for sudoers")
+        ));
+    }
+
+    #[test]
+    fn probe_operation_sudoers_rejects_paths_unsafe_for_sudoers() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let unsafe_install_path = temp.path().join("bin/enoki probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let install_metadata = trusted_install_metadata(
+            &unsafe_install_path,
+            &status_path,
+            assets_public_key_sha256(),
+        );
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+
+        let error = write_probe_operation_sudoers(&install_metadata, &bootstrap_config_path)
+            .expect_err("unsafe install path is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata("sudoers command contains unsafe values")
+        ));
+    }
+
+    #[test]
+    fn probe_operation_sudoers_rejects_bootstrap_path_unsafe_for_sudoers() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+        let unsafe_bootstrap_config_path = temp.path().join("probe bootstrap.toml");
+
+        let error = write_probe_operation_sudoers(&install_metadata, &unsafe_bootstrap_config_path)
+            .expect_err("unsafe bootstrap path is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata("sudoers command contains unsafe values")
+        ));
+    }
+
+    #[test]
     fn internal_probe_upgrader_validates_stdin_token_with_hub_before_noop_result() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");

@@ -4,7 +4,8 @@ export type AuthEnvironment = Record<string, string | undefined>;
 
 export type AuthConfig = {
   failureDelayMs: number;
-  ownerPassword: string;
+  noPasswordWebUi?: boolean;
+  ownerPassword?: string;
   publicHttps?: boolean;
   sessionCookieName: string;
   trustProxyHeaders?: boolean;
@@ -17,6 +18,22 @@ export function createAuthConfigFromEnvironment(
   environment: AuthEnvironment,
 ): AuthConfig {
   const ownerPassword = environment.OWNER_PASSWORD;
+  const noPasswordWebUi = readBoolean(environment.ENOKI_WEB_UI_NO_PASSWORD);
+
+  if (noPasswordWebUi) {
+    console.warn(
+      "ENOKI_WEB_UI_NO_PASSWORD is enabled. Enoki Web UI and management APIs are accessible without login.",
+    );
+
+    return {
+      failureDelayMs: defaultFailureDelayMs,
+      noPasswordWebUi: true,
+      ownerPassword,
+      publicHttps: readBoolean(environment.ENOKI_PUBLIC_HTTPS),
+      sessionCookieName,
+      trustProxyHeaders: readBoolean(environment.ENOKI_TRUST_PROXY_HEADERS),
+    };
+  }
 
   if (ownerPassword) {
     return {

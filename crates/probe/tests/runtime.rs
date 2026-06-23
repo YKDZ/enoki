@@ -1,4 +1,7 @@
-use std::{fs, time::Duration};
+use std::{fs, path::Path, time::Duration};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use enoki_probe::{
     protocol::enoki::v1::{
@@ -34,11 +37,18 @@ fn probe_run_fails_when_bootstrap_config_is_missing() {
     assert_eq!(error.to_string(), "failed to read Probe bootstrap config");
 }
 
+fn write_secure_bootstrap_config(path: &Path, contents: String) {
+    fs::write(path, contents).expect("write bootstrap config");
+
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("set permissions");
+}
+
 #[test]
 fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -48,8 +58,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let response = ProbeRegistrationResponse {
         initial_configuration: Some(ProbeConfigurationResponse {
             collect_cpu: true,
@@ -130,7 +139,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
 fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -140,8 +149,7 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         response: ProbeReportResponse {
             accepted_sequence_end: 1,
@@ -215,7 +223,7 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
         .join("\n"),
     )
     .expect("write operation status");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -226,8 +234,7 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         response: ProbeReportResponse {
             accepted_sequence_end: 1,
@@ -284,7 +291,7 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
         .join("\n"),
     )
     .expect("write operation status");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -295,8 +302,7 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         response: ProbeReportResponse {
             accepted_sequence_end: 1,
@@ -339,7 +345,7 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
 fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -349,8 +355,7 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             ProbeReportResponse {
@@ -405,7 +410,7 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
 fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -417,8 +422,7 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response(1, false),
@@ -495,7 +499,7 @@ fn probe_run_loop_control_can_be_limited_by_smoke_environment() {
 fn probe_run_loop_omits_disabled_individual_metric_fields() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -513,8 +517,7 @@ fn probe_run_loop_omits_disabled_individual_metric_fields() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response_with_version(1, false, "memory-only-v1"),
@@ -552,7 +555,7 @@ fn probe_run_loop_omits_disabled_individual_metric_fields() {
 fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -564,8 +567,7 @@ fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![report_response(1, false), report_response(4, false)],
         ..RecordingProbeTransport::default()
@@ -610,7 +612,7 @@ fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
 fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -622,8 +624,7 @@ fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![report_response(1, false), report_response(2, false)],
         ..RecordingProbeTransport::default()
@@ -661,7 +662,7 @@ fn probe_run_loop_allows_equal_one_second_collection_and_reporting_intervals() {
 fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -678,8 +679,7 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response_with_version(1, false, "disabled-v1"),
@@ -722,7 +722,7 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
 fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -734,8 +734,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             ProbeReportResponse {
@@ -816,7 +815,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
 fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -828,8 +827,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             ProbeReportResponse {
@@ -905,7 +903,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
 fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -917,8 +915,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         response_results: vec![
             Ok(ProbeReportResponse {
@@ -995,7 +992,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
 fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -1007,8 +1004,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             ProbeReportResponse {
@@ -1064,7 +1060,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
 fn probe_run_retries_regular_report_after_transient_report_failure() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -1076,8 +1072,7 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         response_results: vec![
             Ok(report_response(1, false)),
@@ -1123,7 +1118,7 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
 fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
-    fs::write(
+    write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
             "hub_url = \"https://hub.example\"",
@@ -1141,8 +1136,7 @@ fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
             "",
         ]
         .join("\n"),
-    )
-    .expect("write bootstrap config");
+    );
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response_with_operation("operation-01", "0.1.0", "0.2.0"),

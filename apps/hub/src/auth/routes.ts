@@ -44,44 +44,57 @@ export function createOwnerAuth(
   const sessions = new Map<string, SessionRecord>();
   const routes = new Hono();
 
-  routes.post(
-    "/login",
-    vValidator("json", loginSchema, (result, context) => {
-      if (!result.success) {
-        return context.json({ error: "invalid_request" }, 400);
-      }
-
-      return undefined;
-    }),
-    async (context) => {
-      const { password } = context.req.valid("json");
-
-      if (!constantTimeEqual(password, config.ownerPassword)) {
-        recordLoginAuditEvent(context.req.raw, authServices, "failure");
-        await authServices.delay(config.failureDelayMs);
-        return context.json({ error: "invalid_credentials" }, 401);
-      }
-
-      const sessionId = randomBytes(32).toString("base64url");
-      sessions.set(sessionId, {
-        expiresAt: authServices.now() + sessionDurationMs,
-      });
-
-      setCookie(context, config.sessionCookieName, sessionId, {
-        httpOnly: true,
-        maxAge: sessionDurationMs / 1000,
-        path: "/",
-        sameSite: "Lax",
-        secure: isSecureRequest(context.req.raw, config),
-      });
-
-      recordLoginAuditEvent(context.req.raw, authServices, "success");
-
+  if (config.noPasswordWebUi) {
+    routes.post("/login", (context) => {
       return context.json({ authenticated: true });
-    },
-  );
+    });
+  } else {
+    routes.post(
+      "/login",
+      vValidator("json", loginSchema, (result, context) => {
+        if (!result.success) {
+          return context.json({ error: "invalid_request" }, 400);
+        }
+
+        return undefined;
+      }),
+      async (context) => {
+        const { password } = context.req.valid("json");
+
+        if (
+          !config.ownerPassword ||
+          !constantTimeEqual(password, config.ownerPassword)
+        ) {
+          recordLoginAuditEvent(context.req.raw, authServices, "failure");
+          await authServices.delay(config.failureDelayMs);
+          return context.json({ error: "invalid_credentials" }, 401);
+        }
+
+        const sessionId = randomBytes(32).toString("base64url");
+        sessions.set(sessionId, {
+          expiresAt: authServices.now() + sessionDurationMs,
+        });
+
+        setCookie(context, config.sessionCookieName, sessionId, {
+          httpOnly: true,
+          maxAge: sessionDurationMs / 1000,
+          path: "/",
+          sameSite: "Lax",
+          secure: isSecureRequest(context.req.raw, config),
+        });
+
+        recordLoginAuditEvent(context.req.raw, authServices, "success");
+
+        return context.json({ authenticated: true });
+      },
+    );
+  }
 
   routes.post("/logout", (context) => {
+    if (config.noPasswordWebUi) {
+      return context.json({ authenticated: true });
+    }
+
     const sessionId = getCookie(context, config.sessionCookieName);
 
     if (sessionId) {
@@ -104,6 +117,10 @@ export function createOwnerAuth(
   });
 
   const requireOwnerSession: MiddlewareHandler = async (context, next) => {
+    if (config.noPasswordWebUi) {
+      return next();
+    }
+
     if (!currentOwnerSessionId(context.req.raw)) {
       return context.json({ error: "owner_session_required" }, 401);
     }
@@ -112,6 +129,10 @@ export function createOwnerAuth(
   };
 
   function currentOwnerSessionId(request: Request) {
+    if (config.noPasswordWebUi) {
+      return "no-password-web-ui";
+    }
+
     const sessionId = getCookieValue(request, config.sessionCookieName);
 
     if (!sessionId) {

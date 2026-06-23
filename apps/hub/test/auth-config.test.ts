@@ -20,6 +20,21 @@ describe("Hub Owner authentication configuration", () => {
     ).toThrow("OWNER_PASSWORD");
   });
 
+  it("allows explicit no-password Web UI mode in Docker mode", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const app = createHubAppFromEnvironment({
+      ENOKI_DEPLOYMENT: "docker",
+      ENOKI_WEB_UI_NO_PASSWORD: "true",
+    });
+
+    expect(app).toBeDefined();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("ENOKI_WEB_UI_NO_PASSWORD is enabled"),
+    );
+    warn.mockRestore();
+  });
+
   it("generates and prints a temporary Owner password in development", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 

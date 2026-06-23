@@ -1,5 +1,8 @@
 use std::{collections::HashSet, error::Error, fmt, fs, io::Read, path::PathBuf, time::Duration};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use crate::registration::{
     HttpRegistrationTransport, ProbeRegistrationInput, RegistrationError, RegistrationTransport,
     register_probe,
@@ -1050,6 +1053,7 @@ impl BootstrapConfig {
 }
 
 fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunError> {
+    validate_bootstrap_config_file(path)?;
     let contents = fs::read_to_string(path).map_err(ProbeRunError::Io)?;
     let value = contents
         .parse::<toml::Value>()
@@ -1081,6 +1085,36 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
+}
+
+#[cfg(unix)]
+fn validate_bootstrap_config_file(path: &PathBuf) -> Result<(), ProbeRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(ProbeRunError::Io)?;
+
+    if metadata.file_type().is_symlink() {
+        return Err(ProbeRunError::InvalidConfig(
+            "bootstrap config must not be a symlink",
+        ));
+    }
+
+    if !metadata.file_type().is_file() {
+        return Err(ProbeRunError::InvalidConfig(
+            "bootstrap config must be a regular file",
+        ));
+    }
+
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(ProbeRunError::InvalidConfig(
+            "bootstrap config must not be accessible by group or other users",
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_bootstrap_config_file(_path: &PathBuf) -> Result<(), ProbeRunError> {
+    Ok(())
 }
 
 fn read_local_operation_statuses(bootstrap_config: &BootstrapConfig) -> Vec<ProbeOperationStatus> {
@@ -1212,6 +1246,9 @@ mod tests {
     };
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
+    #[cfg(unix)]
+    use std::os::unix::{fs::PermissionsExt, fs::symlink};
+
     #[derive(Default)]
     struct RecordingOperationRunner {
         observed_current_probe_version: Option<String>,
@@ -1255,6 +1292,92 @@ mod tests {
                 })
             })
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_run_rejects_group_readable_bootstrap_config() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_secret = \"enk_probe_secret\"",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("write bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o644))
+            .expect("set permissions");
+
+        let mut transport = RegistrationThenOperationTransport {
+            observed_report_bodies: Vec::new(),
+            registration_response: Vec::new(),
+            report_responses: VecDeque::new(),
+        };
+        let error = run_probe_with_loop_control(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(1),
+            },
+        )
+        .expect_err("group-readable bootstrap config is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid Probe bootstrap config: bootstrap config must not be accessible by group or other users",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn probe_run_rejects_symlink_bootstrap_config() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let target_config_path = temp.path().join("target-bootstrap.toml");
+        let symlink_config_path = temp.path().join("probe-bootstrap.toml");
+        fs::write(
+            &target_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_secret = \"enk_probe_secret\"",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("write bootstrap config");
+        fs::set_permissions(&target_config_path, fs::Permissions::from_mode(0o600))
+            .expect("set permissions");
+        symlink(&target_config_path, &symlink_config_path).expect("create symlink");
+
+        let mut transport = RegistrationThenOperationTransport {
+            observed_report_bodies: Vec::new(),
+            registration_response: Vec::new(),
+            report_responses: VecDeque::new(),
+        };
+        let error = run_probe_with_loop_control(
+            ProbeRunInput {
+                bootstrap_config_path: symlink_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(1),
+            },
+        )
+        .expect_err("symlink bootstrap config is rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid Probe bootstrap config: bootstrap config must not be a symlink",
+        );
     }
 
     #[test]
@@ -1350,6 +1473,9 @@ mod tests {
             .join("\n"),
         )
         .expect("write installer config");
+        #[cfg(unix)]
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("set permissions");
         let mut transport = RegistrationThenOperationTransport {
             observed_report_bodies: Vec::new(),
             registration_response: ProbeRegistrationResponse {
