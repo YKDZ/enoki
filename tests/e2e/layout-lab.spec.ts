@@ -104,8 +104,8 @@ async function expectNoCardOverlap(page: Page) {
           rightIndex < rects.length;
           rightIndex += 1
         ) {
-          const left = rects[leftIndex];
-          const right = rects[rightIndex];
+          const left = rects[leftIndex]!;
+          const right = rects[rightIndex]!;
           const intersects =
             left.left < right.right - 1 &&
             left.right > right.left + 1 &&

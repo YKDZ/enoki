@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["DOM", "DOM.Iterable", "ES2024"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "oxfmt.config.ts",
+    "oxlint.config.ts",
+    "playwright.config.ts",
+    "tests/e2e/**/*.ts"
+  ]
+}

@@ -57,6 +57,7 @@ pub enum ProbeUpgraderRunError {
     RestartFailure(String),
     SignatureFailure,
     SigningKeyUntrusted,
+    DowngradeRejected,
     TargetMismatch,
     TokenValidation(String),
     UninstallStatusReportFailure(String),
@@ -112,6 +113,10 @@ impl fmt::Display for ProbeUpgraderRunError {
                 formatter,
                 "Probe asset signing key fingerprint verification failed"
             ),
+            Self::DowngradeRejected => write!(
+                formatter,
+                "Probe Upgrade target version is not newer than the installed Probe version"
+            ),
             Self::TargetMismatch => write!(
                 formatter,
                 "Probe asset manifest target version does not match Probe Upgrade Request"
@@ -151,6 +156,7 @@ impl Error for ProbeUpgraderRunError {
             | Self::RestartFailure(_)
             | Self::SignatureFailure
             | Self::SigningKeyUntrusted
+            | Self::DowngradeRejected
             | Self::TargetMismatch
             | Self::TokenValidation(_)
             | Self::UninstallStatusReportFailure(_)
@@ -904,6 +910,26 @@ fn execute_probe_upgrade(
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
+    execute_probe_upgrade_with_current_version(
+        operation,
+        bootstrap_config,
+        bootstrap_config_path,
+        install_metadata,
+        transport,
+        systemd,
+        crate::version::probe_version(),
+    )
+}
+
+fn execute_probe_upgrade_with_current_version(
+    operation: &ProbeUpgraderOperationMetadata,
+    bootstrap_config: &ProbeUpgraderBootstrapConfig,
+    bootstrap_config_path: &Path,
+    install_metadata: &TrustedProbeInstallMetadata,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    current_probe_version: &str,
+) -> Result<(), ProbeUpgraderRunError> {
     let hub_url = bootstrap_config
         .hub_url
         .as_deref()
@@ -927,6 +953,7 @@ fn execute_probe_upgrade(
     {
         return Err(ProbeUpgraderRunError::TargetMismatch);
     }
+    validate_probe_upgrade_target_is_newer(&manifest.version, current_probe_version)?;
     if manifest.signature.algorithm != "rsa-sha256"
         || manifest.signature.file != "manifest.json.sig"
         || manifest.signature.public_key != "signing-key.pem"
@@ -1007,6 +1034,57 @@ fn write_probe_operation_sudoers(
 
 fn normalized_probe_version(value: &str) -> &str {
     value.strip_prefix('v').unwrap_or(value)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ProbeSemVer {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+fn validate_probe_upgrade_target_is_newer(
+    target_version: &str,
+    current_probe_version: &str,
+) -> Result<(), ProbeUpgraderRunError> {
+    if current_probe_version == "dev" {
+        return Ok(());
+    }
+
+    let target = parse_probe_semver(target_version).ok_or(
+        ProbeUpgraderRunError::InvalidManifest("target version is not a valid SemVer"),
+    )?;
+    let current = parse_probe_semver(current_probe_version).ok_or(
+        ProbeUpgraderRunError::InvalidConfig("current Probe version is not a valid SemVer"),
+    )?;
+    if target <= current {
+        return Err(ProbeUpgraderRunError::DowngradeRejected);
+    }
+
+    Ok(())
+}
+
+fn parse_probe_semver(value: &str) -> Option<ProbeSemVer> {
+    let mut parts = normalized_probe_version(value).split('.');
+    let major = parse_semver_number(parts.next()?)?;
+    let minor = parse_semver_number(parts.next()?)?;
+    let patch = parse_semver_number(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    Some(ProbeSemVer {
+        major,
+        minor,
+        patch,
+    })
+}
+
+fn parse_semver_number(value: &str) -> Option<u64> {
+    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
+        return None;
+    }
+    value.parse().ok()
 }
 
 fn validate_bootstrap_config_matches_trusted_install_metadata(
@@ -1334,6 +1412,7 @@ fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
         ProbeUpgraderRunError::RestartFailure(_) => "restart_failure",
         ProbeUpgraderRunError::SignatureFailure => "signature_failure",
         ProbeUpgraderRunError::SigningKeyUntrusted => "signing_key_untrusted",
+        ProbeUpgraderRunError::DowngradeRejected => "downgrade_rejected",
         ProbeUpgraderRunError::TargetMismatch => "target_mismatch",
         ProbeUpgraderRunError::UninstallStatusReportFailure(_) => "uninstall_status_report_failure",
         ProbeUpgraderRunError::UnsafeArchive(_) => "unsafe_archive",
@@ -2400,6 +2479,69 @@ mod tests {
     }
 
     #[test]
+    fn internal_probe_upgrader_rejects_signed_downgrade_asset_before_replacement() {
+        let assets = signed_assets("0.1.9", "downgraded probe", None);
+        let public_key_sha256 = assets.public_key_sha256.clone();
+        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
+            assets,
+            public_key_sha256,
+            "0.2.0",
+            "0.1.9",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProbeUpgraderRunError::DowngradeRejected)
+        ));
+        assert_eq!(
+            fs::read_to_string(install_path).expect("binary"),
+            "old probe"
+        );
+        assert!(systemd.restarted.is_empty());
+    }
+
+    #[test]
+    fn internal_probe_upgrader_rejects_signed_same_version_replay_before_replacement() {
+        let assets = signed_assets("0.2.0", "replayed probe", None);
+        let public_key_sha256 = assets.public_key_sha256.clone();
+        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
+            assets,
+            public_key_sha256,
+            "0.2.0",
+            "0.2.0",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ProbeUpgraderRunError::DowngradeRejected)
+        ));
+        assert_eq!(
+            fs::read_to_string(install_path).expect("binary"),
+            "old probe"
+        );
+        assert!(systemd.restarted.is_empty());
+    }
+
+    #[test]
+    fn internal_probe_upgrader_accepts_signed_newer_asset_with_local_version_guard() {
+        let assets = signed_assets("0.2.0", "new probe", None);
+        let public_key_sha256 = assets.public_key_sha256.clone();
+        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
+            assets,
+            public_key_sha256,
+            "0.1.9",
+            "0.2.0",
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            fs::read_to_string(install_path).expect("binary"),
+            "new probe"
+        );
+        assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
+    }
+
+    #[test]
     fn internal_probe_upgrader_accepts_tag_prefixed_manifest_version() {
         let assets = signed_assets("v0.2.0", "new probe", None);
         let public_key_sha256 = assets.public_key_sha256.clone();
@@ -2829,6 +2971,53 @@ mod tests {
             &install_metadata,
         )
         .expect("operation failure is returned");
+        let persisted_install_path = temp.keep().join("bin/enoki-probe");
+
+        (result, persisted_install_path, systemd)
+    }
+
+    fn run_upgrade_with_assets_and_current_version(
+        assets: SignedAssets,
+        public_key_sha256: String,
+        current_probe_version: &str,
+        target_probe_version: &str,
+    ) -> (
+        Result<(), ProbeUpgraderRunError>,
+        PathBuf,
+        RecordingSystemdRunner,
+    ) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
+        fs::write(&install_path, "old probe").expect("old probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, public_key_sha256);
+        write_test_bootstrap_config(&bootstrap_config_path, &install_metadata)
+            .expect("write bootstrap config");
+        let bootstrap_config =
+            read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
+        let operation = ProbeUpgraderOperationMetadata {
+            operation_id: "42".to_string(),
+            target_probe_version: target_probe_version.to_string(),
+            token: "probe-operation-token".to_string(),
+        };
+        let mut transport = RecordingValidationTransport {
+            assets: assets.for_hub("https://hub.example"),
+            ..RecordingValidationTransport::default()
+        };
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let result = execute_probe_upgrade_with_current_version(
+            &operation,
+            &bootstrap_config,
+            &bootstrap_config_path,
+            &install_metadata,
+            &mut transport,
+            &mut systemd,
+            current_probe_version,
+        );
         let persisted_install_path = temp.keep().join("bin/enoki-probe");
 
         (result, persisted_install_path, systemd)
