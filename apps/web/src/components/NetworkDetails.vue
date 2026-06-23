@@ -12,23 +12,23 @@ const props = defineProps<{
   samples: HostMetricSample[];
 }>();
 
-const networkRows = computed(() => {
+type NetworkRow = {
+  key: string;
+  name: string;
+  rxBitsPerSecond: number | null;
+  rxWindowBytes: number;
+  txBitsPerSecond: number | null;
+  txWindowBytes: number;
+};
+
+const networkRows = computed<NetworkRow[]>(() => {
   const latestByName = new Map(
     (props.latestSample?.networkInterfaces ?? []).map((networkInterface) => [
       networkInterface.name,
       networkInterface,
     ]),
   );
-  const totalsByName = new Map<
-    string,
-    {
-      name: string;
-      rxBitsPerSecond: number | null;
-      rxWindowBytes: number;
-      txBitsPerSecond: number | null;
-      txWindowBytes: number;
-    }
-  >();
+  const totalsByName = new Map<string, NetworkRow>();
   const sourceSamples = props.samples.length
     ? props.samples
     : props.latestSample
@@ -39,6 +39,7 @@ const networkRows = computed(() => {
     for (const networkInterface of sample.networkInterfaces) {
       const latest = latestByName.get(networkInterface.name);
       const totals = totalsByName.get(networkInterface.name) ?? {
+        key: `interface:${networkInterface.name}`,
         name: networkInterface.name,
         rxBitsPerSecond: latest?.rxBitsPerSecond ?? null,
         rxWindowBytes: 0,
@@ -51,60 +52,39 @@ const networkRows = computed(() => {
     }
   }
 
-  return [...totalsByName.values()].sort((left, right) =>
+  const interfaceRows = [...totalsByName.values()].sort((left, right) =>
     left.name.localeCompare(right.name, undefined, {
       numeric: true,
       sensitivity: "base",
     }),
   );
+
+  if (interfaceRows.length <= 1) {
+    return interfaceRows;
+  }
+
+  return [
+    {
+      key: "aggregate",
+      name: "总计",
+      rxBitsPerSecond: props.latestMetric?.networkRxBitsPerSecond ?? null,
+      rxWindowBytes: interfaceRows.reduce(
+        (total, networkInterface) => total + networkInterface.rxWindowBytes,
+        0,
+      ),
+      txBitsPerSecond: props.latestMetric?.networkTxBitsPerSecond ?? null,
+      txWindowBytes: interfaceRows.reduce(
+        (total, networkInterface) => total + networkInterface.txWindowBytes,
+        0,
+      ),
+    },
+    ...interfaceRows,
+  ];
 });
 </script>
 
 <template>
   <div class="grid gap-4">
-    <div class="grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
-      <div class="min-w-0">
-        <p class="text-muted-foreground flex items-center gap-2 text-xs">
-          <Download class="size-3.5 text-sky-600" aria-hidden="true" />
-          接收速度
-        </p>
-        <p class="font-semibold break-words">
-          {{
-            formatBitsPerSecond(latestMetric?.networkRxBitsPerSecond ?? null)
-          }}
-        </p>
-      </div>
-      <div class="min-w-0">
-        <p class="text-muted-foreground flex items-center gap-2 text-xs">
-          <Upload class="size-3.5 text-amber-600" aria-hidden="true" />
-          发送速度
-        </p>
-        <p class="font-semibold break-words">
-          {{
-            formatBitsPerSecond(latestMetric?.networkTxBitsPerSecond ?? null)
-          }}
-        </p>
-      </div>
-      <div class="min-w-0">
-        <p class="text-muted-foreground flex items-center gap-2 text-xs">
-          <Download class="size-3.5 text-sky-600" aria-hidden="true" />
-          总接收
-        </p>
-        <p class="font-semibold break-words">
-          {{ formatTrafficBytes(latestMetric?.networkRxBytesDelta ?? null) }}
-        </p>
-      </div>
-      <div class="min-w-0">
-        <p class="text-muted-foreground flex items-center gap-2 text-xs">
-          <Upload class="size-3.5 text-amber-600" aria-hidden="true" />
-          总发送
-        </p>
-        <p class="font-semibold break-words">
-          {{ formatTrafficBytes(latestMetric?.networkTxBytesDelta ?? null) }}
-        </p>
-      </div>
-    </div>
-
     <div v-if="networkRows.length" class="grid gap-2">
       <div class="text-muted-foreground flex items-center gap-2 text-sm">
         <EthernetPort class="size-4" aria-hidden="true" />
@@ -113,7 +93,7 @@ const networkRows = computed(() => {
       <div class="grid gap-2 lg:grid-cols-2">
         <div
           v-for="networkInterface in networkRows"
-          :key="networkInterface.name"
+          :key="networkInterface.key"
           class="bg-muted/35 grid gap-2 rounded-md border p-3 text-sm"
         >
           <div class="font-medium break-words">
