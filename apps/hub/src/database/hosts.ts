@@ -469,22 +469,24 @@ export function createHostRepository(database: HostDatabase): HostRepository {
 
 function parseCollectorCapabilities(
   hostProfile: HostProfileSnapshot | null,
-  inventoryJson: string | null,
+  hostProfileJson: string | null,
 ): CollectorCapabilities | null {
   if (hostProfile) {
     return normalizeCollectorCapabilities(hostProfile.collectorCapabilities);
   }
 
-  if (!inventoryJson) {
+  if (!hostProfileJson) {
     return null;
   }
 
   try {
-    const inventory = JSON.parse(inventoryJson) as {
+    const hostProfileProjection = JSON.parse(hostProfileJson) as {
       collectorCapabilities?: CollectorCapabilities;
     };
 
-    return normalizeCollectorCapabilities(inventory.collectorCapabilities);
+    return normalizeCollectorCapabilities(
+      hostProfileProjection.collectorCapabilities,
+    );
   } catch {
     return null;
   }
