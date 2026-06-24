@@ -431,13 +431,47 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    if (!services.probeOperations) {
-      return hostMetadataError("probe_operations_unavailable", 503);
+    const mode = context.req.query("mode") ?? "uninstall";
+    if (mode !== "uninstall" && mode !== "hub-only") {
+      return hostMetadataError("host_delete_mode_invalid", 400);
     }
 
     const host = services.hosts.findActiveById(hostId);
     if (!host) {
       return hostMetadataError("host_not_found", 404);
+    }
+
+    if (mode === "hub-only") {
+      const nowMs = now();
+      const deleted = services.hosts.softDelete(hostId, nowMs);
+      if (!deleted) {
+        return hostMetadataError("host_not_found", 404);
+      }
+
+      services.audit?.record({
+        action: "host.delete",
+        actor: "owner",
+        details: {
+          hostId,
+          mode,
+        },
+        occurredAtMs: nowMs,
+        outcome: "success",
+        subjectId: String(host.id),
+        subjectType: "host",
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      });
+
+      return context.json({
+        deletedHost: {
+          deletedAtMs: deleted.deletedAtMs,
+          id: deleted.id,
+        },
+      });
+    }
+
+    if (!services.probeOperations) {
+      return hostMetadataError("probe_operations_unavailable", 503);
     }
 
     const activeOperation =

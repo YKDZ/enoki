@@ -19,6 +19,7 @@ import {
 } from "vue";
 
 import AppHeader from "./components/AppHeader.vue";
+import type { DeleteHostMode } from "./components/DeleteHostAlertDialog.vue";
 import EnrollmentDialog from "./components/EnrollmentDialog.vue";
 import GlobalConfigurationDialog from "./components/GlobalConfigurationDialog.vue";
 import HostCardMasonry from "./components/HostCardMasonry.vue";
@@ -687,11 +688,16 @@ function applyHostMetadataUpdate(
 
 async function deleteHost(
   host: Pick<HostSummary | HostDetail, "displayName" | "id">,
+  mode: DeleteHostMode = "uninstall",
 ) {
   deletingHostId.value = host.id;
 
   try {
-    const response = await fetch(`/api/web/hosts/${host.id}`, {
+    const deleteUrl =
+      mode === "hub-only"
+        ? `/api/web/hosts/${host.id}?mode=hub-only`
+        : `/api/web/hosts/${host.id}`;
+    const response = await fetch(deleteUrl, {
       credentials: "same-origin",
       method: "DELETE",
     });
@@ -704,7 +710,9 @@ async function deleteHost(
       throw new Error("delete_failed");
     }
 
-    toast.success("已下发探针卸载请求");
+    toast.success(
+      mode === "hub-only" ? "已删除服务端记录" : "已下发探针卸载请求",
+    );
 
     if (activeHostConfigurationId.value === host.id) {
       activeHostConfigurationId.value = null;

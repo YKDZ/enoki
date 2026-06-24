@@ -30,6 +30,7 @@ import type {
   HostDetail,
   MetricsWindow,
 } from "../types";
+import type { DeleteHostMode } from "./DeleteHostAlertDialog.vue";
 import HostDetailDashboard from "./HostDetailDashboard.vue";
 import HostDetailSkeleton from "./HostDetailSkeleton.vue";
 import HostSettingsDialog from "./HostSettingsDialog.vue";
@@ -50,7 +51,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   back: [];
-  deleteHost: [host: HostDetail];
+  deleteHost: [host: HostDetail, mode: DeleteHostMode];
   openHostConfiguration: [hostId: number];
   openHostMetadata: [host: HostDetail];
   probeUpgradeRequested: [
@@ -290,7 +291,9 @@ function openHostSettings(currentHost: HostDetail) {
         :window-options="windowOptions"
         :x-axis-max-ms="detail.chartRange.value.maxMs"
         :x-axis-min-ms="detail.chartRange.value.minMs"
-        @delete-host="emit('deleteHost', $event)"
+        @delete-host="
+          (targetHost, mode) => emit('deleteHost', targetHost, mode)
+        "
         @open-host-settings="openHostSettings"
         @switch-metrics-window="switchMetricsWindow"
       >

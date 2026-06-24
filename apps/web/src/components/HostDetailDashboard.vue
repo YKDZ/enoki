@@ -27,7 +27,9 @@ import { hostStatusText } from "@/lib/host-display";
 import type { MetricsChartData } from "@/lib/metrics-chart-data";
 
 import type { HostDetail, HostMetricSample, MetricsWindow } from "../types";
-import DeleteHostAlertDialog from "./DeleteHostAlertDialog.vue";
+import DeleteHostAlertDialog, {
+  type DeleteHostMode,
+} from "./DeleteHostAlertDialog.vue";
 import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
 
 const props = defineProps<{
@@ -45,7 +47,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  deleteHost: [host: HostDetail];
+  deleteHost: [host: HostDetail, mode: DeleteHostMode];
   openHostSettings: [host: HostDetail];
   switchMetricsWindow: [value: AcceptableValue];
 }>();
@@ -194,7 +196,9 @@ function statusClass(status: string) {
             <DeleteHostAlertDialog
               :deleting-host-id="deletingHostId"
               :host="host"
-              @delete-host="emit('deleteHost', $event)"
+              @delete-host="
+                (targetHost, mode) => emit('deleteHost', targetHost, mode)
+              "
             />
           </div>
         </div>

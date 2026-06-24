@@ -683,4 +683,68 @@ describe("Host Metadata API", () => {
 
     database.close();
   });
+
+  it("can delete Hub-side Host data when the Probe is already gone", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_070_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+    await reportMetric(app, registration, 1);
+
+    const deleteResponse = await app.request(
+      `/api/web/hosts/${hostId}?mode=hub-only`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+        method: "DELETE",
+      },
+    );
+
+    expect(deleteResponse.status).toBe(200);
+    await expect(deleteResponse.json()).resolves.toEqual({
+      deletedHost: {
+        deletedAtMs: 1_725_000_070_000,
+        id: hostId,
+      },
+    });
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [],
+    });
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    expect(detailResponse.status).toBe(404);
+    expect(database.audit.recent(10)).toContainEqual(
+      expect.objectContaining({
+        action: "host.delete",
+        actor: "owner",
+        detailsJson: JSON.stringify({ hostId, mode: "hub-only" }),
+        outcome: "success",
+        subjectId: String(hostId),
+        subjectType: "host",
+      }),
+    );
+
+    database.close();
+  });
 });

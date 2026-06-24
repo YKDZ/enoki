@@ -15,13 +15,15 @@ import {
 import { Button } from "@/components/ui/button";
 import type { HostDetail } from "@/types";
 
+export type DeleteHostMode = "hub-only" | "uninstall";
+
 defineProps<{
   deletingHostId: number | null;
   host: HostDetail;
 }>();
 
 defineEmits<{
-  deleteHost: [host: HostDetail];
+  deleteHost: [host: HostDetail, mode: DeleteHostMode];
 }>();
 </script>
 
@@ -48,16 +50,21 @@ defineEmits<{
       <AlertDialogHeader>
         <AlertDialogTitle>删除主机</AlertDialogTitle>
         <AlertDialogDescription>
-          Hub
-          会向此主机下发探针卸载请求。探针确认卸载完成后，主机记录、历史指标和详情页会从
-          Hub 中移除。
+          如果探针仍在运行，先卸载探针再删除记录。若探针已经手动卸载或长期离线，可以只删除
+          服务端记录。
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
         <AlertDialogCancel>取消</AlertDialogCancel>
         <AlertDialogAction
-          class="bg-destructive hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40 text-white"
-          @click="$emit('deleteHost', host)"
+          variant="outline"
+          @click="$emit('deleteHost', host, 'hub-only')"
+        >
+          仅删除记录
+        </AlertDialogAction>
+        <AlertDialogAction
+          variant="destructive"
+          @click="$emit('deleteHost', host, 'uninstall')"
         >
           卸载并删除
         </AlertDialogAction>
