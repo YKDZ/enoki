@@ -12,7 +12,7 @@ test.describe("卡槽布局实验室", () => {
   for (const viewport of viewportCases) {
     test(`密集数据在 ${viewport.width}px 下不溢出或重叠`, async ({ page }) => {
       await page.setViewportSize(viewport);
-      await page.goto("/layout-lab?scenario=dense");
+      await gotoLayoutLab(page, "dense");
 
       await expect(
         page.getByRole("heading", { name: "卡槽布局实验室" }),
@@ -26,7 +26,7 @@ test.describe("卡槽布局实验室", () => {
 
   test("稀疏数据也保持相同卡槽结构", async ({ page }) => {
     await page.setViewportSize({ height: 900, width: 1024 });
-    await page.goto("/layout-lab?scenario=sparse");
+    await gotoLayoutLab(page, "sparse");
 
     await expect(
       page.locator("[data-layout-section='production-slots']"),
@@ -41,7 +41,7 @@ test.describe("卡槽布局实验室", () => {
     await page.addInitScript(() => {
       window.localStorage.setItem("enoki:host:9001:panel:cpu:collapsed", "1");
     });
-    await page.goto("/layout-lab?scenario=dense");
+    await gotoLayoutLab(page, "dense");
 
     const cpuPanel = page.locator("[data-panel-id='cpu']");
     await expect(cpuPanel.getByRole("button", { name: "展开" })).toBeVisible();
@@ -53,7 +53,7 @@ test.describe("卡槽布局实验室", () => {
 
   test("打开弹窗不改变页面横向位置", async ({ page }) => {
     await page.setViewportSize({ height: 900, width: 1280 });
-    await page.goto("/layout-lab?scenario=dense");
+    await gotoLayoutLab(page, "dense");
     await forceClassicScrollbarMeasurement(page);
 
     const before = await layoutRootBox(page);
@@ -69,6 +69,12 @@ test.describe("卡槽布局实验室", () => {
     await expectNoHorizontalOverflow(page);
   });
 });
+
+async function gotoLayoutLab(page: Page, scenario: "dense" | "sparse") {
+  await page.goto(`/layout-lab?scenario=${scenario}`, {
+    waitUntil: "domcontentloaded",
+  });
+}
 
 async function expectNoHorizontalOverflow(page: Page) {
   const overflow = await page.evaluate(

@@ -10,9 +10,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { createLayoutLabFixture } from "@/lib/layout-lab-fixtures";
-
-import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
-import MetricPanel from "./MetricPanel.vue";
+import HostMetricSlotGrid from "@/metrics/MetricSlotGrid.vue";
+import MetricPanel from "@/metrics/shared/MetricPanel.vue";
 
 const isDialogOpen = ref(false);
 const scenario = computed(() =>

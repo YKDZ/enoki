@@ -21,8 +21,8 @@ import {
 import { toast } from "@/components/ui/sonner";
 import type { useHostDetail } from "@/composables/useHostDetail";
 import { warningTitle } from "@/lib/host-display";
-import { latestMetricsFromSample } from "@/lib/latest-metrics";
-import { buildMetricsChartData } from "@/lib/metrics-chart-data";
+import { buildMetricsChartData } from "@/metrics/chart-data";
+import { latestMetricsFromSample } from "@/metrics/latest-metrics";
 
 import type {
   HostMetadataDraft,

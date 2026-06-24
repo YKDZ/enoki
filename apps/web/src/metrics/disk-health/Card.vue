@@ -4,12 +4,12 @@ import { computed } from "vue";
 
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatBytes, formatDuration, formatTemperature } from "@/lib/format";
 
-import MetricPanel from "../MetricPanel.vue";
-import { Skeleton } from "../ui/skeleton";
-import { panelStorageKey } from "./card-utils";
-import type { DiskHealthMetricCardProps } from "./types";
+import MetricPanel from "../shared/MetricPanel.vue";
+import { panelStorageKey } from "../shared/panel-storage";
+import type { DiskHealthMetricCardProps } from "../view-model";
 
 const props = defineProps<DiskHealthMetricCardProps>();
 

@@ -7,7 +7,7 @@ import {
 import type { Ref } from "vue";
 
 import { hostProfileBackedFields } from "@/lib/host-profile-live";
-import { mergeLatestMetrics } from "@/lib/latest-metrics";
+import { mergeLatestMetrics } from "@/metrics/latest-metrics";
 
 import type { HostProfileSnapshot, HostSummary } from "../types";
 

@@ -9,11 +9,11 @@ import {
   formatPercent,
   formatTrafficBytes,
 } from "@/lib/format";
-import type { MetricSeries } from "@/lib/metrics-chart-data";
+import type { MetricSeries } from "@/metrics/chart-data";
 
-import type { HostMetricSample, HostProfileSnapshot } from "../types";
-import MetricsChart from "./MetricsChart.vue";
-import SparklineChart from "./SparklineChart.vue";
+import type { HostMetricSample, HostProfileSnapshot } from "../../types";
+import MetricsChart from "../shared/MetricsChart.vue";
+import SparklineChart from "../shared/SparklineChart.vue";
 
 const cpuSparklineWindowMs = 60_000;
 

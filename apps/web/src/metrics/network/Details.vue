@@ -4,7 +4,7 @@ import { computed } from "vue";
 
 import { formatBitsPerSecond, formatTrafficBytes } from "@/lib/format";
 
-import type { HostDetail, HostMetricSample } from "../types";
+import type { HostDetail, HostMetricSample } from "../../types";
 
 const props = defineProps<{
   latestMetric: HostMetricSample | HostDetail["latestMetrics"] | null;

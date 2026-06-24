@@ -2,45 +2,52 @@ import type { Component } from "vue";
 
 import type { HostMetricSample } from "@/types";
 
-import type { CollectorAvailability, CollectorCapabilities } from "../../types";
-import CpuMetricsCard from "./CpuMetricsCard.vue";
-import DiskHealthMetricsCard from "./DiskHealthMetricsCard.vue";
-import DiskMetricsCard from "./DiskMetricsCard.vue";
-import MemoryMetricsCard from "./MemoryMetricsCard.vue";
-import NetworkMetricsCard from "./NetworkMetricsCard.vue";
+import type { CollectorAvailability, CollectorCapabilities } from "../types";
+import CpuMetricsCard from "./cpu/Card.vue";
+import DiskHealthMetricsCard from "./disk-health/Card.vue";
+import DiskMetricsCard from "./disk/Card.vue";
+import MemoryMetricsCard from "./memory/Card.vue";
+import NetworkMetricsCard from "./network/Card.vue";
+import { officialMetricCardDomains } from "./view-model";
 import type {
-  CpuMetricCardData,
   CpuMetricCardProps,
-  DiskHealthMetricCardData,
+  CpuMetricCardViewModel,
   DiskHealthMetricCardProps,
-  DiskMetricCardData,
+  DiskHealthMetricCardViewModel,
   DiskMetricCardProps,
-  MemoryMetricCardData,
+  DiskMetricCardViewModel,
   MemoryMetricCardProps,
-  NetworkMetricCardData,
+  MemoryMetricCardViewModel,
   NetworkMetricCardProps,
+  NetworkMetricCardViewModel,
   OfficialMetricCardProps,
-  OfficialMetricCardSourceData,
-  OfficialMetricDomain,
-} from "./types";
+  OfficialMetricCardDomain,
+  OfficialMetricCardSourceViewModel,
+} from "./view-model";
 
 type OfficialMetricsCardDefinition = {
   component: Component;
-  domain: OfficialMetricDomain;
+  domain: OfficialMetricCardDomain;
 };
 
-export const officialMetricsCards: OfficialMetricsCardDefinition[] = [
-  { component: CpuMetricsCard, domain: "cpu" },
-  { component: NetworkMetricsCard, domain: "network" },
-  { component: MemoryMetricsCard, domain: "memory" },
-  { component: DiskMetricsCard, domain: "disk" },
-  { component: DiskHealthMetricsCard, domain: "diskHealth" },
-];
+const officialMetricCardComponents = {
+  cpu: CpuMetricsCard,
+  disk: DiskMetricsCard,
+  diskHealth: DiskHealthMetricsCard,
+  memory: MemoryMetricsCard,
+  network: NetworkMetricsCard,
+} satisfies Record<OfficialMetricCardDomain, Component>;
+
+export const officialMetricsCards: OfficialMetricsCardDefinition[] =
+  officialMetricCardDomains.map((domain) => ({
+    component: officialMetricCardComponents[domain],
+    domain,
+  }));
 
 export function officialMetricCardProps(
-  domain: OfficialMetricDomain,
+  domain: OfficialMetricCardDomain,
   capabilities: CollectorCapabilities | null,
-  data: OfficialMetricCardSourceData,
+  data: OfficialMetricCardSourceViewModel,
 ): OfficialMetricCardProps | null {
   const capability = officialMetricCapability(capabilities, domain);
 
@@ -92,7 +99,7 @@ export function officialMetricCardProps(
 
 export function cpuMetricCardProps(
   capability: CollectorAvailability | undefined,
-  data: CpuMetricCardData,
+  data: CpuMetricCardViewModel,
 ): CpuMetricCardProps | null {
   if (capability?.available === false) {
     return null;
@@ -105,7 +112,7 @@ export function cpuMetricCardProps(
 
 export function diskMetricCardProps(
   capability: CollectorAvailability | undefined,
-  data: DiskMetricCardData,
+  data: DiskMetricCardViewModel,
 ): DiskMetricCardProps | null {
   if (capability?.available === false) {
     return null;
@@ -118,7 +125,7 @@ export function diskMetricCardProps(
 
 export function diskHealthMetricCardProps(
   capability: CollectorAvailability | undefined,
-  data: DiskHealthMetricCardData,
+  data: DiskHealthMetricCardViewModel,
 ): DiskHealthMetricCardProps | null {
   if (capability?.available !== true) {
     return null;
@@ -131,7 +138,7 @@ export function diskHealthMetricCardProps(
 
 export function memoryMetricCardProps(
   capability: CollectorAvailability | undefined,
-  data: MemoryMetricCardData,
+  data: MemoryMetricCardViewModel,
 ): MemoryMetricCardProps | null {
   if (capability?.available === false) {
     return null;
@@ -144,7 +151,7 @@ export function memoryMetricCardProps(
 
 export function networkMetricCardProps(
   capability: CollectorAvailability | undefined,
-  data: NetworkMetricCardData,
+  data: NetworkMetricCardViewModel,
 ): NetworkMetricCardProps | null {
   if (capability?.available === false) {
     return null;
@@ -157,13 +164,13 @@ export function networkMetricCardProps(
 
 function officialMetricCapability(
   capabilities: CollectorCapabilities | null,
-  domain: OfficialMetricDomain,
+  domain: OfficialMetricCardDomain,
 ): CollectorAvailability | undefined {
   return capabilities?.official?.[domain];
 }
 
 function latestKnownDiskHealth(
-  data: OfficialMetricCardSourceData,
+  data: OfficialMetricCardSourceViewModel,
 ): NonNullable<HostMetricSample["diskHealth"]> | null {
   if (data.latestMetric?.diskHealth?.length) {
     return data.latestMetric.diskHealth;

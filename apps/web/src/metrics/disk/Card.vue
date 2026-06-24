@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import { Skeleton } from "@/components/ui/skeleton";
 import { formatPercent, formatTrafficBytes } from "@/lib/format";
 
-import DiskDetails from "../DiskDetails.vue";
-import MetricPanel from "../MetricPanel.vue";
-import MetricsChart from "../MetricsChart.vue";
-import { Skeleton } from "../ui/skeleton";
-import { panelStorageKey } from "./card-utils";
-import type { DiskMetricCardProps } from "./types";
+import MetricPanel from "../shared/MetricPanel.vue";
+import MetricsChart from "../shared/MetricsChart.vue";
+import { panelStorageKey } from "../shared/panel-storage";
+import type { DiskMetricCardProps } from "../view-model";
+import DiskDetails from "./Details.vue";
 
 defineProps<DiskMetricCardProps>();
 </script>

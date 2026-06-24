@@ -5,7 +5,7 @@ import type {
   HostDetail,
   HostMetricSample,
   HostProfileSnapshot,
-} from "../types";
+} from "../../types";
 
 defineProps<{
   hostProfile: HostProfileSnapshot | null;

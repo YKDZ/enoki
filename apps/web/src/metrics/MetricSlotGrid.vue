@@ -1,13 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import type { MetricsChartData } from "@/lib/metrics-chart-data";
+import type { MetricsChartData } from "@/metrics/chart-data";
 
 import type { HostDetail, HostMetricSample } from "../types";
-import {
-  officialMetricCardProps,
-  officialMetricsCards,
-} from "./metrics-cards/registry";
+import { officialMetricCardProps, officialMetricsCards } from "./registry";
 
 const props = defineProps<{
   chartData: MetricsChartData;

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
-import { linePointsForWindow, type ChartPoint } from "@/lib/metrics-chart-data";
+import { linePointsForWindow, type ChartPoint } from "@/metrics/chart-data";
 
 const chartHeight = 72;
 const chartWidth = 100;

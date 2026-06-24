@@ -3,7 +3,7 @@ import { computed } from "vue";
 
 import { formatBytes, formatPercent } from "@/lib/format";
 
-import type { HostMetricSample, HostProfileSnapshot } from "../types";
+import type { HostMetricSample, HostProfileSnapshot } from "../../types";
 
 const props = defineProps<{
   cpuModel: string | null;

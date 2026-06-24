@@ -8,6 +8,7 @@ import type {
 } from "./protocol.js";
 
 export * from "./protocol.js";
+export * from "./probe-configuration.js";
 export * from "./websocket.js";
 
 export type SessionResponse = {

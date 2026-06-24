@@ -19,7 +19,7 @@ import {
   formatTemperature,
 } from "@/lib/format";
 
-import type { HostMetricSample, HostSummary } from "../types";
+import type { HostMetricSample, HostSummary } from "../../types";
 
 defineProps<{
   latestMetric: HostMetricSample | HostSummary["latestMetrics"] | null;

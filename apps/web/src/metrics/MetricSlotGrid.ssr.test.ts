@@ -2,11 +2,11 @@ import { renderToString } from "@vue/server-renderer";
 import { describe, expect, it } from "vitest";
 import { createSSRApp } from "vue";
 
-import type { MetricsChartData } from "@/lib/metrics-chart-data";
 import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
+import type { MetricsChartData } from "@/metrics/chart-data";
 
 import type { HostDetail, HostMetricSample } from "../types";
-import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
+import HostMetricSlotGrid from "./MetricSlotGrid.vue";
 
 const chartData: MetricsChartData = {
   cpu: {

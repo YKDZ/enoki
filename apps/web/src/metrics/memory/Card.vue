@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { formatPercent } from "@/lib/format";
 
-import MemoryDetails from "../MemoryDetails.vue";
-import MetricPanel from "../MetricPanel.vue";
-import MetricsChart from "../MetricsChart.vue";
-import { panelStorageKey } from "./card-utils";
-import MetricCardLoading from "./MetricCardLoading.vue";
-import type { MemoryMetricCardProps } from "./types";
+import MetricCardLoading from "../shared/MetricCardLoading.vue";
+import MetricPanel from "../shared/MetricPanel.vue";
+import MetricsChart from "../shared/MetricsChart.vue";
+import { panelStorageKey } from "../shared/panel-storage";
+import type { MemoryMetricCardProps } from "../view-model";
+import MemoryDetails from "./Details.vue";
 
 defineProps<MemoryMetricCardProps>();
 </script>

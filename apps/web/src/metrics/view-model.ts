@@ -1,29 +1,36 @@
-import type { MetricsChartData } from "@/lib/metrics-chart-data";
+import type { MetricsChartData } from "@/metrics/chart-data";
 
 import type {
   CollectorAvailability,
+  CollectorCapabilities,
   HostDetail,
   HostMetricSample,
   HostProfileSnapshot,
-} from "../../types";
+} from "../types";
 
-export type OfficialMetricDomain =
-  | "cpu"
-  | "disk"
-  | "diskHealth"
-  | "memory"
-  | "network";
+export const officialMetricCardDomains = [
+  "cpu",
+  "network",
+  "memory",
+  "disk",
+  "diskHealth",
+] as const satisfies readonly (keyof NonNullable<
+  CollectorCapabilities["official"]
+>)[];
 
-export type MetricCardHostFacts = {
+export type OfficialMetricCardDomain =
+  (typeof officialMetricCardDomains)[number];
+
+export type MetricCardHostViewModel = {
   cpuModel: string | null;
   hostProfile: HostProfileSnapshot | null;
   id: number;
 };
 
-export type OfficialMetricCardSourceData = {
+export type OfficialMetricCardSourceViewModel = {
   chartData: MetricsChartData;
   chartStartContinuityGapMs: number;
-  hostFacts: MetricCardHostFacts;
+  hostFacts: MetricCardHostViewModel;
   latestMetric: HostMetricSample | HostDetail["latestMetrics"] | null;
   latestSample: HostMetricSample | null;
   samples: HostMetricSample[];
@@ -31,14 +38,14 @@ export type OfficialMetricCardSourceData = {
   xAxisMinMs: number;
 };
 
-export type CpuMetricCardData = {
+export type CpuMetricCardViewModel = {
   chartData: MetricsChartData["cpu"];
   chartStartContinuityGapMs: number;
-  hostFacts: MetricCardHostFacts;
+  hostFacts: MetricCardHostViewModel;
   latestSample: HostMetricSample | null;
 };
 
-export type MemoryMetricCardData = {
+export type MemoryMetricCardViewModel = {
   chartData: MetricsChartData["memory"];
   chartStartContinuityGapMs: number;
   hostId: number;
@@ -48,7 +55,7 @@ export type MemoryMetricCardData = {
   xAxisMinMs: number;
 };
 
-export type NetworkMetricCardData = {
+export type NetworkMetricCardViewModel = {
   chartData: MetricsChartData["network"];
   chartStartContinuityGapMs: number;
   hostId: number;
@@ -59,7 +66,7 @@ export type NetworkMetricCardData = {
   xAxisMinMs: number;
 };
 
-export type DiskMetricCardData = {
+export type DiskMetricCardViewModel = {
   chartData: MetricsChartData["disk"];
   chartStartContinuityGapMs: number;
   hostId: number;
@@ -68,22 +75,23 @@ export type DiskMetricCardData = {
   xAxisMinMs: number;
 };
 
-export type DiskHealthMetricCardData = {
+export type DiskHealthMetricCardViewModel = {
   hostId: number;
   latestDiskHealth: NonNullable<HostMetricSample["diskHealth"]> | null;
 };
 
-export type MetricCardProps<TData> = {
+export type MetricCardProps<TViewModel> = {
   capability: CollectorAvailability;
-  data: TData;
+  data: TViewModel;
 };
 
-export type CpuMetricCardProps = MetricCardProps<CpuMetricCardData>;
-export type MemoryMetricCardProps = MetricCardProps<MemoryMetricCardData>;
-export type NetworkMetricCardProps = MetricCardProps<NetworkMetricCardData>;
-export type DiskMetricCardProps = MetricCardProps<DiskMetricCardData>;
+export type CpuMetricCardProps = MetricCardProps<CpuMetricCardViewModel>;
+export type MemoryMetricCardProps = MetricCardProps<MemoryMetricCardViewModel>;
+export type NetworkMetricCardProps =
+  MetricCardProps<NetworkMetricCardViewModel>;
+export type DiskMetricCardProps = MetricCardProps<DiskMetricCardViewModel>;
 export type DiskHealthMetricCardProps =
-  MetricCardProps<DiskHealthMetricCardData>;
+  MetricCardProps<DiskHealthMetricCardViewModel>;
 
 export type OfficialMetricCardProps =
   | CpuMetricCardProps

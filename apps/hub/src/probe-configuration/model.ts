@@ -1,24 +1,15 @@
-export const probeCollectorCatalog = [
-  { id: "official.cpu" },
-  { id: "official.memory" },
-  { id: "official.disk" },
-  { id: "official.network" },
-  { id: "official.load" },
-  { id: "official.uptime" },
-  { id: "official.temperature" },
-  { id: "official.battery" },
-  { id: "official.disk-health" },
-] as const;
+import {
+  defaultEnabledCollectorIds,
+  isProbeCollectorId,
+  normalizeEnabledCollectorIds as normalizeKnownEnabledCollectorIds,
+  probeCollectorIds,
+  type ProbeCollectorId,
+} from "@enoki/api-client";
 
-export type ProbeCollectorId = (typeof probeCollectorCatalog)[number]["id"];
+export type { ProbeCollectorId };
 
-const probeCollectorIdSet = new Set<string>(
-  probeCollectorCatalog.map((collector) => collector.id),
-);
-
-export const defaultEnabledCollectorIds = probeCollectorCatalog.map(
-  (collector) => collector.id,
-);
+export const probeCollectorCatalog = probeCollectorIds.map((id) => ({ id }));
+export { defaultEnabledCollectorIds };
 
 export type ProbeConfigurationValues = {
   enabledCollectorIds: string[];
@@ -76,7 +67,7 @@ export function validateProbeConfigurationValues(
 
   if (
     values.enabledCollectorIds.some((collectorId) => {
-      return !probeCollectorIdSet.has(collectorId);
+      return !isProbeCollectorId(collectorId);
     })
   ) {
     return "unknown_collector_id";
@@ -97,11 +88,7 @@ export function normalizeProbeConfigurationValues(
 }
 
 export function normalizeEnabledCollectorIds(enabledCollectorIds: string[]) {
-  const enabled = new Set(enabledCollectorIds);
-
-  return probeCollectorCatalog
-    .filter((collector) => enabled.has(collector.id))
-    .map((collector) => collector.id);
+  return normalizeKnownEnabledCollectorIds(enabledCollectorIds);
 }
 
 export function nextProbeConfigurationVersion(

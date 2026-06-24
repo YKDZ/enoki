@@ -10,11 +10,11 @@ import {
   latestMetricsFromSample,
   latestMetricsFromSamples,
   mergeLatestMetrics,
-} from "@/lib/latest-metrics";
+} from "@/metrics/latest-metrics";
 import {
   useHostMetricsWindowStore,
   type HostMetricsWindowPreferences,
-} from "@/stores/host-metrics-window";
+} from "@/metrics/window-store";
 
 import type {
   HostDetail,

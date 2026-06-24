@@ -13,6 +13,11 @@
       "development": "./src/protocol.ts",
       "import": "./dist/protocol.js"
     },
+    "./probe-configuration": {
+      "types": "./src/probe-configuration.ts",
+      "development": "./src/probe-configuration.ts",
+      "import": "./dist/probe-configuration.js"
+    },
     "./websocket": {
       "types": "./src/websocket.ts",
       "development": "./src/websocket.ts",

@@ -24,13 +24,13 @@ import {
 } from "@/components/ui/select";
 import { formatDuration, formatTemperature } from "@/lib/format";
 import { hostStatusText } from "@/lib/host-display";
-import type { MetricsChartData } from "@/lib/metrics-chart-data";
+import type { MetricsChartData } from "@/metrics/chart-data";
+import HostMetricSlotGrid from "@/metrics/MetricSlotGrid.vue";
 
 import type { HostDetail, HostMetricSample, MetricsWindow } from "../types";
 import DeleteHostAlertDialog, {
   type DeleteHostMode,
 } from "./DeleteHostAlertDialog.vue";
-import HostMetricSlotGrid from "./HostMetricSlotGrid.vue";
 
 const props = defineProps<{
   chartData: MetricsChartData;

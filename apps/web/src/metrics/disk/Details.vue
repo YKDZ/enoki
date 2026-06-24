@@ -5,7 +5,7 @@ import { computed } from "vue";
 import { Progress } from "@/components/ui/progress";
 import { formatBytes, formatPercent, formatTrafficBytes } from "@/lib/format";
 
-import type { HostMetricSample } from "../types";
+import type { HostMetricSample } from "../../types";
 
 const props = defineProps<{
   latestSample: HostMetricSample | null;

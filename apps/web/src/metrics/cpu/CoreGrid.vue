@@ -2,10 +2,10 @@
 import { computed } from "vue";
 
 import { formatPercent } from "@/lib/format";
-import type { MetricSeries } from "@/lib/metrics-chart-data";
+import type { MetricSeries } from "@/metrics/chart-data";
 
-import type { HostMetricSample } from "../types";
-import SparklineChart from "./SparklineChart.vue";
+import type { HostMetricSample } from "../../types";
+import SparklineChart from "../shared/SparklineChart.vue";
 
 const cpuSparklineWindowMs = 60_000;
 

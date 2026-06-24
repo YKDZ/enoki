@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { formatBitsPerSecond } from "@/lib/format";
 
-import MetricPanel from "../MetricPanel.vue";
-import MetricsChart from "../MetricsChart.vue";
-import NetworkDetails from "../NetworkDetails.vue";
-import { panelStorageKey } from "./card-utils";
-import MetricCardLoading from "./MetricCardLoading.vue";
-import type { NetworkMetricCardProps } from "./types";
+import MetricCardLoading from "../shared/MetricCardLoading.vue";
+import MetricPanel from "../shared/MetricPanel.vue";
+import MetricsChart from "../shared/MetricsChart.vue";
+import { panelStorageKey } from "../shared/panel-storage";
+import type { NetworkMetricCardProps } from "../view-model";
+import NetworkDetails from "./Details.vue";
 
 defineProps<NetworkMetricCardProps>();
 </script>

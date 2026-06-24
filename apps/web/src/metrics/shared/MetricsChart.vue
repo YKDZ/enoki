@@ -13,7 +13,7 @@ import {
 import {
   extendSeriesListToWindowStart,
   type MetricSeries,
-} from "@/lib/metrics-chart-data";
+} from "@/metrics/chart-data";
 
 type TooltipParam = {
   axisValue?: number | string;

@@ -2,8 +2,8 @@ import { renderToString } from "@vue/server-renderer";
 import { describe, expect, it } from "vitest";
 import { createSSRApp } from "vue";
 
-import type { HostMetricSample } from "../types";
-import HostResourcePanels from "./HostResourcePanels.vue";
+import type { HostMetricSample } from "../../types";
+import HostResourcePanels from "./ResourcePanels.vue";
 
 const cpuSample: HostMetricSample = {
   collectedAtMs: 1_725_000_000_000,

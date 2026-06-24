@@ -6,7 +6,7 @@ import {
   extendSeriesToWindowStart,
   linePointsForWindow,
   type MetricSeries,
-} from "./metrics-chart-data";
+} from "./chart-data";
 
 const samples: HostMetricSample[] = [
   {

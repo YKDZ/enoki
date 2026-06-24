@@ -1,5 +1,5 @@
-import { buildMetricsChartData } from "@/lib/metrics-chart-data";
 import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
+import { buildMetricsChartData } from "@/metrics/chart-data";
 
 import type { HostDetail, HostMetricSample } from "../types";
 

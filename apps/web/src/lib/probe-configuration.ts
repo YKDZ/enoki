@@ -1,20 +1,29 @@
-export const probeCollectorCatalog = [
-  { id: "official.cpu", label: "CPU" },
-  { id: "official.memory", label: "内存" },
-  { id: "official.disk", label: "磁盘" },
-  { id: "official.network", label: "网络" },
-  { id: "official.load", label: "负载" },
-  { id: "official.uptime", label: "运行时间" },
-  { id: "official.temperature", label: "温度" },
-  { id: "official.battery", label: "电池" },
-  { id: "official.disk-health", label: "磁盘健康" },
-] as const;
+import {
+  defaultEnabledCollectorIds,
+  normalizeEnabledCollectorIds as normalizeKnownEnabledCollectorIds,
+  probeCollectorIds,
+  type ProbeCollectorId,
+} from "@enoki/api-client";
 
-export type ProbeCollectorId = (typeof probeCollectorCatalog)[number]["id"];
+export type { ProbeCollectorId };
+export { defaultEnabledCollectorIds };
 
-export const defaultEnabledCollectorIds = probeCollectorCatalog.map(
-  (collector) => collector.id,
-);
+const probeCollectorLabels = {
+  "official.battery": "电池",
+  "official.cpu": "CPU",
+  "official.disk": "磁盘",
+  "official.disk-health": "磁盘健康",
+  "official.load": "负载",
+  "official.memory": "内存",
+  "official.network": "网络",
+  "official.temperature": "温度",
+  "official.uptime": "运行时间",
+} satisfies Record<ProbeCollectorId, string>;
+
+export const probeCollectorCatalog = probeCollectorIds.map((id) => ({
+  id,
+  label: probeCollectorLabels[id],
+}));
 
 export function collectorEnabled(
   enabledCollectorIds: readonly string[],
@@ -36,9 +45,7 @@ export function updateEnabledCollectorIds(
     next.delete(collectorId);
   }
 
-  return probeCollectorCatalog
-    .filter((collector) => next.has(collector.id))
-    .map((collector) => collector.id);
+  return normalizeKnownEnabledCollectorIds([...next]);
 }
 
 export const probeConfigurationTiming = {

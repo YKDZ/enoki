@@ -1,7 +1,7 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { useHostMetricsWindowStore } from "./host-metrics-window";
+import { useHostMetricsWindowStore } from "./window-store";
 
 describe("Host metrics window preferences", () => {
   beforeEach(() => {

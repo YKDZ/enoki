@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import CpuCoreGrid from "../CpuCoreGrid.vue";
-import CpuDetails from "../CpuDetails.vue";
-import MetricPanel from "../MetricPanel.vue";
-import { panelStorageKey } from "./card-utils";
-import MetricCardLoading from "./MetricCardLoading.vue";
-import type { CpuMetricCardProps } from "./types";
+import MetricCardLoading from "../shared/MetricCardLoading.vue";
+import MetricPanel from "../shared/MetricPanel.vue";
+import { panelStorageKey } from "../shared/panel-storage";
+import type { CpuMetricCardProps } from "../view-model";
+import CpuCoreGrid from "./CoreGrid.vue";
+import CpuDetails from "./Details.vue";
 
 defineProps<CpuMetricCardProps>();
 
