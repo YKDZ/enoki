@@ -1,0 +1,78 @@
+import type { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
+
+type JsonScalar<T> =
+  NonNullable<T> extends { toNumber(): number } ? number : NonNullable<T>;
+
+type RequiredJsonFields<T, Key extends keyof T> = {
+  [Field in Key]-?: JsonScalar<T[Field]>;
+};
+
+type OptionalJsonFields<T, Key extends keyof T> = {
+  [Field in Key]?: JsonScalar<T[Field]> | null;
+};
+
+type RepeatedItem<T> = NonNullable<T> extends Array<infer Item> ? Item : never;
+
+type ProtoMetricSample = enoki.v1.IMetricSample;
+type ProtoCpuCoreMetric = RepeatedItem<ProtoMetricSample["cpuCores"]>;
+type ProtoDiskUsageMetric = RepeatedItem<ProtoMetricSample["disks"]>;
+type ProtoDiskHealthMetric = RepeatedItem<ProtoMetricSample["diskHealth"]>;
+type ProtoNetworkInterfaceMetric = RepeatedItem<
+  ProtoMetricSample["networkInterfaces"]
+>;
+
+export type CollectorAvailability = RequiredJsonFields<
+  enoki.v1.ICollectorAvailability,
+  "available"
+>;
+
+export type OfficialCollectorCapabilities = {
+  [Field in keyof enoki.v1.IOfficialCollectorCapabilities]?: CollectorAvailability;
+};
+
+export type CollectorCapabilities = {
+  official?: OfficialCollectorCapabilities;
+};
+
+export type CpuCoreMetric = RequiredJsonFields<
+  ProtoCpuCoreMetric,
+  "name" | "usagePercent"
+>;
+
+export type DiskUsageMetric = RequiredJsonFields<
+  ProtoDiskUsageMetric,
+  | "availableBytes"
+  | "filesystemType"
+  | "mountPoint"
+  | "totalBytes"
+  | "usedBytes"
+> &
+  OptionalJsonFields<
+    ProtoDiskUsageMetric,
+    | "ioUtilizationPercent"
+    | "readAwaitMs"
+    | "readBytesDelta"
+    | "weightedIoPercent"
+    | "writeAwaitMs"
+    | "writeBytesDelta"
+  >;
+
+export type DiskHealthMetric = {
+  deviceName: JsonScalar<ProtoDiskHealthMetric["deviceName"]>;
+  model: JsonScalar<ProtoDiskHealthMetric["model"]> | null;
+  passed: JsonScalar<ProtoDiskHealthMetric["passed"]>;
+  powerOnHours: JsonScalar<ProtoDiskHealthMetric["powerOnHours"]> | null;
+  role: JsonScalar<ProtoDiskHealthMetric["role"]> | null;
+  serialNumber: JsonScalar<ProtoDiskHealthMetric["serialNumber"]> | null;
+  temperatureCelsius: JsonScalar<
+    ProtoDiskHealthMetric["temperatureCelsius"]
+  > | null;
+  totalBytes: JsonScalar<ProtoDiskHealthMetric["totalBytes"]> | null;
+  usageMountPoint: JsonScalar<ProtoDiskHealthMetric["usageMountPoint"]> | null;
+  usedBytes: JsonScalar<ProtoDiskHealthMetric["usedBytes"]> | null;
+};
+
+export type NetworkInterfaceDeltaMetric = RequiredJsonFields<
+  ProtoNetworkInterfaceMetric,
+  "name" | "rxBytesDelta" | "txBytesDelta"
+>;

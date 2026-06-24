@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package enoki.v1;
+
+message ProbeOperation {
+  string id = 1;
+
+  oneof operation {
+    ProbeUpgradeOperation probe_upgrade = 2;
+    ProbeUninstallOperation probe_uninstall = 3;
+  }
+}
+
+message ProbeUpgradeOperation {
+  string current_probe_version = 1;
+  string target_probe_version = 2;
+  string operation_token = 3;
+}
+
+message ProbeUninstallOperation {
+  string operation_token = 1;
+}
+
+message ProbeOperationAcknowledgement {
+  string operation_id = 1;
+}
+
+message ProbeOperationStatus {
+  string operation_id = 1;
+
+  oneof status {
+    ProbeOperationRunning running = 2;
+    ProbeOperationFailed failed = 3;
+    ProbeOperationSucceeded succeeded = 4;
+  }
+}
+
+message ProbeOperationRunning {}
+
+message ProbeOperationSucceeded {}
+
+message ProbeOperationFailed {
+  string error_code = 1;
+  string message = 2;
+}

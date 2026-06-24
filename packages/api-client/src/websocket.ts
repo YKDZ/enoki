@@ -1,5 +1,13 @@
 import * as v from "valibot";
 
+import type {
+  CollectorCapabilities,
+  CpuCoreMetric,
+  DiskHealthMetric,
+  DiskUsageMetric,
+  NetworkInterfaceDeltaMetric,
+} from "./protocol.js";
+
 const hostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const nullableNumberSchema = v.nullable(v.number());
 const timestampMsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
@@ -14,6 +22,7 @@ const collectorCapabilitiesSchema = v.nullable(
         cpu: v.optional(collectorAvailabilitySchema),
         disk: v.optional(collectorAvailabilitySchema),
         diskHealth: v.optional(collectorAvailabilitySchema),
+        inventory: v.optional(collectorAvailabilitySchema),
         load: v.optional(collectorAvailabilitySchema),
         memory: v.optional(collectorAvailabilitySchema),
         network: v.optional(collectorAvailabilitySchema),
@@ -90,7 +99,22 @@ export const hostLiveSummarySchema = v.object({
   }),
 });
 
-export type HostLiveSummary = v.InferOutput<typeof hostLiveSummarySchema>;
+type HostLiveSummarySchemaOutput = v.InferOutput<typeof hostLiveSummarySchema>;
+type HostLiveSummaryLatestMetrics = NonNullable<
+  HostLiveSummarySchemaOutput["latestMetrics"]
+>;
+
+export type HostLiveSummary = Omit<
+  HostLiveSummarySchemaOutput,
+  "collectorCapabilities" | "latestMetrics"
+> & {
+  collectorCapabilities?: CollectorCapabilities | null;
+  latestMetrics:
+    | (Omit<HostLiveSummaryLatestMetrics, "diskHealth"> & {
+        diskHealth?: DiskHealthMetric[];
+      })
+    | null;
+};
 
 export const hostDetailSampleSchema = v.object({
   collectedAtMs: timestampMsSchema,
@@ -147,7 +171,15 @@ export const hostDetailSampleSchema = v.object({
   uptimeSeconds: nullableNumberSchema,
 });
 
-export type HostDetailSample = v.InferOutput<typeof hostDetailSampleSchema>;
+export type HostDetailSample = Omit<
+  v.InferOutput<typeof hostDetailSampleSchema>,
+  "cpuCores" | "diskHealth" | "disks" | "networkInterfaces"
+> & {
+  cpuCores: CpuCoreMetric[];
+  diskHealth?: DiskHealthMetric[];
+  disks: DiskUsageMetric[];
+  networkInterfaces: NetworkInterfaceDeltaMetric[];
+};
 
 export const webSocketServerMessageSchema = v.variant("type", [
   v.object({
@@ -161,9 +193,16 @@ export const webSocketServerMessageSchema = v.variant("type", [
   }),
 ]);
 
-export type WebSocketServerMessage = v.InferOutput<
-  typeof webSocketServerMessageSchema
->;
+export type WebSocketServerMessage =
+  | {
+      host: HostLiveSummary;
+      type: "host_summary";
+    }
+  | {
+      hostId: number;
+      sample: HostDetailSample;
+      type: "host_detail_sample";
+    };
 
 export function parseWebSocketClientMessage(
   message: unknown,
@@ -178,5 +217,5 @@ export function parseWebSocketServerMessage(
 ): WebSocketServerMessage | null {
   const result = v.safeParse(webSocketServerMessageSchema, message);
 
-  return result.success ? result.output : null;
+  return result.success ? (result.output as WebSocketServerMessage) : null;
 }

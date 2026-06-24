@@ -1,3 +1,7 @@
+import type {
+  CollectorAvailability,
+  CollectorCapabilities,
+} from "@enoki/api-client/protocol";
 import { and, eq, isNull, lte } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
@@ -77,23 +81,10 @@ export type HostSummary = {
   system: string;
 };
 
-export type CollectorCapabilities = {
-  official?: {
-    battery?: CollectorAvailability;
-    cpu?: CollectorAvailability;
-    disk?: CollectorAvailability;
-    diskHealth?: CollectorAvailability;
-    load?: CollectorAvailability;
-    memory?: CollectorAvailability;
-    network?: CollectorAvailability;
-    temperature?: CollectorAvailability;
-    uptime?: CollectorAvailability;
-  };
-};
-
-export type CollectorAvailability = {
-  available: boolean;
-};
+export type {
+  CollectorAvailability,
+  CollectorCapabilities,
+} from "@enoki/api-client/protocol";
 
 export type HostStatusThresholds = {
   offlineAfterMs: number;

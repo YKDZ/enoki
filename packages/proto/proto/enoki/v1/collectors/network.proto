@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package enoki.v1;
+
+message NetworkInterfaceMetric {
+  string name = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+  uint64 rx_bytes_delta = 4;
+  uint64 tx_bytes_delta = 5;
+}

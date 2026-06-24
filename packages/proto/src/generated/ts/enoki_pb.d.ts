@@ -6,6 +6,829 @@ export namespace enoki {
     /** Namespace v1. */
     namespace v1 {
 
+        /** Properties of a ProbeRegistrationRequest. */
+        interface IProbeRegistrationRequest {
+
+            /** ProbeRegistrationRequest enrollmentToken */
+            enrollmentToken?: (string|null);
+
+            /** ProbeRegistrationRequest inventory */
+            inventory?: (enoki.v1.IInventory|null);
+
+            /** ProbeRegistrationRequest probePublicKeyPem */
+            probePublicKeyPem?: (string|null);
+        }
+
+        /** Represents a ProbeRegistrationRequest. */
+        class ProbeRegistrationRequest implements IProbeRegistrationRequest {
+
+            /**
+             * Constructs a new ProbeRegistrationRequest.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeRegistrationRequest);
+
+            /** ProbeRegistrationRequest enrollmentToken. */
+            public enrollmentToken: string;
+
+            /** ProbeRegistrationRequest inventory. */
+            public inventory?: (enoki.v1.IInventory|null);
+
+            /** ProbeRegistrationRequest probePublicKeyPem. */
+            public probePublicKeyPem: string;
+
+            /**
+             * Creates a new ProbeRegistrationRequest instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeRegistrationRequest instance
+             */
+            public static create(properties?: enoki.v1.IProbeRegistrationRequest): enoki.v1.ProbeRegistrationRequest;
+
+            /**
+             * Encodes the specified ProbeRegistrationRequest message. Does not implicitly {@link enoki.v1.ProbeRegistrationRequest.verify|verify} messages.
+             * @param message ProbeRegistrationRequest message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeRegistrationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeRegistrationRequest message, length delimited. Does not implicitly {@link enoki.v1.ProbeRegistrationRequest.verify|verify} messages.
+             * @param message ProbeRegistrationRequest message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeRegistrationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeRegistrationRequest message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeRegistrationRequest
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeRegistrationRequest;
+
+            /**
+             * Decodes a ProbeRegistrationRequest message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeRegistrationRequest
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeRegistrationRequest;
+
+            /**
+             * Verifies a ProbeRegistrationRequest message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeRegistrationRequest message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeRegistrationRequest
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeRegistrationRequest;
+
+            /**
+             * Creates a plain object from a ProbeRegistrationRequest message. Also converts values to other types if specified.
+             * @param message ProbeRegistrationRequest
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeRegistrationRequest, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeRegistrationRequest to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeRegistrationRequest
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeRegistrationResponse. */
+        interface IProbeRegistrationResponse {
+
+            /** ProbeRegistrationResponse probeId */
+            probeId?: (string|null);
+
+            /** ProbeRegistrationResponse probeSecret */
+            probeSecret?: (string|null);
+
+            /** ProbeRegistrationResponse serverTimeMs */
+            serverTimeMs?: (Long|null);
+
+            /** ProbeRegistrationResponse initialConfiguration */
+            initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
+        }
+
+        /** Represents a ProbeRegistrationResponse. */
+        class ProbeRegistrationResponse implements IProbeRegistrationResponse {
+
+            /**
+             * Constructs a new ProbeRegistrationResponse.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeRegistrationResponse);
+
+            /** ProbeRegistrationResponse probeId. */
+            public probeId: string;
+
+            /** ProbeRegistrationResponse probeSecret. */
+            public probeSecret: string;
+
+            /** ProbeRegistrationResponse serverTimeMs. */
+            public serverTimeMs: Long;
+
+            /** ProbeRegistrationResponse initialConfiguration. */
+            public initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
+
+            /**
+             * Creates a new ProbeRegistrationResponse instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeRegistrationResponse instance
+             */
+            public static create(properties?: enoki.v1.IProbeRegistrationResponse): enoki.v1.ProbeRegistrationResponse;
+
+            /**
+             * Encodes the specified ProbeRegistrationResponse message. Does not implicitly {@link enoki.v1.ProbeRegistrationResponse.verify|verify} messages.
+             * @param message ProbeRegistrationResponse message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeRegistrationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeRegistrationResponse message, length delimited. Does not implicitly {@link enoki.v1.ProbeRegistrationResponse.verify|verify} messages.
+             * @param message ProbeRegistrationResponse message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeRegistrationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeRegistrationResponse message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeRegistrationResponse
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeRegistrationResponse;
+
+            /**
+             * Decodes a ProbeRegistrationResponse message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeRegistrationResponse
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeRegistrationResponse;
+
+            /**
+             * Verifies a ProbeRegistrationResponse message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeRegistrationResponse message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeRegistrationResponse
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeRegistrationResponse;
+
+            /**
+             * Creates a plain object from a ProbeRegistrationResponse message. Also converts values to other types if specified.
+             * @param message ProbeRegistrationResponse
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeRegistrationResponse, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeRegistrationResponse to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeRegistrationResponse
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeReportRequest. */
+        interface IProbeReportRequest {
+
+            /** ProbeReportRequest probeId */
+            probeId?: (string|null);
+
+            /** ProbeReportRequest bootId */
+            bootId?: (string|null);
+
+            /** ProbeReportRequest sequenceStart */
+            sequenceStart?: (Long|null);
+
+            /** ProbeReportRequest sequenceEnd */
+            sequenceEnd?: (Long|null);
+
+            /** ProbeReportRequest inventoryHash */
+            inventoryHash?: (string|null);
+
+            /** ProbeReportRequest probeConfigurationVersion */
+            probeConfigurationVersion?: (string|null);
+
+            /** ProbeReportRequest metrics */
+            metrics?: (enoki.v1.IMetricSample[]|null);
+
+            /** ProbeReportRequest inventory */
+            inventory?: (enoki.v1.IInventory|null);
+
+            /** ProbeReportRequest probeConfigurationError */
+            probeConfigurationError?: (enoki.v1.IProbeConfigurationError|null);
+
+            /** ProbeReportRequest operationAcknowledgements */
+            operationAcknowledgements?: (enoki.v1.IProbeOperationAcknowledgement[]|null);
+
+            /** ProbeReportRequest operationStatuses */
+            operationStatuses?: (enoki.v1.IProbeOperationStatus[]|null);
+        }
+
+        /** Represents a ProbeReportRequest. */
+        class ProbeReportRequest implements IProbeReportRequest {
+
+            /**
+             * Constructs a new ProbeReportRequest.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeReportRequest);
+
+            /** ProbeReportRequest probeId. */
+            public probeId: string;
+
+            /** ProbeReportRequest bootId. */
+            public bootId: string;
+
+            /** ProbeReportRequest sequenceStart. */
+            public sequenceStart: Long;
+
+            /** ProbeReportRequest sequenceEnd. */
+            public sequenceEnd: Long;
+
+            /** ProbeReportRequest inventoryHash. */
+            public inventoryHash: string;
+
+            /** ProbeReportRequest probeConfigurationVersion. */
+            public probeConfigurationVersion: string;
+
+            /** ProbeReportRequest metrics. */
+            public metrics: enoki.v1.IMetricSample[];
+
+            /** ProbeReportRequest inventory. */
+            public inventory?: (enoki.v1.IInventory|null);
+
+            /** ProbeReportRequest probeConfigurationError. */
+            public probeConfigurationError?: (enoki.v1.IProbeConfigurationError|null);
+
+            /** ProbeReportRequest operationAcknowledgements. */
+            public operationAcknowledgements: enoki.v1.IProbeOperationAcknowledgement[];
+
+            /** ProbeReportRequest operationStatuses. */
+            public operationStatuses: enoki.v1.IProbeOperationStatus[];
+
+            /**
+             * Creates a new ProbeReportRequest instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeReportRequest instance
+             */
+            public static create(properties?: enoki.v1.IProbeReportRequest): enoki.v1.ProbeReportRequest;
+
+            /**
+             * Encodes the specified ProbeReportRequest message. Does not implicitly {@link enoki.v1.ProbeReportRequest.verify|verify} messages.
+             * @param message ProbeReportRequest message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeReportRequest, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeReportRequest message, length delimited. Does not implicitly {@link enoki.v1.ProbeReportRequest.verify|verify} messages.
+             * @param message ProbeReportRequest message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeReportRequest, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeReportRequest message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeReportRequest
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeReportRequest;
+
+            /**
+             * Decodes a ProbeReportRequest message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeReportRequest
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeReportRequest;
+
+            /**
+             * Verifies a ProbeReportRequest message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeReportRequest message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeReportRequest
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeReportRequest;
+
+            /**
+             * Creates a plain object from a ProbeReportRequest message. Also converts values to other types if specified.
+             * @param message ProbeReportRequest
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeReportRequest, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeReportRequest to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeReportRequest
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeReportResponse. */
+        interface IProbeReportResponse {
+
+            /** ProbeReportResponse acceptedSequenceEnd */
+            acceptedSequenceEnd?: (Long|null);
+
+            /** ProbeReportResponse serverTimeMs */
+            serverTimeMs?: (Long|null);
+
+            /** ProbeReportResponse currentProbeConfigurationVersion */
+            currentProbeConfigurationVersion?: (string|null);
+
+            /** ProbeReportResponse inventoryNeeded */
+            inventoryNeeded?: (boolean|null);
+
+            /** ProbeReportResponse pendingOperation */
+            pendingOperation?: (enoki.v1.IProbeOperation|null);
+        }
+
+        /** Represents a ProbeReportResponse. */
+        class ProbeReportResponse implements IProbeReportResponse {
+
+            /**
+             * Constructs a new ProbeReportResponse.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeReportResponse);
+
+            /** ProbeReportResponse acceptedSequenceEnd. */
+            public acceptedSequenceEnd: Long;
+
+            /** ProbeReportResponse serverTimeMs. */
+            public serverTimeMs: Long;
+
+            /** ProbeReportResponse currentProbeConfigurationVersion. */
+            public currentProbeConfigurationVersion: string;
+
+            /** ProbeReportResponse inventoryNeeded. */
+            public inventoryNeeded: boolean;
+
+            /** ProbeReportResponse pendingOperation. */
+            public pendingOperation?: (enoki.v1.IProbeOperation|null);
+
+            /**
+             * Creates a new ProbeReportResponse instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeReportResponse instance
+             */
+            public static create(properties?: enoki.v1.IProbeReportResponse): enoki.v1.ProbeReportResponse;
+
+            /**
+             * Encodes the specified ProbeReportResponse message. Does not implicitly {@link enoki.v1.ProbeReportResponse.verify|verify} messages.
+             * @param message ProbeReportResponse message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeReportResponse, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeReportResponse message, length delimited. Does not implicitly {@link enoki.v1.ProbeReportResponse.verify|verify} messages.
+             * @param message ProbeReportResponse message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeReportResponse, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeReportResponse message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeReportResponse
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeReportResponse;
+
+            /**
+             * Decodes a ProbeReportResponse message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeReportResponse
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeReportResponse;
+
+            /**
+             * Verifies a ProbeReportResponse message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeReportResponse message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeReportResponse
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeReportResponse;
+
+            /**
+             * Creates a plain object from a ProbeReportResponse message. Also converts values to other types if specified.
+             * @param message ProbeReportResponse
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeReportResponse, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeReportResponse to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeReportResponse
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeConfigurationError. */
+        interface IProbeConfigurationError {
+
+            /** ProbeConfigurationError failedVersion */
+            failedVersion?: (string|null);
+
+            /** ProbeConfigurationError errorCode */
+            errorCode?: (string|null);
+
+            /** ProbeConfigurationError message */
+            message?: (string|null);
+        }
+
+        /** Represents a ProbeConfigurationError. */
+        class ProbeConfigurationError implements IProbeConfigurationError {
+
+            /**
+             * Constructs a new ProbeConfigurationError.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeConfigurationError);
+
+            /** ProbeConfigurationError failedVersion. */
+            public failedVersion: string;
+
+            /** ProbeConfigurationError errorCode. */
+            public errorCode: string;
+
+            /** ProbeConfigurationError message. */
+            public message: string;
+
+            /**
+             * Creates a new ProbeConfigurationError instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeConfigurationError instance
+             */
+            public static create(properties?: enoki.v1.IProbeConfigurationError): enoki.v1.ProbeConfigurationError;
+
+            /**
+             * Encodes the specified ProbeConfigurationError message. Does not implicitly {@link enoki.v1.ProbeConfigurationError.verify|verify} messages.
+             * @param message ProbeConfigurationError message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeConfigurationError, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeConfigurationError message, length delimited. Does not implicitly {@link enoki.v1.ProbeConfigurationError.verify|verify} messages.
+             * @param message ProbeConfigurationError message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeConfigurationError, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeConfigurationError message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeConfigurationError
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeConfigurationError;
+
+            /**
+             * Decodes a ProbeConfigurationError message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeConfigurationError
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeConfigurationError;
+
+            /**
+             * Verifies a ProbeConfigurationError message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeConfigurationError message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeConfigurationError
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeConfigurationError;
+
+            /**
+             * Creates a plain object from a ProbeConfigurationError message. Also converts values to other types if specified.
+             * @param message ProbeConfigurationError
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeConfigurationError, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeConfigurationError to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeConfigurationError
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeConfigurationRequest. */
+        interface IProbeConfigurationRequest {
+
+            /** ProbeConfigurationRequest probeId */
+            probeId?: (string|null);
+
+            /** ProbeConfigurationRequest currentVersion */
+            currentVersion?: (string|null);
+        }
+
+        /** Represents a ProbeConfigurationRequest. */
+        class ProbeConfigurationRequest implements IProbeConfigurationRequest {
+
+            /**
+             * Constructs a new ProbeConfigurationRequest.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeConfigurationRequest);
+
+            /** ProbeConfigurationRequest probeId. */
+            public probeId: string;
+
+            /** ProbeConfigurationRequest currentVersion. */
+            public currentVersion: string;
+
+            /**
+             * Creates a new ProbeConfigurationRequest instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeConfigurationRequest instance
+             */
+            public static create(properties?: enoki.v1.IProbeConfigurationRequest): enoki.v1.ProbeConfigurationRequest;
+
+            /**
+             * Encodes the specified ProbeConfigurationRequest message. Does not implicitly {@link enoki.v1.ProbeConfigurationRequest.verify|verify} messages.
+             * @param message ProbeConfigurationRequest message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeConfigurationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeConfigurationRequest message, length delimited. Does not implicitly {@link enoki.v1.ProbeConfigurationRequest.verify|verify} messages.
+             * @param message ProbeConfigurationRequest message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeConfigurationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeConfigurationRequest message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeConfigurationRequest
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeConfigurationRequest;
+
+            /**
+             * Decodes a ProbeConfigurationRequest message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeConfigurationRequest
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeConfigurationRequest;
+
+            /**
+             * Verifies a ProbeConfigurationRequest message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeConfigurationRequest message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeConfigurationRequest
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeConfigurationRequest;
+
+            /**
+             * Creates a plain object from a ProbeConfigurationRequest message. Also converts values to other types if specified.
+             * @param message ProbeConfigurationRequest
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeConfigurationRequest, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeConfigurationRequest to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeConfigurationRequest
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeConfigurationResponse. */
+        interface IProbeConfigurationResponse {
+
+            /** ProbeConfigurationResponse version */
+            version?: (string|null);
+
+            /** ProbeConfigurationResponse metricsCollectionIntervalSeconds */
+            metricsCollectionIntervalSeconds?: (number|null);
+
+            /** ProbeConfigurationResponse enabledCollectorIds */
+            enabledCollectorIds?: (string[]|null);
+        }
+
+        /** Represents a ProbeConfigurationResponse. */
+        class ProbeConfigurationResponse implements IProbeConfigurationResponse {
+
+            /**
+             * Constructs a new ProbeConfigurationResponse.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeConfigurationResponse);
+
+            /** ProbeConfigurationResponse version. */
+            public version: string;
+
+            /** ProbeConfigurationResponse metricsCollectionIntervalSeconds. */
+            public metricsCollectionIntervalSeconds: number;
+
+            /** ProbeConfigurationResponse enabledCollectorIds. */
+            public enabledCollectorIds: string[];
+
+            /**
+             * Creates a new ProbeConfigurationResponse instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeConfigurationResponse instance
+             */
+            public static create(properties?: enoki.v1.IProbeConfigurationResponse): enoki.v1.ProbeConfigurationResponse;
+
+            /**
+             * Encodes the specified ProbeConfigurationResponse message. Does not implicitly {@link enoki.v1.ProbeConfigurationResponse.verify|verify} messages.
+             * @param message ProbeConfigurationResponse message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeConfigurationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeConfigurationResponse message, length delimited. Does not implicitly {@link enoki.v1.ProbeConfigurationResponse.verify|verify} messages.
+             * @param message ProbeConfigurationResponse message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeConfigurationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeConfigurationResponse message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeConfigurationResponse
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeConfigurationResponse;
+
+            /**
+             * Decodes a ProbeConfigurationResponse message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeConfigurationResponse
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeConfigurationResponse;
+
+            /**
+             * Verifies a ProbeConfigurationResponse message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeConfigurationResponse message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeConfigurationResponse
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeConfigurationResponse;
+
+            /**
+             * Creates a plain object from a ProbeConfigurationResponse message. Also converts values to other types if specified.
+             * @param message ProbeConfigurationResponse
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeConfigurationResponse, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeConfigurationResponse to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeConfigurationResponse
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
         /** Properties of an Inventory. */
         interface IInventory {
 
@@ -543,6 +1366,9 @@ export namespace enoki {
 
             /** OfficialCollectorCapabilities diskHealth */
             diskHealth?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities inventory */
+            inventory?: (enoki.v1.ICollectorAvailability|null);
         }
 
         /** Represents an OfficialCollectorCapabilities. */
@@ -580,6 +1406,9 @@ export namespace enoki {
 
             /** OfficialCollectorCapabilities diskHealth. */
             public diskHealth?: (enoki.v1.ICollectorAvailability|null);
+
+            /** OfficialCollectorCapabilities inventory. */
+            public inventory?: (enoki.v1.ICollectorAvailability|null);
 
             /**
              * Creates a new OfficialCollectorCapabilities instance using the specified properties.
@@ -750,496 +1579,6 @@ export namespace enoki {
 
             /**
              * Gets the default type url for CollectorCapabilities
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a ProbeRegistrationRequest. */
-        interface IProbeRegistrationRequest {
-
-            /** ProbeRegistrationRequest enrollmentToken */
-            enrollmentToken?: (string|null);
-
-            /** ProbeRegistrationRequest inventory */
-            inventory?: (enoki.v1.IInventory|null);
-
-            /** ProbeRegistrationRequest probePublicKeyPem */
-            probePublicKeyPem?: (string|null);
-        }
-
-        /** Represents a ProbeRegistrationRequest. */
-        class ProbeRegistrationRequest implements IProbeRegistrationRequest {
-
-            /**
-             * Constructs a new ProbeRegistrationRequest.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeRegistrationRequest);
-
-            /** ProbeRegistrationRequest enrollmentToken. */
-            public enrollmentToken: string;
-
-            /** ProbeRegistrationRequest inventory. */
-            public inventory?: (enoki.v1.IInventory|null);
-
-            /** ProbeRegistrationRequest probePublicKeyPem. */
-            public probePublicKeyPem: string;
-
-            /**
-             * Creates a new ProbeRegistrationRequest instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeRegistrationRequest instance
-             */
-            public static create(properties?: enoki.v1.IProbeRegistrationRequest): enoki.v1.ProbeRegistrationRequest;
-
-            /**
-             * Encodes the specified ProbeRegistrationRequest message. Does not implicitly {@link enoki.v1.ProbeRegistrationRequest.verify|verify} messages.
-             * @param message ProbeRegistrationRequest message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeRegistrationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeRegistrationRequest message, length delimited. Does not implicitly {@link enoki.v1.ProbeRegistrationRequest.verify|verify} messages.
-             * @param message ProbeRegistrationRequest message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeRegistrationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeRegistrationRequest message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeRegistrationRequest
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeRegistrationRequest;
-
-            /**
-             * Decodes a ProbeRegistrationRequest message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeRegistrationRequest
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeRegistrationRequest;
-
-            /**
-             * Verifies a ProbeRegistrationRequest message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeRegistrationRequest message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeRegistrationRequest
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeRegistrationRequest;
-
-            /**
-             * Creates a plain object from a ProbeRegistrationRequest message. Also converts values to other types if specified.
-             * @param message ProbeRegistrationRequest
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeRegistrationRequest, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeRegistrationRequest to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeRegistrationRequest
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a ProbeRegistrationResponse. */
-        interface IProbeRegistrationResponse {
-
-            /** ProbeRegistrationResponse probeId */
-            probeId?: (string|null);
-
-            /** ProbeRegistrationResponse probeSecret */
-            probeSecret?: (string|null);
-
-            /** ProbeRegistrationResponse serverTimeMs */
-            serverTimeMs?: (Long|null);
-
-            /** ProbeRegistrationResponse initialConfiguration */
-            initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
-        }
-
-        /** Represents a ProbeRegistrationResponse. */
-        class ProbeRegistrationResponse implements IProbeRegistrationResponse {
-
-            /**
-             * Constructs a new ProbeRegistrationResponse.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeRegistrationResponse);
-
-            /** ProbeRegistrationResponse probeId. */
-            public probeId: string;
-
-            /** ProbeRegistrationResponse probeSecret. */
-            public probeSecret: string;
-
-            /** ProbeRegistrationResponse serverTimeMs. */
-            public serverTimeMs: Long;
-
-            /** ProbeRegistrationResponse initialConfiguration. */
-            public initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
-
-            /**
-             * Creates a new ProbeRegistrationResponse instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeRegistrationResponse instance
-             */
-            public static create(properties?: enoki.v1.IProbeRegistrationResponse): enoki.v1.ProbeRegistrationResponse;
-
-            /**
-             * Encodes the specified ProbeRegistrationResponse message. Does not implicitly {@link enoki.v1.ProbeRegistrationResponse.verify|verify} messages.
-             * @param message ProbeRegistrationResponse message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeRegistrationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeRegistrationResponse message, length delimited. Does not implicitly {@link enoki.v1.ProbeRegistrationResponse.verify|verify} messages.
-             * @param message ProbeRegistrationResponse message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeRegistrationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeRegistrationResponse message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeRegistrationResponse
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeRegistrationResponse;
-
-            /**
-             * Decodes a ProbeRegistrationResponse message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeRegistrationResponse
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeRegistrationResponse;
-
-            /**
-             * Verifies a ProbeRegistrationResponse message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeRegistrationResponse message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeRegistrationResponse
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeRegistrationResponse;
-
-            /**
-             * Creates a plain object from a ProbeRegistrationResponse message. Also converts values to other types if specified.
-             * @param message ProbeRegistrationResponse
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeRegistrationResponse, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeRegistrationResponse to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeRegistrationResponse
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a ProbeReportRequest. */
-        interface IProbeReportRequest {
-
-            /** ProbeReportRequest probeId */
-            probeId?: (string|null);
-
-            /** ProbeReportRequest bootId */
-            bootId?: (string|null);
-
-            /** ProbeReportRequest sequenceStart */
-            sequenceStart?: (Long|null);
-
-            /** ProbeReportRequest sequenceEnd */
-            sequenceEnd?: (Long|null);
-
-            /** ProbeReportRequest inventoryHash */
-            inventoryHash?: (string|null);
-
-            /** ProbeReportRequest probeConfigurationVersion */
-            probeConfigurationVersion?: (string|null);
-
-            /** ProbeReportRequest metrics */
-            metrics?: (enoki.v1.IMetricSample[]|null);
-
-            /** ProbeReportRequest inventory */
-            inventory?: (enoki.v1.IInventory|null);
-
-            /** ProbeReportRequest probeConfigurationError */
-            probeConfigurationError?: (enoki.v1.IProbeConfigurationError|null);
-
-            /** ProbeReportRequest operationAcknowledgements */
-            operationAcknowledgements?: (enoki.v1.IProbeOperationAcknowledgement[]|null);
-
-            /** ProbeReportRequest operationStatuses */
-            operationStatuses?: (enoki.v1.IProbeOperationStatus[]|null);
-        }
-
-        /** Represents a ProbeReportRequest. */
-        class ProbeReportRequest implements IProbeReportRequest {
-
-            /**
-             * Constructs a new ProbeReportRequest.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeReportRequest);
-
-            /** ProbeReportRequest probeId. */
-            public probeId: string;
-
-            /** ProbeReportRequest bootId. */
-            public bootId: string;
-
-            /** ProbeReportRequest sequenceStart. */
-            public sequenceStart: Long;
-
-            /** ProbeReportRequest sequenceEnd. */
-            public sequenceEnd: Long;
-
-            /** ProbeReportRequest inventoryHash. */
-            public inventoryHash: string;
-
-            /** ProbeReportRequest probeConfigurationVersion. */
-            public probeConfigurationVersion: string;
-
-            /** ProbeReportRequest metrics. */
-            public metrics: enoki.v1.IMetricSample[];
-
-            /** ProbeReportRequest inventory. */
-            public inventory?: (enoki.v1.IInventory|null);
-
-            /** ProbeReportRequest probeConfigurationError. */
-            public probeConfigurationError?: (enoki.v1.IProbeConfigurationError|null);
-
-            /** ProbeReportRequest operationAcknowledgements. */
-            public operationAcknowledgements: enoki.v1.IProbeOperationAcknowledgement[];
-
-            /** ProbeReportRequest operationStatuses. */
-            public operationStatuses: enoki.v1.IProbeOperationStatus[];
-
-            /**
-             * Creates a new ProbeReportRequest instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeReportRequest instance
-             */
-            public static create(properties?: enoki.v1.IProbeReportRequest): enoki.v1.ProbeReportRequest;
-
-            /**
-             * Encodes the specified ProbeReportRequest message. Does not implicitly {@link enoki.v1.ProbeReportRequest.verify|verify} messages.
-             * @param message ProbeReportRequest message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeReportRequest, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeReportRequest message, length delimited. Does not implicitly {@link enoki.v1.ProbeReportRequest.verify|verify} messages.
-             * @param message ProbeReportRequest message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeReportRequest, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeReportRequest message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeReportRequest
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeReportRequest;
-
-            /**
-             * Decodes a ProbeReportRequest message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeReportRequest
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeReportRequest;
-
-            /**
-             * Verifies a ProbeReportRequest message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeReportRequest message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeReportRequest
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeReportRequest;
-
-            /**
-             * Creates a plain object from a ProbeReportRequest message. Also converts values to other types if specified.
-             * @param message ProbeReportRequest
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeReportRequest, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeReportRequest to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeReportRequest
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a ProbeConfigurationError. */
-        interface IProbeConfigurationError {
-
-            /** ProbeConfigurationError failedVersion */
-            failedVersion?: (string|null);
-
-            /** ProbeConfigurationError errorCode */
-            errorCode?: (string|null);
-
-            /** ProbeConfigurationError message */
-            message?: (string|null);
-        }
-
-        /** Represents a ProbeConfigurationError. */
-        class ProbeConfigurationError implements IProbeConfigurationError {
-
-            /**
-             * Constructs a new ProbeConfigurationError.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeConfigurationError);
-
-            /** ProbeConfigurationError failedVersion. */
-            public failedVersion: string;
-
-            /** ProbeConfigurationError errorCode. */
-            public errorCode: string;
-
-            /** ProbeConfigurationError message. */
-            public message: string;
-
-            /**
-             * Creates a new ProbeConfigurationError instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeConfigurationError instance
-             */
-            public static create(properties?: enoki.v1.IProbeConfigurationError): enoki.v1.ProbeConfigurationError;
-
-            /**
-             * Encodes the specified ProbeConfigurationError message. Does not implicitly {@link enoki.v1.ProbeConfigurationError.verify|verify} messages.
-             * @param message ProbeConfigurationError message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeConfigurationError, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeConfigurationError message, length delimited. Does not implicitly {@link enoki.v1.ProbeConfigurationError.verify|verify} messages.
-             * @param message ProbeConfigurationError message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeConfigurationError, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeConfigurationError message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeConfigurationError
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeConfigurationError;
-
-            /**
-             * Decodes a ProbeConfigurationError message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeConfigurationError
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeConfigurationError;
-
-            /**
-             * Verifies a ProbeConfigurationError message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeConfigurationError message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeConfigurationError
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeConfigurationError;
-
-            /**
-             * Creates a plain object from a ProbeConfigurationError message. Also converts values to other types if specified.
-             * @param message ProbeConfigurationError
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeConfigurationError, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeConfigurationError to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeConfigurationError
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */
@@ -2061,127 +2400,6 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
-        /** Properties of a ProbeReportResponse. */
-        interface IProbeReportResponse {
-
-            /** ProbeReportResponse acceptedSequenceEnd */
-            acceptedSequenceEnd?: (Long|null);
-
-            /** ProbeReportResponse serverTimeMs */
-            serverTimeMs?: (Long|null);
-
-            /** ProbeReportResponse currentProbeConfigurationVersion */
-            currentProbeConfigurationVersion?: (string|null);
-
-            /** ProbeReportResponse inventoryNeeded */
-            inventoryNeeded?: (boolean|null);
-
-            /** ProbeReportResponse pendingOperation */
-            pendingOperation?: (enoki.v1.IProbeOperation|null);
-        }
-
-        /** Represents a ProbeReportResponse. */
-        class ProbeReportResponse implements IProbeReportResponse {
-
-            /**
-             * Constructs a new ProbeReportResponse.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeReportResponse);
-
-            /** ProbeReportResponse acceptedSequenceEnd. */
-            public acceptedSequenceEnd: Long;
-
-            /** ProbeReportResponse serverTimeMs. */
-            public serverTimeMs: Long;
-
-            /** ProbeReportResponse currentProbeConfigurationVersion. */
-            public currentProbeConfigurationVersion: string;
-
-            /** ProbeReportResponse inventoryNeeded. */
-            public inventoryNeeded: boolean;
-
-            /** ProbeReportResponse pendingOperation. */
-            public pendingOperation?: (enoki.v1.IProbeOperation|null);
-
-            /**
-             * Creates a new ProbeReportResponse instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeReportResponse instance
-             */
-            public static create(properties?: enoki.v1.IProbeReportResponse): enoki.v1.ProbeReportResponse;
-
-            /**
-             * Encodes the specified ProbeReportResponse message. Does not implicitly {@link enoki.v1.ProbeReportResponse.verify|verify} messages.
-             * @param message ProbeReportResponse message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeReportResponse, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeReportResponse message, length delimited. Does not implicitly {@link enoki.v1.ProbeReportResponse.verify|verify} messages.
-             * @param message ProbeReportResponse message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeReportResponse, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeReportResponse message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeReportResponse
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeReportResponse;
-
-            /**
-             * Decodes a ProbeReportResponse message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeReportResponse
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeReportResponse;
-
-            /**
-             * Verifies a ProbeReportResponse message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeReportResponse message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeReportResponse
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeReportResponse;
-
-            /**
-             * Creates a plain object from a ProbeReportResponse message. Also converts values to other types if specified.
-             * @param message ProbeReportResponse
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeReportResponse, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeReportResponse to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeReportResponse
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
         /** Properties of a ProbeOperation. */
         interface IProbeOperation {
 
@@ -2994,218 +3212,6 @@ export namespace enoki {
 
             /**
              * Gets the default type url for ProbeOperationFailed
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a ProbeConfigurationRequest. */
-        interface IProbeConfigurationRequest {
-
-            /** ProbeConfigurationRequest probeId */
-            probeId?: (string|null);
-
-            /** ProbeConfigurationRequest currentVersion */
-            currentVersion?: (string|null);
-        }
-
-        /** Represents a ProbeConfigurationRequest. */
-        class ProbeConfigurationRequest implements IProbeConfigurationRequest {
-
-            /**
-             * Constructs a new ProbeConfigurationRequest.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeConfigurationRequest);
-
-            /** ProbeConfigurationRequest probeId. */
-            public probeId: string;
-
-            /** ProbeConfigurationRequest currentVersion. */
-            public currentVersion: string;
-
-            /**
-             * Creates a new ProbeConfigurationRequest instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeConfigurationRequest instance
-             */
-            public static create(properties?: enoki.v1.IProbeConfigurationRequest): enoki.v1.ProbeConfigurationRequest;
-
-            /**
-             * Encodes the specified ProbeConfigurationRequest message. Does not implicitly {@link enoki.v1.ProbeConfigurationRequest.verify|verify} messages.
-             * @param message ProbeConfigurationRequest message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeConfigurationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeConfigurationRequest message, length delimited. Does not implicitly {@link enoki.v1.ProbeConfigurationRequest.verify|verify} messages.
-             * @param message ProbeConfigurationRequest message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeConfigurationRequest, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeConfigurationRequest message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeConfigurationRequest
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeConfigurationRequest;
-
-            /**
-             * Decodes a ProbeConfigurationRequest message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeConfigurationRequest
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeConfigurationRequest;
-
-            /**
-             * Verifies a ProbeConfigurationRequest message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeConfigurationRequest message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeConfigurationRequest
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeConfigurationRequest;
-
-            /**
-             * Creates a plain object from a ProbeConfigurationRequest message. Also converts values to other types if specified.
-             * @param message ProbeConfigurationRequest
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeConfigurationRequest, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeConfigurationRequest to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeConfigurationRequest
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a ProbeConfigurationResponse. */
-        interface IProbeConfigurationResponse {
-
-            /** ProbeConfigurationResponse version */
-            version?: (string|null);
-
-            /** ProbeConfigurationResponse metricsCollectionIntervalSeconds */
-            metricsCollectionIntervalSeconds?: (number|null);
-
-            /** ProbeConfigurationResponse enabledCollectorIds */
-            enabledCollectorIds?: (string[]|null);
-        }
-
-        /** Represents a ProbeConfigurationResponse. */
-        class ProbeConfigurationResponse implements IProbeConfigurationResponse {
-
-            /**
-             * Constructs a new ProbeConfigurationResponse.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IProbeConfigurationResponse);
-
-            /** ProbeConfigurationResponse version. */
-            public version: string;
-
-            /** ProbeConfigurationResponse metricsCollectionIntervalSeconds. */
-            public metricsCollectionIntervalSeconds: number;
-
-            /** ProbeConfigurationResponse enabledCollectorIds. */
-            public enabledCollectorIds: string[];
-
-            /**
-             * Creates a new ProbeConfigurationResponse instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns ProbeConfigurationResponse instance
-             */
-            public static create(properties?: enoki.v1.IProbeConfigurationResponse): enoki.v1.ProbeConfigurationResponse;
-
-            /**
-             * Encodes the specified ProbeConfigurationResponse message. Does not implicitly {@link enoki.v1.ProbeConfigurationResponse.verify|verify} messages.
-             * @param message ProbeConfigurationResponse message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IProbeConfigurationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified ProbeConfigurationResponse message, length delimited. Does not implicitly {@link enoki.v1.ProbeConfigurationResponse.verify|verify} messages.
-             * @param message ProbeConfigurationResponse message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IProbeConfigurationResponse, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a ProbeConfigurationResponse message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns ProbeConfigurationResponse
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeConfigurationResponse;
-
-            /**
-             * Decodes a ProbeConfigurationResponse message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns ProbeConfigurationResponse
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeConfigurationResponse;
-
-            /**
-             * Verifies a ProbeConfigurationResponse message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a ProbeConfigurationResponse message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns ProbeConfigurationResponse
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeConfigurationResponse;
-
-            /**
-             * Creates a plain object from a ProbeConfigurationResponse message. Also converts values to other types if specified.
-             * @param message ProbeConfigurationResponse
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.ProbeConfigurationResponse, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this ProbeConfigurationResponse to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for ProbeConfigurationResponse
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

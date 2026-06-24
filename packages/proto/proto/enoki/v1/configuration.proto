@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package enoki.v1;
+
+message ProbeConfigurationError {
+  string failed_version = 1;
+  string error_code = 2;
+  string message = 3;
+}
+
+message ProbeConfigurationRequest {
+  string probe_id = 1;
+  string current_version = 2;
+}
+
+message ProbeConfigurationResponse {
+  string version = 1;
+  uint32 metrics_collection_interval_seconds = 2;
+  repeated string enabled_collector_ids = 10;
+
+  reserved 3, 4 to 9;
+  reserved "reporting_batch_interval_seconds", "collect_cpu", "collect_memory", "collect_disk", "collect_network", "collect_load", "collect_uptime";
+}

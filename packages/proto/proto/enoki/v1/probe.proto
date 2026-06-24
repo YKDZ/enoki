@@ -2,57 +2,10 @@ syntax = "proto3";
 
 package enoki.v1;
 
-message Inventory {
-  string hostname = 1;
-  string os = 2;
-  string kernel = 3;
-  string architecture = 4;
-  uint32 cpu_count = 5;
-  uint64 memory_total_bytes = 6;
-  repeated FilesystemInventory filesystems = 7;
-  repeated NetworkInterfaceInventory network_interfaces = 8;
-  string probe_version = 9;
-  string cpu_model = 10;
-  uint32 process_count = 11;
-  uint32 thread_count = 12;
-  uint64 cpu_cache_l3_bytes = 13;
-  uint32 cpu_base_frequency_mhz = 14;
-  uint32 cpu_socket_count = 15;
-  uint32 cpu_physical_count = 16;
-  CollectorCapabilities collector_capabilities = 17;
-}
-
-message FilesystemInventory {
-  string mount_point = 1;
-  string filesystem_type = 2;
-  uint64 total_bytes = 3;
-  uint64 available_bytes = 4;
-}
-
-message NetworkInterfaceInventory {
-  string name = 1;
-  repeated string addresses = 2;
-}
-
-message CollectorAvailability {
-  bool available = 1;
-}
-
-message OfficialCollectorCapabilities {
-  CollectorAvailability cpu = 1;
-  CollectorAvailability memory = 2;
-  CollectorAvailability disk = 3;
-  CollectorAvailability network = 4;
-  CollectorAvailability load = 5;
-  CollectorAvailability uptime = 6;
-  CollectorAvailability temperature = 7;
-  CollectorAvailability battery = 8;
-  CollectorAvailability disk_health = 9;
-}
-
-message CollectorCapabilities {
-  OfficialCollectorCapabilities official = 1;
-}
+import "enoki/v1/configuration.proto";
+import "enoki/v1/collectors/inventory.proto";
+import "enoki/v1/metrics.proto";
+import "enoki/v1/operations.proto";
 
 message ProbeRegistrationRequest {
   string enrollment_token = 1;
@@ -81,147 +34,10 @@ message ProbeReportRequest {
   repeated ProbeOperationStatus operation_statuses = 11;
 }
 
-message ProbeConfigurationError {
-  string failed_version = 1;
-  string error_code = 2;
-  string message = 3;
-}
-
-message MetricSample {
-  uint64 sequence = 1;
-  int64 collected_at_ms = 2;
-  optional double cpu_percent = 3;
-  optional uint64 memory_used_bytes = 4;
-  optional double load_1 = 5;
-  optional double load_5 = 6;
-  optional double load_15 = 7;
-  optional uint64 uptime_seconds = 8;
-  repeated DiskUsageMetric disks = 9;
-  repeated NetworkInterfaceMetric network_interfaces = 10;
-  repeated CpuCoreMetric cpu_cores = 11;
-  optional uint64 memory_total_bytes = 12;
-  optional double cpu_user_percent = 13;
-  optional double cpu_system_percent = 14;
-  optional double cpu_iowait_percent = 15;
-  optional double cpu_steal_percent = 16;
-  optional double cpu_idle_percent = 17;
-  optional uint64 memory_cache_bytes = 18;
-  optional uint64 swap_total_bytes = 19;
-  optional uint64 swap_used_bytes = 20;
-  optional double temperature_celsius = 21;
-  optional uint32 battery_percent = 22;
-  optional string battery_state = 23;
-  repeated DiskHealthMetric disk_health = 24;
-}
-
-message CpuCoreMetric {
-  string name = 1;
-  uint64 user = 2;
-  uint64 nice = 3;
-  uint64 system = 4;
-  uint64 idle = 5;
-  uint64 iowait = 6;
-  uint64 irq = 7;
-  uint64 softirq = 8;
-  uint64 steal = 9;
-  double usage_percent = 10;
-}
-
-message DiskUsageMetric {
-  string mount_point = 1;
-  string filesystem_type = 2;
-  uint64 total_bytes = 3;
-  uint64 used_bytes = 4;
-  uint64 available_bytes = 5;
-  uint64 read_bytes_delta = 6;
-  uint64 write_bytes_delta = 7;
-  optional double io_utilization_percent = 8;
-  optional double read_await_ms = 9;
-  optional double write_await_ms = 10;
-  optional double weighted_io_percent = 11;
-}
-
-message DiskHealthMetric {
-  string device_name = 1;
-  string model = 2;
-  string serial_number = 3;
-  bool passed = 4;
-  optional double temperature_celsius = 5;
-  optional uint64 power_on_hours = 6;
-  optional uint64 total_bytes = 7;
-  optional uint64 used_bytes = 8;
-  string usage_mount_point = 9;
-  string role = 10;
-}
-
-message NetworkInterfaceMetric {
-  string name = 1;
-  uint64 rx_bytes = 2;
-  uint64 tx_bytes = 3;
-  uint64 rx_bytes_delta = 4;
-  uint64 tx_bytes_delta = 5;
-}
-
 message ProbeReportResponse {
   uint64 accepted_sequence_end = 1;
   int64 server_time_ms = 2;
   string current_probe_configuration_version = 3;
   bool inventory_needed = 4;
   ProbeOperation pending_operation = 5;
-}
-
-message ProbeOperation {
-  string id = 1;
-
-  oneof operation {
-    ProbeUpgradeOperation probe_upgrade = 2;
-    ProbeUninstallOperation probe_uninstall = 3;
-  }
-}
-
-message ProbeUpgradeOperation {
-  string current_probe_version = 1;
-  string target_probe_version = 2;
-  string operation_token = 3;
-}
-
-message ProbeUninstallOperation {
-  string operation_token = 1;
-}
-
-message ProbeOperationAcknowledgement {
-  string operation_id = 1;
-}
-
-message ProbeOperationStatus {
-  string operation_id = 1;
-
-  oneof status {
-    ProbeOperationRunning running = 2;
-    ProbeOperationFailed failed = 3;
-    ProbeOperationSucceeded succeeded = 4;
-  }
-}
-
-message ProbeOperationRunning {}
-
-message ProbeOperationSucceeded {}
-
-message ProbeOperationFailed {
-  string error_code = 1;
-  string message = 2;
-}
-
-message ProbeConfigurationRequest {
-  string probe_id = 1;
-  string current_version = 2;
-}
-
-message ProbeConfigurationResponse {
-  string version = 1;
-  uint32 metrics_collection_interval_seconds = 2;
-  repeated string enabled_collector_ids = 10;
-
-  reserved 3, 4 to 9;
-  reserved "reporting_batch_interval_seconds", "collect_cpu", "collect_memory", "collect_disk", "collect_network", "collect_load", "collect_uptime";
 }

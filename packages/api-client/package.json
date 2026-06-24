@@ -8,6 +8,11 @@
       "development": "./src/index.ts",
       "import": "./dist/index.js"
     },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "development": "./src/protocol.ts",
+      "import": "./dist/protocol.js"
+    },
     "./websocket": {
       "types": "./src/websocket.ts",
       "development": "./src/websocket.ts",
@@ -20,6 +25,7 @@
     "typecheck": "tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.typecheck.json"
   },
   "dependencies": {
+    "@enoki/proto": "workspace:*",
     "valibot": "^1.4.1"
   },
   "devDependencies": {

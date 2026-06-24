@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import type {
+  CollectorCapabilities,
+  CpuCoreMetric,
+  DiskHealthMetric,
+  DiskUsageMetric,
+  NetworkInterfaceDeltaMetric,
+} from "../src/protocol.js";
 import {
   parseWebSocketServerMessage,
   parseWebSocketClientMessage,
@@ -46,6 +53,57 @@ describe("WebSocket contracts", () => {
 
   it("exports the Valibot schema for shared runtime validation", () => {
     expect(webSocketClientMessageSchema).toBeDefined();
+  });
+
+  it("exports JSON metric types derived from the Probe protocol", () => {
+    const capabilities = {
+      official: {
+        diskHealth: {
+          available: true,
+        },
+        inventory: {
+          available: true,
+        },
+      },
+    } satisfies CollectorCapabilities;
+    const cpuCore = {
+      name: "cpu0",
+      usagePercent: 12.5,
+    } satisfies CpuCoreMetric;
+    const disk = {
+      availableBytes: 512,
+      filesystemType: "ext4",
+      mountPoint: "/",
+      readBytesDelta: 128,
+      totalBytes: 1024,
+      usedBytes: 512,
+      writeBytesDelta: 64,
+    } satisfies DiskUsageMetric;
+    const diskHealth = {
+      deviceName: "/dev/sda",
+      model: "Example SSD",
+      passed: true,
+      powerOnHours: 100,
+      role: "data",
+      serialNumber: "serial",
+      temperatureCelsius: 32,
+      totalBytes: 1024,
+      usageMountPoint: "/",
+      usedBytes: 512,
+    } satisfies DiskHealthMetric;
+    const networkInterface = {
+      name: "eth0",
+      rxBytesDelta: 1024,
+      txBytesDelta: 2048,
+    } satisfies NetworkInterfaceDeltaMetric;
+
+    expect({
+      capabilities,
+      cpuCore,
+      disk,
+      diskHealth,
+      networkInterface,
+    }).toBeDefined();
   });
 
   it("validates server Host summary messages", () => {

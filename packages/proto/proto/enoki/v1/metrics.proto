@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package enoki.v1;
+
+import "enoki/v1/collectors/cpu.proto";
+import "enoki/v1/collectors/disk.proto";
+import "enoki/v1/collectors/disk_health.proto";
+import "enoki/v1/collectors/network.proto";
+
+message MetricSample {
+  uint64 sequence = 1;
+  int64 collected_at_ms = 2;
+  optional double cpu_percent = 3;
+  optional uint64 memory_used_bytes = 4;
+  optional double load_1 = 5;
+  optional double load_5 = 6;
+  optional double load_15 = 7;
+  optional uint64 uptime_seconds = 8;
+  repeated DiskUsageMetric disks = 9;
+  repeated NetworkInterfaceMetric network_interfaces = 10;
+  repeated CpuCoreMetric cpu_cores = 11;
+  optional uint64 memory_total_bytes = 12;
+  optional double cpu_user_percent = 13;
+  optional double cpu_system_percent = 14;
+  optional double cpu_iowait_percent = 15;
+  optional double cpu_steal_percent = 16;
+  optional double cpu_idle_percent = 17;
+  optional uint64 memory_cache_bytes = 18;
+  optional uint64 swap_total_bytes = 19;
+  optional uint64 swap_used_bytes = 20;
+  optional double temperature_celsius = 21;
+  optional uint32 battery_percent = 22;
+  optional string battery_state = 23;
+  repeated DiskHealthMetric disk_health = 24;
+}

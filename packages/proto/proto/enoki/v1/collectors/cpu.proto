@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package enoki.v1;
+
+message CpuCoreMetric {
+  string name = 1;
+  uint64 user = 2;
+  uint64 nice = 3;
+  uint64 system = 4;
+  uint64 idle = 5;
+  uint64 iowait = 6;
+  uint64 irq = 7;
+  uint64 softirq = 8;
+  uint64 steal = 9;
+  double usage_percent = 10;
+}

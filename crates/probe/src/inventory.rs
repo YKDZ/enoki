@@ -221,6 +221,7 @@ fn official_collector_capabilities(
             disk_health: Some(CollectorAvailability {
                 available: disk_health_available(),
             }),
+            inventory: Some(CollectorAvailability { available: true }),
             load: Some(CollectorAvailability { available: true }),
             memory: Some(CollectorAvailability {
                 available: memory_total_bytes > 0,

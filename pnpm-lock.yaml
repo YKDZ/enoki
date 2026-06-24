@@ -353,6 +353,9 @@ importers:
 
   packages/api-client:
     dependencies:
+      '@enoki/proto':
+        specifier: workspace:*
+        version: link:../proto
       valibot:
         specifier: ^1.4.1
         version: 1.4.1(typescript@6.0.3)

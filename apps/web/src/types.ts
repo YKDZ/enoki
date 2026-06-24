@@ -1,3 +1,12 @@
+import type {
+  CollectorAvailability as ProtocolCollectorAvailability,
+  CollectorCapabilities as ProtocolCollectorCapabilities,
+  CpuCoreMetric as ProtocolCpuCoreMetric,
+  DiskHealthMetric as ProtocolDiskHealthMetric,
+  DiskUsageMetric as ProtocolDiskUsageMetric,
+  NetworkInterfaceDeltaMetric as ProtocolNetworkInterfaceDeltaMetric,
+} from "@enoki/api-client";
+
 export type SessionResponse = {
   authenticated: boolean;
 };
@@ -51,23 +60,9 @@ export type HostSummary = {
   system: string;
 };
 
-export type CollectorCapabilities = {
-  official?: {
-    battery?: CollectorAvailability;
-    cpu?: CollectorAvailability;
-    disk?: CollectorAvailability;
-    diskHealth?: CollectorAvailability;
-    load?: CollectorAvailability;
-    memory?: CollectorAvailability;
-    network?: CollectorAvailability;
-    temperature?: CollectorAvailability;
-    uptime?: CollectorAvailability;
-  };
-};
+export type CollectorCapabilities = ProtocolCollectorCapabilities;
 
-export type CollectorAvailability = {
-  available: boolean;
-};
+export type CollectorAvailability = ProtocolCollectorAvailability;
 
 export type HostsResponse = {
   hosts: HostSummary[];
@@ -102,10 +97,7 @@ export type HostMetricSample = {
   batteryPercent?: number | null;
   batteryState?: string | null;
   collectedAtMs: number;
-  cpuCores: Array<{
-    name: string;
-    usagePercent: number;
-  }>;
+  cpuCores: ProtocolCpuCoreMetric[];
   cpuIdlePercent?: number | null;
   cpuIowaitPercent?: number | null;
   cpuPercent: number | null;
@@ -115,29 +107,16 @@ export type HostMetricSample = {
   diskHealth?: DiskHealthMetric[];
   diskTotalBytes: number | null;
   diskUsedBytes: number | null;
-  disks: Array<{
-    availableBytes: number;
-    filesystemType: string;
-    ioUtilizationPercent?: number | null;
-    mountPoint: string;
-    readAwaitMs?: number | null;
-    readBytesDelta?: number;
-    totalBytes: number;
-    usedBytes: number;
-    weightedIoPercent?: number | null;
-    writeAwaitMs?: number | null;
-    writeBytesDelta?: number;
-  }>;
+  disks: ProtocolDiskUsageMetric[];
   memoryCacheBytes?: number | null;
   memoryTotalBytes: number | null;
   memoryUsedBytes: number | null;
-  networkInterfaces: Array<{
-    name: string;
-    rxBitsPerSecond: number | null;
-    rxBytesDelta: number;
-    txBitsPerSecond: number | null;
-    txBytesDelta: number;
-  }>;
+  networkInterfaces: Array<
+    ProtocolNetworkInterfaceDeltaMetric & {
+      rxBitsPerSecond: number | null;
+      txBitsPerSecond: number | null;
+    }
+  >;
   networkRxBitsPerSecond: number | null;
   networkRxBytesDelta: number | null;
   networkTxBitsPerSecond: number | null;
@@ -150,18 +129,7 @@ export type HostMetricSample = {
   uptimeSeconds: number | null;
 };
 
-export type DiskHealthMetric = {
-  deviceName: string;
-  model: string | null;
-  passed: boolean;
-  powerOnHours: number | null;
-  role: string | null;
-  serialNumber: string | null;
-  temperatureCelsius: number | null;
-  totalBytes: number | null;
-  usageMountPoint: string | null;
-  usedBytes: number | null;
-};
+export type DiskHealthMetric = ProtocolDiskHealthMetric;
 
 export type MetricsWindow = "1m" | "1h" | "6h" | "24h" | "7d";
 
