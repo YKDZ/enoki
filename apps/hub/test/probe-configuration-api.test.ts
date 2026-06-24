@@ -767,6 +767,56 @@ describe("Probe Configuration API", () => {
     database.close();
   });
 
+  it("rejects Host Profile as an Owner-configurable collector", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_045_000,
+    });
+    const ownerSession = await loginOwner(app);
+
+    const response = await app.request("/api/web/probe-configuration", {
+      body: JSON.stringify(
+        probeConfigurationInput({
+          enabledCollectorIds: [
+            ...defaultEnabledCollectorIds,
+            "official.host-profile",
+          ],
+        }),
+      ),
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerSession,
+      },
+      method: "PUT",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "unknown_collector_id",
+    });
+
+    const currentResponse = await app.request("/api/web/probe-configuration", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+
+    await expect(currentResponse.json()).resolves.toEqual({
+      configuration: expect.objectContaining({
+        enabledCollectorIds: [...defaultEnabledCollectorIds],
+        version: "default-v1",
+      }),
+    });
+
+    database.close();
+  });
+
   it("accepts one-second collection and reporting intervals", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

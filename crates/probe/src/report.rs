@@ -1,11 +1,10 @@
 use crate::{
+    collectors::HOST_PROFILE_COLLECTOR_ID,
     inventory::{host_profile_from_inventory, host_profile_hash, inventory_hash},
     protocol::enoki::v1::{
         HostProfileSnapshot, Inventory, MetricSample, ProbeReportRequest, Snapshot, snapshot,
     },
 };
-
-const HOST_PROFILE_COLLECTOR_ID: &str = "official.host-profile";
 
 pub trait HostProfileSnapshotSource {
     fn host_profile_snapshot(&self) -> HostProfileSnapshot;

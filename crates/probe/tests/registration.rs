@@ -155,6 +155,89 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
 }
 
+#[test]
+fn probe_registration_does_not_persist_required_host_profile_as_configurable_collector() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let response = ProbeRegistrationResponse {
+        initial_configuration: Some(ProbeConfigurationResponse {
+            enabled_collector_ids: vec![
+                "official.host-profile".to_string(),
+                "official.memory".to_string(),
+                "official.disk-health".to_string(),
+            ],
+            metrics_collection_interval_seconds: 5,
+            version: "default-v1".to_string(),
+        }),
+        probe_id: "probe_01".to_string(),
+        probe_secret: String::new(),
+        server_time_ms: 1_725_000_000_000,
+    }
+    .encode_to_vec();
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response,
+    };
+
+    register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path: bootstrap_config_path.clone(),
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("Probe registration succeeds");
+
+    let bootstrap_config =
+        fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
+    assert!(bootstrap_config.contains("enabled_collector_ids = ["));
+    assert!(!bootstrap_config.contains("\"official.host-profile\""));
+    assert!(bootstrap_config.contains("\"official.memory\""));
+    assert!(bootstrap_config.contains("\"official.disk-health\""));
+}
+
+#[test]
+fn probe_registration_drops_unknown_initial_collector_ids_from_bootstrap_config() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let response = ProbeRegistrationResponse {
+        initial_configuration: Some(ProbeConfigurationResponse {
+            enabled_collector_ids: vec![
+                "official.memory".to_string(),
+                "official.not-real".to_string(),
+            ],
+            metrics_collection_interval_seconds: 5,
+            version: "default-v1".to_string(),
+        }),
+        probe_id: "probe_01".to_string(),
+        probe_secret: String::new(),
+        server_time_ms: 1_725_000_000_000,
+    }
+    .encode_to_vec();
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response,
+    };
+
+    register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path: bootstrap_config_path.clone(),
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("Probe registration succeeds");
+
+    let bootstrap_config =
+        fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
+    assert!(bootstrap_config.contains("\"official.memory\""));
+    assert!(!bootstrap_config.contains("\"official.not-real\""));
+}
+
 fn all_collector_ids() -> Vec<String> {
     CollectorId::all_official()
         .iter()

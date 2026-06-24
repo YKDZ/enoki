@@ -10,6 +10,7 @@ use crate::registration::{
     register_probe,
 };
 use crate::{
+    collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
     inventory::collect_local_inventory,
     metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
@@ -29,8 +30,6 @@ use crate::{
 use prost::Message;
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
-const HOST_PROFILE_COLLECTOR_ID: &str = "official.host-profile";
-
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
     pub bootstrap_config_path: PathBuf,
@@ -76,7 +75,10 @@ impl From<RegistrationError> for ProbeRunError {
 
 impl From<ReportError> for ProbeRunError {
     fn from(error: ReportError) -> Self {
-        Self::Report(error)
+        match error {
+            ReportError::InvalidConfig(message) => Self::InvalidConfig(message),
+            error => Self::Report(error),
+        }
     }
 }
 
@@ -150,6 +152,7 @@ pub fn run_loop_control_from_environment(
 pub enum ReportError {
     Decode(String),
     Http(String),
+    InvalidConfig(&'static str),
     InvalidResponse(&'static str),
     InvalidSigningKey(String),
     Io(std::io::Error),
@@ -162,6 +165,9 @@ impl fmt::Display for ReportError {
                 write!(formatter, "failed to decode report response: {message}")
             }
             Self::Http(message) => write!(formatter, "report request failed: {message}"),
+            Self::InvalidConfig(message) => {
+                write!(formatter, "invalid Probe bootstrap config: {message}")
+            }
             Self::InvalidResponse(message) => {
                 write!(formatter, "invalid report response: {message}")
             }
@@ -179,6 +185,7 @@ impl Error for ReportError {
             Self::Io(error) => Some(error),
             Self::Decode(_)
             | Self::Http(_)
+            | Self::InvalidConfig(_)
             | Self::InvalidResponse(_)
             | Self::InvalidSigningKey(_) => None,
         }
@@ -371,7 +378,7 @@ fn run_reporting_loop(
     let boot_id = new_boot_id();
     let local_operation_statuses = read_local_operation_statuses(bootstrap_config);
     let mut active_configuration =
-        ActiveProbeConfiguration::from_bootstrap(bootstrap_config, probe_configuration_version);
+        ActiveProbeConfiguration::from_bootstrap(bootstrap_config, probe_configuration_version)?;
     let mut pending_configuration_error = None;
     let mut sequence = 1;
     let mut reports_sent = 0;
@@ -1042,19 +1049,22 @@ struct ActiveProbeConfiguration {
 }
 
 impl ActiveProbeConfiguration {
-    fn from_bootstrap(bootstrap_config: &BootstrapConfig, version: &str) -> Self {
+    fn from_bootstrap(
+        bootstrap_config: &BootstrapConfig,
+        version: &str,
+    ) -> Result<Self, ReportError> {
         let metrics_collection_interval = bootstrap_config
             .metrics_collection_interval_seconds
             .unwrap_or(default_metrics_collection_interval_seconds());
         let reporting_batch_interval =
             derived_reporting_batch_interval_seconds(metrics_collection_interval);
 
-        Self {
+        Ok(Self {
             metrics_collection_interval: Duration::from_secs(metrics_collection_interval),
-            metrics_config: bootstrap_config.metrics_collection_config(),
+            metrics_config: bootstrap_config.metrics_collection_config()?,
             reporting_interval: Duration::from_secs(reporting_batch_interval),
             version: version.to_string(),
-        }
+        })
     }
 
     fn try_from_response(configuration: ProbeConfigurationResponse) -> Result<Self, &'static str> {
@@ -1109,11 +1119,11 @@ impl BootstrapConfig {
                 .is_some_and(|value| !value.is_empty())
     }
 
-    fn metrics_collection_config(&self) -> MetricsCollectionConfig {
+    fn metrics_collection_config(&self) -> Result<MetricsCollectionConfig, ReportError> {
         match self.enabled_collector_ids.as_deref() {
             Some(collector_ids) => metrics_collection_config_from_config_ids(collector_ids)
-                .unwrap_or_else(|_| MetricsCollectionConfig::all_enabled()),
-            None => MetricsCollectionConfig::all_enabled(),
+                .map_err(ReportError::InvalidConfig),
+            None => Ok(MetricsCollectionConfig::all_enabled()),
         }
     }
 }
@@ -1124,6 +1134,9 @@ fn metrics_collection_config_from_config_ids(
     let mut enabled_collectors = Vec::with_capacity(collector_ids.len());
 
     for collector_id in collector_ids {
+        if !is_owner_configurable_collector_id(collector_id) {
+            return Err("unknown Probe Configuration collector ID");
+        }
         let collector_id = CollectorId::from_config_id(collector_id)
             .ok_or("unknown Probe Configuration collector ID")?;
         enabled_collectors.push(collector_id);

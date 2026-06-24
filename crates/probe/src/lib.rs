@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod collectors;
 pub mod inventory;
 pub mod metrics;
 pub mod privileged_collectors;

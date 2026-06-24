@@ -413,6 +413,9 @@ describe("Probe registration API", () => {
         ]),
       }),
     );
+    expect(decoded.initialConfiguration?.enabledCollectorIds).not.toContain(
+      "official.host-profile",
+    );
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
@@ -854,6 +857,9 @@ describe("Probe registration API", () => {
           "official.disk-health",
         ]),
       }),
+    );
+    expect(configuration.enabledCollectorIds).not.toContain(
+      "official.host-profile",
     );
 
     database.close();

@@ -10,7 +10,7 @@ use enoki_probe::{
         ProbeConfigurationRequest, ProbeConfigurationResponse, ProbeOperation,
         ProbeOperationStatus, ProbeRegistrationRequest, ProbeRegistrationResponse,
         ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation, probe_operation::Operation,
-        probe_operation_status::Status,
+        probe_operation_status::Status, snapshot,
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
@@ -210,6 +210,43 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
     assert!(!inventory.os.is_empty());
     assert!(!request.inventory_hash.is_empty());
     assert!(request.metrics.is_empty());
+}
+
+#[test]
+fn probe_run_rejects_host_profile_as_a_configurable_collector() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "enabled_collector_ids = [\"official.host-profile\"]",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport::default();
+    let mut sleeper = RecordingSleeper::default();
+
+    let error = run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(1),
+        },
+    )
+    .expect_err("Host Profile is not a configurable Metrics collector");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid Probe bootstrap config: unknown Probe Configuration collector ID",
+    );
+    assert!(transport.observed_report_bodies.is_empty());
 }
 
 #[test]
@@ -833,6 +870,22 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
         vec![(1, 1), (2, 2)],
     );
     assert!(reports.iter().all(|report| report.metrics.is_empty()));
+    assert!(reports[0].inventory.is_some());
+    let startup_host_profile = reports[0]
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.collector_id == "official.host-profile")
+        .expect("startup report includes Host Profile snapshot");
+    assert!(matches!(
+        startup_host_profile.payload,
+        Some(snapshot::Payload::HostProfile(_))
+    ));
+    let regular_host_profile = reports[1]
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.collector_id == "official.host-profile")
+        .expect("regular report includes Host Profile snapshot hash");
+    assert!(regular_host_profile.payload.is_none());
 }
 
 #[test]
@@ -997,6 +1050,86 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             .as_ref()
             .map(|error| error.failed_version.as_str()),
         Some("global-bad"),
+    );
+    assert_eq!(
+        reports[1]
+            .probe_configuration_error
+            .as_ref()
+            .map(|error| error.error_code.as_str()),
+        Some("invalid_probe_configuration"),
+    );
+}
+
+#[test]
+fn probe_run_rejects_host_profile_in_fetched_probe_configuration() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 7",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "global-host-profile".to_string(),
+                inventory_needed: false,
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1_725_000_000_000,
+            }
+            .encode_to_vec(),
+            ProbeConfigurationResponse {
+                enabled_collector_ids: vec!["official.host-profile".to_string()],
+                metrics_collection_interval_seconds: 10,
+                version: "global-host-profile".to_string(),
+            }
+            .encode_to_vec(),
+            ProbeReportResponse {
+                accepted_sequence_end: 2,
+                current_probe_configuration_version: "global-host-profile".to_string(),
+                inventory_needed: false,
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1_725_000_000_001,
+            }
+            .encode_to_vec(),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+    )
+    .expect("run loop keeps reporting after rejected Probe Configuration");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports[1].probe_configuration_version, "default-v1");
+    assert_eq!(
+        reports[1]
+            .probe_configuration_error
+            .as_ref()
+            .map(|error| error.failed_version.as_str()),
+        Some("global-host-profile"),
     );
     assert_eq!(
         reports[1]

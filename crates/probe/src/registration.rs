@@ -13,14 +13,13 @@ use rsa::{
 };
 
 use crate::{
+    collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
     inventory::{collect_local_inventory, host_profile_from_inventory, host_profile_hash},
     metrics::MetricsCollectionConfig,
     protocol::enoki::v1::{
         ProbeRegistrationRequest, ProbeRegistrationResponse, Snapshot, snapshot,
     },
 };
-
-const HOST_PROFILE_COLLECTOR_ID: &str = "official.host-profile";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRegistrationInput {
@@ -135,7 +134,9 @@ pub fn register_probe(
             enabled_collector_ids: response
                 .initial_configuration
                 .as_ref()
-                .map(|configuration| configuration.enabled_collector_ids.clone()),
+                .map(|configuration| {
+                    normalize_initial_enabled_collector_ids(&configuration.enabled_collector_ids)
+                }),
             hub_url: input.hub_url,
             metrics_collection_interval_seconds: response.initial_configuration.as_ref().and_then(
                 |configuration| {
@@ -344,6 +345,14 @@ fn default_enabled_collector_ids() -> Vec<String> {
         .enabled_collector_config_ids()
         .into_iter()
         .map(str::to_string)
+        .collect()
+}
+
+fn normalize_initial_enabled_collector_ids(collector_ids: &[String]) -> Vec<String> {
+    collector_ids
+        .iter()
+        .filter(|collector_id| is_owner_configurable_collector_id(collector_id))
+        .cloned()
         .collect()
 }
 
