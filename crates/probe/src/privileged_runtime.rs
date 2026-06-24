@@ -1,9 +1,11 @@
 use std::{
     error::Error,
     fmt,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,7 +252,7 @@ where
     }
 }
 
-pub struct LocalPrivilegedRuntimeRunner<P = SystemdPrivilegedRuntimeProcessRunner> {
+pub struct LocalPrivilegedRuntimeRunner<P = AutoPrivilegedRuntimeProcessRunner> {
     probe_binary: PathBuf,
     process_runner: P,
 }
@@ -287,6 +289,65 @@ where
                     PrivilegedRuntimeError::TimedOut { timeout }
                 }
             })
+    }
+}
+
+#[derive(Default)]
+pub struct AutoPrivilegedRuntimeProcessRunner {
+    direct_runner: DirectPrivilegedRuntimeProcessRunner,
+    systemd_runner: SystemdPrivilegedRuntimeProcessRunner,
+}
+
+impl PrivilegedRuntimeProcessRunner for AutoPrivilegedRuntimeProcessRunner {
+    fn run(
+        &mut self,
+        plan: &PrivilegedRuntimeExecutionPlan,
+    ) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
+        if systemd_runtime_available() {
+            return self.systemd_runner.run(plan);
+        }
+
+        self.direct_runner.run(plan)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectPrivilegedRuntimeProcessRunner {
+    network_isolator: PathBuf,
+}
+
+impl Default for DirectPrivilegedRuntimeProcessRunner {
+    fn default() -> Self {
+        Self {
+            network_isolator: PathBuf::from("unshare"),
+        }
+    }
+}
+
+impl DirectPrivilegedRuntimeProcessRunner {
+    pub fn new(network_isolator: impl Into<PathBuf>) -> Self {
+        Self {
+            network_isolator: network_isolator.into(),
+        }
+    }
+}
+
+impl PrivilegedRuntimeProcessRunner for DirectPrivilegedRuntimeProcessRunner {
+    fn run(
+        &mut self,
+        plan: &PrivilegedRuntimeExecutionPlan,
+    ) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
+        let mut command = match plan.network_boundary {
+            PrivilegedRuntimeNetworkBoundary::PrivateNetwork => {
+                let mut command = Command::new(&self.network_isolator);
+                command.arg("--net").arg(&plan.probe_binary);
+                command
+            }
+            PrivilegedRuntimeNetworkBoundary::HostNetwork => Command::new(&plan.probe_binary),
+        };
+        command.args(&plan.probe_args);
+
+        run_command_with_timeout(command, plan.timeout)
     }
 }
 
@@ -332,5 +393,65 @@ impl PrivilegedRuntimeProcessRunner for SystemdPrivilegedRuntimeProcessRunner {
             "privileged runtime child failed: {}",
             stderr.trim()
         )))
+    }
+}
+
+fn systemd_runtime_available() -> bool {
+    Path::new("/usr/bin/systemd-run").exists() && Path::new("/run/systemd/system").exists()
+}
+
+fn run_command_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            PrivilegedRuntimeProcessError::Failed(format!(
+                "privileged runtime boundary unavailable: {error}"
+            ))
+        })?;
+    let started_at = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+
+                if let Some(mut child_stdout) = child.stdout.take() {
+                    let _ = child_stdout.read_to_string(&mut stdout);
+                }
+                if let Some(mut child_stderr) = child.stderr.take() {
+                    let _ = child_stderr.read_to_string(&mut stderr);
+                }
+
+                if status.success() {
+                    return Ok(PrivilegedRuntimeProcessOutput { stdout });
+                }
+
+                return Err(PrivilegedRuntimeProcessError::Failed(format!(
+                    "privileged runtime child failed: {}",
+                    stderr.trim()
+                )));
+            }
+            Ok(None) => {
+                if started_at.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(PrivilegedRuntimeProcessError::TimedOut { timeout });
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(PrivilegedRuntimeProcessError::Failed(format!(
+                    "privileged runtime child failed: {error}"
+                )));
+            }
+        }
     }
 }

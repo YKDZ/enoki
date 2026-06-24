@@ -10,9 +10,9 @@ use crate::metrics::{
     CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
 };
 use crate::privileged_runtime::{
-    CollectorRuntimeProfile, DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE, LocalPrivilegedRuntimeRunner,
-    PrivilegedCollector, PrivilegedCollectorId, PrivilegedCollectorRuntime,
-    PrivilegedRuntimeRunner, SystemdPrivilegedRuntimeProcessRunner,
+    AutoPrivilegedRuntimeProcessRunner, CollectorRuntimeProfile,
+    DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE, LocalPrivilegedRuntimeRunner, PrivilegedCollector,
+    PrivilegedCollectorId, PrivilegedCollectorRuntime, PrivilegedRuntimeRunner,
 };
 use crate::protocol::enoki::v1::{DiskHealthMetric, MetricSample};
 
@@ -201,7 +201,7 @@ impl Default for PrivilegedDiskHealthMetricsRunner {
         let probe_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("enoki-probe"));
         Self::new(LocalPrivilegedRuntimeRunner::new(
             probe_binary,
-            SystemdPrivilegedRuntimeProcessRunner,
+            AutoPrivilegedRuntimeProcessRunner::default(),
         ))
     }
 }
