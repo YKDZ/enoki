@@ -3,7 +3,6 @@ import type {
   HostMetadataResponse,
   HostMetricSample,
   HostMetricsResponse,
-  HostProfileSnapshot,
   ProbeUpgradeRequestResponse,
   ProbeUpgradeStatus,
 } from "@enoki/api-client";
@@ -111,13 +110,11 @@ export function createHostRoutes(services: HostRouteServices) {
           version: null,
         };
 
-    const storedHostProfile =
-      services.snapshotCollectors?.hostProfile.read(hostId) ?? null;
     const hostProfile =
-      storedHostProfile ?? parseHostProfile(host.inventoryJson);
+      services.snapshotCollectors?.hostProfile.read(hostId) ?? null;
     const succeededOperation = succeedActiveProbeUpgradeRequestFromHostProfile({
       hostId,
-      hostProfile: storedHostProfile,
+      hostProfile,
       nowMs: now(),
       services,
     });
@@ -759,105 +756,6 @@ function requiredOperationId(operation: ProbeUpgradeRequest) {
   }
 
   return operation.id;
-}
-
-function parseHostProfile(
-  inventoryJson: string | null,
-): HostProfileSnapshot | null {
-  if (!inventoryJson) {
-    return null;
-  }
-
-  try {
-    const hostProfile = JSON.parse(inventoryJson) as Record<string, unknown>;
-
-    return {
-      architecture: stringField(hostProfile.architecture),
-      collectorCapabilities:
-        (hostProfile.collectorCapabilities as HostProfileSnapshot["collectorCapabilities"]) ??
-        null,
-      cpuBaseFrequencyMhz: nullableNumberField(hostProfile.cpuBaseFrequencyMhz),
-      cpuCacheL3Bytes: nullableNumberField(hostProfile.cpuCacheL3Bytes),
-      cpuCount: numberField(hostProfile.cpuCount),
-      cpuModel: nullableStringField(hostProfile.cpuModel),
-      cpuPhysicalCount: nullableNumberField(hostProfile.cpuPhysicalCount),
-      cpuSocketCount: nullableNumberField(hostProfile.cpuSocketCount),
-      filesystems: Array.isArray(hostProfile.filesystems)
-        ? hostProfile.filesystems.map((filesystem) =>
-            normalizeFilesystemProfile(filesystem),
-          )
-        : [],
-      hostname: stringField(hostProfile.hostname),
-      kernel: stringField(hostProfile.kernel),
-      memoryTotalBytes: numberField(hostProfile.memoryTotalBytes),
-      networkInterfaces: Array.isArray(hostProfile.networkInterfaces)
-        ? hostProfile.networkInterfaces.map((networkInterface) =>
-            normalizeNetworkInterfaceProfile(networkInterface),
-          )
-        : [],
-      os: stringField(hostProfile.os),
-      probeVersion: stringField(hostProfile.probeVersion),
-      processCount: nullableNumberField(hostProfile.processCount),
-      threadCount: nullableNumberField(hostProfile.threadCount),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function normalizeFilesystemProfile(value: unknown) {
-  const filesystem =
-    value && typeof value === "object"
-      ? (value as Record<string, unknown>)
-      : {};
-
-  return {
-    availableBytes: numberField(filesystem.availableBytes),
-    filesystemType: stringField(filesystem.filesystemType),
-    mountPoint: stringField(filesystem.mountPoint),
-    totalBytes: numberField(filesystem.totalBytes),
-  };
-}
-
-function normalizeNetworkInterfaceProfile(value: unknown) {
-  const networkInterface =
-    value && typeof value === "object"
-      ? (value as Record<string, unknown>)
-      : {};
-
-  return {
-    addresses: Array.isArray(networkInterface.addresses)
-      ? networkInterface.addresses.map((address) => String(address))
-      : [],
-    name: stringField(networkInterface.name),
-  };
-}
-
-function stringField(value: unknown) {
-  return typeof value === "string" ? value : "";
-}
-
-function nullableStringField(value: unknown) {
-  return typeof value === "string" && value ? value : null;
-}
-
-function numberField(value: unknown) {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? value : 0;
-  }
-
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-
-  return 0;
-}
-
-function nullableNumberField(value: unknown) {
-  const parsed = numberField(value);
-
-  return parsed > 0 ? parsed : null;
 }
 
 function warningList(host: {

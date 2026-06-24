@@ -552,12 +552,17 @@ describe("Probe report API", () => {
     expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([]);
 
     const storedHost = database.sqlite
-      .prepare("select hostname, inventory_hash from managed_hosts")
-      .get() as { hostname: string; inventory_hash: string };
+      .prepare("select hostname from managed_hosts")
+      .get() as { hostname: string };
     expect(storedHost).toEqual({
       hostname: "fixture-host",
-      inventory_hash: hostProfileCrossRuntimeCanonicalHash,
     });
+    const storedHostProfile = database.sqlite
+      .prepare("select snapshot_hash from official_host_profiles")
+      .get() as { snapshot_hash: string };
+    expect(storedHostProfile.snapshot_hash).toBe(
+      hostProfileCrossRuntimeCanonicalHash,
+    );
 
     database.close();
   });

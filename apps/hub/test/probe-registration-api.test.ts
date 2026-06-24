@@ -567,12 +567,17 @@ describe("Probe registration API", () => {
 
     expect(response.status).toBe(200);
     const storedHost = database.sqlite
-      .prepare("select hostname, inventory_hash from managed_hosts")
-      .get() as { hostname: string; inventory_hash: string };
+      .prepare("select hostname from managed_hosts")
+      .get() as { hostname: string };
     expect(storedHost).toEqual({
       hostname: "fixture-host",
-      inventory_hash: hostProfileCrossRuntimeCanonicalHash,
     });
+    const storedHostProfile = database.sqlite
+      .prepare("select snapshot_hash from official_host_profiles")
+      .get() as { snapshot_hash: string };
+    expect(storedHostProfile.snapshot_hash).toBe(
+      hostProfileCrossRuntimeCanonicalHash,
+    );
 
     database.close();
   });
@@ -996,28 +1001,37 @@ describe("Probe registration API", () => {
 
     const storedHost = database.sqlite
       .prepare(
-        "select hostname, probe_version, cpu_count, cpu_model, memory_total_bytes, inventory_hash, inventory_json from managed_hosts",
+        "select hostname, probe_version, cpu_count, cpu_model, memory_total_bytes from managed_hosts",
       )
       .get() as {
       cpu_count: number;
       cpu_model: string;
       hostname: string;
-      inventory_hash: string;
-      inventory_json: string;
       memory_total_bytes: number;
       probe_version: string;
     };
+    const storedHostId = database.sqlite
+      .prepare("select id from managed_hosts where hostname = ?")
+      .get("renamed-host") as { id: number };
     expect(storedHost).toEqual(
       expect.objectContaining({
         cpu_count: 4,
         cpu_model: "AMD EPYC 7B13",
         hostname: "renamed-host",
-        inventory_hash: changedHostProfileHash,
         memory_total_bytes: 4_294_967_296,
         probe_version: "0.2.0",
       }),
     );
-    expect(JSON.parse(storedHost.inventory_json)).toEqual(
+    const storedHostProfile = database.sqlite
+      .prepare(
+        "select snapshot_hash, payload_json from official_host_profiles where managed_host_id = ?",
+      )
+      .get(storedHostId.id) as {
+      payload_json: string;
+      snapshot_hash: string;
+    };
+    expect(storedHostProfile.snapshot_hash).toBe(changedHostProfileHash);
+    expect(JSON.parse(storedHostProfile.payload_json)).toEqual(
       expect.objectContaining({
         cpuModel: "AMD EPYC 7B13",
         hostname: "renamed-host",
@@ -1144,10 +1158,10 @@ describe("Probe registration API", () => {
     );
     expect(hashOnlyAck.requestedSnapshotCollectorIds).toEqual([]);
 
-    const storedHost = database.sqlite
-      .prepare("select inventory_hash from managed_hosts")
-      .get() as { inventory_hash: string };
-    expect(storedHost.inventory_hash).toBe(canonicalHash);
+    const storedHostProfile = database.sqlite
+      .prepare("select snapshot_hash from official_host_profiles")
+      .get() as { snapshot_hash: string };
+    expect(storedHostProfile.snapshot_hash).toBe(canonicalHash);
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {

@@ -152,13 +152,21 @@ describe("Host Profile storage adapter", () => {
     expect(
       database.sqlite
         .prepare(
-          "select hostname, inventory_hash, probe_version from managed_hosts where id = ?",
+          "select hostname, probe_version from managed_hosts where id = ?",
         )
         .get(host.id),
     ).toEqual({
       hostname: "dispatch-host",
-      inventory_hash: "hash-dispatch",
       probe_version: "0.5.0",
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select snapshot_hash from official_host_profiles where managed_host_id = ?",
+        )
+        .get(host.id),
+    ).toEqual({
+      snapshot_hash: "hash-dispatch",
     });
 
     database.close();

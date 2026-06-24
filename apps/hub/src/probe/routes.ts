@@ -144,8 +144,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       displayName,
       displayNameEdited: false,
       hostname: hostProfile.hostname || null,
-      inventoryHash: hostProfileHash,
-      inventoryJson: serializeHostProfile(hostProfile),
       kernel: hostProfile.kernel || null,
       lastClockSkewMs: null,
       lastReportAtMs: null,
@@ -260,8 +258,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const knownHostProfileSnapshot =
       services.snapshotCollectors
         ?.get(hostProfileCollectorId)
-        ?.hasSnapshot(host.id, reportedSnapshotHash) ??
-      reportedSnapshotHash === host.inventoryHash;
+        ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
     const requestedSnapshotCollectorIds =
       !reportedHostProfile && !knownHostProfileSnapshot
         ? [hostProfileCollectorId]
@@ -292,10 +289,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         ? reportedHostProfile.cpuModel?.trim() || null
         : undefined,
       hostname: reportedHostProfile?.hostname || undefined,
-      inventoryHash: reportedHostProfileHash ?? undefined,
-      inventoryJson: reportedHostProfile
-        ? serializeHostProfile(reportedHostProfile)
-        : undefined,
       kernel: reportedHostProfile?.kernel || undefined,
       lastClockSkewMs: clockSkew.lastDeltaMs,
       lastReportAtMs: reportReceivedAtMs,
@@ -1532,17 +1525,6 @@ function hashHostProfile(hostProfile: ProtoMessage) {
   ).finish();
 
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function serializeHostProfile(hostProfile: ProtoMessage) {
-  return JSON.stringify(
-    HostProfileSnapshotMessage.toObject(
-      HostProfileSnapshotMessage.create(stableHostProfile(hostProfile)),
-      {
-        longs: String,
-      },
-    ),
-  );
 }
 
 function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {

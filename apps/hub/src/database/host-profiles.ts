@@ -12,7 +12,6 @@ import { hosts, officialHostProfiles } from "./schema.js";
 type HostProfileDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 type ProtoHostProfileSnapshot = enoki.v1.IHostProfileSnapshot;
 
-const HostProfileSnapshotMessage = enoki.v1.HostProfileSnapshot as any;
 const hostProfileCollectorId = "official.host-profile";
 
 export type SnapshotCollectorStorageAdapter<Payload, View> = {
@@ -178,8 +177,6 @@ export function createHostProfileStorageAdapter(
             cpuCount: view.cpuCount,
             cpuModel: view.cpuModel?.trim() || null,
             hostname: view.hostname,
-            inventoryHash: input.snapshotHash,
-            inventoryJson: serializeHostProfile(input.payload),
             kernel: view.kernel,
             memoryTotalBytes: view.memoryTotalBytes,
             os: view.os,
@@ -254,17 +251,6 @@ function normalizeHostProfile(
     processCount: nullableNumberField(hostProfile.processCount),
     threadCount: nullableNumberField(hostProfile.threadCount),
   };
-}
-
-function serializeHostProfile(hostProfile: ProtoHostProfileSnapshot) {
-  return JSON.stringify(
-    HostProfileSnapshotMessage.toObject(
-      HostProfileSnapshotMessage.create(hostProfile),
-      {
-        longs: String,
-      },
-    ),
-  );
 }
 
 function parseJson<T>(json: string | null, fallback: T): T {

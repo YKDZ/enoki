@@ -159,8 +159,6 @@ export type HostRepository = {
       cpuCount?: number | null;
       cpuModel?: string | null;
       hostname?: string | null;
-      inventoryHash?: string | null;
-      inventoryJson?: string | null;
       kernel?: string | null;
       connectAddress?: string | null;
       clockSkewDetected?: boolean;
@@ -266,10 +264,7 @@ export function createHostRepository(database: HostDatabase): HostRepository {
               detected: host.clockSkewDetected,
               lastDeltaMs: host.lastClockSkewMs,
             },
-            collectorCapabilities: parseCollectorCapabilities(
-              hostProfile,
-              host.inventoryJson,
-            ),
+            collectorCapabilities: parseCollectorCapabilities(hostProfile),
             cpu: formatCpu(host.cpuCount),
             cpuModel: host.cpuModel,
             description: host.description,
@@ -357,8 +352,6 @@ export function createHostRepository(database: HostDatabase): HostRepository {
             ? input.hostname.trim()
             : undefined,
         hostname: input.hostname,
-        inventoryHash: input.inventoryHash,
-        inventoryJson: input.inventoryJson,
         kernel: input.kernel,
         lastClockSkewMs: input.lastClockSkewMs,
         lastReportAtMs: input.lastReportAtMs,
@@ -469,27 +462,12 @@ export function createHostRepository(database: HostDatabase): HostRepository {
 
 function parseCollectorCapabilities(
   hostProfile: HostProfileSnapshot | null,
-  hostProfileJson: string | null,
 ): CollectorCapabilities | null {
   if (hostProfile) {
     return normalizeCollectorCapabilities(hostProfile.collectorCapabilities);
   }
 
-  if (!hostProfileJson) {
-    return null;
-  }
-
-  try {
-    const hostProfileProjection = JSON.parse(hostProfileJson) as {
-      collectorCapabilities?: CollectorCapabilities;
-    };
-
-    return normalizeCollectorCapabilities(
-      hostProfileProjection.collectorCapabilities,
-    );
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function normalizeCollectorCapabilities(

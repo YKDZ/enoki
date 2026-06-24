@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "a65944df-816c-4403-ba8a-1934ceb4baf0",
-  "prevIds": ["1c44b2ec-9aaa-4fcd-b15d-a70c20d40fd5"],
+  "id": "bf92bc3e-a861-41bd-8d20-db553dfde317",
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
       "name": "audit_log",
@@ -17,19 +17,11 @@
       "entityType": "tables"
     },
     {
-      "name": "metric_cpu_cores",
-      "entityType": "tables"
-    },
-    {
-      "name": "metric_disks",
-      "entityType": "tables"
-    },
-    {
-      "name": "metric_network_interfaces",
-      "entityType": "tables"
-    },
-    {
       "name": "metric_samples",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_host_profiles",
       "entityType": "tables"
     },
     {
@@ -42,6 +34,10 @@
     },
     {
       "name": "probe_operations",
+      "entityType": "tables"
+    },
+    {
+      "name": "probe_request_nonces",
       "entityType": "tables"
     },
     {
@@ -230,6 +226,16 @@
     },
     {
       "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_public_key_pem",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
@@ -325,26 +331,6 @@
       "default": null,
       "generated": null,
       "name": "memory_total_bytes",
-      "entityType": "columns",
-      "table": "managed_hosts"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "inventory_hash",
-      "entityType": "columns",
-      "table": "managed_hosts"
-    },
-    {
-      "type": "text",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "inventory_json",
       "entityType": "columns",
       "table": "managed_hosts"
     },
@@ -487,326 +473,6 @@
       "name": "last_clock_skew_ms",
       "entityType": "columns",
       "table": "managed_hosts"
-    },
-    {
-      "type": "integer",
-      "notNull": false,
-      "autoincrement": true,
-      "default": null,
-      "generated": null,
-      "name": "id",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "metric_sample_id",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "name",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "user",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "nice",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "system",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "idle",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "iowait",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "irq",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "softirq",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "steal",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "real",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "usage_percent",
-      "entityType": "columns",
-      "table": "metric_cpu_cores"
-    },
-    {
-      "type": "integer",
-      "notNull": false,
-      "autoincrement": true,
-      "default": null,
-      "generated": null,
-      "name": "id",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "metric_sample_id",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "mount_point",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "filesystem_type",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "total_bytes",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "used_bytes",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "available_bytes",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": "0",
-      "generated": null,
-      "name": "read_bytes_delta",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": "0",
-      "generated": null,
-      "name": "write_bytes_delta",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "real",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "io_utilization_percent",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "real",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "read_await_ms",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "real",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "write_await_ms",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "real",
-      "notNull": false,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "weighted_io_percent",
-      "entityType": "columns",
-      "table": "metric_disks"
-    },
-    {
-      "type": "integer",
-      "notNull": false,
-      "autoincrement": true,
-      "default": null,
-      "generated": null,
-      "name": "id",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "metric_sample_id",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
-    },
-    {
-      "type": "text",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "name",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "rx_bytes",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "tx_bytes",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "rx_bytes_delta",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "tx_bytes_delta",
-      "entityType": "columns",
-      "table": "metric_network_interfaces"
     },
     {
       "type": "integer",
@@ -1101,6 +767,166 @@
     {
       "type": "integer",
       "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "snapshot_hash",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "payload_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "hostname",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "os",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kernel",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "architecture",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_count",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_model",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_total_bytes",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_version",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "collector_capabilities_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "filesystems_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "network_interfaces_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
       "autoincrement": false,
       "default": null,
       "generated": null,
@@ -1139,72 +965,12 @@
       "table": "probe_configuration_global_defaults"
     },
     {
-      "type": "integer",
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
       "generated": null,
-      "name": "reporting_batch_interval_seconds",
-      "entityType": "columns",
-      "table": "probe_configuration_global_defaults"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_cpu",
-      "entityType": "columns",
-      "table": "probe_configuration_global_defaults"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_memory",
-      "entityType": "columns",
-      "table": "probe_configuration_global_defaults"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_disk",
-      "entityType": "columns",
-      "table": "probe_configuration_global_defaults"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_network",
-      "entityType": "columns",
-      "table": "probe_configuration_global_defaults"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_load",
-      "entityType": "columns",
-      "table": "probe_configuration_global_defaults"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_uptime",
+      "name": "enabled_collector_ids_json",
       "entityType": "columns",
       "table": "probe_configuration_global_defaults"
     },
@@ -1249,72 +1015,12 @@
       "table": "probe_configuration_host_overrides"
     },
     {
-      "type": "integer",
+      "type": "text",
       "notNull": true,
       "autoincrement": false,
       "default": null,
       "generated": null,
-      "name": "reporting_batch_interval_seconds",
-      "entityType": "columns",
-      "table": "probe_configuration_host_overrides"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_cpu",
-      "entityType": "columns",
-      "table": "probe_configuration_host_overrides"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_memory",
-      "entityType": "columns",
-      "table": "probe_configuration_host_overrides"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_disk",
-      "entityType": "columns",
-      "table": "probe_configuration_host_overrides"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_network",
-      "entityType": "columns",
-      "table": "probe_configuration_host_overrides"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_load",
-      "entityType": "columns",
-      "table": "probe_configuration_host_overrides"
-    },
-    {
-      "type": "integer",
-      "notNull": true,
-      "autoincrement": false,
-      "default": null,
-      "generated": null,
-      "name": "collect_uptime",
+      "name": "enabled_collector_ids_json",
       "entityType": "columns",
       "table": "probe_configuration_host_overrides"
     },
@@ -1476,6 +1182,46 @@
       "generated": null,
       "name": "id",
       "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_id",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "nonce",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expires_at_ms",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
       "table": "report_observations"
     },
     {
@@ -1552,29 +1298,15 @@
     {
       "columns": ["id"],
       "nameExplicit": false,
-      "name": "metric_cpu_cores_pk",
-      "table": "metric_cpu_cores",
-      "entityType": "pks"
-    },
-    {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "metric_disks_pk",
-      "table": "metric_disks",
-      "entityType": "pks"
-    },
-    {
-      "columns": ["id"],
-      "nameExplicit": false,
-      "name": "metric_network_interfaces_pk",
-      "table": "metric_network_interfaces",
-      "entityType": "pks"
-    },
-    {
-      "columns": ["id"],
-      "nameExplicit": false,
       "name": "metric_samples_pk",
       "table": "metric_samples",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_host_profiles_pk",
+      "table": "official_host_profiles",
       "entityType": "pks"
     },
     {
@@ -1596,6 +1328,13 @@
       "nameExplicit": false,
       "name": "probe_operations_pk",
       "table": "probe_operations",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "probe_request_nonces_pk",
+      "table": "probe_request_nonces",
       "entityType": "pks"
     },
     {
@@ -1677,6 +1416,34 @@
         }
       ],
       "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_host_profiles_host_idx",
+      "entityType": "indexes",
+      "table": "official_host_profiles"
+    },
+    {
+      "columns": [
+        {
+          "value": "snapshot_hash",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "official_host_profiles_snapshot_hash_idx",
+      "entityType": "indexes",
+      "table": "official_host_profiles"
+    },
+    {
+      "columns": [
+        {
+          "value": "managed_host_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
       "where": "state in ('pending', 'accepted', 'running')",
       "origin": "manual",
       "name": "probe_operations_one_active_per_host_idx",
@@ -1726,6 +1493,38 @@
       "name": "probe_operations_latest_for_host_idx",
       "entityType": "indexes",
       "table": "probe_operations"
+    },
+    {
+      "columns": [
+        {
+          "value": "probe_id",
+          "isExpression": false
+        },
+        {
+          "value": "nonce",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "probe_request_nonces_probe_nonce_idx",
+      "entityType": "indexes",
+      "table": "probe_request_nonces"
+    },
+    {
+      "columns": [
+        {
+          "value": "expires_at_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "probe_request_nonces_expires_at_idx",
+      "entityType": "indexes",
+      "table": "probe_request_nonces"
     },
     {
       "columns": [

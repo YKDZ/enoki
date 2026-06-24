@@ -12,7 +12,7 @@ export default defineConfig({
     url: sqlitePath,
   },
   dialect: "sqlite",
-  out: "./drizzle",
-  schema: "./src/database/schema-core.ts",
+  out: "./drizzle-official-metrics",
+  schema: "./src/database/schema-official-metrics.ts",
   strict: true,
 });

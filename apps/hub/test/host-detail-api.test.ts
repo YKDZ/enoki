@@ -831,37 +831,6 @@ describe("Host detail API", () => {
       }),
     });
 
-    const persistedHostProfile = JSON.parse(
-      database.sqlite
-        .prepare("select inventory_json from managed_hosts where id = ?")
-        .get(hostId)!.inventory_json as string,
-    ) as {
-      collectorCapabilities: {
-        official: Record<string, unknown>;
-      };
-    };
-    persistedHostProfile.collectorCapabilities.official.diskHealth = {};
-    database.sqlite
-      .prepare("update managed_hosts set inventory_json = ? where id = ?")
-      .run(JSON.stringify(persistedHostProfile), hostId);
-
-    const protoJsonFalseCapabilityResponse = await app.request(
-      `/api/web/hosts/${hostId}`,
-      {
-        headers: { cookie: ownerSession },
-      },
-    );
-    expect(protoJsonFalseCapabilityResponse.status).toBe(200);
-    await expect(protoJsonFalseCapabilityResponse.json()).resolves.toEqual({
-      host: expect.objectContaining({
-        collectorCapabilities: expect.objectContaining({
-          official: expect.objectContaining({
-            disk: { available: false },
-          }),
-        }),
-      }),
-    });
-
     await reportHostProfile(app, registration, {
       diskAvailable: null,
       sequence: 2,
@@ -899,78 +868,6 @@ describe("Host detail API", () => {
       )
       .get() as { observations: number; samples: number };
     expect(counts).toEqual({ observations: 2, samples: 0 });
-
-    database.close();
-  });
-
-  it("uses stored Host Profile Collector Capability for Host summaries before legacy Host Profile JSON", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      now: () => 1_725_000_000_000,
-    });
-    const ownerSession = await loginOwner(app);
-    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
-    await registerProbe(app, enrollmentToken);
-    const hostId = await firstHostId(app, ownerSession);
-
-    database.snapshotCollectors.write({
-      collectorId: "official.host-profile",
-      hostId,
-      payload: {
-        architecture: "x86_64",
-        collectorCapabilities: {
-          official: {
-            disk: { available: true },
-          },
-        },
-        cpuCount: 2,
-        filesystems: [],
-        hostname: "managed-host-01",
-        kernel: "6.8.0",
-        memoryTotalBytes: 8_589_934_592,
-        networkInterfaces: [],
-        os: "linux",
-        probeVersion: "0.1.0",
-      },
-      snapshotHash: "host-profile-summary-hash",
-      updatedAtMs: 1_725_000_000_100,
-    });
-    database.sqlite
-      .prepare("update managed_hosts set inventory_json = ? where id = ?")
-      .run(
-        JSON.stringify({
-          collectorCapabilities: {
-            official: {
-              disk: { available: false },
-            },
-          },
-        }),
-        hostId,
-      );
-
-    const summaryResponse = await app.request("/api/web/hosts", {
-      headers: { cookie: ownerSession },
-    });
-
-    expect(summaryResponse.status).toBe(200);
-    await expect(summaryResponse.json()).resolves.toEqual({
-      hosts: [
-        expect.objectContaining({
-          collectorCapabilities: expect.objectContaining({
-            official: expect.objectContaining({
-              disk: { available: true },
-            }),
-          }),
-          id: hostId,
-        }),
-      ],
-    });
 
     database.close();
   });
@@ -1435,7 +1332,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("keeps an active Probe Upgrade Request running when only the legacy Host row changes", async () => {
+  it("keeps an active Probe Upgrade Request running when only the Host summary row changes", async () => {
     const database = await createTemporaryDatabase();
     const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
     tempRoots.push(assetRoot);
@@ -1485,30 +1382,8 @@ describe("Host detail API", () => {
         created.probeUpgradeRequest.id,
       );
     database.sqlite
-      .prepare(
-        "update managed_hosts set probe_version = ?, inventory_json = ? where id = ?",
-      )
-      .run(
-        "v0.2.0",
-        JSON.stringify({
-          architecture: "x86_64",
-          cpuCount: 2,
-          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-          filesystems: [],
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 8_589_934_592,
-          networkInterfaces: [
-            {
-              addresses: ["10.0.0.10"],
-              name: "eth0",
-            },
-          ],
-          os: "linux",
-          probeVersion: "v0.2.0",
-        }),
-        hostId,
-      );
+      .prepare("update managed_hosts set probe_version = ? where id = ?")
+      .run("v0.2.0", hostId);
 
     const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
       headers: {

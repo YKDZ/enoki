@@ -60,8 +60,6 @@ export const hosts = sqliteTable(
     cpuCount: integer(),
     cpuModel: text(),
     memoryTotalBytes: integer(),
-    inventoryHash: text(),
-    inventoryJson: text(),
     probeVersion: text(),
     connectAddress: text().notNull(),
     connectAddressEdited: integer({

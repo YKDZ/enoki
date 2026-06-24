@@ -1,0 +1,1084 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "07148abf-0e93-4371-9e3d-7c67761b3d60",
+  "prevIds": ["00000000-0000-0000-0000-000000000000"],
+  "ddl": [
+    {
+      "name": "metric_cpu_cores",
+      "entityType": "tables"
+    },
+    {
+      "name": "metric_disks",
+      "entityType": "tables"
+    },
+    {
+      "name": "metric_network_interfaces",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_cpu",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_disk_health",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_disk_summary",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_load",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_memory",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_network_summary",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_thermal_power",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_metric_uptime",
+      "entityType": "tables"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "name",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "user",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "nice",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "system",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "idle",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "iowait",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "irq",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "softirq",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "steal",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "real",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "usage_percent",
+      "entityType": "columns",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "mount_point",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "filesystem_type",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "total_bytes",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "used_bytes",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "available_bytes",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "read_bytes_delta",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "write_bytes_delta",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "io_utilization_percent",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_await_ms",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "write_await_ms",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "weighted_io_percent",
+      "entityType": "columns",
+      "table": "metric_disks"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "name",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "rx_bytes",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "tx_bytes",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "rx_bytes_delta",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "tx_bytes_delta",
+      "entityType": "columns",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_percent",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_user_percent",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_system_percent",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_iowait_percent",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_steal_percent",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_idle_percent",
+      "entityType": "columns",
+      "table": "official_metric_cpu"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "device_name",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "model",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "serial_number",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "passed",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "temperature_celsius",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "power_on_hours",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "total_bytes",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "used_bytes",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "usage_mount_point",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "role",
+      "entityType": "columns",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_disk_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_disk_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disk_used_bytes",
+      "entityType": "columns",
+      "table": "official_metric_disk_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disk_total_bytes",
+      "entityType": "columns",
+      "table": "official_metric_disk_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_load"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_load"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "load_1",
+      "entityType": "columns",
+      "table": "official_metric_load"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "load_5",
+      "entityType": "columns",
+      "table": "official_metric_load"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "load_15",
+      "entityType": "columns",
+      "table": "official_metric_load"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_used_bytes",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_total_bytes",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_cache_bytes",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "swap_total_bytes",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "swap_used_bytes",
+      "entityType": "columns",
+      "table": "official_metric_memory"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_network_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_network_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "network_rx_bytes_delta",
+      "entityType": "columns",
+      "table": "official_metric_network_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "network_tx_bytes_delta",
+      "entityType": "columns",
+      "table": "official_metric_network_summary"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "temperature_celsius",
+      "entityType": "columns",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "battery_percent",
+      "entityType": "columns",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "battery_state",
+      "entityType": "columns",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_metric_uptime"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metric_sample_id",
+      "entityType": "columns",
+      "table": "official_metric_uptime"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "uptime_seconds",
+      "entityType": "columns",
+      "table": "official_metric_uptime"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "metric_cpu_cores_pk",
+      "table": "metric_cpu_cores",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "metric_disks_pk",
+      "table": "metric_disks",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "metric_network_interfaces_pk",
+      "table": "metric_network_interfaces",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_cpu_pk",
+      "table": "official_metric_cpu",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_disk_health_pk",
+      "table": "official_metric_disk_health",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_disk_summary_pk",
+      "table": "official_metric_disk_summary",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_load_pk",
+      "table": "official_metric_load",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_memory_pk",
+      "table": "official_metric_memory",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_network_summary_pk",
+      "table": "official_metric_network_summary",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_thermal_power_pk",
+      "table": "official_metric_thermal_power",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_metric_uptime_pk",
+      "table": "official_metric_uptime",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metric_cpu_cores_sample_idx",
+      "entityType": "indexes",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metric_disks_sample_idx",
+      "entityType": "indexes",
+      "table": "metric_disks"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metric_network_interfaces_sample_idx",
+      "entityType": "indexes",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_cpu_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_cpu"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_disk_health_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_disk_summary_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_disk_summary"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_load_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_load"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_memory_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_memory"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_network_summary_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_network_summary"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_thermal_power_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "columns": [
+        {
+          "value": "metric_sample_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_metric_uptime_sample_idx",
+      "entityType": "indexes",
+      "table": "official_metric_uptime"
+    }
+  ],
+  "renames": []
+}
