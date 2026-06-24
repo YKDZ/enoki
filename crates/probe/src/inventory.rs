@@ -417,6 +417,28 @@ pub fn host_profile_hash(host_profile: &HostProfileSnapshot) -> String {
     hex_lower(&digest)
 }
 
+pub fn host_profile_from_inventory(inventory: Inventory) -> HostProfileSnapshot {
+    HostProfileSnapshot {
+        architecture: inventory.architecture,
+        collector_capabilities: inventory.collector_capabilities,
+        cpu_base_frequency_mhz: inventory.cpu_base_frequency_mhz,
+        cpu_cache_l3_bytes: inventory.cpu_cache_l3_bytes,
+        cpu_count: inventory.cpu_count,
+        cpu_model: inventory.cpu_model,
+        cpu_physical_count: inventory.cpu_physical_count,
+        cpu_socket_count: inventory.cpu_socket_count,
+        filesystems: inventory.filesystems,
+        hostname: inventory.hostname,
+        kernel: inventory.kernel,
+        memory_total_bytes: inventory.memory_total_bytes,
+        network_interfaces: inventory.network_interfaces,
+        os: inventory.os,
+        probe_version: inventory.probe_version,
+        process_count: inventory.process_count,
+        thread_count: inventory.thread_count,
+    }
+}
+
 pub fn stable_inventory(mut inventory: Inventory) -> Inventory {
     inventory.filesystems.sort_by(|left, right| {
         left.mount_point

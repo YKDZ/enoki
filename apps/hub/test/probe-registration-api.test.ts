@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
@@ -17,6 +18,8 @@ const tempRoots: string[] = [];
 const Inventory = root.enoki.v1.Inventory;
 const HostProfileSnapshot = root.enoki.v1.HostProfileSnapshot;
 const testProbePrivateKeys = new WeakMap<Response, string>();
+const hostProfileCrossRuntimeCanonicalHash =
+  "928378a1b8ba549304607f856b21f97c6ddc06f43bcbebe86f3dc5f9cb44bb06";
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-probe-db-"));
@@ -166,6 +169,72 @@ function sampleHostProfileSnapshot(
   };
 }
 
+function hostProfileCrossRuntimeCanonicalFixture(): root.enoki.v1.IHostProfileSnapshot {
+  return sampleHostProfileSnapshot({
+    collectorCapabilities: {
+      official: {
+        cpu: { available: true },
+        disk: { available: true },
+        load: { available: true },
+        memory: { available: true },
+        network: { available: true },
+        uptime: { available: true },
+      },
+    },
+    cpuBaseFrequencyMhz: 2_100,
+    cpuCacheL3Bytes: 36 * 1024 * 1024,
+    cpuPhysicalCount: 1,
+    cpuSocketCount: 1,
+    filesystems: [
+      {
+        availableBytes: 20_000,
+        filesystemType: "zfs",
+        mountPoint: "/a",
+        totalBytes: 70_000,
+      },
+      {
+        availableBytes: 30_000,
+        filesystemType: "ext4",
+        mountPoint: "/B",
+        totalBytes: 80_000,
+      },
+      {
+        availableBytes: 40_000,
+        filesystemType: "xfs",
+        mountPoint: "/😀",
+        totalBytes: 90_000,
+      },
+      {
+        availableBytes: 10_000,
+        filesystemType: "apfs",
+        mountPoint: "/B",
+        totalBytes: 60_000,
+      },
+    ],
+    hostname: "fixture-host",
+    processCount: 123,
+    networkInterfaces: [
+      {
+        addresses: ["fd00::2", "10.0.0.2", "10.0.0.2", "2001:db8::2"],
+        name: "eth1",
+      },
+      {
+        addresses: ["fe80::1"],
+        name: "Éth0",
+      },
+      {
+        addresses: ["192.0.2.10"],
+        name: "Eth0",
+      },
+      {
+        addresses: ["203.0.113.10"],
+        name: "😀0",
+      },
+    ],
+    threadCount: 456,
+  });
+}
+
 function hashStableInventory(inventory: root.enoki.v1.IInventory) {
   return createHash("sha256")
     .update(
@@ -199,22 +268,25 @@ function stableHostProfile<T extends root.enoki.v1.IHostProfileSnapshot>(
     ...hostProfile,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
-        String(left.mountPoint ?? "").localeCompare(
-          String(right.mountPoint ?? ""),
-        ) ||
-        String(left.filesystemType ?? "").localeCompare(
-          String(right.filesystemType ?? ""),
-        ),
+        compareProtoStrings(left.mountPoint, right.mountPoint) ||
+        compareProtoStrings(left.filesystemType, right.filesystemType),
     ),
     networkInterfaces: [...(hostProfile.networkInterfaces ?? [])]
       .map((networkInterface) => ({
         ...networkInterface,
-        addresses: [...new Set(networkInterface.addresses ?? [])].sort(),
+        addresses: [...new Set(networkInterface.addresses ?? [])].sort(
+          compareProtoStrings,
+        ),
       }))
-      .sort((left, right) =>
-        String(left.name ?? "").localeCompare(String(right.name ?? "")),
-      ),
+      .sort((left, right) => compareProtoStrings(left.name, right.name)),
   } as T;
+}
+
+function compareProtoStrings(left: unknown, right: unknown) {
+  return Buffer.compare(
+    Buffer.from(String(left ?? ""), "utf8"),
+    Buffer.from(String(right ?? ""), "utf8"),
+  );
 }
 
 async function withHubServer(
@@ -449,6 +521,54 @@ describe("Probe registration API", () => {
         probeVersion: "0.2.0",
         system: "linux 6.9.0 x86_64",
       }),
+    });
+
+    database.close();
+  });
+
+  it("accepts a Host Profile Snapshot Collector registration with the Rust canonical fixture hash", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+    const identity = createTestProbeIdentity();
+    const hostProfile = hostProfileCrossRuntimeCanonicalFixture();
+
+    const response = await app.request("/api/probe/register", {
+      body: RegistrationRequest.encode(
+        RegistrationRequest.create({
+          enrollmentToken,
+          probePublicKeyPem: identity.publicKeyPem,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: HostProfileSnapshot.create(hostProfile),
+              snapshotHash: hostProfileCrossRuntimeCanonicalHash,
+            },
+          ],
+        }),
+      ).finish(),
+      headers: {
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    const storedHost = database.sqlite
+      .prepare("select hostname, inventory_hash from managed_hosts")
+      .get() as { hostname: string; inventory_hash: string };
+    expect(storedHost).toEqual({
+      hostname: "fixture-host",
+      inventory_hash: hostProfileCrossRuntimeCanonicalHash,
     });
 
     database.close();

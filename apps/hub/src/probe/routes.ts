@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
   createHash,
   createPublicKey,
@@ -220,11 +221,20 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const suppliedInventoryHash = request.inventory
       ? hashInventory(request.inventory)
       : null;
+    const hostProfileSnapshot = hostProfileSnapshotFromReport(request);
 
     if (
       request.inventory &&
       request.inventoryHash &&
       request.inventoryHash !== suppliedInventoryHash
+    ) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
+
+    if (
+      hostProfileSnapshot?.hostProfile &&
+      hostProfileSnapshot.snapshotHash &&
+      hostProfileSnapshot.snapshotHash !== hostProfileSnapshot.canonicalHash
     ) {
       return probeJsonError("malformed_probe_report", 400);
     }
@@ -242,13 +252,36 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError(operationReportError, 400);
     }
 
-    const inventoryJson = request.inventory
-      ? serializeInventory(request.inventory)
-      : host.inventoryJson;
-    const inventoryHash = suppliedInventoryHash ?? host.inventoryHash;
+    const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
+    const reportedProfile = reportedHostProfile ?? request.inventory;
+    const inventoryJson = reportedHostProfile
+      ? serializeHostProfile(reportedHostProfile)
+      : request.inventory
+        ? serializeInventory(request.inventory)
+        : host.inventoryJson;
+    const inventoryHash = reportedHostProfile
+      ? hostProfileSnapshot?.canonicalHash
+      : request.inventory
+        ? suppliedInventoryHash
+        : host.inventoryHash;
+    const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
+    const acceptedLegacyInventoryReport =
+      Boolean(request.inventory) ||
+      (!hostProfileSnapshot &&
+        Boolean(request.inventoryHash) &&
+        request.inventoryHash === host.inventoryHash);
+    const requestedSnapshotCollectorIds =
+      !reportedHostProfile &&
+      !acceptedLegacyInventoryReport &&
+      (!reportedSnapshotHash || reportedSnapshotHash !== host.inventoryHash)
+        ? [hostProfileCollectorId]
+        : [];
     const inventoryNeeded =
-      !request.inventory &&
-      (!request.inventoryHash || request.inventoryHash !== host.inventoryHash);
+      requestedSnapshotCollectorIds.includes(hostProfileCollectorId) ||
+      (!request.inventory &&
+        !hostProfileSnapshot &&
+        (!request.inventoryHash ||
+          request.inventoryHash !== host.inventoryHash));
     const clockSkew = detectClockSkew(
       request.metrics ?? [],
       reportReceivedAtMs,
@@ -261,26 +294,24 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     );
 
     services.hosts.recordReport(host.id, {
-      architecture: request.inventory?.architecture || undefined,
+      architecture: reportedProfile?.architecture || undefined,
       clockSkewDetected: clockSkew.detected,
-      connectAddress: reportConnectAddress(request.inventory, host, observedIp),
-      cpuCount: request.inventory
-        ? request.inventory.cpuCount || null
+      connectAddress: reportConnectAddress(reportedProfile, host, observedIp),
+      cpuCount: reportedProfile ? reportedProfile.cpuCount || null : undefined,
+      cpuModel: reportedProfile
+        ? reportedProfile.cpuModel?.trim() || null
         : undefined,
-      cpuModel: request.inventory
-        ? request.inventory.cpuModel?.trim() || null
-        : undefined,
-      hostname: request.inventory?.hostname || undefined,
+      hostname: reportedProfile?.hostname || undefined,
       inventoryHash,
       inventoryJson,
-      kernel: request.inventory?.kernel || undefined,
+      kernel: reportedProfile?.kernel || undefined,
       lastClockSkewMs: clockSkew.lastDeltaMs,
       lastReportAtMs: reportReceivedAtMs,
-      memoryTotalBytes: request.inventory
-        ? unsignedNumber(request.inventory.memoryTotalBytes) || null
+      memoryTotalBytes: reportedProfile
+        ? unsignedNumber(reportedProfile.memoryTotalBytes) || null
         : undefined,
       observedIp,
-      os: request.inventory?.os || undefined,
+      os: reportedProfile?.os || undefined,
       probeConfigurationError: request.probeConfigurationError
         ? {
             errorCode: request.probeConfigurationError.errorCode ?? "",
@@ -289,12 +320,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             reportedAtMs: reportReceivedAtMs,
           }
         : null,
-      probeVersion: request.inventory?.probeVersion || undefined,
+      probeVersion: reportedProfile?.probeVersion || undefined,
     });
     markProbeUpgradeSucceededFromInventory({
       hostId: host.id,
       nowMs: reportReceivedAtMs,
-      probeVersion: request.inventory?.probeVersion,
+      probeVersion: reportedProfile?.probeVersion,
       services,
     });
 
@@ -459,6 +490,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       ReportResponse.create({
         acceptedSequenceEnd: validatedReport.sequenceEnd,
         inventoryNeeded,
+        requestedSnapshotCollectorIds,
         currentProbeConfigurationVersion:
           services.probeConfigurations.getEffectiveForHost(host.id)
             .configuration.version,
@@ -1216,6 +1248,28 @@ function hostProfileSnapshotFromRegistration(request: ProtoMessage) {
   };
 }
 
+function hostProfileSnapshotFromReport(request: ProtoMessage) {
+  const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(
+    (snapshot) => snapshot.collectorId === hostProfileCollectorId,
+  );
+
+  if (!snapshot) {
+    return null;
+  }
+
+  const snapshotHash =
+    typeof snapshot.snapshotHash === "string" && snapshot.snapshotHash.trim()
+      ? snapshot.snapshotHash
+      : null;
+  const hostProfile = snapshot.hostProfile ?? null;
+
+  return {
+    canonicalHash: hostProfile ? hashHostProfile(hostProfile) : null,
+    hostProfile,
+    snapshotHash,
+  };
+}
+
 const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
 const acceptedProbeRequestClockSkewMs = 5 * 60 * 1000;
 
@@ -1492,22 +1546,25 @@ function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
     ...hostProfile,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
-        String(left.mountPoint ?? "").localeCompare(
-          String(right.mountPoint ?? ""),
-        ) ||
-        String(left.filesystemType ?? "").localeCompare(
-          String(right.filesystemType ?? ""),
-        ),
+        compareProtoStrings(left.mountPoint, right.mountPoint) ||
+        compareProtoStrings(left.filesystemType, right.filesystemType),
     ),
     networkInterfaces: [...(hostProfile.networkInterfaces ?? [])]
       .map((networkInterface) => ({
         ...networkInterface,
-        addresses: [...new Set(networkInterface.addresses ?? [])].sort(),
+        addresses: [...new Set(networkInterface.addresses ?? [])].sort(
+          compareProtoStrings,
+        ),
       }))
-      .sort((left, right) =>
-        String(left.name ?? "").localeCompare(String(right.name ?? "")),
-      ),
+      .sort((left, right) => compareProtoStrings(left.name, right.name)),
   };
+}
+
+function compareProtoStrings(left: unknown, right: unknown) {
+  return Buffer.compare(
+    Buffer.from(String(left ?? ""), "utf8"),
+    Buffer.from(String(right ?? ""), "utf8"),
+  );
 }
 
 function validateReportEnvelope(request: ProtoMessage) {

@@ -107,6 +107,7 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
         probe_id: "probe-01".to_string(),
         sequence_end: 8,
         sequence_start: 7,
+        snapshots: Vec::new(),
     };
 
     let encoded = request.encode_to_vec();
@@ -193,6 +194,7 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
                 target_probe_version: "0.2.0".to_string(),
             })),
         }),
+        requested_snapshot_collector_ids: Vec::new(),
         server_time_ms: 1_710_000_005_000,
     };
 
@@ -231,6 +233,7 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
         probe_id: "probe-01".to_string(),
         sequence_end: 1,
         sequence_start: 1,
+        snapshots: Vec::new(),
     };
 
     let decoded_request = ProbeReportRequest::decode(request.encode_to_vec().as_slice())

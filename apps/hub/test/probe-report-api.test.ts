@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +22,8 @@ import {
 } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
+const hostProfileCrossRuntimeCanonicalHash =
+  "928378a1b8ba549304607f856b21f97c6ddc06f43bcbebe86f3dc5f9cb44bb06";
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-report-db-"));
@@ -102,6 +106,144 @@ async function registerProbe(
   };
 }
 
+function sampleHostProfileSnapshot(
+  overrides: Partial<root.enoki.v1.IHostProfileSnapshot> = {},
+): root.enoki.v1.IHostProfileSnapshot {
+  return {
+    architecture: "x86_64",
+    cpuCount: 2,
+    cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+    filesystems: [
+      {
+        availableBytes: 60_000,
+        filesystemType: "ext4",
+        mountPoint: "/",
+        totalBytes: 100_000,
+      },
+    ],
+    hostname: "managed-host-01",
+    kernel: "6.8.0",
+    memoryTotalBytes: 2_147_483_648,
+    networkInterfaces: [
+      {
+        addresses: ["10.0.0.10", "2001:db8::10"],
+        name: "eth0",
+      },
+    ],
+    os: "linux",
+    probeVersion: "0.1.0",
+    ...overrides,
+  };
+}
+
+function hostProfileCrossRuntimeCanonicalFixture(): root.enoki.v1.IHostProfileSnapshot {
+  return sampleHostProfileSnapshot({
+    collectorCapabilities: {
+      official: {
+        cpu: { available: true },
+        disk: { available: true },
+        load: { available: true },
+        memory: { available: true },
+        network: { available: true },
+        uptime: { available: true },
+      },
+    },
+    cpuBaseFrequencyMhz: 2_100,
+    cpuCacheL3Bytes: 36 * 1024 * 1024,
+    cpuPhysicalCount: 1,
+    cpuSocketCount: 1,
+    filesystems: [
+      {
+        availableBytes: 20_000,
+        filesystemType: "zfs",
+        mountPoint: "/a",
+        totalBytes: 70_000,
+      },
+      {
+        availableBytes: 30_000,
+        filesystemType: "ext4",
+        mountPoint: "/B",
+        totalBytes: 80_000,
+      },
+      {
+        availableBytes: 40_000,
+        filesystemType: "xfs",
+        mountPoint: "/😀",
+        totalBytes: 90_000,
+      },
+      {
+        availableBytes: 10_000,
+        filesystemType: "apfs",
+        mountPoint: "/B",
+        totalBytes: 60_000,
+      },
+    ],
+    hostname: "fixture-host",
+    networkInterfaces: [
+      {
+        addresses: ["fd00::2", "10.0.0.2", "10.0.0.2", "2001:db8::2"],
+        name: "eth1",
+      },
+      {
+        addresses: ["fe80::1"],
+        name: "Éth0",
+      },
+      {
+        addresses: ["192.0.2.10"],
+        name: "Eth0",
+      },
+      {
+        addresses: ["203.0.113.10"],
+        name: "😀0",
+      },
+    ],
+    processCount: 123,
+    threadCount: 456,
+  });
+}
+
+function hashStableHostProfile(
+  hostProfile: root.enoki.v1.IHostProfileSnapshot,
+) {
+  const HostProfileSnapshot = root.enoki.v1.HostProfileSnapshot;
+
+  return createHash("sha256")
+    .update(
+      HostProfileSnapshot.encode(
+        HostProfileSnapshot.create(stableHostProfile(hostProfile)),
+      ).finish(),
+    )
+    .digest("hex");
+}
+
+function stableHostProfile<T extends root.enoki.v1.IHostProfileSnapshot>(
+  hostProfile: T,
+): T {
+  return {
+    ...hostProfile,
+    filesystems: [...(hostProfile.filesystems ?? [])].sort(
+      (left, right) =>
+        compareProtoStrings(left.mountPoint, right.mountPoint) ||
+        compareProtoStrings(left.filesystemType, right.filesystemType),
+    ),
+    networkInterfaces: [...(hostProfile.networkInterfaces ?? [])]
+      .map((networkInterface) => ({
+        ...networkInterface,
+        addresses: [...new Set(networkInterface.addresses ?? [])].sort(
+          compareProtoStrings,
+        ),
+      }))
+      .sort((left, right) => compareProtoStrings(left.name, right.name)),
+  } as T;
+}
+
+function compareProtoStrings(left: unknown, right: unknown) {
+  return Buffer.compare(
+    Buffer.from(String(left ?? ""), "utf8"),
+    Buffer.from(String(right ?? ""), "utf8"),
+  );
+}
+
 function requestWithStreamBody(
   path: string,
   init: Omit<RequestInit, "body"> & {
@@ -121,6 +263,288 @@ describe("Probe report API", () => {
         .splice(0)
         .map((root) => rm(root, { force: true, recursive: true })),
     );
+  });
+
+  it("requests the full Host Profile snapshot when a hash-only snapshot report is unknown", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const changedHostProfile = sampleHostProfileSnapshot({
+      hostname: "snapshot-renamed-host",
+    });
+    const changedHash = hashStableHostProfile(changedHostProfile);
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-snapshot-hash-only",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            cpuPercent: 12.5,
+            sequence: 1,
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            snapshotHash: changedHash,
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(200);
+    const acknowledgement = ReportResponse.decode(
+      new Uint8Array(await response.arrayBuffer()),
+    );
+    expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([
+      "official.host-profile",
+    ]);
+
+    const metricsCount = database.sqlite
+      .prepare("select count(*) as count from metric_samples")
+      .get() as { count: number };
+    expect(metricsCount.count).toBe(1);
+
+    database.close();
+  });
+
+  it("stores a requested full Host Profile snapshot replay from a Probe report", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const changedHostProfile = sampleHostProfileSnapshot({
+      cpuCount: 4,
+      cpuModel: "AMD EPYC 7B13",
+      hostname: "snapshot-renamed-host",
+      memoryTotalBytes: 4_294_967_296,
+      probeVersion: "0.2.0",
+    });
+    const changedHash = hashStableHostProfile(changedHostProfile);
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-snapshot-full-replay",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: changedHostProfile,
+            snapshotHash: changedHash,
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(200);
+    const acknowledgement = ReportResponse.decode(
+      new Uint8Array(await response.arrayBuffer()),
+    );
+    expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([]);
+    expect(acknowledgement.inventoryNeeded).toBe(false);
+
+    const storedHost = database.sqlite
+      .prepare(
+        "select hostname, probe_version, cpu_count, cpu_model, memory_total_bytes, inventory_hash, inventory_json from managed_hosts",
+      )
+      .get() as {
+      cpu_count: number;
+      cpu_model: string;
+      hostname: string;
+      inventory_hash: string;
+      inventory_json: string;
+      memory_total_bytes: number;
+      probe_version: string;
+    };
+    expect(storedHost).toEqual(
+      expect.objectContaining({
+        cpu_count: 4,
+        cpu_model: "AMD EPYC 7B13",
+        hostname: "snapshot-renamed-host",
+        inventory_hash: changedHash,
+        memory_total_bytes: 4_294_967_296,
+        probe_version: "0.2.0",
+      }),
+    );
+    expect(JSON.parse(storedHost.inventory_json)).toEqual(
+      expect.objectContaining({
+        cpuModel: "AMD EPYC 7B13",
+        hostname: "snapshot-renamed-host",
+      }),
+    );
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          cpuModel: "AMD EPYC 7B13",
+          probeVersion: "0.2.0",
+        }),
+      ],
+    });
+
+    database.close();
+  });
+
+  it("stores a requested full Host Profile snapshot replay with the Rust canonical fixture hash", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const hostProfile = hostProfileCrossRuntimeCanonicalFixture();
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-cross-runtime-host-profile",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile,
+            snapshotHash: hostProfileCrossRuntimeCanonicalHash,
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(200);
+    const acknowledgement = ReportResponse.decode(
+      new Uint8Array(await response.arrayBuffer()),
+    );
+    expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([]);
+    expect(acknowledgement.inventoryNeeded).toBe(false);
+
+    const storedHost = database.sqlite
+      .prepare("select hostname, inventory_hash from managed_hosts")
+      .get() as { hostname: string; inventory_hash: string };
+    expect(storedHost).toEqual({
+      hostname: "fixture-host",
+      inventory_hash: hostProfileCrossRuntimeCanonicalHash,
+    });
+
+    database.close();
+  });
+
+  it("rejects full Host Profile snapshot reports when the supplied snapshot hash is not canonical", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const hostProfile = sampleHostProfileSnapshot({
+      hostname: "bad-snapshot-hash-host",
+    });
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-bad-host-profile-hash",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile,
+            snapshotHash: "not-the-canonical-host-profile-hash",
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          displayName: "managed-host-01",
+          lastReportAtMs: null,
+        }),
+      ],
+    });
+
+    database.close();
   });
 
   it("delivers the same pending Probe Operation in report responses until it is acknowledged", async () => {

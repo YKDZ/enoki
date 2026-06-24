@@ -160,6 +160,7 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
             current_probe_configuration_version: "default-v1".to_string(),
             inventory_needed: false,
             pending_operation: None,
+            requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
         }
         .encode_to_vec(),
@@ -244,6 +245,7 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
             current_probe_configuration_version: "default-v1".to_string(),
             inventory_needed: false,
             pending_operation: None,
+            requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
         }
         .encode_to_vec(),
@@ -311,6 +313,7 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
             current_probe_configuration_version: "default-v1".to_string(),
             inventory_needed: false,
             pending_operation: None,
+            requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
         }
         .encode_to_vec(),
@@ -364,6 +367,7 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
                 current_probe_configuration_version: "default-v1".to_string(),
                 inventory_needed: true,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -372,6 +376,7 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
                 current_probe_configuration_version: "default-v1".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -404,6 +409,57 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
     assert_eq!(follow_up.sequence_end, 2);
     assert!(follow_up.inventory.is_some());
     assert!(!follow_up.inventory_hash.is_empty());
+    assert!(follow_up.metrics.is_empty());
+}
+
+#[test]
+fn probe_run_sends_full_host_profile_snapshot_when_the_hub_requests_it() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response_requesting_host_profile_snapshot(1),
+            report_response(2, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+    )
+    .expect("startup report succeeds");
+
+    assert_eq!(transport.observed_report_bodies.len(), 2);
+    let follow_up = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
+        .expect("follow-up report request decodes");
+    assert_eq!(follow_up.sequence_start, 2);
+    assert_eq!(follow_up.sequence_end, 2);
+    assert_eq!(follow_up.snapshots.len(), 1);
+    assert_eq!(follow_up.snapshots[0].collector_id, "official.host-profile");
+    assert!(!follow_up.snapshots[0].snapshot_hash.is_empty());
+    assert!(matches!(
+        follow_up.snapshots[0].payload,
+        Some(enoki_probe::protocol::enoki::v1::snapshot::Payload::HostProfile(_))
+    ));
     assert!(follow_up.metrics.is_empty());
 }
 
@@ -801,6 +857,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -815,6 +872,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -889,6 +947,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
                 current_probe_configuration_version: "global-bad".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -903,6 +962,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
                 current_probe_configuration_version: "global-bad".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -969,6 +1029,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec()),
@@ -978,6 +1039,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec()),
@@ -1056,6 +1118,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
@@ -1065,6 +1128,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
                 current_probe_configuration_version: "global-2".to_string(),
                 inventory_needed: false,
                 pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
             }
             .encode_to_vec(),
@@ -1227,6 +1291,18 @@ fn report_response(accepted_sequence_end: u64, inventory_needed: bool) -> Vec<u8
     report_response_with_version(accepted_sequence_end, inventory_needed, "default-v1")
 }
 
+fn report_response_requesting_host_profile_snapshot(accepted_sequence_end: u64) -> Vec<u8> {
+    ProbeReportResponse {
+        accepted_sequence_end,
+        current_probe_configuration_version: "default-v1".to_string(),
+        inventory_needed: false,
+        pending_operation: None,
+        requested_snapshot_collector_ids: vec!["official.host-profile".to_string()],
+        server_time_ms: 1_725_000_000_000,
+    }
+    .encode_to_vec()
+}
+
 fn report_response_with_version(
     accepted_sequence_end: u64,
     inventory_needed: bool,
@@ -1237,6 +1313,7 @@ fn report_response_with_version(
         current_probe_configuration_version: version.to_string(),
         inventory_needed,
         pending_operation: None,
+        requested_snapshot_collector_ids: Vec::new(),
         server_time_ms: 1_725_000_000_000,
     }
     .encode_to_vec()
@@ -1259,6 +1336,7 @@ fn report_response_with_operation(
                 target_probe_version: target_probe_version.to_string(),
             })),
         }),
+        requested_snapshot_collector_ids: Vec::new(),
         server_time_ms: 1_725_000_000_000,
     }
     .encode_to_vec()

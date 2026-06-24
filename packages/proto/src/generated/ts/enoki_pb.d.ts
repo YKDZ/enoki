@@ -271,6 +271,9 @@ export namespace enoki {
 
             /** ProbeReportRequest operationStatuses */
             operationStatuses?: (enoki.v1.IProbeOperationStatus[]|null);
+
+            /** ProbeReportRequest snapshots */
+            snapshots?: (enoki.v1.ISnapshot[]|null);
         }
 
         /** Represents a ProbeReportRequest. */
@@ -314,6 +317,9 @@ export namespace enoki {
 
             /** ProbeReportRequest operationStatuses. */
             public operationStatuses: enoki.v1.IProbeOperationStatus[];
+
+            /** ProbeReportRequest snapshots. */
+            public snapshots: enoki.v1.ISnapshot[];
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.
@@ -410,6 +416,9 @@ export namespace enoki {
 
             /** ProbeReportResponse pendingOperation */
             pendingOperation?: (enoki.v1.IProbeOperation|null);
+
+            /** ProbeReportResponse requestedSnapshotCollectorIds */
+            requestedSnapshotCollectorIds?: (string[]|null);
         }
 
         /** Represents a ProbeReportResponse. */
@@ -435,6 +444,9 @@ export namespace enoki {
 
             /** ProbeReportResponse pendingOperation. */
             public pendingOperation?: (enoki.v1.IProbeOperation|null);
+
+            /** ProbeReportResponse requestedSnapshotCollectorIds. */
+            public requestedSnapshotCollectorIds: string[];
 
             /**
              * Creates a new ProbeReportResponse instance using the specified properties.

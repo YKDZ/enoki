@@ -29,6 +29,7 @@ use crate::{
 use prost::Message;
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
+const HOST_PROFILE_COLLECTOR_ID: &str = "official.host-profile";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
@@ -410,7 +411,7 @@ fn run_reporting_loop(
         operation_reports.observe_response(&response, operation_runner);
     }
 
-    if response.inventory_needed {
+    if host_profile_snapshot_requested(&response) {
         if report_limit_reached(reports_sent, control) {
             return Ok(());
         }
@@ -500,7 +501,9 @@ fn run_reporting_loop(
             operation_reports.observe_response(&response, operation_runner);
         }
 
-        if response.inventory_needed && !report_limit_reached(reports_sent, control) {
+        if host_profile_snapshot_requested(&response)
+            && !report_limit_reached(reports_sent, control)
+        {
             sequence += 1;
             inventory = inventory_provider.collect_inventory();
             let request = full_inventory_report(
@@ -553,6 +556,14 @@ fn refresh_probe_request_auth(auth: &mut ProbeRequestAuth<'_>, response: &ProbeR
     };
     let offset = i128::from(response.server_time_ms) - now_ms;
     auth.server_time_offset_ms = offset.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64;
+}
+
+fn host_profile_snapshot_requested(response: &ProbeReportResponse) -> bool {
+    response.inventory_needed
+        || response
+            .requested_snapshot_collector_ids
+            .iter()
+            .any(|collector_id| collector_id == HOST_PROFILE_COLLECTOR_ID)
 }
 
 fn current_unix_time_ms_i128() -> Option<i128> {
@@ -867,6 +878,7 @@ mod operation_report_tests {
                         },
                     )),
                 }),
+                requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1,
             },
             &mut runner,
@@ -1614,6 +1626,7 @@ mod tests {
                     target_probe_version: "0.2.0".to_string(),
                 })),
             }),
+            requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
         };
 
@@ -1656,6 +1669,7 @@ mod tests {
                     target_probe_version: "0.2.0".to_string(),
                 })),
             }),
+            requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
         };
 
@@ -1720,6 +1734,7 @@ mod tests {
                             target_probe_version: "0.2.0".to_string(),
                         })),
                     }),
+                    requested_snapshot_collector_ids: Vec::new(),
                     server_time_ms: 1,
                 }
                 .encode_to_vec(),
@@ -1728,6 +1743,7 @@ mod tests {
                     current_probe_configuration_version: "default-v1".to_string(),
                     inventory_needed: false,
                     pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
                     server_time_ms: 2,
                 }
                 .encode_to_vec(),

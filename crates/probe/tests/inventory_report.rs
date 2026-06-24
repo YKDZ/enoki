@@ -1,8 +1,11 @@
 use enoki_probe::{
-    inventory::{collect_local_inventory, inventory_hash, stable_inventory},
+    inventory::{
+        collect_local_inventory, host_profile_from_inventory, host_profile_hash, inventory_hash,
+        stable_inventory,
+    },
     protocol::enoki::v1::{
-        CollectorAvailability, CollectorCapabilities, FilesystemInventory, Inventory, MetricSample,
-        NetworkInterfaceInventory, OfficialCollectorCapabilities,
+        CollectorAvailability, CollectorCapabilities, FilesystemInventory, HostProfileSnapshot,
+        Inventory, MetricSample, NetworkInterfaceInventory, OfficialCollectorCapabilities,
     },
     report::{regular_report, startup_report},
 };
@@ -54,6 +57,35 @@ fn probe_report_startup_sends_full_inventory_and_regular_reports_send_hash_only(
 }
 
 #[test]
+fn regular_probe_report_sends_host_profile_snapshot_hash_without_payload() {
+    let host_profile = sample_host_profile();
+    let expected_hash = host_profile_hash(&host_profile);
+
+    let report = regular_report(
+        "probe_01",
+        "boot_01",
+        2,
+        2,
+        "default-v1",
+        &host_profile,
+        vec![MetricSample {
+            cpu_percent: Some(12.5),
+            collected_at_ms: 1_725_000_000_000,
+            memory_used_bytes: Some(1024),
+            sequence: 2,
+            ..MetricSample::default()
+        }],
+    );
+
+    assert!(report.inventory.is_none());
+    assert_eq!(report.snapshots.len(), 1);
+    assert_eq!(report.snapshots[0].collector_id, "official.host-profile");
+    assert_eq!(report.snapshots[0].snapshot_hash, expected_hash);
+    assert!(report.snapshots[0].payload.is_none());
+    assert_eq!(report.metrics.len(), 1);
+}
+
+#[test]
 fn inventory_hash_uses_stable_inventory_ordering() {
     let inventory = sample_inventory();
     let reordered = Inventory {
@@ -66,6 +98,26 @@ fn inventory_hash_uses_stable_inventory_ordering() {
     assert_eq!(
         stable_inventory(reordered).network_interfaces[0].addresses,
         vec!["10.0.0.10".to_string(), "2001:db8::10".to_string()],
+    );
+}
+
+#[test]
+fn host_profile_hash_uses_stable_repeated_field_ordering() {
+    let host_profile = sample_host_profile();
+    let reordered = HostProfileSnapshot {
+        filesystems: host_profile.filesystems.iter().cloned().rev().collect(),
+        network_interfaces: host_profile
+            .network_interfaces
+            .iter()
+            .cloned()
+            .rev()
+            .collect(),
+        ..host_profile.clone()
+    };
+
+    assert_eq!(
+        host_profile_hash(&host_profile),
+        host_profile_hash(&reordered)
     );
 }
 
@@ -157,6 +209,68 @@ fn inventory_hash_matches_the_cross_runtime_canonical_fixture() {
 }
 
 #[test]
+fn host_profile_hash_matches_the_cross_runtime_canonical_fixture() {
+    let host_profile = HostProfileSnapshot {
+        filesystems: vec![
+            FilesystemInventory {
+                available_bytes: 20_000,
+                filesystem_type: "zfs".to_string(),
+                mount_point: "/a".to_string(),
+                total_bytes: 70_000,
+            },
+            FilesystemInventory {
+                available_bytes: 30_000,
+                filesystem_type: "ext4".to_string(),
+                mount_point: "/B".to_string(),
+                total_bytes: 80_000,
+            },
+            FilesystemInventory {
+                available_bytes: 40_000,
+                filesystem_type: "xfs".to_string(),
+                mount_point: "/😀".to_string(),
+                total_bytes: 90_000,
+            },
+            FilesystemInventory {
+                available_bytes: 10_000,
+                filesystem_type: "apfs".to_string(),
+                mount_point: "/B".to_string(),
+                total_bytes: 60_000,
+            },
+        ],
+        hostname: "fixture-host".to_string(),
+        network_interfaces: vec![
+            NetworkInterfaceInventory {
+                addresses: vec![
+                    "fd00::2".to_string(),
+                    "10.0.0.2".to_string(),
+                    "10.0.0.2".to_string(),
+                    "2001:db8::2".to_string(),
+                ],
+                name: "eth1".to_string(),
+            },
+            NetworkInterfaceInventory {
+                addresses: vec!["fe80::1".to_string()],
+                name: "Éth0".to_string(),
+            },
+            NetworkInterfaceInventory {
+                addresses: vec!["192.0.2.10".to_string()],
+                name: "Eth0".to_string(),
+            },
+            NetworkInterfaceInventory {
+                addresses: vec!["203.0.113.10".to_string()],
+                name: "😀0".to_string(),
+            },
+        ],
+        ..sample_host_profile()
+    };
+
+    assert_eq!(
+        host_profile_hash(&host_profile),
+        "928378a1b8ba549304607f856b21f97c6ddc06f43bcbebe86f3dc5f9cb44bb06",
+    );
+}
+
+#[test]
 fn local_inventory_snapshot_contains_host_capacity_and_probe_version() {
     let inventory = collect_local_inventory();
 
@@ -233,4 +347,8 @@ fn sample_inventory() -> Inventory {
         probe_version: "0.1.0".to_string(),
         thread_count: 456,
     }
+}
+
+fn sample_host_profile() -> HostProfileSnapshot {
+    host_profile_from_inventory(sample_inventory())
 }

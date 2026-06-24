@@ -415,6 +415,8 @@ pub struct ProbeReportRequest {
     >,
     #[prost(message, repeated, tag = "11")]
     pub operation_statuses: ::prost::alloc::vec::Vec<ProbeOperationStatus>,
+    #[prost(message, repeated, tag = "12")]
+    pub snapshots: ::prost::alloc::vec::Vec<Snapshot>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeReportResponse {
@@ -428,4 +430,8 @@ pub struct ProbeReportResponse {
     pub inventory_needed: bool,
     #[prost(message, optional, tag = "5")]
     pub pending_operation: ::core::option::Option<ProbeOperation>,
+    #[prost(string, repeated, tag = "6")]
+    pub requested_snapshot_collector_ids: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
 }

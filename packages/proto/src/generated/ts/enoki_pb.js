@@ -684,6 +684,7 @@ export const enoki = $root.enoki = (() => {
              * @property {enoki.v1.IProbeConfigurationError|null} [probeConfigurationError] ProbeReportRequest probeConfigurationError
              * @property {Array.<enoki.v1.IProbeOperationAcknowledgement>|null} [operationAcknowledgements] ProbeReportRequest operationAcknowledgements
              * @property {Array.<enoki.v1.IProbeOperationStatus>|null} [operationStatuses] ProbeReportRequest operationStatuses
+             * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeReportRequest snapshots
              */
 
             /**
@@ -698,6 +699,7 @@ export const enoki = $root.enoki = (() => {
                 this.metrics = [];
                 this.operationAcknowledgements = [];
                 this.operationStatuses = [];
+                this.snapshots = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -793,6 +795,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.operationStatuses = $util.emptyArray;
 
             /**
+             * ProbeReportRequest snapshots.
+             * @member {Array.<enoki.v1.ISnapshot>} snapshots
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.snapshots = $util.emptyArray;
+
+            /**
              * Creates a new ProbeReportRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportRequest
@@ -845,6 +855,9 @@ export const enoki = $root.enoki = (() => {
                 if (message.operationStatuses != null && message.operationStatuses.length)
                     for (let i = 0; i < message.operationStatuses.length; ++i)
                         $root.enoki.v1.ProbeOperationStatus.encode(message.operationStatuses[i], writer.uint32(/* id 11, wireType 2 =*/90).fork(), q + 1).ldelim();
+                if (message.snapshots != null && message.snapshots.length)
+                    for (let i = 0; i < message.snapshots.length; ++i)
+                        $root.enoki.v1.Snapshot.encode(message.snapshots[i], writer.uint32(/* id 12, wireType 2 =*/98).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -933,6 +946,12 @@ export const enoki = $root.enoki = (() => {
                             if (!(message.operationStatuses && message.operationStatuses.length))
                                 message.operationStatuses = [];
                             message.operationStatuses.push($root.enoki.v1.ProbeOperationStatus.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 12: {
+                            if (!(message.snapshots && message.snapshots.length))
+                                message.snapshots = [];
+                            message.snapshots.push($root.enoki.v1.Snapshot.decode(reader, reader.uint32(), undefined, long + 1));
                             break;
                         }
                     default:
@@ -1029,6 +1048,15 @@ export const enoki = $root.enoki = (() => {
                             return "operationStatuses." + error;
                     }
                 }
+                if (message.snapshots != null && Object.hasOwnProperty.call(message, "snapshots")) {
+                    if (!Array.isArray(message.snapshots))
+                        return "snapshots: array expected";
+                    for (let i = 0; i < message.snapshots.length; ++i) {
+                        let error = $root.enoki.v1.Snapshot.verify(message.snapshots[i], long + 1);
+                        if (error)
+                            return "snapshots." + error;
+                    }
+                }
                 return null;
             };
 
@@ -1116,6 +1144,16 @@ export const enoki = $root.enoki = (() => {
                         message.operationStatuses[i] = $root.enoki.v1.ProbeOperationStatus.fromObject(object.operationStatuses[i], long + 1);
                     }
                 }
+                if (object.snapshots) {
+                    if (!Array.isArray(object.snapshots))
+                        throw TypeError(".enoki.v1.ProbeReportRequest.snapshots: array expected");
+                    message.snapshots = [];
+                    for (let i = 0; i < object.snapshots.length; ++i) {
+                        if (!$util.isObject(object.snapshots[i]))
+                            throw TypeError(".enoki.v1.ProbeReportRequest.snapshots: object expected");
+                        message.snapshots[i] = $root.enoki.v1.Snapshot.fromObject(object.snapshots[i], long + 1);
+                    }
+                }
                 return message;
             };
 
@@ -1140,6 +1178,7 @@ export const enoki = $root.enoki = (() => {
                     object.metrics = [];
                     object.operationAcknowledgements = [];
                     object.operationStatuses = [];
+                    object.snapshots = [];
                 }
                 if (options.defaults) {
                     object.probeId = "";
@@ -1200,6 +1239,11 @@ export const enoki = $root.enoki = (() => {
                     for (let j = 0; j < message.operationStatuses.length; ++j)
                         object.operationStatuses[j] = $root.enoki.v1.ProbeOperationStatus.toObject(message.operationStatuses[j], options, q + 1);
                 }
+                if (message.snapshots && message.snapshots.length) {
+                    object.snapshots = [];
+                    for (let j = 0; j < message.snapshots.length; ++j)
+                        object.snapshots[j] = $root.enoki.v1.Snapshot.toObject(message.snapshots[j], options, q + 1);
+                }
                 return object;
             };
 
@@ -1243,6 +1287,7 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [currentProbeConfigurationVersion] ProbeReportResponse currentProbeConfigurationVersion
              * @property {boolean|null} [inventoryNeeded] ProbeReportResponse inventoryNeeded
              * @property {enoki.v1.IProbeOperation|null} [pendingOperation] ProbeReportResponse pendingOperation
+             * @property {Array.<string>|null} [requestedSnapshotCollectorIds] ProbeReportResponse requestedSnapshotCollectorIds
              */
 
             /**
@@ -1254,6 +1299,7 @@ export const enoki = $root.enoki = (() => {
              * @param {enoki.v1.IProbeReportResponse=} [properties] Properties to set
              */
             function ProbeReportResponse(properties) {
+                this.requestedSnapshotCollectorIds = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -1301,6 +1347,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportResponse.prototype.pendingOperation = null;
 
             /**
+             * ProbeReportResponse requestedSnapshotCollectorIds.
+             * @member {Array.<string>} requestedSnapshotCollectorIds
+             * @memberof enoki.v1.ProbeReportResponse
+             * @instance
+             */
+            ProbeReportResponse.prototype.requestedSnapshotCollectorIds = $util.emptyArray;
+
+            /**
              * Creates a new ProbeReportResponse instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportResponse
@@ -1338,6 +1392,9 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 4, wireType 0 =*/32).bool(message.inventoryNeeded);
                 if (message.pendingOperation != null && Object.hasOwnProperty.call(message, "pendingOperation"))
                     $root.enoki.v1.ProbeOperation.encode(message.pendingOperation, writer.uint32(/* id 5, wireType 2 =*/42).fork(), q + 1).ldelim();
+                if (message.requestedSnapshotCollectorIds != null && message.requestedSnapshotCollectorIds.length)
+                    for (let i = 0; i < message.requestedSnapshotCollectorIds.length; ++i)
+                        writer.uint32(/* id 6, wireType 2 =*/50).string(message.requestedSnapshotCollectorIds[i]);
                 return writer;
             };
 
@@ -1398,6 +1455,12 @@ export const enoki = $root.enoki = (() => {
                             message.pendingOperation = $root.enoki.v1.ProbeOperation.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
+                    case 6: {
+                            if (!(message.requestedSnapshotCollectorIds && message.requestedSnapshotCollectorIds.length))
+                                message.requestedSnapshotCollectorIds = [];
+                            message.requestedSnapshotCollectorIds.push(reader.string());
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -1454,6 +1517,13 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "pendingOperation." + error;
                 }
+                if (message.requestedSnapshotCollectorIds != null && Object.hasOwnProperty.call(message, "requestedSnapshotCollectorIds")) {
+                    if (!Array.isArray(message.requestedSnapshotCollectorIds))
+                        return "requestedSnapshotCollectorIds: array expected";
+                    for (let i = 0; i < message.requestedSnapshotCollectorIds.length; ++i)
+                        if (!$util.isString(message.requestedSnapshotCollectorIds[i]))
+                            return "requestedSnapshotCollectorIds: string[] expected";
+                }
                 return null;
             };
 
@@ -1502,6 +1572,13 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeReportResponse.pendingOperation: object expected");
                     message.pendingOperation = $root.enoki.v1.ProbeOperation.fromObject(object.pendingOperation, long + 1);
                 }
+                if (object.requestedSnapshotCollectorIds) {
+                    if (!Array.isArray(object.requestedSnapshotCollectorIds))
+                        throw TypeError(".enoki.v1.ProbeReportResponse.requestedSnapshotCollectorIds: array expected");
+                    message.requestedSnapshotCollectorIds = [];
+                    for (let i = 0; i < object.requestedSnapshotCollectorIds.length; ++i)
+                        message.requestedSnapshotCollectorIds[i] = String(object.requestedSnapshotCollectorIds[i]);
+                }
                 return message;
             };
 
@@ -1522,6 +1599,8 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
+                if (options.arrays || options.defaults)
+                    object.requestedSnapshotCollectorIds = [];
                 if (options.defaults) {
                     if ($util.Long) {
                         let long = new $util.Long(0, 0, true);
@@ -1557,6 +1636,11 @@ export const enoki = $root.enoki = (() => {
                     object.inventoryNeeded = message.inventoryNeeded;
                 if (message.pendingOperation != null && Object.hasOwnProperty.call(message, "pendingOperation"))
                     object.pendingOperation = $root.enoki.v1.ProbeOperation.toObject(message.pendingOperation, options, q + 1);
+                if (message.requestedSnapshotCollectorIds && message.requestedSnapshotCollectorIds.length) {
+                    object.requestedSnapshotCollectorIds = [];
+                    for (let j = 0; j < message.requestedSnapshotCollectorIds.length; ++j)
+                        object.requestedSnapshotCollectorIds[j] = message.requestedSnapshotCollectorIds[j];
+                }
                 return object;
             };
 
