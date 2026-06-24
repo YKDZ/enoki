@@ -602,6 +602,55 @@ describe("Host detail data", () => {
     );
   });
 
+  it("keeps latest-known Disk Health when a refreshed history window ends with a sparse sample", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: hostDetail(1),
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [
+              {
+                ...metricSample(1, 1_725_000_001_000),
+                diskHealth: [
+                  {
+                    deviceName: "/dev/sda",
+                    model: "Samsung SSD 870 EVO 1TB",
+                    passed: true,
+                    powerOnHours: 12_345,
+                    serialNumber: "S6PTEST",
+                    temperatureCelsius: 31,
+                  },
+                ],
+              },
+              metricSample(2, 1_725_000_002_000),
+            ],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+
+    expect(detail.host.value?.latestMetrics).toEqual(
+      expect.objectContaining({
+        cpuPercent: 2,
+        diskHealth: [
+          expect.objectContaining({
+            deviceName: "/dev/sda",
+            passed: true,
+          }),
+        ],
+      }),
+    );
+  });
+
   it("polls history and plays newly observed samples at the collection cadence", async () => {
     vi.useFakeTimers();
     let metricsRequestCount = 0;

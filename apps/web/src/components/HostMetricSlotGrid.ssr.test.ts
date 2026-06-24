@@ -452,4 +452,63 @@ describe("Host metric slot grid", () => {
     expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
     expect(html).toContain("挂载点");
   });
+
+  it("uses latest non-empty Disk Health sample when the latest metric is sparse", async () => {
+    const sparseSample: HostMetricSample = {
+      collectedAtMs: 1_725_000_005_000,
+      cpuCores: [],
+      cpuPercent: 30,
+      diskHealth: [],
+      diskTotalBytes: 100,
+      diskUsedBytes: 60,
+      disks: [],
+      memoryTotalBytes: 100,
+      memoryUsedBytes: 50,
+      networkInterfaces: [],
+      networkRxBitsPerSecond: null,
+      networkRxBytesDelta: null,
+      networkTxBitsPerSecond: null,
+      networkTxBytesDelta: null,
+      receivedAtMs: 1_725_000_005_500,
+      sequence: 2,
+      uptimeSeconds: 120,
+    };
+    const diskHealthSample: HostMetricSample = {
+      ...sparseSample,
+      collectedAtMs: 1_725_000_000_000,
+      diskHealth: [
+        {
+          deviceName: "/dev/sda",
+          model: "Samsung SSD 870 EVO 1TB",
+          passed: true,
+          powerOnHours: 12_345,
+          serialNumber: "S6PTEST",
+          temperatureCelsius: 31,
+        },
+      ],
+      sequence: 1,
+    };
+    const html = await renderHostMetricSlotGrid(
+      {
+        ...host,
+        collectorCapabilities: {
+          official: {
+            cpu: { available: true },
+            diskHealth: { available: true },
+            memory: { available: true },
+            network: { available: true },
+          },
+        },
+      },
+      {
+        latestMetric: sparseSample,
+        latestSample: sparseSample,
+        samples: [diskHealthSample, sparseSample],
+      },
+    );
+
+    expect(html).toContain("硬盘健康");
+    expect(html).toContain("Samsung SSD 870 EVO 1TB");
+    expect(html).not.toContain("等待硬盘健康数据");
+  });
 });

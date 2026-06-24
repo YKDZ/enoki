@@ -1,5 +1,7 @@
 import type { Component } from "vue";
 
+import type { DiskHealthMetric, HostMetricSample } from "@/types";
+
 import type { CollectorAvailability, CollectorCapabilities } from "../../types";
 import CpuMetricsCard from "./CpuMetricsCard.vue";
 import DiskHealthMetricsCard from "./DiskHealthMetricsCard.vue";
@@ -62,7 +64,7 @@ export function officialMetricCardProps(
     case "diskHealth":
       return diskHealthMetricCardProps(capability, {
         hostId: data.hostFacts.id,
-        latestDiskHealth: data.latestMetric?.diskHealth ?? null,
+        latestDiskHealth: latestKnownDiskHealth(data),
       });
     case "memory":
       return memoryMetricCardProps(capability, {
@@ -158,4 +160,29 @@ function officialMetricCapability(
   domain: OfficialMetricDomain,
 ): CollectorAvailability | undefined {
   return capabilities?.official?.[domain];
+}
+
+function latestKnownDiskHealth(
+  data: OfficialMetricCardSourceData,
+): DiskHealthMetric[] | null {
+  if (data.latestMetric?.diskHealth?.length) {
+    return data.latestMetric.diskHealth;
+  }
+
+  return latestNonEmptyMetricArray(data.samples, "diskHealth");
+}
+
+function latestNonEmptyMetricArray<Key extends keyof HostMetricSample>(
+  samples: HostMetricSample[],
+  key: Key,
+): Extract<NonNullable<HostMetricSample[Key]>, unknown[]> | null {
+  for (const sample of [...samples].reverse()) {
+    const value = sample[key];
+
+    if (Array.isArray(value) && value.length > 0) {
+      return value as Extract<NonNullable<HostMetricSample[Key]>, unknown[]>;
+    }
+  }
+
+  return null;
 }

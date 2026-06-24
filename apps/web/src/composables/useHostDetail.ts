@@ -5,7 +5,10 @@ import type {
 import { computed, onScopeDispose, ref, unref, type MaybeRef } from "vue";
 
 import { apiGet, apiMutate, isUnauthorizedError } from "@/lib/api";
-import { latestMetricsFromSample } from "@/lib/latest-metrics";
+import {
+  latestMetricsFromSample,
+  latestMetricsFromSamples,
+} from "@/lib/latest-metrics";
 import {
   useHostMetricsWindowStore,
   type HostMetricsWindowPreferences,
@@ -184,7 +187,7 @@ export function useHostDetail(
     if (options.mode === "replace") {
       samples.value = response.metrics.samples;
       clearLivePlayback();
-      updateHostLatestMetric(samples.value.at(-1) ?? null);
+      updateHostLatestMetricsFromSamples(samples.value);
       return;
     }
 
@@ -447,6 +450,32 @@ export function useHostDetail(
         sample.receivedAtMs,
       ),
       latestMetrics: latestMetricsFromSample(sample, host.value.latestMetrics),
+      status: "online",
+    };
+  }
+
+  function updateHostLatestMetricsFromSamples(nextSamples: HostMetricSample[]) {
+    if (!host.value || nextSamples.length === 0) {
+      return;
+    }
+
+    const latestSample = nextSamples.at(-1);
+    const latestMetrics = latestMetricsFromSamples(
+      nextSamples,
+      host.value.latestMetrics,
+    );
+
+    if (!latestSample || !latestMetrics) {
+      return;
+    }
+
+    host.value = {
+      ...host.value,
+      lastReportAtMs: Math.max(
+        host.value.lastReportAtMs ?? 0,
+        latestSample.receivedAtMs,
+      ),
+      latestMetrics,
       status: "online",
     };
   }

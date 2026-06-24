@@ -34,6 +34,29 @@ export function latestMetricsFromSample(
   });
 }
 
+export function latestMetricsFromSamples(
+  samples: HostMetricSample[],
+  previous: LatestHostMetrics | null | undefined,
+): LatestHostMetrics | null {
+  let latestFromSamples: LatestHostMetrics | null = null;
+
+  for (const sample of samples) {
+    latestFromSamples = latestMetricsFromSample(sample, latestFromSamples);
+  }
+
+  if (!latestFromSamples) {
+    return previous ?? null;
+  }
+
+  if (!previous) {
+    return latestFromSamples;
+  }
+
+  return previous.collectedAtMs > latestFromSamples.collectedAtMs
+    ? mergeLatestMetrics(latestFromSamples, previous)
+    : mergeLatestMetrics(previous, latestFromSamples);
+}
+
 export function mergeLatestMetrics(
   previous: LatestHostMetrics | null | undefined,
   next: LatestHostMetrics,
