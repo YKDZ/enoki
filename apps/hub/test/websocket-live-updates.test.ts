@@ -124,6 +124,7 @@ async function sendReport(
     bootId?: string;
     cpuPercent?: number;
     diskAvailable?: boolean;
+    hostProfile?: root.enoki.v1.IHostProfileSnapshot;
     sequence?: number;
   } = {},
 ) {
@@ -193,6 +194,14 @@ async function sendReport(
       probeId: registration.probeId,
       sequenceEnd: sequence,
       sequenceStart: sequence,
+      snapshots: options.hostProfile
+        ? [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: options.hostProfile,
+            },
+          ]
+        : [],
     }),
   ).finish();
   const response = await fetch(`${baseUrl}/api/probe/report`, {
@@ -647,6 +656,70 @@ describe("WebSocket live updates", () => {
         type: "host_summary",
       }),
     ]);
+
+    await closeSocket(socket);
+    database.close();
+  });
+
+  it("broadcasts Host Profile updates to the subscribed Host detail", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+
+    socket.send(
+      JSON.stringify({
+        hostId: 1,
+        type: "subscribe_host_detail",
+      }),
+    );
+    const messages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, registration, {
+      hostProfile: {
+        architecture: "x86_64",
+        collectorCapabilities: {
+          official: {
+            cpu: { available: true },
+          },
+        },
+        cpuCount: 4,
+        cpuModel: "AMD EPYC 7B13",
+        filesystems: [],
+        hostname: "profile-live-host",
+        kernel: "6.9.0",
+        memoryTotalBytes: 4_294_967_296,
+        networkInterfaces: [
+          {
+            addresses: ["10.0.0.20"],
+            name: "eth0",
+          },
+        ],
+        os: "linux",
+        probeVersion: "0.2.0",
+      },
+      sequence: 2,
+    });
+
+    await expect(messages).resolves.toEqual(
+      expect.arrayContaining([
+        {
+          hostId: 1,
+          hostProfile: expect.objectContaining({
+            cpuCount: 4,
+            hostname: "profile-live-host",
+            probeVersion: "0.2.0",
+          }),
+          type: "host_profile",
+        },
+      ]),
+    );
 
     await closeSocket(socket);
     database.close();

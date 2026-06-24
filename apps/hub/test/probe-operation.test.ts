@@ -7,7 +7,7 @@ import {
   createProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
   succeedReportedProbeOperation,
-  succeedProbeUpgradeRequestFromInventory,
+  succeedProbeUpgradeRequestFromHostProfile,
 } from "../src/probe/operation";
 
 describe("Probe Upgrade Request lifecycle", () => {
@@ -294,7 +294,7 @@ describe("Probe Upgrade Request lifecycle", () => {
     });
   });
 
-  it("succeeds only when Inventory reports the target Probe version", () => {
+  it("succeeds only when Host Profile reports the target Probe version", () => {
     const running = {
       ...createProbeUpgradeRequest({
         activeOperation: null,
@@ -309,17 +309,21 @@ describe("Probe Upgrade Request lifecycle", () => {
     };
 
     expect(
-      succeedProbeUpgradeRequestFromInventory({
+      succeedProbeUpgradeRequestFromHostProfile({
         nowMs: 1_725_000_030_000,
         operation: running,
-        probeVersion: "0.1.0",
+        hostProfile: {
+          probeVersion: "0.1.0",
+        },
       }),
     ).toBeNull();
     expect(
-      succeedProbeUpgradeRequestFromInventory({
+      succeedProbeUpgradeRequestFromHostProfile({
         nowMs: 1_725_000_030_000,
         operation: running,
-        probeVersion: "0.2.0",
+        hostProfile: {
+          probeVersion: "0.2.0",
+        },
       }),
     ).toEqual({
       ...running,
@@ -331,7 +335,7 @@ describe("Probe Upgrade Request lifecycle", () => {
     });
   });
 
-  it("succeeds when Inventory reports a tag-prefixed Probe version", () => {
+  it("succeeds when Host Profile reports a tag-prefixed Probe version", () => {
     const running = {
       ...createProbeUpgradeRequest({
         activeOperation: null,
@@ -346,10 +350,12 @@ describe("Probe Upgrade Request lifecycle", () => {
     };
 
     expect(
-      succeedProbeUpgradeRequestFromInventory({
+      succeedProbeUpgradeRequestFromHostProfile({
         nowMs: 1_725_000_030_000,
         operation: running,
-        probeVersion: "v0.2.0",
+        hostProfile: {
+          probeVersion: "v0.2.0",
+        },
       }),
     ).toEqual({
       ...running,

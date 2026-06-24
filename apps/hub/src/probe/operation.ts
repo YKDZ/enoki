@@ -376,15 +376,17 @@ export function succeedReportedProbeOperation(input: {
   };
 }
 
-export function succeedProbeUpgradeRequestFromInventory(input: {
+export function succeedProbeUpgradeRequestFromHostProfile(input: {
+  hostProfile: {
+    probeVersion?: string | null;
+  } | null | undefined;
   nowMs: number;
   operation: ProbeUpgradeRequest;
-  probeVersion: string | null | undefined;
 }): ProbeUpgradeRequest | null {
   if (
     input.operation.kind !== "probe_upgrade" ||
     !isActiveProbeOperation(input.operation) ||
-    normalizeProbeVersion(input.probeVersion) !==
+    normalizeProbeVersion(input.hostProfile?.probeVersion) !==
       normalizeProbeVersion(input.operation.targetProbeVersion)
   ) {
     return null;

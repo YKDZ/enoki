@@ -206,6 +206,60 @@ describe("WebSocket contracts", () => {
     });
   });
 
+  it("validates server Host Profile live update messages", () => {
+    expect(
+      parseWebSocketServerMessage({
+        hostId: 1,
+        hostProfile: {
+          architecture: "x86_64",
+          collectorCapabilities: {
+            official: {
+              cpu: {
+                available: true,
+              },
+            },
+          },
+          cpuBaseFrequencyMhz: null,
+          cpuCacheL3Bytes: null,
+          cpuCount: 4,
+          cpuModel: "AMD EPYC",
+          cpuPhysicalCount: null,
+          cpuSocketCount: null,
+          filesystems: [
+            {
+              availableBytes: 10,
+              filesystemType: "xfs",
+              mountPoint: "/data",
+              totalBytes: 20,
+            },
+          ],
+          hostname: "profile-host",
+          kernel: "6.9.0",
+          memoryTotalBytes: 34_359_738_368,
+          networkInterfaces: [
+            {
+              addresses: ["10.0.0.20"],
+              name: "eth0",
+            },
+          ],
+          os: "linux",
+          probeVersion: "0.3.0",
+          processCount: 120,
+          threadCount: null,
+        },
+        type: "host_profile",
+      }),
+    ).toEqual({
+      hostId: 1,
+      hostProfile: expect.objectContaining({
+        cpuCount: 4,
+        hostname: "profile-host",
+        probeVersion: "0.3.0",
+      }),
+      type: "host_profile",
+    });
+  });
+
   it("validates uptime in live detail samples", () => {
     expect(
       parseWebSocketServerMessage({

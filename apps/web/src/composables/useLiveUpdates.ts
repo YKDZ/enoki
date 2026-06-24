@@ -6,9 +6,10 @@ import {
 } from "@enoki/api-client/websocket";
 import type { Ref } from "vue";
 
+import { hostProfileBackedFields } from "@/lib/host-profile-live";
 import { mergeLatestMetrics } from "@/lib/latest-metrics";
 
-import type { HostSummary } from "../types";
+import type { HostProfileSnapshot, HostSummary } from "../types";
 
 export type LiveSummaryApplyResult = {
   hosts: HostSummary[];
@@ -50,11 +51,36 @@ export function applyHostLiveSummary(
   };
 }
 
+export function applyHostProfileLiveUpdate(
+  hosts: HostSummary[],
+  hostId: number,
+  hostProfile: HostProfileSnapshot,
+): LiveSummaryApplyResult {
+  let matched = false;
+  const updatedHosts = hosts.map((host) => {
+    if (host.id !== hostId) {
+      return host;
+    }
+
+    matched = true;
+    return {
+      ...host,
+      ...hostProfileBackedFields(hostProfile),
+    };
+  });
+
+  return {
+    hosts: updatedHosts,
+    needsReload: !matched,
+  };
+}
+
 export function useLiveUpdates(options: {
   hosts: Ref<HostSummary[]>;
   isAuthenticated: Ref<boolean>;
   loadHosts: () => Promise<void>;
   onDetailSample?: (sample: HostDetailSample) => void;
+  onHostProfile?: (hostId: number, hostProfile: HostProfileSnapshot) => void;
   onSummary?: (summary: HostLiveSummary) => void;
   reconnectDelayMs?: number;
   recoverDetail?: () => Promise<void>;
@@ -162,10 +188,27 @@ export function useLiveUpdates(options: {
 
     const message = parseWebSocketServerMessage(payload);
 
-    if (message?.type !== "host_summary") {
-      if (message?.type === "host_detail_sample") {
-        options.onDetailSample?.(message.sample);
+    if (message?.type === "host_detail_sample") {
+      options.onDetailSample?.(message.sample);
+      return;
+    }
+
+    if (message?.type === "host_profile") {
+      const result = applyHostProfileLiveUpdate(
+        options.hosts.value,
+        message.hostId,
+        message.hostProfile,
+      );
+      options.hosts.value = result.hosts;
+      options.onHostProfile?.(message.hostId, message.hostProfile);
+
+      if (result.needsReload) {
+        await options.loadHosts();
       }
+      return;
+    }
+
+    if (message?.type !== "host_summary") {
       return;
     }
 

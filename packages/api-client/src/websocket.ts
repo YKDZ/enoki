@@ -5,6 +5,7 @@ import type {
   CpuCoreMetric,
   DiskHealthMetric,
   DiskUsageMetric,
+  HostProfileSnapshot,
   NetworkInterfaceDeltaMetric,
 } from "./protocol.js";
 
@@ -92,6 +93,11 @@ export type WebSocketServerMessage =
     }
   | {
       hostId: number;
+      hostProfile: HostProfileSnapshot;
+      type: "host_profile";
+    }
+  | {
+      hostId: number;
       sample: HostDetailSample;
       type: "host_detail_sample";
     };
@@ -131,6 +137,37 @@ const diskHealthMetricSchema = v.object({
   totalBytes: nullableNumberSchema,
   usageMountPoint: v.nullable(v.string()),
   usedBytes: nullableNumberSchema,
+});
+const hostProfileSchema = v.object({
+  architecture: v.string(),
+  collectorCapabilities: v.optional(collectorCapabilitiesSchema),
+  cpuBaseFrequencyMhz: v.optional(nullableNumberSchema),
+  cpuCacheL3Bytes: v.optional(nullableNumberSchema),
+  cpuCount: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  cpuModel: v.optional(v.nullable(v.string())),
+  cpuPhysicalCount: v.optional(nullableNumberSchema),
+  cpuSocketCount: v.optional(nullableNumberSchema),
+  filesystems: v.array(
+    v.object({
+      availableBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
+      filesystemType: v.string(),
+      mountPoint: v.string(),
+      totalBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
+    }),
+  ),
+  hostname: v.string(),
+  kernel: v.string(),
+  memoryTotalBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  networkInterfaces: v.array(
+    v.object({
+      addresses: v.array(v.string()),
+      name: v.string(),
+    }),
+  ),
+  os: v.string(),
+  probeVersion: v.string(),
+  processCount: v.optional(nullableNumberSchema),
+  threadCount: v.optional(nullableNumberSchema),
 });
 
 export const webSocketClientMessageSchema = v.variant("type", [
@@ -242,6 +279,11 @@ export const webSocketServerMessageSchema = v.variant("type", [
   v.object({
     host: hostLiveSummarySchema,
     type: v.literal("host_summary"),
+  }),
+  v.object({
+    hostId: hostIdSchema,
+    hostProfile: hostProfileSchema,
+    type: v.literal("host_profile"),
   }),
   v.object({
     hostId: hostIdSchema,

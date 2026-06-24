@@ -266,6 +266,56 @@ describe("Host Profile storage adapter", () => {
     database.close();
   });
 
+  it("does not let Probe-reported Host Profile overwrite Hub-owned metadata or report freshness", async () => {
+    const database = await createTemporaryDatabase();
+    const host = database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "10.0.0.20",
+      createdAtMs: 1_725_000_000_000,
+      description: "Owned by the Hub",
+      displayName: "Hub name",
+      displayNameEdited: false,
+      lastClockSkewMs: null,
+      lastReportAtMs: null,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-adapter-metadata",
+      probeSecretHash: "secret-hash-metadata",
+    });
+
+    database.snapshotCollectors.hostProfile.write({
+      hostId: host.id,
+      observedIp: "192.0.2.10",
+      payload: fakeHostProfile({
+        hostname: "probe-reported-name",
+        networkInterfaces: [
+          {
+            addresses: ["10.0.0.99"],
+            name: "eth0",
+          },
+        ],
+      }),
+      snapshotHash: "hash-metadata",
+      updatedAtMs: 1_725_000_000_100,
+    });
+
+    const updated = database.sqlite
+      .prepare(
+        "select connect_address, description, display_name, hostname, last_report_at_ms from managed_hosts where id = ?",
+      )
+      .get(host.id);
+    expect(updated).toEqual(
+      {
+        connect_address: "10.0.0.20",
+        description: "Owned by the Hub",
+        display_name: "Hub name",
+        hostname: "probe-reported-name",
+        last_report_at_ms: null,
+      },
+    );
+
+    database.close();
+  });
+
   it("rolls back Host Profile storage when the Host projection write fails", async () => {
     const database = await createTemporaryDatabase();
     const host = database.hosts.create({

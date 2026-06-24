@@ -174,6 +174,9 @@ const {
   onDetailSample(sample) {
     detail.appendLiveSample(sample);
   },
+  onHostProfile(hostId, hostProfile) {
+    detail.applyHostProfile(hostId, hostProfile);
+  },
   onSummary(summary) {
     detail.applyLiveSummary(summary);
   },

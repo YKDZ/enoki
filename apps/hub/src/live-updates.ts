@@ -4,6 +4,7 @@ import {
   parseWebSocketClientMessage,
   type WebSocketServerMessage,
 } from "@enoki/api-client/websocket";
+import type { HostProfileSnapshot } from "@enoki/api-client";
 import type { WSContext, WSMessageReceive } from "hono/ws";
 
 import type { HostSummary } from "./database/hosts.js";
@@ -17,6 +18,7 @@ type LiveClient = {
 export type LiveUpdateBroadcaster = {
   addClient: (socket: WSContext, options: { sessionId: string }) => void;
   broadcastDetailSample: (sample: HostDetailSample) => void;
+  broadcastHostProfile: (hostId: number, hostProfile: HostProfileSnapshot) => void;
   broadcastHostSummary: (summary: HostLiveSummary) => void;
   closeSession: (sessionId: string) => void;
   handleClientMessage: (socket: WSContext, message: WSMessageReceive) => void;
@@ -43,6 +45,19 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
 
       for (const client of clients.values()) {
         if (client.detailHostId === sample.hostId) {
+          sendJson(client.socket, message);
+        }
+      }
+    },
+    broadcastHostProfile(hostId, hostProfile) {
+      const message: WebSocketServerMessage = {
+        hostId,
+        hostProfile,
+        type: "host_profile",
+      };
+
+      for (const client of clients.values()) {
+        if (client.detailHostId === hostId) {
           sendJson(client.socket, message);
         }
       }

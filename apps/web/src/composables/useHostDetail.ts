@@ -5,6 +5,7 @@ import type {
 import { computed, onScopeDispose, ref, unref, type MaybeRef } from "vue";
 
 import { apiGet, apiMutate, isUnauthorizedError } from "@/lib/api";
+import { hostProfileBackedFields } from "@/lib/host-profile-live";
 import {
   latestMetricsFromSample,
   latestMetricsFromSamples,
@@ -20,6 +21,7 @@ import type {
   HostDetailResponse,
   HostMetricSample,
   HostMetricsResponse,
+  HostProfileSnapshot,
   MetricsWindow,
   ProbeUpgradeRequestResponse,
 } from "../types";
@@ -29,6 +31,8 @@ type MutateJson = <T>(
   path: string,
   options: { body?: unknown; method: "DELETE" | "POST" | "PUT" },
 ) => Promise<T>;
+type ProbeUpgradeEligibility = HostDetail["probeUpgradeEligibility"];
+type ProbeUpgradeStatus = HostDetail["probeUpgradeStatus"];
 
 const metricsWindowDurationsMs: Record<MetricsWindow, number> = {
   "1m": 60 * 1000,
@@ -269,6 +273,23 @@ export function useHostDetail(
     enqueueMetricSamples([
       detailSampleToMetricSample(sample, metricsCollectionIntervalSeconds()),
     ]);
+  }
+
+  function applyHostProfile(hostId: number, hostProfile: HostProfileSnapshot) {
+    if (!host.value || hostId !== currentHostId()) {
+      return;
+    }
+
+    host.value = {
+      ...host.value,
+      ...hostProfileBackedFields(hostProfile),
+      hostProfile,
+      probeUpgradeEligibility: eligibilityFromHostProfile(
+        host.value.probeUpgradeEligibility,
+        host.value.probeUpgradeStatus,
+        hostProfile,
+      ),
+    };
   }
 
   function enqueueMetricSamples(nextSamples: HostMetricSample[]) {
@@ -525,6 +546,7 @@ export function useHostDetail(
   return {
     appendLiveSample,
     applyHostDetail,
+    applyHostProfile,
     applyLiveSummary,
     chartRange,
     createProbeUpgradeRequest,
@@ -539,6 +561,53 @@ export function useHostDetail(
     selectedWindow,
     switchWindow,
   };
+}
+
+function eligibilityFromHostProfile(
+  eligibility: ProbeUpgradeEligibility,
+  upgradeStatus: ProbeUpgradeStatus,
+  hostProfile: HostProfileSnapshot,
+): ProbeUpgradeEligibility {
+  const currentProbeVersion = normalizeProbeVersion(hostProfile.probeVersion);
+  const currentProbeAssetSetVersion = normalizeProbeVersion(
+    eligibility.currentProbeAssetSetVersion,
+  );
+  const reportedProbeVersion = currentProbeVersion ?? hostProfile.probeVersion;
+
+  if (
+    !isActiveProbeUpgradeStatus(upgradeStatus) &&
+    currentProbeVersion &&
+    currentProbeAssetSetVersion &&
+    currentProbeVersion === currentProbeAssetSetVersion
+  ) {
+    return {
+      ...eligibility,
+      currentProbeVersion,
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_version_current",
+    };
+  }
+
+  return {
+    ...eligibility,
+    currentProbeVersion: reportedProbeVersion,
+  };
+}
+
+function isActiveProbeUpgradeStatus(status: ProbeUpgradeStatus) {
+  return (
+    status?.state === "pending" ||
+    status?.state === "accepted" ||
+    status?.state === "running"
+  );
+}
+
+function normalizeProbeVersion(value: string | null | undefined) {
+  const match = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(
+    value?.trim() ?? "",
+  );
+
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
 }
 
 function dedupeAndSortMetricSamples(samples: HostMetricSample[]) {

@@ -37,7 +37,7 @@ import {
   failReportedProbeUpgradeRequest,
   succeedReportedProbeOperation,
   startProbeUpgradeRequest,
-  succeedProbeUpgradeRequestFromInventory,
+  succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
 } from "./operation.js";
 
@@ -120,6 +120,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const probeSecretPlaceholder = createProbeSecret();
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
     const registrationProfile = hostProfile ? null : request.inventory;
+    const registrationMetadataProfile = hostProfile ?? registrationProfile;
     const inventory = request.inventory;
     const inventoryJson = registrationProfile
       ? serializeHostProfile(registrationProfile)
@@ -135,13 +136,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.trustForwardedHeaders,
     );
     const displayName =
-      registrationProfile?.hostname?.trim() || fallbackDisplayName(probeId);
+      registrationMetadataProfile?.hostname?.trim() ||
+      fallbackDisplayName(probeId);
 
     const createdHost = services.hosts.create({
       architecture: registrationProfile?.architecture || null,
       clockSkewDetected: false,
       connectAddress:
-        firstInventoryAddress(registrationProfile) ?? observedIp ?? "",
+        firstInventoryAddress(registrationMetadataProfile) ?? observedIp ?? "",
       createdAtMs: registeredAtMs,
       cpuCount: registrationProfile?.cpuCount || null,
       cpuModel: registrationProfile?.cpuModel?.trim() || null,
@@ -267,7 +269,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
     const reportedProfile = reportedHostProfile ? null : request.inventory;
-    const reportedOperationProfile = reportedHostProfile ?? request.inventory;
     const inventoryJson = reportedHostProfile
       ? undefined
       : request.inventory
@@ -343,7 +344,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       probeVersion: reportedProfile?.probeVersion || undefined,
     });
     if (reportedHostProfile && reportedHostProfileHash) {
-      services.snapshotCollectors?.write({
+      const result = services.snapshotCollectors?.write({
         collectorId: hostProfileCollectorId,
         hostId: host.id,
         observedIp,
@@ -351,11 +352,23 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         snapshotHash: reportedHostProfileHash,
         updatedAtMs: reportReceivedAtMs,
       });
+      if (result?.changed) {
+        services.liveUpdates?.broadcastHostProfile(host.id, result.view);
+      }
     }
-    markProbeUpgradeSucceededFromInventory({
+    const storedReportedHostProfile =
+      !reportedHostProfile &&
+      hostProfileSnapshot &&
+      services.snapshotCollectors?.hostProfile.hasSnapshot(
+        host.id,
+        reportedSnapshotHash,
+      )
+        ? services.snapshotCollectors.hostProfile.read(host.id)
+        : null;
+    markProbeUpgradeSucceededFromHostProfile({
       hostId: host.id,
+      hostProfile: reportedHostProfile ?? storedReportedHostProfile,
       nowMs: reportReceivedAtMs,
-      probeVersion: reportedOperationProfile?.probeVersion,
       services,
     });
 
@@ -1084,13 +1097,15 @@ function completeProbeUninstallIfSucceeded(input: {
   input.services.hosts.softDelete(input.operation.hostId, input.nowMs);
 }
 
-function markProbeUpgradeSucceededFromInventory(input: {
+function markProbeUpgradeSucceededFromHostProfile(input: {
   hostId: number;
+  hostProfile: {
+    probeVersion?: string | null;
+  } | null;
   nowMs: number;
-  probeVersion: string | null | undefined;
   services: ProbeRouteServices;
 }) {
-  if (!input.probeVersion) {
+  if (!input.hostProfile?.probeVersion) {
     return;
   }
 
@@ -1101,10 +1116,10 @@ function markProbeUpgradeSucceededFromInventory(input: {
     return;
   }
 
-  const succeeded = succeedProbeUpgradeRequestFromInventory({
+  const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+    hostProfile: input.hostProfile,
     nowMs: input.nowMs,
     operation: active,
-    probeVersion: input.probeVersion,
   });
 
   if (succeeded) {

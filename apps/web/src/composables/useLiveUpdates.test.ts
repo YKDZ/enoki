@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ref } from "vue";
 
 import type { HostSummary } from "../types";
-import { applyHostLiveSummary, useLiveUpdates } from "./useLiveUpdates";
+import {
+  applyHostLiveSummary,
+  applyHostProfileLiveUpdate,
+  useLiveUpdates,
+} from "./useLiveUpdates";
 
 const existingHost: HostSummary = {
   clockSkew: {
@@ -121,6 +125,57 @@ describe("live Host summaries", () => {
         },
       },
     });
+    expect(result.needsReload).toBe(false);
+  });
+
+  it("updates Host Profile-backed summary fields without changing Hub-owned fields", () => {
+    const result = applyHostProfileLiveUpdate([existingHost], 1, {
+      architecture: "x86_64",
+      collectorCapabilities: {
+        official: {
+          cpu: { available: true },
+        },
+      },
+      cpuBaseFrequencyMhz: null,
+      cpuCacheL3Bytes: null,
+      cpuCount: 4,
+      cpuModel: "AMD EPYC",
+      cpuPhysicalCount: null,
+      cpuSocketCount: null,
+      filesystems: [],
+      hostname: "probe-reported-name",
+      kernel: "6.9.0",
+      memoryTotalBytes: 4_294_967_296,
+      networkInterfaces: [
+        {
+          addresses: ["10.0.0.99"],
+          name: "eth0",
+        },
+      ],
+      os: "linux",
+      probeVersion: "0.2.0",
+      processCount: null,
+      threadCount: null,
+    });
+
+    expect(result.hosts[0]).toEqual(
+      expect.objectContaining({
+        collectorCapabilities: {
+          official: {
+            cpu: { available: true },
+          },
+        },
+        connectAddress: "10.0.0.10",
+        cpu: "4 cores",
+        cpuModel: "AMD EPYC",
+        description: "生产数据库",
+        displayName: "managed-host-01",
+        memory: "4 GB",
+        probeVersion: "0.2.0",
+        status: "offline",
+        system: "linux 6.9.0 x86_64",
+      }),
+    );
     expect(result.needsReload).toBe(false);
   });
 
@@ -278,6 +333,63 @@ describe("live Host summaries", () => {
         hostId: 1,
         sequence: 1,
       }),
+    ]);
+  });
+
+  it("passes Host Profile live updates to the detail handler and updates summaries", async () => {
+    const hosts = ref<HostSummary[]>([existingHost]);
+    const hostProfiles: unknown[] = [];
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {},
+      onHostProfile(hostId, hostProfile) {
+        hostProfiles.push({ hostId, hostProfile });
+      },
+    });
+
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        hostId: 1,
+        hostProfile: {
+          architecture: "x86_64",
+          collectorCapabilities: null,
+          cpuBaseFrequencyMhz: null,
+          cpuCacheL3Bytes: null,
+          cpuCount: 8,
+          cpuModel: "AMD EPYC",
+          cpuPhysicalCount: null,
+          cpuSocketCount: null,
+          filesystems: [],
+          hostname: "profile-host",
+          kernel: "6.9.0",
+          memoryTotalBytes: 8_589_934_592,
+          networkInterfaces: [],
+          os: "linux",
+          probeVersion: "0.3.0",
+          processCount: null,
+          threadCount: null,
+        },
+        type: "host_profile",
+      }),
+    );
+
+    expect(hosts.value[0]).toEqual(
+      expect.objectContaining({
+        cpu: "8 cores",
+        memory: "8 GB",
+        probeVersion: "0.3.0",
+        system: "linux 6.9.0 x86_64",
+      }),
+    );
+    expect(hostProfiles).toEqual([
+      {
+        hostId: 1,
+        hostProfile: expect.objectContaining({
+          hostname: "profile-host",
+          probeVersion: "0.3.0",
+        }),
+      },
     ]);
   });
 

@@ -31,7 +31,7 @@ import {
   createProbeUpgradeRequest,
   type ProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
-  succeedProbeUpgradeRequestFromInventory,
+  succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
 import { hostSummaryResponse } from "./api-response.js";
 
@@ -111,10 +111,13 @@ export function createHostRoutes(services: HostRouteServices) {
           version: null,
         };
 
-    const succeededOperation = succeedActiveProbeUpgradeRequestFromHost({
+    const storedHostProfile =
+      services.snapshotCollectors?.hostProfile.read(hostId) ?? null;
+    const hostProfile = storedHostProfile ?? parseHostProfile(host.inventoryJson);
+    const succeededOperation = succeedActiveProbeUpgradeRequestFromHostProfile({
       hostId,
+      hostProfile: storedHostProfile,
       nowMs: now(),
-      probeVersion: host.probeVersion,
       services,
     });
     const timedOutOperation = succeededOperation
@@ -136,9 +139,7 @@ export function createHostRoutes(services: HostRouteServices) {
           displayName: host.displayName,
           observedIp: host.observedIp,
         },
-        hostProfile:
-          services.snapshotCollectors?.hostProfile.read(hostId) ??
-          parseHostProfile(host.inventoryJson),
+        hostProfile,
         inventory: parseInventory(host.inventoryJson),
         probeConfiguration: services.probeConfigurations?.getEffectiveForHost(
           hostId,
@@ -682,10 +683,12 @@ function failTimedOutActiveProbeUpgradeRequest(input: {
   return persisted;
 }
 
-function succeedActiveProbeUpgradeRequestFromHost(input: {
+function succeedActiveProbeUpgradeRequestFromHostProfile(input: {
   hostId: number;
+  hostProfile: {
+    probeVersion?: string | null;
+  } | null;
   nowMs: number;
-  probeVersion: string | null | undefined;
   services: HostRouteServices;
 }) {
   const activeOperation =
@@ -694,10 +697,10 @@ function succeedActiveProbeUpgradeRequestFromHost(input: {
     return null;
   }
 
-  const succeeded = succeedProbeUpgradeRequestFromInventory({
+  const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+    hostProfile: input.hostProfile,
     nowMs: input.nowMs,
     operation: activeOperation,
-    probeVersion: input.probeVersion,
   });
   if (!succeeded) {
     return null;

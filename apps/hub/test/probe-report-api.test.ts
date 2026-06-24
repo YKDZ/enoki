@@ -429,6 +429,79 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it("marks an active Probe Upgrade Request succeeded from a Host Profile snapshot report", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_030_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest({
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_010_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+      acceptedAtMs: 1_725_000_015_000,
+      runningAtMs: 1_725_000_020_000,
+      state: "running",
+    });
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const changedHostProfile = sampleHostProfileSnapshot({
+      probeVersion: "v0.2.0",
+    });
+    const changedHash = hashStableHostProfile(changedHostProfile);
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-upgrade-host-profile",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: changedHostProfile,
+            snapshotHash: changedHash,
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(200);
+    expect(operation.id).toEqual(expect.any(Number));
+    if (operation.id === null) {
+      throw new Error("persisted Probe Upgrade Request is missing an id");
+    }
+    expect(database.probeOperations.findById(operation.id)).toEqual(
+      expect.objectContaining({
+        completedAtMs: 1_725_000_030_000,
+        failureCode: null,
+        state: "succeeded",
+        targetProbeVersion: "0.2.0",
+      }),
+    );
+
+    database.close();
+  });
+
   it("stores a requested full Host Profile snapshot replay with the Rust canonical fixture hash", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -993,7 +1066,7 @@ describe("Probe report API", () => {
     );
   });
 
-  it("marks a Probe Upgrade Request succeeded only after Inventory reports the target version", async () => {
+  it("does not mark a Probe Upgrade Request succeeded from legacy Inventory only", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1079,10 +1152,12 @@ describe("Probe report API", () => {
     expect(targetInventory.status).toBe(200);
     expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
       expect.objectContaining({
-        completedAtMs: 1_725_000_010_000,
-        state: "succeeded",
+        completedAtMs: null,
+        state: "running",
       }),
     );
+
+    database.close();
   });
 
   it("rejects malformed Probe Operation acknowledgements and statuses with stable errors", async () => {

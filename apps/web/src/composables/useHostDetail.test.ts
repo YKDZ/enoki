@@ -966,6 +966,175 @@ describe("Host detail data", () => {
     );
     expect(detail.samples.value).toEqual([]);
   });
+
+  it("applies live Host Profile updates without overwriting Hub metadata, status, or upgrade state", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              connectAddress: "10.0.0.10",
+              description: "Hub description",
+              displayName: "Hub display name",
+              hostMetadata: {
+                connectAddress: "10.0.0.10",
+                description: "Hub description",
+                displayName: "Hub display name",
+                observedIp: null,
+              },
+              hostProfile: null,
+              probeUpgradeEligibility: {
+                currentProbeAssetSetVersion: "0.2.0",
+                currentProbeVersion: "0.1.0",
+                isUpgradeable: true,
+                nonUpgradeableReason: null,
+              },
+              probeUpgradeStatus: {
+                createdAtMs: 1,
+                failure: null,
+                id: 9,
+                state: "running",
+                targetProbeVersion: "0.2.0",
+                updatedAtMs: 2,
+              },
+              probeVersion: "0.1.0",
+              status: "offline",
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    detail.applyHostProfile(1, {
+      architecture: "x86_64",
+      collectorCapabilities: {
+        official: {
+          cpu: { available: true },
+        },
+      },
+      cpuBaseFrequencyMhz: null,
+      cpuCacheL3Bytes: null,
+      cpuCount: 4,
+      cpuModel: "AMD EPYC",
+      cpuPhysicalCount: null,
+      cpuSocketCount: null,
+      filesystems: [],
+      hostname: "probe-reported-name",
+      kernel: "6.9.0",
+      memoryTotalBytes: 4_294_967_296,
+      networkInterfaces: [
+        {
+          addresses: ["10.0.0.99"],
+          name: "eth0",
+        },
+      ],
+      os: "linux",
+      probeVersion: "0.2.0",
+      processCount: null,
+      threadCount: null,
+    });
+
+    expect(detail.host.value).toEqual(
+      expect.objectContaining({
+        connectAddress: "10.0.0.10",
+        cpu: "4 cores",
+        cpuModel: "AMD EPYC",
+        description: "Hub description",
+        displayName: "Hub display name",
+        hostMetadata: expect.objectContaining({
+          connectAddress: "10.0.0.10",
+          displayName: "Hub display name",
+        }),
+        memory: "4 GB",
+        probeUpgradeEligibility: expect.objectContaining({
+          currentProbeVersion: "0.2.0",
+          isUpgradeable: true,
+        }),
+        probeUpgradeStatus: expect.objectContaining({
+          id: 9,
+          state: "running",
+        }),
+        probeVersion: "0.2.0",
+        status: "offline",
+        system: "linux 6.9.0 x86_64",
+      }),
+    );
+    expect(detail.host.value?.hostProfile).toEqual(
+      expect.objectContaining({
+        hostname: "probe-reported-name",
+        probeVersion: "0.2.0",
+      }),
+    );
+  });
+
+  it("marks upgrade eligibility current after a live Host Profile update when no upgrade is active", async () => {
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string) {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              hostProfile: null,
+              probeUpgradeEligibility: {
+                currentProbeAssetSetVersion: "0.2.0",
+                currentProbeVersion: "0.1.0",
+                isUpgradeable: true,
+                nonUpgradeableReason: null,
+              },
+              probeUpgradeStatus: null,
+              probeVersion: "0.1.0",
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    detail.applyHostProfile(1, {
+      architecture: "x86_64",
+      collectorCapabilities: null,
+      cpuBaseFrequencyMhz: null,
+      cpuCacheL3Bytes: null,
+      cpuCount: 4,
+      cpuModel: "AMD EPYC",
+      cpuPhysicalCount: null,
+      cpuSocketCount: null,
+      filesystems: [],
+      hostname: "probe-reported-name",
+      kernel: "6.9.0",
+      memoryTotalBytes: 4_294_967_296,
+      networkInterfaces: [],
+      os: "linux",
+      probeVersion: "v0.2.0",
+      processCount: null,
+      threadCount: null,
+    });
+
+    expect(detail.host.value?.probeUpgradeEligibility).toEqual({
+      currentProbeAssetSetVersion: "0.2.0",
+      currentProbeVersion: "0.2.0",
+      isUpgradeable: false,
+      nonUpgradeableReason: "probe_version_current",
+    });
+  });
 });
 
 function createWindowPreferences(

@@ -126,8 +126,6 @@ export function createHostProfileStorageAdapter(
         const currentHost =
           transaction
             .select({
-              connectAddressEdited: hosts.connectAddressEdited,
-              displayNameEdited: hosts.displayNameEdited,
               id: hosts.id,
             })
             .from(hosts)
@@ -172,15 +170,8 @@ export function createHostProfileStorageAdapter(
           .update(hosts)
           .set({
             architecture: view.architecture,
-            connectAddress: !currentHost.connectAddressEdited
-              ? (firstHostProfileAddress(view) ?? input.observedIp ?? undefined)
-              : undefined,
             cpuCount: view.cpuCount,
             cpuModel: view.cpuModel?.trim() || null,
-            displayName:
-              !currentHost.displayNameEdited && view.hostname.trim()
-                ? view.hostname.trim()
-                : undefined,
             hostname: view.hostname,
             inventoryHash: input.snapshotHash,
             inventoryJson: serializeHostProfile(input.payload),
@@ -196,19 +187,6 @@ export function createHostProfileStorageAdapter(
       });
     },
   };
-}
-
-function firstHostProfileAddress(hostProfile: HostProfileSnapshot) {
-  for (const networkInterface of hostProfile.networkInterfaces) {
-    const address = networkInterface.addresses.find((address) =>
-      address.trim(),
-    );
-    if (address) {
-      return address;
-    }
-  }
-
-  return null;
 }
 
 function viewFromRow(
