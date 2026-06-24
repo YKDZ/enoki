@@ -1,11 +1,9 @@
 use std::{
     error::Error,
     fmt,
-    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -294,7 +292,6 @@ where
 
 #[derive(Default)]
 pub struct AutoPrivilegedRuntimeProcessRunner {
-    direct_runner: DirectPrivilegedRuntimeProcessRunner,
     systemd_runner: SystemdPrivilegedRuntimeProcessRunner,
 }
 
@@ -303,51 +300,13 @@ impl PrivilegedRuntimeProcessRunner for AutoPrivilegedRuntimeProcessRunner {
         &mut self,
         plan: &PrivilegedRuntimeExecutionPlan,
     ) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
-        if systemd_runtime_available() {
-            return self.systemd_runner.run(plan);
+        if !systemd_runtime_available() {
+            return Err(PrivilegedRuntimeProcessError::Failed(
+                "systemd privileged runtime is unavailable".to_string(),
+            ));
         }
 
-        self.direct_runner.run(plan)
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirectPrivilegedRuntimeProcessRunner {
-    network_isolator: PathBuf,
-}
-
-impl Default for DirectPrivilegedRuntimeProcessRunner {
-    fn default() -> Self {
-        Self {
-            network_isolator: PathBuf::from("unshare"),
-        }
-    }
-}
-
-impl DirectPrivilegedRuntimeProcessRunner {
-    pub fn new(network_isolator: impl Into<PathBuf>) -> Self {
-        Self {
-            network_isolator: network_isolator.into(),
-        }
-    }
-}
-
-impl PrivilegedRuntimeProcessRunner for DirectPrivilegedRuntimeProcessRunner {
-    fn run(
-        &mut self,
-        plan: &PrivilegedRuntimeExecutionPlan,
-    ) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
-        let mut command = match plan.network_boundary {
-            PrivilegedRuntimeNetworkBoundary::PrivateNetwork => {
-                let mut command = Command::new(&self.network_isolator);
-                command.arg("--net").arg(&plan.probe_binary);
-                command
-            }
-            PrivilegedRuntimeNetworkBoundary::HostNetwork => Command::new(&plan.probe_binary),
-        };
-        command.args(&plan.probe_args);
-
-        run_command_with_timeout(command, plan.timeout)
+        self.systemd_runner.run(plan)
     }
 }
 
@@ -397,61 +356,32 @@ impl PrivilegedRuntimeProcessRunner for SystemdPrivilegedRuntimeProcessRunner {
 }
 
 fn systemd_runtime_available() -> bool {
-    Path::new("/usr/bin/systemd-run").exists() && Path::new("/run/systemd/system").exists()
+    systemd_runtime_available_at(
+        Path::new("/usr/bin/systemd-run"),
+        Path::new("/run/systemd/system"),
+    )
 }
 
-fn run_command_with_timeout(
-    mut command: Command,
-    timeout: Duration,
-) -> Result<PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessError> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            PrivilegedRuntimeProcessError::Failed(format!(
-                "privileged runtime boundary unavailable: {error}"
-            ))
-        })?;
-    let started_at = Instant::now();
+fn systemd_runtime_available_at(systemd_run: &Path, runtime_dir: &Path) -> bool {
+    systemd_run.exists() && runtime_dir.exists()
+}
 
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
+#[cfg(test)]
+mod tests {
+    use super::systemd_runtime_available_at;
 
-                if let Some(mut child_stdout) = child.stdout.take() {
-                    let _ = child_stdout.read_to_string(&mut stdout);
-                }
-                if let Some(mut child_stderr) = child.stderr.take() {
-                    let _ = child_stderr.read_to_string(&mut stderr);
-                }
+    #[test]
+    fn systemd_runtime_requires_binary_and_runtime_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let systemd_run = temp.path().join("systemd-run");
+        let runtime_dir = temp.path().join("systemd");
 
-                if status.success() {
-                    return Ok(PrivilegedRuntimeProcessOutput { stdout });
-                }
+        assert!(!systemd_runtime_available_at(&systemd_run, &runtime_dir));
 
-                return Err(PrivilegedRuntimeProcessError::Failed(format!(
-                    "privileged runtime child failed: {}",
-                    stderr.trim()
-                )));
-            }
-            Ok(None) => {
-                if started_at.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(PrivilegedRuntimeProcessError::TimedOut { timeout });
-                }
-                thread::sleep(Duration::from_millis(25));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(PrivilegedRuntimeProcessError::Failed(format!(
-                    "privileged runtime child failed: {error}"
-                )));
-            }
-        }
+        std::fs::write(&systemd_run, "").expect("systemd-run marker");
+        assert!(!systemd_runtime_available_at(&systemd_run, &runtime_dir));
+
+        std::fs::create_dir(&runtime_dir).expect("runtime dir");
+        assert!(systemd_runtime_available_at(&systemd_run, &runtime_dir));
     }
 }

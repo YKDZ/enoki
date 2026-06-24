@@ -4,11 +4,11 @@ use enoki_probe::metrics::{
     CollectorRegistry, DiskHealthMetricsRunner, MetricCollector, MetricsCollectionConfig,
 };
 use enoki_probe::privileged_runtime::{
-    CollectorRuntimeProfile, DirectPrivilegedRuntimeProcessRunner, LocalPrivilegedRuntimeRunner,
-    NetworkAccess, PrivilegedCollector, PrivilegedCollectorId, PrivilegedCollectorRuntime,
-    PrivilegedRuntimeError, PrivilegedRuntimeExecutionPlan, PrivilegedRuntimeNetworkBoundary,
-    PrivilegedRuntimeOutput, PrivilegedRuntimeProcessError, PrivilegedRuntimeProcessOutput,
-    PrivilegedRuntimeProcessRunner, PrivilegedRuntimeRunner,
+    CollectorRuntimeProfile, LocalPrivilegedRuntimeRunner, NetworkAccess, PrivilegedCollector,
+    PrivilegedCollectorId, PrivilegedCollectorRuntime, PrivilegedRuntimeError,
+    PrivilegedRuntimeExecutionPlan, PrivilegedRuntimeNetworkBoundary, PrivilegedRuntimeOutput,
+    PrivilegedRuntimeProcessError, PrivilegedRuntimeProcessOutput, PrivilegedRuntimeProcessRunner,
+    PrivilegedRuntimeRunner,
 };
 use enoki_probe::protocol::enoki::v1::MetricSample;
 use std::time::Duration;
@@ -124,50 +124,6 @@ fn local_privileged_runtime_does_not_accept_runtime_input_for_argv_or_policy() {
         assert!(!plan.probe_args.iter().any(|arg| arg == hostile_arg));
     }
     assert_ne!(plan.timeout, hostile_probe_configuration.timeout);
-}
-
-#[test]
-fn direct_privileged_runtime_preserves_disabled_network_boundary_without_systemd() {
-    let mut process_runner = DirectPrivilegedRuntimeProcessRunner::new("/bin/echo");
-    let plan = PrivilegedRuntimeExecutionPlan::new(
-        "/opt/enoki/bin/enoki-probe",
-        enoki_probe::privileged_runtime::PrivilegedRuntimeInvocation {
-            collector_id: PrivilegedCollectorId::FixedCollector,
-            profile: CollectorRuntimeProfile::default(),
-        },
-    );
-
-    let output = process_runner
-        .run(&plan)
-        .expect("direct fallback can run through an injected network isolator");
-
-    assert!(output.stdout.contains("--net"));
-    assert!(output.stdout.contains("/opt/enoki/bin/enoki-probe"));
-    assert!(output.stdout.contains("internal-privileged-collector"));
-    assert!(output.stdout.contains("fixed.collector"));
-}
-
-#[test]
-fn direct_privileged_runtime_skips_network_isolator_when_collector_allows_network() {
-    let mut process_runner = DirectPrivilegedRuntimeProcessRunner::new("/bin/false");
-    let plan = PrivilegedRuntimeExecutionPlan::new(
-        "/bin/echo",
-        enoki_probe::privileged_runtime::PrivilegedRuntimeInvocation {
-            collector_id: PrivilegedCollectorId::NetworkEnabledCollector,
-            profile: CollectorRuntimeProfile {
-                timeout: Duration::from_secs(2),
-                network_access: NetworkAccess::Enabled,
-            },
-        },
-    );
-
-    let output = process_runner
-        .run(&plan)
-        .expect("host-network collectors can run the compiled entrypoint directly");
-
-    assert!(!output.stdout.contains("--net"));
-    assert!(output.stdout.contains("internal-privileged-collector"));
-    assert!(output.stdout.contains("network.collector"));
 }
 
 #[test]

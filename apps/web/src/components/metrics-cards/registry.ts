@@ -1,6 +1,6 @@
 import type { Component } from "vue";
 
-import type { DiskHealthMetric, HostMetricSample } from "@/types";
+import type { HostMetricSample } from "@/types";
 
 import type { CollectorAvailability, CollectorCapabilities } from "../../types";
 import CpuMetricsCard from "./CpuMetricsCard.vue";
@@ -164,7 +164,7 @@ function officialMetricCapability(
 
 function latestKnownDiskHealth(
   data: OfficialMetricCardSourceData,
-): DiskHealthMetric[] | null {
+): NonNullable<HostMetricSample["diskHealth"]> | null {
   if (data.latestMetric?.diskHealth?.length) {
     return data.latestMetric.diskHealth;
   }

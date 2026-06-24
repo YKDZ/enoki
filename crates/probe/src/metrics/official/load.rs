@@ -2,7 +2,6 @@ use std::fs;
 
 use crate::metrics::{
     CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
-    collect_load_metrics_from_proc_loadavg,
 };
 use crate::protocol::enoki::v1::MetricSample;
 
@@ -31,4 +30,21 @@ impl MetricCollector for LoadMetricCollector {
 
         Ok(true)
     }
+}
+
+#[derive(Debug)]
+pub struct LoadMetrics {
+    pub one: f64,
+    pub five: f64,
+    pub fifteen: f64,
+}
+
+pub fn collect_load_metrics_from_proc_loadavg(contents: &str) -> Option<LoadMetrics> {
+    let mut parts = contents.split_whitespace();
+
+    Some(LoadMetrics {
+        one: parts.next()?.parse().ok()?,
+        five: parts.next()?.parse().ok()?,
+        fifteen: parts.next()?.parse().ok()?,
+    })
 }

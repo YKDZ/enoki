@@ -2,7 +2,6 @@ import type { MetricsChartData } from "@/lib/metrics-chart-data";
 
 import type {
   CollectorAvailability,
-  DiskHealthMetric,
   HostDetail,
   HostMetricSample,
 } from "../../types";
@@ -70,7 +69,7 @@ export type DiskMetricCardData = {
 
 export type DiskHealthMetricCardData = {
   hostId: number;
-  latestDiskHealth: DiskHealthMetric[] | null;
+  latestDiskHealth: NonNullable<HostMetricSample["diskHealth"]> | null;
 };
 
 export type MetricCardProps<TData> = {
