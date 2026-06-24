@@ -888,7 +888,7 @@ fn is_runtime_mount_path(path: &str) -> bool {
         || path.starts_with("/sys/")
 }
 
-fn filesystem_capacity(path: impl AsRef<Path>) -> Option<FilesystemCapacity> {
+pub(crate) fn filesystem_capacity(path: impl AsRef<Path>) -> Option<FilesystemCapacity> {
     let c_path = CString::new(path.as_ref().as_os_str().as_encoded_bytes()).ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     // SAFETY: c_path is a valid nul-terminated path and stat points to writable memory.

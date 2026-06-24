@@ -60,8 +60,12 @@ export type RawMetricSampleInput = {
     model?: string | null;
     passed: boolean;
     powerOnHours?: number | null;
+    role?: string | null;
     serialNumber?: string | null;
     temperatureCelsius?: number | null;
+    totalBytes?: number | null;
+    usageMountPoint?: string | null;
+    usedBytes?: number | null;
   }>;
   diskTotalBytes?: number | null;
   diskUsedBytes?: number | null;
@@ -123,8 +127,12 @@ export type MetricHistorySample = MetricSampleRow & {
     model: string | null;
     passed: boolean;
     powerOnHours: number | null;
+    role: string | null;
     serialNumber: string | null;
     temperatureCelsius: number | null;
+    totalBytes: number | null;
+    usageMountPoint: string | null;
+    usedBytes: number | null;
   }>;
   networkInterfaces: Array<{
     name: string;
@@ -302,8 +310,12 @@ export function createMetricsRepository(
           model: diskHealth.model,
           passed: diskHealth.passed,
           powerOnHours: diskHealth.powerOnHours,
+          role: diskHealth.role,
           serialNumber: diskHealth.serialNumber,
           temperatureCelsius: diskHealth.temperatureCelsius,
+          totalBytes: diskHealth.totalBytes,
+          usageMountPoint: diskHealth.usageMountPoint,
+          usedBytes: diskHealth.usedBytes,
         });
         diskHealthBySample.set(diskHealth.metricSampleId, rows);
       }
@@ -560,8 +572,12 @@ function insertMetricSample(
           model: disk.model ?? null,
           passed: disk.passed,
           powerOnHours: disk.powerOnHours ?? null,
+          role: disk.role ?? null,
           serialNumber: disk.serialNumber ?? null,
           temperatureCelsius: disk.temperatureCelsius ?? null,
+          totalBytes: disk.totalBytes ?? null,
+          usageMountPoint: disk.usageMountPoint ?? null,
+          usedBytes: disk.usedBytes ?? null,
         })),
       )
       .run();
@@ -705,7 +721,11 @@ function latestDiskHealthForHost(
       model: disk.model,
       passed: disk.passed,
       powerOnHours: disk.powerOnHours,
+      role: disk.role,
       serialNumber: disk.serialNumber,
       temperatureCelsius: disk.temperatureCelsius,
+      totalBytes: disk.totalBytes,
+      usageMountPoint: disk.usageMountPoint,
+      usedBytes: disk.usedBytes,
     }));
 }

@@ -129,8 +129,12 @@ fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
                 model: "Samsung SSD 870 EVO 1TB".to_string(),
                 passed: true,
                 power_on_hours: Some(12_345),
+                role: String::new(),
                 serial_number: "S6PTEST".to_string(),
                 temperature_celsius: Some(31.0),
+                total_bytes: None,
+                usage_mount_point: String::new(),
+                used_bytes: None,
             }],
             sequence: 7,
             ..MetricSample::default()

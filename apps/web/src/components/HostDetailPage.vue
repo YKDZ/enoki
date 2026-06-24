@@ -21,6 +21,7 @@ import {
 import { toast } from "@/components/ui/sonner";
 import type { useHostDetail } from "@/composables/useHostDetail";
 import { warningTitle } from "@/lib/host-display";
+import { latestMetricsFromSample } from "@/lib/latest-metrics";
 import { buildMetricsChartData } from "@/lib/metrics-chart-data";
 
 import type {
@@ -97,9 +98,13 @@ const visibleWarnings = computed(
     [],
 );
 const latestSample = computed(() => props.detail.samples.value.at(-1) ?? null);
-const latestMetric = computed(
-  () => latestSample.value ?? host.value?.latestMetrics ?? null,
-);
+const latestMetric = computed(() => {
+  if (!latestSample.value) {
+    return host.value?.latestMetrics ?? null;
+  }
+
+  return latestMetricsFromSample(latestSample.value, host.value?.latestMetrics);
+});
 const chartStartContinuityGapMs = computed(() => {
   const intervalSeconds =
     host.value?.probeConfiguration.configuration

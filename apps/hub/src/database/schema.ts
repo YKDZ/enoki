@@ -431,6 +431,10 @@ export const officialMetricDiskHealth = sqliteTable(
     passed: integer({ mode: "boolean" }).notNull(),
     temperatureCelsius: real(),
     powerOnHours: integer(),
+    totalBytes: integer(),
+    usedBytes: integer(),
+    usageMountPoint: text(),
+    role: text(),
   },
   (table) => [
     index("official_metric_disk_health_sample_idx").on(table.metricSampleId),

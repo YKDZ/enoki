@@ -279,8 +279,12 @@ describe("Host metric slot grid", () => {
           model: "Samsung SSD 870 EVO 1TB",
           passed: true,
           powerOnHours: 12_345,
+          role: null,
           serialNumber: "S6PTEST",
           temperatureCelsius: 31,
+          totalBytes: null,
+          usageMountPoint: null,
+          usedBytes: null,
         },
       ],
     };
@@ -377,8 +381,12 @@ describe("Host metric slot grid", () => {
               model: "Samsung SSD 870 EVO 1TB",
               passed: true,
               powerOnHours: 12_345,
+              role: null,
               serialNumber: "S6PTEST",
               temperatureCelsius: 31,
+              totalBytes: null,
+              usageMountPoint: null,
+              usedBytes: null,
             },
           ],
         },
@@ -403,8 +411,12 @@ describe("Host metric slot grid", () => {
           model: "Samsung SSD 870 EVO 1TB",
           passed: true,
           powerOnHours: 12_345,
+          role: null,
           serialNumber: "S6PTEST",
           temperatureCelsius: 31,
+          totalBytes: null,
+          usageMountPoint: null,
+          usedBytes: null,
         },
       ],
       diskTotalBytes: 100,
@@ -482,8 +494,12 @@ describe("Host metric slot grid", () => {
           model: "Samsung SSD 870 EVO 1TB",
           passed: true,
           powerOnHours: 12_345,
+          role: "Data",
           serialNumber: "S6PTEST",
           temperatureCelsius: 31,
+          totalBytes: 100 * 1024 ** 3,
+          usageMountPoint: "/mnt/disk1",
+          usedBytes: 40 * 1024 ** 3,
         },
       ],
       sequence: 1,
@@ -509,6 +525,9 @@ describe("Host metric slot grid", () => {
 
     expect(html).toContain("硬盘健康");
     expect(html).toContain("Samsung SSD 870 EVO 1TB");
+    expect(html).toContain("Data / /mnt/disk1");
+    expect(html).toContain("40 GB / 100 GB");
+    expect(html).toContain("col-span-12");
     expect(html).not.toContain("等待硬盘健康数据");
   });
 });

@@ -5938,6 +5938,10 @@ export const enoki = $root.enoki = (() => {
              * @property {boolean|null} [passed] DiskHealthMetric passed
              * @property {number|null} [temperatureCelsius] DiskHealthMetric temperatureCelsius
              * @property {Long|null} [powerOnHours] DiskHealthMetric powerOnHours
+             * @property {Long|null} [totalBytes] DiskHealthMetric totalBytes
+             * @property {Long|null} [usedBytes] DiskHealthMetric usedBytes
+             * @property {string|null} [usageMountPoint] DiskHealthMetric usageMountPoint
+             * @property {string|null} [role] DiskHealthMetric role
              */
 
             /**
@@ -6003,6 +6007,38 @@ export const enoki = $root.enoki = (() => {
              */
             DiskHealthMetric.prototype.powerOnHours = null;
 
+            /**
+             * DiskHealthMetric totalBytes.
+             * @member {Long|null|undefined} totalBytes
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.totalBytes = null;
+
+            /**
+             * DiskHealthMetric usedBytes.
+             * @member {Long|null|undefined} usedBytes
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.usedBytes = null;
+
+            /**
+             * DiskHealthMetric usageMountPoint.
+             * @member {string} usageMountPoint
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.usageMountPoint = "";
+
+            /**
+             * DiskHealthMetric role.
+             * @member {string} role
+             * @memberof enoki.v1.DiskHealthMetric
+             * @instance
+             */
+            DiskHealthMetric.prototype.role = "";
+
             // OneOf field names bound to virtual getters and setters
             let $oneOfFields;
 
@@ -6015,6 +6051,18 @@ export const enoki = $root.enoki = (() => {
             // Virtual OneOf for proto3 optional field
             Object.defineProperty(DiskHealthMetric.prototype, "_powerOnHours", {
                 get: $util.oneOfGetter($oneOfFields = ["powerOnHours"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskHealthMetric.prototype, "_totalBytes", {
+                get: $util.oneOfGetter($oneOfFields = ["totalBytes"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            // Virtual OneOf for proto3 optional field
+            Object.defineProperty(DiskHealthMetric.prototype, "_usedBytes", {
+                get: $util.oneOfGetter($oneOfFields = ["usedBytes"]),
                 set: $util.oneOfSetter($oneOfFields)
             });
 
@@ -6058,6 +6106,14 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 5, wireType 1 =*/41).double(message.temperatureCelsius);
                 if (message.powerOnHours != null && Object.hasOwnProperty.call(message, "powerOnHours"))
                     writer.uint32(/* id 6, wireType 0 =*/48).uint64(message.powerOnHours);
+                if (message.totalBytes != null && Object.hasOwnProperty.call(message, "totalBytes"))
+                    writer.uint32(/* id 7, wireType 0 =*/56).uint64(message.totalBytes);
+                if (message.usedBytes != null && Object.hasOwnProperty.call(message, "usedBytes"))
+                    writer.uint32(/* id 8, wireType 0 =*/64).uint64(message.usedBytes);
+                if (message.usageMountPoint != null && Object.hasOwnProperty.call(message, "usageMountPoint"))
+                    writer.uint32(/* id 9, wireType 2 =*/74).string(message.usageMountPoint);
+                if (message.role != null && Object.hasOwnProperty.call(message, "role"))
+                    writer.uint32(/* id 10, wireType 2 =*/82).string(message.role);
                 return writer;
             };
 
@@ -6122,6 +6178,22 @@ export const enoki = $root.enoki = (() => {
                             message.powerOnHours = reader.uint64();
                             break;
                         }
+                    case 7: {
+                            message.totalBytes = reader.uint64();
+                            break;
+                        }
+                    case 8: {
+                            message.usedBytes = reader.uint64();
+                            break;
+                        }
+                    case 9: {
+                            message.usageMountPoint = reader.string();
+                            break;
+                        }
+                    case 10: {
+                            message.role = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -6184,6 +6256,22 @@ export const enoki = $root.enoki = (() => {
                     if (!$util.isInteger(message.powerOnHours) && !(message.powerOnHours && $util.isInteger(message.powerOnHours.low) && $util.isInteger(message.powerOnHours.high)))
                         return "powerOnHours: integer|Long expected";
                 }
+                if (message.totalBytes != null && Object.hasOwnProperty.call(message, "totalBytes")) {
+                    properties._totalBytes = 1;
+                    if (!$util.isInteger(message.totalBytes) && !(message.totalBytes && $util.isInteger(message.totalBytes.low) && $util.isInteger(message.totalBytes.high)))
+                        return "totalBytes: integer|Long expected";
+                }
+                if (message.usedBytes != null && Object.hasOwnProperty.call(message, "usedBytes")) {
+                    properties._usedBytes = 1;
+                    if (!$util.isInteger(message.usedBytes) && !(message.usedBytes && $util.isInteger(message.usedBytes.low) && $util.isInteger(message.usedBytes.high)))
+                        return "usedBytes: integer|Long expected";
+                }
+                if (message.usageMountPoint != null && Object.hasOwnProperty.call(message, "usageMountPoint"))
+                    if (!$util.isString(message.usageMountPoint))
+                        return "usageMountPoint: string expected";
+                if (message.role != null && Object.hasOwnProperty.call(message, "role"))
+                    if (!$util.isString(message.role))
+                        return "role: string expected";
                 return null;
             };
 
@@ -6224,6 +6312,28 @@ export const enoki = $root.enoki = (() => {
                         message.powerOnHours = object.powerOnHours;
                     else if (typeof object.powerOnHours === "object")
                         message.powerOnHours = new $util.LongBits(object.powerOnHours.low >>> 0, object.powerOnHours.high >>> 0).toNumber(true);
+                if (object.totalBytes != null)
+                    if ($util.Long)
+                        message.totalBytes = $util.Long.fromValue(object.totalBytes, true);
+                    else if (typeof object.totalBytes === "string")
+                        message.totalBytes = parseInt(object.totalBytes, 10);
+                    else if (typeof object.totalBytes === "number")
+                        message.totalBytes = object.totalBytes;
+                    else if (typeof object.totalBytes === "object")
+                        message.totalBytes = new $util.LongBits(object.totalBytes.low >>> 0, object.totalBytes.high >>> 0).toNumber(true);
+                if (object.usedBytes != null)
+                    if ($util.Long)
+                        message.usedBytes = $util.Long.fromValue(object.usedBytes, true);
+                    else if (typeof object.usedBytes === "string")
+                        message.usedBytes = parseInt(object.usedBytes, 10);
+                    else if (typeof object.usedBytes === "number")
+                        message.usedBytes = object.usedBytes;
+                    else if (typeof object.usedBytes === "object")
+                        message.usedBytes = new $util.LongBits(object.usedBytes.low >>> 0, object.usedBytes.high >>> 0).toNumber(true);
+                if (object.usageMountPoint != null)
+                    message.usageMountPoint = String(object.usageMountPoint);
+                if (object.role != null)
+                    message.role = String(object.role);
                 return message;
             };
 
@@ -6249,6 +6359,8 @@ export const enoki = $root.enoki = (() => {
                     object.model = "";
                     object.serialNumber = "";
                     object.passed = false;
+                    object.usageMountPoint = "";
+                    object.role = "";
                 }
                 if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
                     object.deviceName = message.deviceName;
@@ -6273,6 +6385,30 @@ export const enoki = $root.enoki = (() => {
                     if (options.oneofs)
                         object._powerOnHours = "powerOnHours";
                 }
+                if (message.totalBytes != null && Object.hasOwnProperty.call(message, "totalBytes")) {
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.totalBytes = typeof message.totalBytes === "number" ? BigInt(message.totalBytes) : $util.Long.fromBits(message.totalBytes.low >>> 0, message.totalBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.totalBytes === "number")
+                        object.totalBytes = options.longs === String ? String(message.totalBytes) : message.totalBytes;
+                    else
+                        object.totalBytes = options.longs === String ? $util.Long.prototype.toString.call(message.totalBytes) : options.longs === Number ? new $util.LongBits(message.totalBytes.low >>> 0, message.totalBytes.high >>> 0).toNumber(true) : message.totalBytes;
+                    if (options.oneofs)
+                        object._totalBytes = "totalBytes";
+                }
+                if (message.usedBytes != null && Object.hasOwnProperty.call(message, "usedBytes")) {
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.usedBytes = typeof message.usedBytes === "number" ? BigInt(message.usedBytes) : $util.Long.fromBits(message.usedBytes.low >>> 0, message.usedBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.usedBytes === "number")
+                        object.usedBytes = options.longs === String ? String(message.usedBytes) : message.usedBytes;
+                    else
+                        object.usedBytes = options.longs === String ? $util.Long.prototype.toString.call(message.usedBytes) : options.longs === Number ? new $util.LongBits(message.usedBytes.low >>> 0, message.usedBytes.high >>> 0).toNumber(true) : message.usedBytes;
+                    if (options.oneofs)
+                        object._usedBytes = "usedBytes";
+                }
+                if (message.usageMountPoint != null && Object.hasOwnProperty.call(message, "usageMountPoint"))
+                    object.usageMountPoint = message.usageMountPoint;
+                if (message.role != null && Object.hasOwnProperty.call(message, "role"))
+                    object.role = message.role;
                 return object;
             };
 

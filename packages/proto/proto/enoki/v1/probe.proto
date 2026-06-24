@@ -148,6 +148,10 @@ message DiskHealthMetric {
   bool passed = 4;
   optional double temperature_celsius = 5;
   optional uint64 power_on_hours = 6;
+  optional uint64 total_bytes = 7;
+  optional uint64 used_bytes = 8;
+  string usage_mount_point = 9;
+  string role = 10;
 }
 
 message NetworkInterfaceMetric {

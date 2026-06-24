@@ -3,7 +3,8 @@ import { Activity, Clock3, HardDrive, Thermometer } from "@lucide/vue";
 import { computed } from "vue";
 
 import { Badge } from "@/components/ui/badge";
-import { formatDuration, formatTemperature } from "@/lib/format";
+import { Progress } from "@/components/ui/progress";
+import { formatBytes, formatDuration, formatTemperature } from "@/lib/format";
 
 import MetricPanel from "../MetricPanel.vue";
 import { Skeleton } from "../ui/skeleton";
@@ -21,17 +22,33 @@ const disks = computed(() =>
 function powerOnDuration(hours: number | null) {
   return hours === null ? null : formatDuration(hours * 60 * 60);
 }
+
+function usagePercent(usedBytes: number | null, totalBytes: number | null) {
+  if (usedBytes === null || totalBytes === null || totalBytes <= 0) {
+    return null;
+  }
+
+  return Math.max(0, Math.min(100, (usedBytes / totalBytes) * 100));
+}
+
+function usageText(usedBytes: number | null, totalBytes: number | null) {
+  if (usedBytes === null || totalBytes === null || totalBytes <= 0) {
+    return null;
+  }
+
+  return `${formatBytes(usedBytes)} / ${formatBytes(totalBytes)}`;
+}
 </script>
 
 <template>
   <MetricPanel
     title="硬盘健康"
     description="硬盘自检状态"
-    size="lg"
+    size="xl"
     :storage-key="panelStorageKey(data.hostId, 'disk-health')"
     collapsible
   >
-    <div v-if="disks.length" class="grid gap-3">
+    <div v-if="disks.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
       <div
         v-for="disk in disks"
         :key="disk.deviceName"
@@ -59,6 +76,17 @@ function powerOnDuration(hours: number | null) {
 
         <div class="grid gap-2 text-sm sm:grid-cols-2">
           <div
+            v-if="disk.role || disk.usageMountPoint"
+            class="text-muted-foreground flex items-center gap-2"
+          >
+            <HardDrive class="size-4" aria-hidden="true" />
+            <span class="min-w-0 wrap-break-word">
+              {{
+                [disk.role, disk.usageMountPoint].filter(Boolean).join(" / ")
+              }}
+            </span>
+          </div>
+          <div
             v-if="disk.temperatureCelsius !== null"
             class="text-muted-foreground flex items-center gap-2"
           >
@@ -72,6 +100,21 @@ function powerOnDuration(hours: number | null) {
             <Clock3 class="size-4" aria-hidden="true" />
             <span>通电 {{ powerOnDuration(disk.powerOnHours) }}</span>
           </div>
+        </div>
+
+        <div
+          v-if="usageText(disk.usedBytes, disk.totalBytes)"
+          class="grid gap-2"
+        >
+          <div class="flex items-center justify-between gap-3 text-xs">
+            <span class="text-muted-foreground">占用</span>
+            <span class="text-foreground font-medium">
+              {{ usageText(disk.usedBytes, disk.totalBytes) }}
+            </span>
+          </div>
+          <Progress
+            :model-value="usagePercent(disk.usedBytes, disk.totalBytes) ?? 0"
+          />
         </div>
 
         <p

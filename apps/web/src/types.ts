@@ -155,8 +155,12 @@ export type DiskHealthMetric = {
   model: string | null;
   passed: boolean;
   powerOnHours: number | null;
+  role: string | null;
   serialNumber: string | null;
   temperatureCelsius: number | null;
+  totalBytes: number | null;
+  usageMountPoint: string | null;
+  usedBytes: number | null;
 };
 
 export type MetricsWindow = "1m" | "1h" | "6h" | "24h" | "7d";

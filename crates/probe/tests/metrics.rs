@@ -328,8 +328,12 @@ fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results
                 model: "Samsung SSD 870 EVO 1TB".to_string(),
                 passed: true,
                 power_on_hours: Some(12_345),
+                role: String::new(),
                 serial_number: "S6PTEST".to_string(),
                 temperature_celsius: Some(31.0),
+                total_bytes: None,
+                usage_mount_point: String::new(),
+                used_bytes: None,
             }]],
         }),
     )]);
@@ -378,8 +382,12 @@ fn disk_health_collector_result_updates_inventory_capability() {
             model: "Samsung SSD 870 EVO 1TB".to_string(),
             passed: true,
             power_on_hours: Some(12_345),
+            role: String::new(),
             serial_number: "S6PTEST".to_string(),
             temperature_celsius: Some(31.0),
+            total_bytes: None,
+            usage_mount_point: String::new(),
+            used_bytes: None,
         }]],
     });
 

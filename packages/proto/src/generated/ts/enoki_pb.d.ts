@@ -1809,6 +1809,18 @@ export namespace enoki {
 
             /** DiskHealthMetric powerOnHours */
             powerOnHours?: (Long|null);
+
+            /** DiskHealthMetric totalBytes */
+            totalBytes?: (Long|null);
+
+            /** DiskHealthMetric usedBytes */
+            usedBytes?: (Long|null);
+
+            /** DiskHealthMetric usageMountPoint */
+            usageMountPoint?: (string|null);
+
+            /** DiskHealthMetric role */
+            role?: (string|null);
         }
 
         /** Represents a DiskHealthMetric. */
@@ -1837,6 +1849,18 @@ export namespace enoki {
 
             /** DiskHealthMetric powerOnHours. */
             public powerOnHours?: (Long|null);
+
+            /** DiskHealthMetric totalBytes. */
+            public totalBytes?: (Long|null);
+
+            /** DiskHealthMetric usedBytes. */
+            public usedBytes?: (Long|null);
+
+            /** DiskHealthMetric usageMountPoint. */
+            public usageMountPoint: string;
+
+            /** DiskHealthMetric role. */
+            public role: string;
 
             /**
              * Creates a new DiskHealthMetric instance using the specified properties.

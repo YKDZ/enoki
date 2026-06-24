@@ -8,6 +8,7 @@ import { apiGet, apiMutate, isUnauthorizedError } from "@/lib/api";
 import {
   latestMetricsFromSample,
   latestMetricsFromSamples,
+  mergeLatestMetrics,
 } from "@/lib/latest-metrics";
 import {
   useHostMetricsWindowStore,
@@ -433,6 +434,9 @@ export function useHostDetail(
           ? host.value.collectorCapabilities
           : summary.collectorCapabilities,
       lastReportAtMs: summary.lastSeenAtMs,
+      latestMetrics: summary.latestMetrics
+        ? mergeLatestMetrics(host.value.latestMetrics, summary.latestMetrics)
+        : host.value.latestMetrics,
       status: summary.status,
       warnings: liveSummaryWarnings(host.value.warnings, summary),
     };

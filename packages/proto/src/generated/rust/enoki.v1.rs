@@ -254,6 +254,14 @@ pub struct DiskHealthMetric {
     pub temperature_celsius: ::core::option::Option<f64>,
     #[prost(uint64, optional, tag = "6")]
     pub power_on_hours: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "7")]
+    pub total_bytes: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "8")]
+    pub used_bytes: ::core::option::Option<u64>,
+    #[prost(string, tag = "9")]
+    pub usage_mount_point: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub role: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NetworkInterfaceMetric {

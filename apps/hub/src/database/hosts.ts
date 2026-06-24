@@ -38,8 +38,12 @@ export type HostSummary = {
       model: string | null;
       passed: boolean;
       powerOnHours: number | null;
+      role: string | null;
       serialNumber: string | null;
       temperatureCelsius: number | null;
+      totalBytes: number | null;
+      usageMountPoint: string | null;
+      usedBytes: number | null;
     }>;
     diskTotalBytes: number | null;
     diskUsedBytes: number | null;
@@ -112,8 +116,12 @@ export type HostSummaryOptions = {
       model: string | null;
       passed: boolean;
       powerOnHours: number | null;
+      role: string | null;
       serialNumber: string | null;
       temperatureCelsius: number | null;
+      totalBytes: number | null;
+      usageMountPoint: string | null;
+      usedBytes: number | null;
     }>;
     diskTotalBytes: number | null;
     diskUsedBytes: number | null;

@@ -23,6 +23,18 @@ const collectorCapabilitiesSchema = v.nullable(
     ),
   }),
 );
+const diskHealthMetricSchema = v.object({
+  deviceName: v.string(),
+  model: v.nullable(v.string()),
+  passed: v.boolean(),
+  powerOnHours: nullableNumberSchema,
+  role: v.nullable(v.string()),
+  serialNumber: v.nullable(v.string()),
+  temperatureCelsius: nullableNumberSchema,
+  totalBytes: nullableNumberSchema,
+  usageMountPoint: v.nullable(v.string()),
+  usedBytes: nullableNumberSchema,
+});
 
 export const webSocketClientMessageSchema = v.variant("type", [
   v.object({
@@ -54,18 +66,7 @@ export const hostLiveSummarySchema = v.object({
       cpuStealPercent: v.optional(nullableNumberSchema),
       cpuSystemPercent: v.optional(nullableNumberSchema),
       cpuUserPercent: v.optional(nullableNumberSchema),
-      diskHealth: v.optional(
-        v.array(
-          v.object({
-            deviceName: v.string(),
-            model: v.nullable(v.string()),
-            passed: v.boolean(),
-            powerOnHours: nullableNumberSchema,
-            serialNumber: v.nullable(v.string()),
-            temperatureCelsius: nullableNumberSchema,
-          }),
-        ),
-      ),
+      diskHealth: v.optional(v.array(diskHealthMetricSchema)),
       diskTotalBytes: nullableNumberSchema,
       diskUsedBytes: nullableNumberSchema,
       memoryCacheBytes: v.optional(nullableNumberSchema),
@@ -107,18 +108,7 @@ export const hostDetailSampleSchema = v.object({
   cpuStealPercent: v.optional(nullableNumberSchema),
   cpuSystemPercent: v.optional(nullableNumberSchema),
   cpuUserPercent: v.optional(nullableNumberSchema),
-  diskHealth: v.optional(
-    v.array(
-      v.object({
-        deviceName: v.string(),
-        model: v.nullable(v.string()),
-        passed: v.boolean(),
-        powerOnHours: nullableNumberSchema,
-        serialNumber: v.nullable(v.string()),
-        temperatureCelsius: nullableNumberSchema,
-      }),
-    ),
-  ),
+  diskHealth: v.optional(v.array(diskHealthMetricSchema)),
   disks: v.array(
     v.object({
       availableBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
