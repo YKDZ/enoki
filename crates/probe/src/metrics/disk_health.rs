@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicI8, Ordering},
 };
@@ -90,7 +90,7 @@ pub fn collect_disk_health_metrics_from_smartctl_json(
         serial_number: json_string(&value, "/serial_number").unwrap_or_default(),
         passed,
         temperature_celsius: json_f64(&value, "/temperature/current"),
-        total_bytes: None,
+        total_bytes: json_u64(&value, "/user_capacity/bytes"),
         usage_mount_point: String::new(),
         used_bytes: None,
     }))
@@ -309,11 +309,15 @@ fn enrich_disk_health_metrics_with_usage(metrics: &mut [DiskHealthMetric]) {
             continue;
         };
 
-        metric.role = usage.role.clone();
-        metric.total_bytes = Some(usage.total_bytes);
-        metric.usage_mount_point = usage.mount_point.clone();
-        metric.used_bytes = Some(usage.used_bytes);
+        apply_disk_physical_usage(metric, usage);
     }
+}
+
+fn apply_disk_physical_usage(metric: &mut DiskHealthMetric, usage: &DiskPhysicalUsage) {
+    metric.role = usage.role.clone();
+    metric.total_bytes = metric.total_bytes.or(Some(usage.total_bytes));
+    metric.usage_mount_point = usage.mount_point.clone();
+    metric.used_bytes = Some(usage.used_bytes);
 }
 
 fn disk_usage_by_device() -> BTreeMap<String, DiskPhysicalUsage> {
@@ -479,12 +483,74 @@ fn parse_mount(line: &str) -> Option<MountEntry> {
 }
 
 fn physical_device_name(source: &str) -> Option<String> {
+    physical_device_name_with_sysfs(source, Path::new("/sys/class/block"))
+}
+
+fn physical_device_name_with_sysfs(source: &str, sysfs_block_root: &Path) -> Option<String> {
     let name = source.strip_prefix("/dev/")?;
-    if name.starts_with("mapper/") || name.starts_with("md") {
+    if let Some(name) = physical_device_name_from_direct_block_name(name) {
+        return Some(name);
+    }
+
+    let basename = block_device_basename(source).or_else(|| Some(name.to_string()))?;
+    let physical_names = physical_device_names_from_sysfs(&basename, sysfs_block_root);
+
+    if physical_names.len() == 1 {
+        return physical_names.into_iter().next();
+    }
+
+    None
+}
+
+fn physical_device_name_from_direct_block_name(name: &str) -> Option<String> {
+    if name.starts_with("mapper/") || name.starts_with("md") || name.starts_with("dm-") {
         return None;
     }
 
     Some(format!("/dev/{}", physical_device_basename(name)?))
+}
+
+fn block_device_basename(source: &str) -> Option<String> {
+    let canonical = fs::canonicalize(source).ok()?;
+    canonical.file_name()?.to_str().map(ToOwned::to_owned)
+}
+
+fn physical_device_names_from_sysfs(block_name: &str, sysfs_block_root: &Path) -> BTreeSet<String> {
+    let mut visited = BTreeSet::new();
+    physical_device_names_from_sysfs_inner(block_name, sysfs_block_root, &mut visited)
+}
+
+fn physical_device_names_from_sysfs_inner(
+    block_name: &str,
+    sysfs_block_root: &Path,
+    visited: &mut BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut physical_names = BTreeSet::new();
+    if !visited.insert(block_name.to_string()) {
+        return physical_names;
+    }
+
+    if let Some(name) = physical_device_name_from_direct_block_name(block_name) {
+        physical_names.insert(name);
+        return physical_names;
+    }
+
+    let Ok(slaves) = fs::read_dir(sysfs_block_root.join(block_name).join("slaves")) else {
+        return physical_names;
+    };
+
+    for slave in slaves.flatten() {
+        let Some(slave_name) = slave.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        physical_names.extend(physical_device_names_from_sysfs_inner(
+            &slave_name,
+            sysfs_block_root,
+            visited,
+        ));
+    }
+
+    physical_names
 }
 
 fn physical_device_basename(name: &str) -> Option<String> {
@@ -647,6 +713,69 @@ fsUsed="90"
         );
         assert_eq!(physical_device_name("/dev/md1p1"), None);
         assert_eq!(physical_device_name("/dev/mapper/vg-root"), None);
+    }
+
+    #[test]
+    fn smartctl_json_preserves_physical_user_capacity() {
+        let metric = collect_disk_health_metrics_from_smartctl_json(
+            "/dev/nvme0",
+            r#"{
+  "model_name": "GVL-1TB",
+  "serial_number": "0009462008226",
+  "smart_support": { "available": true },
+  "smart_status": { "passed": true },
+  "temperature": { "current": 40 },
+  "power_on_time": { "hours": 24773 },
+  "user_capacity": { "blocks": 2000409264, "bytes": 1024209543168 }
+}"#,
+        )
+        .expect("smartctl json parses")
+        .expect("smartctl metric is available");
+
+        assert_eq!(metric.total_bytes, Some(1_024_209_543_168));
+    }
+
+    #[test]
+    fn disk_usage_enrichment_does_not_override_physical_capacity() {
+        let mut metric = DiskHealthMetric {
+            device_name: "/dev/nvme0".to_string(),
+            model: "GVL-1TB".to_string(),
+            passed: true,
+            power_on_hours: Some(24_773),
+            role: String::new(),
+            serial_number: "0009462008226".to_string(),
+            temperature_celsius: Some(40.0),
+            total_bytes: Some(1_024_209_543_168),
+            usage_mount_point: String::new(),
+            used_bytes: None,
+        };
+
+        apply_disk_physical_usage(
+            &mut metric,
+            &DiskPhysicalUsage {
+                mount_point: "/boot, /boot/efi".to_string(),
+                role: String::new(),
+                total_bytes: 3_165_372_416,
+                used_bytes: 216_649_728,
+            },
+        );
+
+        assert_eq!(metric.total_bytes, Some(1_024_209_543_168));
+        assert_eq!(metric.used_bytes, Some(216_649_728));
+        assert_eq!(metric.usage_mount_point, "/boot, /boot/efi");
+    }
+
+    #[test]
+    fn lvm_dm_device_maps_to_single_physical_nvme_controller() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slaves = temp.path().join("dm-0/slaves");
+        fs::create_dir_all(&slaves).expect("slaves dir");
+        fs::write(slaves.join("nvme0n1p3"), "").expect("slave marker");
+
+        assert_eq!(
+            physical_device_name_with_sysfs("/dev/dm-0", temp.path()).as_deref(),
+            Some("/dev/nvme0"),
+        );
     }
 
     #[test]
