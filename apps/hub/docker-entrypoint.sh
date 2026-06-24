@@ -1,10 +1,11 @@
 #!/bin/sh
 set -eu
 
-data_root="${ENOKI_DATA_ROOT:-/data}"
+data_root_base="${ENOKI_DATA_ROOT_BASE:-/data}"
+data_root="${ENOKI_DATA_ROOT:-$data_root_base}"
 
 case "$data_root" in
-  /data | /data/*) ;;
+  "$data_root_base" | "$data_root_base"/*) ;;
   *)
     echo "ENOKI_DATA_ROOT must be /data or a path below /data." >&2
     exit 1
@@ -19,8 +20,8 @@ case "$data_root" in
 esac
 
 reject_symlink_components() {
-  current="/data"
-  remainder="${data_root#/data}"
+  current="$data_root_base"
+  remainder="${data_root#$data_root_base}"
   remainder="${remainder#/}"
 
   if [ -L "$current" ]; then

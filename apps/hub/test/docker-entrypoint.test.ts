@@ -46,8 +46,13 @@ describe("Hub Docker entrypoint", () => {
 
   it("rejects a symlink ENOKI_DATA_ROOT below /data before chowning", async () => {
     const root = await createTempRoot();
+    const dataRootBase = path.join(root, "data");
     const mockBin = path.join(root, "bin");
-    const linkPath = `/data/enoki-entrypoint-link-${process.pid}-${Date.now()}`;
+    const linkPath = path.join(
+      dataRootBase,
+      `enoki-entrypoint-link-${process.pid}-${Date.now()}`,
+    );
+    await mkdir(dataRootBase, { recursive: true });
     await mkdir(mockBin, { recursive: true });
     await writeFile(
       path.join(mockBin, "id"),
@@ -58,6 +63,7 @@ describe("Hub Docker entrypoint", () => {
     tempRoots.push(linkPath);
 
     const result = await runEntrypoint({
+      ENOKI_DATA_ROOT_BASE: dataRootBase,
       ENOKI_DATA_ROOT: linkPath,
       PATH: `${mockBin}:${process.env.PATH ?? ""}`,
     });
