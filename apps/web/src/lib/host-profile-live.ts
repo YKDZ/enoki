@@ -4,7 +4,12 @@ import { formatBytes } from "./format";
 
 type HostProfileBackedFields = Pick<
   HostSummary,
-  "collectorCapabilities" | "cpu" | "cpuModel" | "memory" | "probeVersion" | "system"
+  | "collectorCapabilities"
+  | "cpu"
+  | "cpuModel"
+  | "memory"
+  | "probeVersion"
+  | "system"
 >;
 
 export function hostProfileBackedFields(

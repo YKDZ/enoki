@@ -377,9 +377,12 @@ export function succeedReportedProbeOperation(input: {
 }
 
 export function succeedProbeUpgradeRequestFromHostProfile(input: {
-  hostProfile: {
-    probeVersion?: string | null;
-  } | null | undefined;
+  hostProfile:
+    | {
+        probeVersion?: string | null;
+      }
+    | null
+    | undefined;
   nowMs: number;
   operation: ProbeUpgradeRequest;
 }): ProbeUpgradeRequest | null {

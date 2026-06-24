@@ -13,11 +13,11 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 
 import type { EnrollmentRepository } from "../database/enrollments.js";
+import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
 import type {
   HostStatusThresholds,
   HostRepository,
 } from "../database/hosts.js";
-import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
@@ -137,8 +137,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const createdHost = services.hosts.create({
       architecture: hostProfile.architecture || null,
       clockSkewDetected: false,
-      connectAddress:
-        firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
+      connectAddress: firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
       createdAtMs: registeredAtMs,
       cpuCount: hostProfile.cpuCount || null,
       cpuModel: hostProfile.cpuModel?.trim() || null,
@@ -259,10 +258,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const reportedHostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
     const knownHostProfileSnapshot =
-      services.snapshotCollectors?.get(hostProfileCollectorId)?.hasSnapshot(
-        host.id,
-        reportedSnapshotHash,
-      ) ?? reportedSnapshotHash === host.inventoryHash;
+      services.snapshotCollectors
+        ?.get(hostProfileCollectorId)
+        ?.hasSnapshot(host.id, reportedSnapshotHash) ??
+      reportedSnapshotHash === host.inventoryHash;
     const requestedSnapshotCollectorIds =
       !reportedHostProfile && !knownHostProfileSnapshot
         ? [hostProfileCollectorId]
@@ -281,7 +280,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     services.hosts.recordReport(host.id, {
       architecture: reportedHostProfile?.architecture || undefined,
       clockSkewDetected: clockSkew.detected,
-      connectAddress: reportConnectAddress(reportedHostProfile, host, observedIp),
+      connectAddress: reportConnectAddress(
+        reportedHostProfile,
+        host,
+        observedIp,
+      ),
       cpuCount: reportedHostProfile
         ? reportedHostProfile.cpuCount || null
         : undefined,

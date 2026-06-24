@@ -7,9 +7,9 @@ import {
 
 describe("probe configuration collector catalog", () => {
   it("does not expose Host Profile as an Owner-facing Metrics collector", () => {
-    expect(probeCollectorCatalog.map((collector) => collector.id)).not.toContain(
-      "official.host-profile",
-    );
+    expect(
+      probeCollectorCatalog.map((collector) => collector.id),
+    ).not.toContain("official.host-profile");
     expect(defaultEnabledCollectorIds).not.toContain("official.host-profile");
   });
 });

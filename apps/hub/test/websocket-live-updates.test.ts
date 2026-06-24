@@ -182,45 +182,46 @@ async function sendReport(
       probeId: registration.probeId,
       sequenceEnd: sequence,
       sequenceStart: sequence,
-      snapshots: (options.hostProfile ??
-      (options.diskAvailable === undefined
-        ? null
-        : {
-            architecture: "x86_64",
-            collectorCapabilities: {
-              official: {
-                disk: { available: options.diskAvailable },
+      snapshots:
+        (options.hostProfile ??
+        (options.diskAvailable === undefined
+          ? null
+          : {
+              architecture: "x86_64",
+              collectorCapabilities: {
+                official: {
+                  disk: { available: options.diskAvailable },
+                },
               },
-            },
-            cpuCount: 2,
-            hostname: "managed-host-01",
-            kernel: "6.8.0",
-            memoryTotalBytes: 2_147_483_648,
-            os: "linux",
-            probeVersion: "0.1.0",
-          }))
-        ? [
-            {
-              collectorId: "official.host-profile",
-              hostProfile:
-                options.hostProfile ??
-                ({
-                  architecture: "x86_64",
-                  collectorCapabilities: {
-                    official: {
-                      disk: { available: options.diskAvailable },
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              os: "linux",
+              probeVersion: "0.1.0",
+            }))
+          ? [
+              {
+                collectorId: "official.host-profile",
+                hostProfile:
+                  options.hostProfile ??
+                  ({
+                    architecture: "x86_64",
+                    collectorCapabilities: {
+                      official: {
+                        disk: { available: options.diskAvailable },
+                      },
                     },
-                  },
-                  cpuCount: 2,
-                  hostname: "managed-host-01",
-                  kernel: "6.8.0",
-                  memoryTotalBytes: 2_147_483_648,
-                  os: "linux",
-                  probeVersion: "0.1.0",
-                } satisfies root.enoki.v1.IHostProfileSnapshot),
-            },
-          ]
-        : [],
+                    cpuCount: 2,
+                    hostname: "managed-host-01",
+                    kernel: "6.8.0",
+                    memoryTotalBytes: 2_147_483_648,
+                    os: "linux",
+                    probeVersion: "0.1.0",
+                  } satisfies root.enoki.v1.IHostProfileSnapshot),
+              },
+            ]
+          : [],
     }),
   ).finish();
   const response = await fetch(`${baseUrl}/api/probe/report`, {

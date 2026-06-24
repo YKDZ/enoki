@@ -303,15 +303,13 @@ describe("Host Profile storage adapter", () => {
         "select connect_address, description, display_name, hostname, last_report_at_ms from managed_hosts where id = ?",
       )
       .get(host.id);
-    expect(updated).toEqual(
-      {
-        connect_address: "10.0.0.20",
-        description: "Owned by the Hub",
-        display_name: "Hub name",
-        hostname: "probe-reported-name",
-        last_report_at_ms: null,
-      },
-    );
+    expect(updated).toEqual({
+      connect_address: "10.0.0.20",
+      description: "Owned by the Hub",
+      display_name: "Hub name",
+      hostname: "probe-reported-name",
+      last_report_at_ms: null,
+    });
 
     database.close();
   });

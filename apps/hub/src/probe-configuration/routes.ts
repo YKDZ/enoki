@@ -89,10 +89,9 @@ export function createHostProbeConfigurationRoutes(
       return configurationError("host_not_found", 404);
     }
 
-    const response =
-      services.probeConfigurations.getEffectiveForHost(
-        hostId,
-      ) satisfies HostProbeConfigurationResponse;
+    const response = services.probeConfigurations.getEffectiveForHost(
+      hostId,
+    ) satisfies HostProbeConfigurationResponse;
 
     return context.json(response);
   });

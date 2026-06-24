@@ -52,7 +52,9 @@ export type SnapshotCollectorStorageRegistry = {
     ProtoHostProfileSnapshot,
     HostProfileSnapshot
   >;
-  get: (collectorId: string) => RegisteredSnapshotCollectorStorageAdapter | null;
+  get: (
+    collectorId: string,
+  ) => RegisteredSnapshotCollectorStorageAdapter | null;
   write: (
     input: SnapshotCollectorSnapshotWrite,
   ) => { changed: boolean; view: HostProfileSnapshot } | null;
@@ -83,7 +85,10 @@ export function createSnapshotCollectorStorageRegistry(
 
 export function createHostProfileStorageAdapter(
   database: HostProfileDatabase,
-): SnapshotCollectorStorageAdapter<ProtoHostProfileSnapshot, HostProfileSnapshot> {
+): SnapshotCollectorStorageAdapter<
+  ProtoHostProfileSnapshot,
+  HostProfileSnapshot
+> {
   return {
     collectorId: hostProfileCollectorId,
     hasSnapshot(hostId, snapshotHash) {
@@ -223,9 +228,7 @@ function normalizeHostProfile(
     collectorCapabilities: normalizeCollectorCapabilities(
       hostProfile.collectorCapabilities,
     ),
-    cpuBaseFrequencyMhz: nullableNumberField(
-      hostProfile.cpuBaseFrequencyMhz,
-    ),
+    cpuBaseFrequencyMhz: nullableNumberField(hostProfile.cpuBaseFrequencyMhz),
     cpuCacheL3Bytes: nullableNumberField(hostProfile.cpuCacheL3Bytes),
     cpuCount: numberField(hostProfile.cpuCount),
     cpuModel: nullableStringField(hostProfile.cpuModel),

@@ -11,19 +11,19 @@ import { Hono } from "hono";
 
 import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
+import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
 import type {
   HostStatusThresholds,
   HostRepository,
 } from "../database/hosts.js";
-import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import {
   evaluateProbeUpgradeEligibility,
   readProbeAssetSetVersionFromDirectory,
 } from "../probe/asset-set.js";
-import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import {
   acceptedTimedOutProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
@@ -113,7 +113,8 @@ export function createHostRoutes(services: HostRouteServices) {
 
     const storedHostProfile =
       services.snapshotCollectors?.hostProfile.read(hostId) ?? null;
-    const hostProfile = storedHostProfile ?? parseHostProfile(host.inventoryJson);
+    const hostProfile =
+      storedHostProfile ?? parseHostProfile(host.inventoryJson);
     const succeededOperation = succeedActiveProbeUpgradeRequestFromHostProfile({
       hostId,
       hostProfile: storedHostProfile,
@@ -357,56 +358,58 @@ export function createHostRoutes(services: HostRouteServices) {
               hostId,
               toCollectedAtMs,
             })
-            .map((sample): HostMetricSample => ({
-              batteryPercent: sample.batteryPercent,
-              batteryState: sample.batteryState,
-              collectedAtMs: sample.collectedAtMs,
-              cpuCores: sample.cpuCores,
-              cpuIdlePercent: sample.cpuIdlePercent,
-              cpuIowaitPercent: sample.cpuIowaitPercent,
-              cpuPercent: sample.cpuPercent,
-              cpuStealPercent: sample.cpuStealPercent,
-              cpuSystemPercent: sample.cpuSystemPercent,
-              cpuUserPercent: sample.cpuUserPercent,
-              diskTotalBytes: sample.diskTotalBytes,
-              ...(sample.diskHealth.length
-                ? { diskHealth: sample.diskHealth }
-                : {}),
-              diskUsedBytes: sample.diskUsedBytes,
-              disks: sample.disks,
-              memoryCacheBytes: sample.memoryCacheBytes,
-              memoryTotalBytes: sample.memoryTotalBytes,
-              memoryUsedBytes: sample.memoryUsedBytes,
-              networkInterfaces: sample.networkInterfaces.map(
-                (networkInterface) => ({
-                  ...networkInterface,
-                  rxBitsPerSecond: bitsPerSecond(
-                    networkInterface.rxBytesDelta,
-                    intervalSeconds,
-                  ),
-                  txBitsPerSecond: bitsPerSecond(
-                    networkInterface.txBytesDelta,
-                    intervalSeconds,
-                  ),
-                }),
-              ),
-              networkRxBitsPerSecond: bitsPerSecond(
-                sample.networkRxBytesDelta,
-                intervalSeconds,
-              ),
-              networkRxBytesDelta: sample.networkRxBytesDelta,
-              networkTxBitsPerSecond: bitsPerSecond(
-                sample.networkTxBytesDelta,
-                intervalSeconds,
-              ),
-              networkTxBytesDelta: sample.networkTxBytesDelta,
-              receivedAtMs: sample.receivedAtMs,
-              sequence: sample.sequence,
-              swapTotalBytes: sample.swapTotalBytes,
-              swapUsedBytes: sample.swapUsedBytes,
-              temperatureCelsius: sample.temperatureCelsius,
-              uptimeSeconds: sample.uptimeSeconds,
-            })) ?? [],
+            .map(
+              (sample): HostMetricSample => ({
+                batteryPercent: sample.batteryPercent,
+                batteryState: sample.batteryState,
+                collectedAtMs: sample.collectedAtMs,
+                cpuCores: sample.cpuCores,
+                cpuIdlePercent: sample.cpuIdlePercent,
+                cpuIowaitPercent: sample.cpuIowaitPercent,
+                cpuPercent: sample.cpuPercent,
+                cpuStealPercent: sample.cpuStealPercent,
+                cpuSystemPercent: sample.cpuSystemPercent,
+                cpuUserPercent: sample.cpuUserPercent,
+                diskTotalBytes: sample.diskTotalBytes,
+                ...(sample.diskHealth.length
+                  ? { diskHealth: sample.diskHealth }
+                  : {}),
+                diskUsedBytes: sample.diskUsedBytes,
+                disks: sample.disks,
+                memoryCacheBytes: sample.memoryCacheBytes,
+                memoryTotalBytes: sample.memoryTotalBytes,
+                memoryUsedBytes: sample.memoryUsedBytes,
+                networkInterfaces: sample.networkInterfaces.map(
+                  (networkInterface) => ({
+                    ...networkInterface,
+                    rxBitsPerSecond: bitsPerSecond(
+                      networkInterface.rxBytesDelta,
+                      intervalSeconds,
+                    ),
+                    txBitsPerSecond: bitsPerSecond(
+                      networkInterface.txBytesDelta,
+                      intervalSeconds,
+                    ),
+                  }),
+                ),
+                networkRxBitsPerSecond: bitsPerSecond(
+                  sample.networkRxBytesDelta,
+                  intervalSeconds,
+                ),
+                networkRxBytesDelta: sample.networkRxBytesDelta,
+                networkTxBitsPerSecond: bitsPerSecond(
+                  sample.networkTxBytesDelta,
+                  intervalSeconds,
+                ),
+                networkTxBytesDelta: sample.networkTxBytesDelta,
+                receivedAtMs: sample.receivedAtMs,
+                sequence: sample.sequence,
+                swapTotalBytes: sample.swapTotalBytes,
+                swapUsedBytes: sample.swapUsedBytes,
+                temperatureCelsius: sample.temperatureCelsius,
+                uptimeSeconds: sample.uptimeSeconds,
+              }),
+            ) ?? [],
         window,
       },
     } satisfies HostMetricsResponse;

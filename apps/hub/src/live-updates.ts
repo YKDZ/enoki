@@ -1,10 +1,10 @@
+import type { HostProfileSnapshot } from "@enoki/api-client";
 import {
   type HostDetailSample,
   type HostLiveSummary,
   parseWebSocketClientMessage,
   type WebSocketServerMessage,
 } from "@enoki/api-client/websocket";
-import type { HostProfileSnapshot } from "@enoki/api-client";
 import type { WSContext, WSMessageReceive } from "hono/ws";
 
 import type { HostSummary } from "./database/hosts.js";
@@ -18,7 +18,10 @@ type LiveClient = {
 export type LiveUpdateBroadcaster = {
   addClient: (socket: WSContext, options: { sessionId: string }) => void;
   broadcastDetailSample: (sample: HostDetailSample) => void;
-  broadcastHostProfile: (hostId: number, hostProfile: HostProfileSnapshot) => void;
+  broadcastHostProfile: (
+    hostId: number,
+    hostProfile: HostProfileSnapshot,
+  ) => void;
   broadcastHostSummary: (summary: HostLiveSummary) => void;
   closeSession: (sessionId: string) => void;
   handleClientMessage: (socket: WSContext, message: WSMessageReceive) => void;
