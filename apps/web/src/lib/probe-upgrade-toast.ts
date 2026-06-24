@@ -53,8 +53,6 @@ function probeUpgradeHostName(host: HostDetail) {
     return displayName;
   }
 
-  const inventoryHostname = host.inventory?.hostname;
-  return typeof inventoryHostname === "string" && inventoryHostname.trim()
-    ? inventoryHostname.trim()
-    : "";
+  const hostProfileHostname = host.hostProfile?.hostname;
+  return hostProfileHostname?.trim() ? hostProfileHostname.trim() : "";
 }

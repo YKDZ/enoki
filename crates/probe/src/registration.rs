@@ -13,10 +13,15 @@ use rsa::{
 };
 
 use crate::{
-    inventory::collect_local_inventory,
+    inventory::{collect_local_inventory, host_profile_hash},
     metrics::MetricsCollectionConfig,
-    protocol::enoki::v1::{ProbeRegistrationRequest, ProbeRegistrationResponse},
+    protocol::enoki::v1::{
+        HostProfileSnapshot, ProbeRegistrationRequest, ProbeRegistrationResponse, Snapshot,
+        snapshot,
+    },
 };
+
+const HOST_PROFILE_COLLECTOR_ID: &str = "official.host-profile";
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRegistrationInput {
@@ -101,10 +106,17 @@ pub fn register_probe(
     transport: &mut impl RegistrationTransport,
 ) -> Result<ProbeRegistrationOutcome, RegistrationError> {
     let signing_key = generate_probe_signing_key()?;
+    let inventory = collect_local_inventory();
+    let host_profile = host_profile_from_inventory(inventory.clone());
     let request = ProbeRegistrationRequest {
         enrollment_token: input.enrollment_token,
-        inventory: Some(collect_local_inventory()),
+        inventory: Some(inventory.clone()),
         probe_public_key_pem: signing_key.public_key_pem.clone(),
+        snapshots: vec![Snapshot {
+            collector_id: HOST_PROFILE_COLLECTOR_ID.to_string(),
+            snapshot_hash: host_profile_hash(&host_profile),
+            payload: Some(snapshot::Payload::HostProfile(host_profile)),
+        }],
     };
     let response_body =
         transport.post_protobuf(&registration_url(&input.hub_url), request.encode_to_vec())?;
@@ -149,6 +161,30 @@ pub fn register_probe(
             .map(|configuration| configuration.version),
         probe_id: response.probe_id,
     })
+}
+
+fn host_profile_from_inventory(
+    inventory: crate::protocol::enoki::v1::Inventory,
+) -> HostProfileSnapshot {
+    HostProfileSnapshot {
+        architecture: inventory.architecture,
+        collector_capabilities: inventory.collector_capabilities,
+        cpu_base_frequency_mhz: inventory.cpu_base_frequency_mhz,
+        cpu_cache_l3_bytes: inventory.cpu_cache_l3_bytes,
+        cpu_count: inventory.cpu_count,
+        cpu_model: inventory.cpu_model,
+        cpu_physical_count: inventory.cpu_physical_count,
+        cpu_socket_count: inventory.cpu_socket_count,
+        filesystems: inventory.filesystems,
+        hostname: inventory.hostname,
+        kernel: inventory.kernel,
+        memory_total_bytes: inventory.memory_total_bytes,
+        network_interfaces: inventory.network_interfaces,
+        os: inventory.os,
+        probe_version: inventory.probe_version,
+        process_count: inventory.process_count,
+        thread_count: inventory.thread_count,
+    }
 }
 
 struct GeneratedProbeSigningKey {

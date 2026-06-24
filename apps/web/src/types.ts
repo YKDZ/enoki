@@ -4,6 +4,7 @@ import type {
   CpuCoreMetric as ProtocolCpuCoreMetric,
   DiskHealthMetric as ProtocolDiskHealthMetric,
   DiskUsageMetric as ProtocolDiskUsageMetric,
+  HostProfileSnapshot as ProtocolHostProfileSnapshot,
   NetworkInterfaceDeltaMetric as ProtocolNetworkInterfaceDeltaMetric,
 } from "@enoki/api-client";
 
@@ -63,6 +64,8 @@ export type HostSummary = {
 export type CollectorCapabilities = ProtocolCollectorCapabilities;
 
 export type CollectorAvailability = ProtocolCollectorAvailability;
+
+export type HostProfileSnapshot = ProtocolHostProfileSnapshot;
 
 export type HostsResponse = {
   hosts: HostSummary[];
@@ -140,6 +143,7 @@ export type HostDetail = HostSummary & {
     displayName: string;
     observedIp: string | null;
   };
+  hostProfile: HostProfileSnapshot | null;
   inventory: Record<string, unknown> | null;
   probeConfiguration: HostProbeConfigurationResponse;
   probeUpgradeEligibility: {

@@ -44,8 +44,10 @@ const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
 const ReportRequest = enoki.v1.ProbeReportRequest as any;
 const ReportResponse = enoki.v1.ProbeReportResponse as any;
 const InventoryMessage = enoki.v1.Inventory as any;
+const HostProfileSnapshotMessage = enoki.v1.HostProfileSnapshot as any;
 const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest as any;
 const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse as any;
+const hostProfileCollectorId = "official.host-profile";
 const maxProbeReportPayloadBytes = 1024 * 1024;
 const maxProbeOperationPayloadBytes = 16 * 1024;
 const maxReportObservationRange = 10_000;
@@ -93,6 +95,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_public_key_required", 400);
     }
 
+    const hostProfileSnapshot = hostProfileSnapshotFromRegistration(request);
+    if (
+      hostProfileSnapshot?.snapshotHash &&
+      hostProfileSnapshot.snapshotHash !== hostProfileSnapshot.canonicalHash
+    ) {
+      return probeJsonError("snapshot_hash_mismatch", 400);
+    }
+
     const registeredAtMs = now();
     const enrollment = services.enrollments.consume(
       hashSecret(request.enrollmentToken),
@@ -105,41 +115,50 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     const probeId = createProbeId();
     const probeSecretPlaceholder = createProbeSecret();
+    const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
+    const registrationProfile = hostProfile ?? request.inventory;
     const inventory = request.inventory;
-    const inventoryJson = inventory ? serializeInventory(inventory) : null;
-    const inventoryHash = inventory ? hashInventory(inventory) : null;
+    const inventoryJson = registrationProfile
+      ? serializeHostProfile(registrationProfile)
+      : null;
+    const inventoryHash = hostProfile
+      ? (hostProfileSnapshot?.canonicalHash ?? hashHostProfile(hostProfile))
+      : inventory
+        ? hashInventory(inventory)
+        : null;
     const observedIp = observedIpFromContext(
       context,
       services.trustForwardedHeaders,
     );
     const displayName =
-      inventory?.hostname?.trim() || fallbackDisplayName(probeId);
+      registrationProfile?.hostname?.trim() || fallbackDisplayName(probeId);
 
     services.hosts.create({
-      architecture: inventory?.architecture || null,
+      architecture: registrationProfile?.architecture || null,
       clockSkewDetected: false,
-      connectAddress: firstInventoryAddress(inventory) ?? observedIp ?? "",
+      connectAddress:
+        firstInventoryAddress(registrationProfile) ?? observedIp ?? "",
       createdAtMs: registeredAtMs,
-      cpuCount: inventory?.cpuCount || null,
-      cpuModel: inventory?.cpuModel?.trim() || null,
+      cpuCount: registrationProfile?.cpuCount || null,
+      cpuModel: registrationProfile?.cpuModel?.trim() || null,
       displayName,
       displayNameEdited: false,
-      hostname: inventory?.hostname || null,
+      hostname: registrationProfile?.hostname || null,
       inventoryHash,
       inventoryJson,
-      kernel: inventory?.kernel || null,
+      kernel: registrationProfile?.kernel || null,
       lastClockSkewMs: null,
       lastReportAtMs: null,
-      memoryTotalBytes: inventory?.memoryTotalBytes
-        ? Number(inventory.memoryTotalBytes)
+      memoryTotalBytes: registrationProfile?.memoryTotalBytes
+        ? Number(registrationProfile.memoryTotalBytes)
         : null,
       observedIp,
       probePublicKeyPem: request.probePublicKeyPem,
-      os: inventory?.os || null,
+      os: registrationProfile?.os || null,
       probeConfigurationVersion: defaultProbeConfiguration.version,
       probeId,
       probeSecretHash: hashSecret(probeSecretPlaceholder),
-      probeVersion: inventory?.probeVersion || null,
+      probeVersion: registrationProfile?.probeVersion || null,
     });
 
     const body = RegistrationResponse.encode(
@@ -1175,6 +1194,28 @@ function decodeConfigurationRequest(body: Uint8Array): any | null {
   }
 }
 
+function hostProfileSnapshotFromRegistration(request: ProtoMessage) {
+  const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(
+    (snapshot) =>
+      snapshot.collectorId === hostProfileCollectorId && snapshot.hostProfile,
+  );
+
+  if (!snapshot?.hostProfile) {
+    return null;
+  }
+
+  const snapshotHash =
+    typeof snapshot.snapshotHash === "string" && snapshot.snapshotHash.trim()
+      ? snapshot.snapshotHash
+      : null;
+
+  return {
+    canonicalHash: hashHostProfile(snapshot.hostProfile),
+    hostProfile: snapshot.hostProfile,
+    snapshotHash,
+  };
+}
+
 const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
 const acceptedProbeRequestClockSkewMs = 5 * 60 * 1000;
 
@@ -1412,6 +1453,14 @@ function hashInventory(inventory: ProtoMessage) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function hashHostProfile(hostProfile: ProtoMessage) {
+  const bytes = HostProfileSnapshotMessage.encode(
+    HostProfileSnapshotMessage.create(stableHostProfile(hostProfile)),
+  ).finish();
+
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 function serializeInventory(inventory: ProtoMessage) {
   return JSON.stringify(
     InventoryMessage.toObject(
@@ -1423,10 +1472,25 @@ function serializeInventory(inventory: ProtoMessage) {
   );
 }
 
+function serializeHostProfile(hostProfile: ProtoMessage) {
+  return JSON.stringify(
+    HostProfileSnapshotMessage.toObject(
+      HostProfileSnapshotMessage.create(stableHostProfile(hostProfile)),
+      {
+        longs: String,
+      },
+    ),
+  );
+}
+
 function stableInventory(inventory: ProtoMessage): ProtoMessage {
+  return stableHostProfile(inventory);
+}
+
+function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
   return {
-    ...inventory,
-    filesystems: [...(inventory.filesystems ?? [])].sort(
+    ...hostProfile,
+    filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
         String(left.mountPoint ?? "").localeCompare(
           String(right.mountPoint ?? ""),
@@ -1435,7 +1499,7 @@ function stableInventory(inventory: ProtoMessage): ProtoMessage {
           String(right.filesystemType ?? ""),
         ),
     ),
-    networkInterfaces: [...(inventory.networkInterfaces ?? [])]
+    networkInterfaces: [...(hostProfile.networkInterfaces ?? [])]
       .map((networkInterface) => ({
         ...networkInterface,
         addresses: [...new Set(networkInterface.addresses ?? [])].sort(),

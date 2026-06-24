@@ -15,9 +15,7 @@ defineEmits<{
   openHostMetadata: [host: HostDetail];
 }>();
 
-function inventoryText(host: HostDetail, key: string) {
-  const value = host.inventory?.[key];
-
+function hostProfileText(value: string | number | null | undefined) {
   if (value === null || value === undefined || value === "") {
     return "暂无";
   }
@@ -26,7 +24,7 @@ function inventoryText(host: HostDetail, key: string) {
 }
 
 function memoryTotal(host: HostDetail) {
-  return Number(host.inventory?.memoryTotalBytes ?? 0) || null;
+  return host.hostProfile?.memoryTotalBytes ?? null;
 }
 
 function cpuModel(host: HostDetail) {
@@ -34,12 +32,12 @@ function cpuModel(host: HostDetail) {
 }
 
 function cpuCoreCount(host: HostDetail) {
-  const value = Number(host.inventory?.cpuCount ?? 0);
+  const value = host.hostProfile?.cpuCount ?? 0;
 
   return value > 0 ? `${value} 核心` : "核心数暂无";
 }
 
-function probeVersionText(value: string | null) {
+function probeVersionText(value: string | null | undefined) {
   return value?.trim() || "暂无";
 }
 </script>
@@ -108,21 +106,19 @@ function probeVersionText(value: string | null) {
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">主机名</p>
         <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
-          {{ inventoryText(host, "hostname") }}
+          {{ hostProfileText(host.hostProfile?.hostname) }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">架构</p>
         <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
-          {{ inventoryText(host, "architecture") }}
+          {{ hostProfileText(host.hostProfile?.architecture) }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
         <p class="text-muted-foreground text-xs">探针版本</p>
         <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
-          {{
-            probeVersionText(host.probeUpgradeEligibility.currentProbeVersion)
-          }}
+          {{ probeVersionText(host.hostProfile?.probeVersion) }}
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">

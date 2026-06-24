@@ -35,6 +35,30 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
       displayName: "测试主机",
       observedIp: null,
     },
+    hostProfile: {
+      architecture: "x86_64",
+      cpuBaseFrequencyMhz: 4_700,
+      cpuCacheL3Bytes: 67_108_864,
+      cpuCount: kind === "dense" ? 24 : 4,
+      cpuModel:
+        kind === "dense"
+          ? "AMD Ryzen 9 7900X 12-Core Processor with a deliberately long suffix"
+          : "AMD Ryzen 9 7900X",
+      cpuPhysicalCount: 1,
+      cpuSocketCount: 1,
+      filesystems: [],
+      hostname:
+        kind === "dense"
+          ? "enoki-production-database-primary-long-hostname"
+          : "enoki-test",
+      kernel: "6.8.0-124-generic",
+      memoryTotalBytes: 66_437_775_360,
+      networkInterfaces: [],
+      os: "Debian GNU/Linux 12 (bookworm)",
+      probeVersion: "0.1.33",
+      processCount: 286,
+      threadCount: 4255,
+    },
     id: kind === "dense" ? 9_001 : 9_002,
     inventory: {
       architecture: "x86_64",

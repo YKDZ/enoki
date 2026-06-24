@@ -1,9 +1,10 @@
 use std::fs;
 
 use enoki_probe::{
+    inventory::host_profile_hash,
     metrics::CollectorId,
     protocol::enoki::v1::{
-        ProbeConfigurationResponse, ProbeRegistrationRequest, ProbeRegistrationResponse,
+        ProbeConfigurationResponse, ProbeRegistrationRequest, ProbeRegistrationResponse, snapshot,
     },
     registration::{
         ProbeRegistrationInput, RegistrationError, RegistrationTransport, register_probe,
@@ -57,6 +58,22 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
             .starts_with("-----BEGIN PUBLIC KEY-----")
     );
     assert_eq!(request.inventory.expect("inventory").probe_version, "dev");
+    let host_profile_snapshot = request
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.collector_id == "official.host-profile")
+        .expect("Host Profile snapshot registration payload");
+    assert!(!host_profile_snapshot.snapshot_hash.is_empty());
+    let host_profile = match host_profile_snapshot.payload.as_ref() {
+        Some(snapshot::Payload::HostProfile(host_profile)) => host_profile,
+        None => panic!("Host Profile snapshot payload is missing"),
+    };
+    assert_eq!(host_profile.probe_version, "dev");
+    assert!(!host_profile.architecture.is_empty());
+    assert_eq!(
+        host_profile_snapshot.snapshot_hash,
+        host_profile_hash(host_profile)
+    );
 
     let bootstrap_config =
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");

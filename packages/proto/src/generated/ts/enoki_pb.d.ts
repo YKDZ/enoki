@@ -17,6 +17,9 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest probePublicKeyPem */
             probePublicKeyPem?: (string|null);
+
+            /** ProbeRegistrationRequest snapshots */
+            snapshots?: (enoki.v1.ISnapshot[]|null);
         }
 
         /** Represents a ProbeRegistrationRequest. */
@@ -36,6 +39,9 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest probePublicKeyPem. */
             public probePublicKeyPem: string;
+
+            /** ProbeRegistrationRequest snapshots. */
+            public snapshots: enoki.v1.ISnapshot[];
 
             /**
              * Creates a new ProbeRegistrationRequest instance using the specified properties.
@@ -1016,6 +1022,311 @@ export namespace enoki {
 
             /**
              * Gets the default type url for Inventory
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a HostProfileSnapshot. */
+        interface IHostProfileSnapshot {
+
+            /** HostProfileSnapshot hostname */
+            hostname?: (string|null);
+
+            /** HostProfileSnapshot os */
+            os?: (string|null);
+
+            /** HostProfileSnapshot kernel */
+            kernel?: (string|null);
+
+            /** HostProfileSnapshot architecture */
+            architecture?: (string|null);
+
+            /** HostProfileSnapshot cpuCount */
+            cpuCount?: (number|null);
+
+            /** HostProfileSnapshot memoryTotalBytes */
+            memoryTotalBytes?: (Long|null);
+
+            /** HostProfileSnapshot filesystems */
+            filesystems?: (enoki.v1.IFilesystemInventory[]|null);
+
+            /** HostProfileSnapshot networkInterfaces */
+            networkInterfaces?: (enoki.v1.INetworkInterfaceInventory[]|null);
+
+            /** HostProfileSnapshot probeVersion */
+            probeVersion?: (string|null);
+
+            /** HostProfileSnapshot cpuModel */
+            cpuModel?: (string|null);
+
+            /** HostProfileSnapshot processCount */
+            processCount?: (number|null);
+
+            /** HostProfileSnapshot threadCount */
+            threadCount?: (number|null);
+
+            /** HostProfileSnapshot cpuCacheL3Bytes */
+            cpuCacheL3Bytes?: (Long|null);
+
+            /** HostProfileSnapshot cpuBaseFrequencyMhz */
+            cpuBaseFrequencyMhz?: (number|null);
+
+            /** HostProfileSnapshot cpuSocketCount */
+            cpuSocketCount?: (number|null);
+
+            /** HostProfileSnapshot cpuPhysicalCount */
+            cpuPhysicalCount?: (number|null);
+
+            /** HostProfileSnapshot collectorCapabilities */
+            collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
+        }
+
+        /** Represents a HostProfileSnapshot. */
+        class HostProfileSnapshot implements IHostProfileSnapshot {
+
+            /**
+             * Constructs a new HostProfileSnapshot.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IHostProfileSnapshot);
+
+            /** HostProfileSnapshot hostname. */
+            public hostname: string;
+
+            /** HostProfileSnapshot os. */
+            public os: string;
+
+            /** HostProfileSnapshot kernel. */
+            public kernel: string;
+
+            /** HostProfileSnapshot architecture. */
+            public architecture: string;
+
+            /** HostProfileSnapshot cpuCount. */
+            public cpuCount: number;
+
+            /** HostProfileSnapshot memoryTotalBytes. */
+            public memoryTotalBytes: Long;
+
+            /** HostProfileSnapshot filesystems. */
+            public filesystems: enoki.v1.IFilesystemInventory[];
+
+            /** HostProfileSnapshot networkInterfaces. */
+            public networkInterfaces: enoki.v1.INetworkInterfaceInventory[];
+
+            /** HostProfileSnapshot probeVersion. */
+            public probeVersion: string;
+
+            /** HostProfileSnapshot cpuModel. */
+            public cpuModel: string;
+
+            /** HostProfileSnapshot processCount. */
+            public processCount: number;
+
+            /** HostProfileSnapshot threadCount. */
+            public threadCount: number;
+
+            /** HostProfileSnapshot cpuCacheL3Bytes. */
+            public cpuCacheL3Bytes: Long;
+
+            /** HostProfileSnapshot cpuBaseFrequencyMhz. */
+            public cpuBaseFrequencyMhz: number;
+
+            /** HostProfileSnapshot cpuSocketCount. */
+            public cpuSocketCount: number;
+
+            /** HostProfileSnapshot cpuPhysicalCount. */
+            public cpuPhysicalCount: number;
+
+            /** HostProfileSnapshot collectorCapabilities. */
+            public collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
+
+            /**
+             * Creates a new HostProfileSnapshot instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns HostProfileSnapshot instance
+             */
+            public static create(properties?: enoki.v1.IHostProfileSnapshot): enoki.v1.HostProfileSnapshot;
+
+            /**
+             * Encodes the specified HostProfileSnapshot message. Does not implicitly {@link enoki.v1.HostProfileSnapshot.verify|verify} messages.
+             * @param message HostProfileSnapshot message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IHostProfileSnapshot, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified HostProfileSnapshot message, length delimited. Does not implicitly {@link enoki.v1.HostProfileSnapshot.verify|verify} messages.
+             * @param message HostProfileSnapshot message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IHostProfileSnapshot, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a HostProfileSnapshot message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns HostProfileSnapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.HostProfileSnapshot;
+
+            /**
+             * Decodes a HostProfileSnapshot message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns HostProfileSnapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.HostProfileSnapshot;
+
+            /**
+             * Verifies a HostProfileSnapshot message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a HostProfileSnapshot message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns HostProfileSnapshot
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.HostProfileSnapshot;
+
+            /**
+             * Creates a plain object from a HostProfileSnapshot message. Also converts values to other types if specified.
+             * @param message HostProfileSnapshot
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.HostProfileSnapshot, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this HostProfileSnapshot to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for HostProfileSnapshot
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a Snapshot. */
+        interface ISnapshot {
+
+            /** Snapshot collectorId */
+            collectorId?: (string|null);
+
+            /** Snapshot snapshotHash */
+            snapshotHash?: (string|null);
+
+            /** Snapshot hostProfile */
+            hostProfile?: (enoki.v1.IHostProfileSnapshot|null);
+        }
+
+        /** Represents a Snapshot. */
+        class Snapshot implements ISnapshot {
+
+            /**
+             * Constructs a new Snapshot.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ISnapshot);
+
+            /** Snapshot collectorId. */
+            public collectorId: string;
+
+            /** Snapshot snapshotHash. */
+            public snapshotHash: string;
+
+            /** Snapshot hostProfile. */
+            public hostProfile?: (enoki.v1.IHostProfileSnapshot|null);
+
+            /** Snapshot payload. */
+            public payload?: "hostProfile";
+
+            /**
+             * Creates a new Snapshot instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns Snapshot instance
+             */
+            public static create(properties?: enoki.v1.ISnapshot): enoki.v1.Snapshot;
+
+            /**
+             * Encodes the specified Snapshot message. Does not implicitly {@link enoki.v1.Snapshot.verify|verify} messages.
+             * @param message Snapshot message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ISnapshot, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified Snapshot message, length delimited. Does not implicitly {@link enoki.v1.Snapshot.verify|verify} messages.
+             * @param message Snapshot message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ISnapshot, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a Snapshot message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns Snapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.Snapshot;
+
+            /**
+             * Decodes a Snapshot message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns Snapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.Snapshot;
+
+            /**
+             * Verifies a Snapshot message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a Snapshot message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns Snapshot
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.Snapshot;
+
+            /**
+             * Creates a plain object from a Snapshot message. Also converts values to other types if specified.
+             * @param message Snapshot
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.Snapshot, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this Snapshot to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for Snapshot
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

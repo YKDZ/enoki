@@ -14,8 +14,8 @@ use crate::metrics::{
     last_disk_health_collector_availability,
 };
 use crate::protocol::enoki::v1::{
-    CollectorAvailability, CollectorCapabilities, FilesystemInventory, Inventory,
-    NetworkInterfaceInventory, OfficialCollectorCapabilities,
+    CollectorAvailability, CollectorCapabilities, FilesystemInventory, HostProfileSnapshot,
+    Inventory, NetworkInterfaceInventory, OfficialCollectorCapabilities,
 };
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
@@ -410,6 +410,13 @@ pub fn inventory_hash(inventory: &Inventory) -> String {
     hex_lower(&digest)
 }
 
+pub fn host_profile_hash(host_profile: &HostProfileSnapshot) -> String {
+    let canonical = stable_host_profile(host_profile.clone());
+    let digest = Sha256::digest(canonical.encode_to_vec());
+
+    hex_lower(&digest)
+}
+
 pub fn stable_inventory(mut inventory: Inventory) -> Inventory {
     inventory.filesystems.sort_by(|left, right| {
         left.mount_point
@@ -425,6 +432,23 @@ pub fn stable_inventory(mut inventory: Inventory) -> Inventory {
         .sort_by(|left, right| left.name.cmp(&right.name));
 
     inventory
+}
+
+pub fn stable_host_profile(mut host_profile: HostProfileSnapshot) -> HostProfileSnapshot {
+    host_profile.filesystems.sort_by(|left, right| {
+        left.mount_point
+            .cmp(&right.mount_point)
+            .then_with(|| left.filesystem_type.cmp(&right.filesystem_type))
+    });
+    for network_interface in &mut host_profile.network_interfaces {
+        network_interface.addresses.sort();
+        network_interface.addresses.dedup();
+    }
+    host_profile
+        .network_interfaces
+        .sort_by(|left, right| left.name.cmp(&right.name));
+
+    host_profile
 }
 
 fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {

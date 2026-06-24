@@ -34,6 +34,7 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [enrollmentToken] ProbeRegistrationRequest enrollmentToken
              * @property {enoki.v1.IInventory|null} [inventory] ProbeRegistrationRequest inventory
              * @property {string|null} [probePublicKeyPem] ProbeRegistrationRequest probePublicKeyPem
+             * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeRegistrationRequest snapshots
              */
 
             /**
@@ -45,6 +46,7 @@ export const enoki = $root.enoki = (() => {
              * @param {enoki.v1.IProbeRegistrationRequest=} [properties] Properties to set
              */
             function ProbeRegistrationRequest(properties) {
+                this.snapshots = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -74,6 +76,14 @@ export const enoki = $root.enoki = (() => {
              * @instance
              */
             ProbeRegistrationRequest.prototype.probePublicKeyPem = "";
+
+            /**
+             * ProbeRegistrationRequest snapshots.
+             * @member {Array.<enoki.v1.ISnapshot>} snapshots
+             * @memberof enoki.v1.ProbeRegistrationRequest
+             * @instance
+             */
+            ProbeRegistrationRequest.prototype.snapshots = $util.emptyArray;
 
             /**
              * Creates a new ProbeRegistrationRequest instance using the specified properties.
@@ -109,6 +119,9 @@ export const enoki = $root.enoki = (() => {
                     $root.enoki.v1.Inventory.encode(message.inventory, writer.uint32(/* id 2, wireType 2 =*/18).fork(), q + 1).ldelim();
                 if (message.probePublicKeyPem != null && Object.hasOwnProperty.call(message, "probePublicKeyPem"))
                     writer.uint32(/* id 3, wireType 2 =*/26).string(message.probePublicKeyPem);
+                if (message.snapshots != null && message.snapshots.length)
+                    for (let i = 0; i < message.snapshots.length; ++i)
+                        $root.enoki.v1.Snapshot.encode(message.snapshots[i], writer.uint32(/* id 4, wireType 2 =*/34).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -161,6 +174,12 @@ export const enoki = $root.enoki = (() => {
                             message.probePublicKeyPem = reader.string();
                             break;
                         }
+                    case 4: {
+                            if (!(message.snapshots && message.snapshots.length))
+                                message.snapshots = [];
+                            message.snapshots.push($root.enoki.v1.Snapshot.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -211,6 +230,15 @@ export const enoki = $root.enoki = (() => {
                 if (message.probePublicKeyPem != null && Object.hasOwnProperty.call(message, "probePublicKeyPem"))
                     if (!$util.isString(message.probePublicKeyPem))
                         return "probePublicKeyPem: string expected";
+                if (message.snapshots != null && Object.hasOwnProperty.call(message, "snapshots")) {
+                    if (!Array.isArray(message.snapshots))
+                        return "snapshots: array expected";
+                    for (let i = 0; i < message.snapshots.length; ++i) {
+                        let error = $root.enoki.v1.Snapshot.verify(message.snapshots[i], long + 1);
+                        if (error)
+                            return "snapshots." + error;
+                    }
+                }
                 return null;
             };
 
@@ -241,6 +269,16 @@ export const enoki = $root.enoki = (() => {
                 }
                 if (object.probePublicKeyPem != null)
                     message.probePublicKeyPem = String(object.probePublicKeyPem);
+                if (object.snapshots) {
+                    if (!Array.isArray(object.snapshots))
+                        throw TypeError(".enoki.v1.ProbeRegistrationRequest.snapshots: array expected");
+                    message.snapshots = [];
+                    for (let i = 0; i < object.snapshots.length; ++i) {
+                        if (!$util.isObject(object.snapshots[i]))
+                            throw TypeError(".enoki.v1.ProbeRegistrationRequest.snapshots: object expected");
+                        message.snapshots[i] = $root.enoki.v1.Snapshot.fromObject(object.snapshots[i], long + 1);
+                    }
+                }
                 return message;
             };
 
@@ -261,6 +299,8 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
+                if (options.arrays || options.defaults)
+                    object.snapshots = [];
                 if (options.defaults) {
                     object.enrollmentToken = "";
                     object.inventory = null;
@@ -272,6 +312,11 @@ export const enoki = $root.enoki = (() => {
                     object.inventory = $root.enoki.v1.Inventory.toObject(message.inventory, options, q + 1);
                 if (message.probePublicKeyPem != null && Object.hasOwnProperty.call(message, "probePublicKeyPem"))
                     object.probePublicKeyPem = message.probePublicKeyPem;
+                if (message.snapshots && message.snapshots.length) {
+                    object.snapshots = [];
+                    for (let j = 0; j < message.snapshots.length; ++j)
+                        object.snapshots[j] = $root.enoki.v1.Snapshot.toObject(message.snapshots[j], options, q + 1);
+                }
                 return object;
             };
 
@@ -3035,6 +3080,982 @@ export const enoki = $root.enoki = (() => {
             };
 
             return Inventory;
+        })();
+
+        v1.HostProfileSnapshot = (function() {
+
+            /**
+             * Properties of a HostProfileSnapshot.
+             * @memberof enoki.v1
+             * @interface IHostProfileSnapshot
+             * @property {string|null} [hostname] HostProfileSnapshot hostname
+             * @property {string|null} [os] HostProfileSnapshot os
+             * @property {string|null} [kernel] HostProfileSnapshot kernel
+             * @property {string|null} [architecture] HostProfileSnapshot architecture
+             * @property {number|null} [cpuCount] HostProfileSnapshot cpuCount
+             * @property {Long|null} [memoryTotalBytes] HostProfileSnapshot memoryTotalBytes
+             * @property {Array.<enoki.v1.IFilesystemInventory>|null} [filesystems] HostProfileSnapshot filesystems
+             * @property {Array.<enoki.v1.INetworkInterfaceInventory>|null} [networkInterfaces] HostProfileSnapshot networkInterfaces
+             * @property {string|null} [probeVersion] HostProfileSnapshot probeVersion
+             * @property {string|null} [cpuModel] HostProfileSnapshot cpuModel
+             * @property {number|null} [processCount] HostProfileSnapshot processCount
+             * @property {number|null} [threadCount] HostProfileSnapshot threadCount
+             * @property {Long|null} [cpuCacheL3Bytes] HostProfileSnapshot cpuCacheL3Bytes
+             * @property {number|null} [cpuBaseFrequencyMhz] HostProfileSnapshot cpuBaseFrequencyMhz
+             * @property {number|null} [cpuSocketCount] HostProfileSnapshot cpuSocketCount
+             * @property {number|null} [cpuPhysicalCount] HostProfileSnapshot cpuPhysicalCount
+             * @property {enoki.v1.ICollectorCapabilities|null} [collectorCapabilities] HostProfileSnapshot collectorCapabilities
+             */
+
+            /**
+             * Constructs a new HostProfileSnapshot.
+             * @memberof enoki.v1
+             * @classdesc Represents a HostProfileSnapshot.
+             * @implements IHostProfileSnapshot
+             * @constructor
+             * @param {enoki.v1.IHostProfileSnapshot=} [properties] Properties to set
+             */
+            function HostProfileSnapshot(properties) {
+                this.filesystems = [];
+                this.networkInterfaces = [];
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * HostProfileSnapshot hostname.
+             * @member {string} hostname
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.hostname = "";
+
+            /**
+             * HostProfileSnapshot os.
+             * @member {string} os
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.os = "";
+
+            /**
+             * HostProfileSnapshot kernel.
+             * @member {string} kernel
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.kernel = "";
+
+            /**
+             * HostProfileSnapshot architecture.
+             * @member {string} architecture
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.architecture = "";
+
+            /**
+             * HostProfileSnapshot cpuCount.
+             * @member {number} cpuCount
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.cpuCount = 0;
+
+            /**
+             * HostProfileSnapshot memoryTotalBytes.
+             * @member {Long} memoryTotalBytes
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.memoryTotalBytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * HostProfileSnapshot filesystems.
+             * @member {Array.<enoki.v1.IFilesystemInventory>} filesystems
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.filesystems = $util.emptyArray;
+
+            /**
+             * HostProfileSnapshot networkInterfaces.
+             * @member {Array.<enoki.v1.INetworkInterfaceInventory>} networkInterfaces
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.networkInterfaces = $util.emptyArray;
+
+            /**
+             * HostProfileSnapshot probeVersion.
+             * @member {string} probeVersion
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.probeVersion = "";
+
+            /**
+             * HostProfileSnapshot cpuModel.
+             * @member {string} cpuModel
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.cpuModel = "";
+
+            /**
+             * HostProfileSnapshot processCount.
+             * @member {number} processCount
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.processCount = 0;
+
+            /**
+             * HostProfileSnapshot threadCount.
+             * @member {number} threadCount
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.threadCount = 0;
+
+            /**
+             * HostProfileSnapshot cpuCacheL3Bytes.
+             * @member {Long} cpuCacheL3Bytes
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.cpuCacheL3Bytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * HostProfileSnapshot cpuBaseFrequencyMhz.
+             * @member {number} cpuBaseFrequencyMhz
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.cpuBaseFrequencyMhz = 0;
+
+            /**
+             * HostProfileSnapshot cpuSocketCount.
+             * @member {number} cpuSocketCount
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.cpuSocketCount = 0;
+
+            /**
+             * HostProfileSnapshot cpuPhysicalCount.
+             * @member {number} cpuPhysicalCount
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.cpuPhysicalCount = 0;
+
+            /**
+             * HostProfileSnapshot collectorCapabilities.
+             * @member {enoki.v1.ICollectorCapabilities|null|undefined} collectorCapabilities
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.collectorCapabilities = null;
+
+            /**
+             * Creates a new HostProfileSnapshot instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {enoki.v1.IHostProfileSnapshot=} [properties] Properties to set
+             * @returns {enoki.v1.HostProfileSnapshot} HostProfileSnapshot instance
+             */
+            HostProfileSnapshot.create = function create(properties) {
+                return new HostProfileSnapshot(properties);
+            };
+
+            /**
+             * Encodes the specified HostProfileSnapshot message. Does not implicitly {@link enoki.v1.HostProfileSnapshot.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {enoki.v1.IHostProfileSnapshot} message HostProfileSnapshot message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            HostProfileSnapshot.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.hostname);
+                if (message.os != null && Object.hasOwnProperty.call(message, "os"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.os);
+                if (message.kernel != null && Object.hasOwnProperty.call(message, "kernel"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.kernel);
+                if (message.architecture != null && Object.hasOwnProperty.call(message, "architecture"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.architecture);
+                if (message.cpuCount != null && Object.hasOwnProperty.call(message, "cpuCount"))
+                    writer.uint32(/* id 5, wireType 0 =*/40).uint32(message.cpuCount);
+                if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
+                    writer.uint32(/* id 6, wireType 0 =*/48).uint64(message.memoryTotalBytes);
+                if (message.filesystems != null && message.filesystems.length)
+                    for (let i = 0; i < message.filesystems.length; ++i)
+                        $root.enoki.v1.FilesystemInventory.encode(message.filesystems[i], writer.uint32(/* id 7, wireType 2 =*/58).fork(), q + 1).ldelim();
+                if (message.networkInterfaces != null && message.networkInterfaces.length)
+                    for (let i = 0; i < message.networkInterfaces.length; ++i)
+                        $root.enoki.v1.NetworkInterfaceInventory.encode(message.networkInterfaces[i], writer.uint32(/* id 8, wireType 2 =*/66).fork(), q + 1).ldelim();
+                if (message.probeVersion != null && Object.hasOwnProperty.call(message, "probeVersion"))
+                    writer.uint32(/* id 9, wireType 2 =*/74).string(message.probeVersion);
+                if (message.cpuModel != null && Object.hasOwnProperty.call(message, "cpuModel"))
+                    writer.uint32(/* id 10, wireType 2 =*/82).string(message.cpuModel);
+                if (message.processCount != null && Object.hasOwnProperty.call(message, "processCount"))
+                    writer.uint32(/* id 11, wireType 0 =*/88).uint32(message.processCount);
+                if (message.threadCount != null && Object.hasOwnProperty.call(message, "threadCount"))
+                    writer.uint32(/* id 12, wireType 0 =*/96).uint32(message.threadCount);
+                if (message.cpuCacheL3Bytes != null && Object.hasOwnProperty.call(message, "cpuCacheL3Bytes"))
+                    writer.uint32(/* id 13, wireType 0 =*/104).uint64(message.cpuCacheL3Bytes);
+                if (message.cpuBaseFrequencyMhz != null && Object.hasOwnProperty.call(message, "cpuBaseFrequencyMhz"))
+                    writer.uint32(/* id 14, wireType 0 =*/112).uint32(message.cpuBaseFrequencyMhz);
+                if (message.cpuSocketCount != null && Object.hasOwnProperty.call(message, "cpuSocketCount"))
+                    writer.uint32(/* id 15, wireType 0 =*/120).uint32(message.cpuSocketCount);
+                if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
+                    writer.uint32(/* id 16, wireType 0 =*/128).uint32(message.cpuPhysicalCount);
+                if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities"))
+                    $root.enoki.v1.CollectorCapabilities.encode(message.collectorCapabilities, writer.uint32(/* id 17, wireType 2 =*/138).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified HostProfileSnapshot message, length delimited. Does not implicitly {@link enoki.v1.HostProfileSnapshot.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {enoki.v1.IHostProfileSnapshot} message HostProfileSnapshot message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            HostProfileSnapshot.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a HostProfileSnapshot message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.HostProfileSnapshot} HostProfileSnapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            HostProfileSnapshot.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.HostProfileSnapshot();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.hostname = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.os = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.kernel = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.architecture = reader.string();
+                            break;
+                        }
+                    case 5: {
+                            message.cpuCount = reader.uint32();
+                            break;
+                        }
+                    case 6: {
+                            message.memoryTotalBytes = reader.uint64();
+                            break;
+                        }
+                    case 7: {
+                            if (!(message.filesystems && message.filesystems.length))
+                                message.filesystems = [];
+                            message.filesystems.push($root.enoki.v1.FilesystemInventory.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 8: {
+                            if (!(message.networkInterfaces && message.networkInterfaces.length))
+                                message.networkInterfaces = [];
+                            message.networkInterfaces.push($root.enoki.v1.NetworkInterfaceInventory.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 9: {
+                            message.probeVersion = reader.string();
+                            break;
+                        }
+                    case 10: {
+                            message.cpuModel = reader.string();
+                            break;
+                        }
+                    case 11: {
+                            message.processCount = reader.uint32();
+                            break;
+                        }
+                    case 12: {
+                            message.threadCount = reader.uint32();
+                            break;
+                        }
+                    case 13: {
+                            message.cpuCacheL3Bytes = reader.uint64();
+                            break;
+                        }
+                    case 14: {
+                            message.cpuBaseFrequencyMhz = reader.uint32();
+                            break;
+                        }
+                    case 15: {
+                            message.cpuSocketCount = reader.uint32();
+                            break;
+                        }
+                    case 16: {
+                            message.cpuPhysicalCount = reader.uint32();
+                            break;
+                        }
+                    case 17: {
+                            message.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a HostProfileSnapshot message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.HostProfileSnapshot} HostProfileSnapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            HostProfileSnapshot.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a HostProfileSnapshot message.
+             * @function verify
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            HostProfileSnapshot.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
+                    if (!$util.isString(message.hostname))
+                        return "hostname: string expected";
+                if (message.os != null && Object.hasOwnProperty.call(message, "os"))
+                    if (!$util.isString(message.os))
+                        return "os: string expected";
+                if (message.kernel != null && Object.hasOwnProperty.call(message, "kernel"))
+                    if (!$util.isString(message.kernel))
+                        return "kernel: string expected";
+                if (message.architecture != null && Object.hasOwnProperty.call(message, "architecture"))
+                    if (!$util.isString(message.architecture))
+                        return "architecture: string expected";
+                if (message.cpuCount != null && Object.hasOwnProperty.call(message, "cpuCount"))
+                    if (!$util.isInteger(message.cpuCount))
+                        return "cpuCount: integer expected";
+                if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
+                    if (!$util.isInteger(message.memoryTotalBytes) && !(message.memoryTotalBytes && $util.isInteger(message.memoryTotalBytes.low) && $util.isInteger(message.memoryTotalBytes.high)))
+                        return "memoryTotalBytes: integer|Long expected";
+                if (message.filesystems != null && Object.hasOwnProperty.call(message, "filesystems")) {
+                    if (!Array.isArray(message.filesystems))
+                        return "filesystems: array expected";
+                    for (let i = 0; i < message.filesystems.length; ++i) {
+                        let error = $root.enoki.v1.FilesystemInventory.verify(message.filesystems[i], long + 1);
+                        if (error)
+                            return "filesystems." + error;
+                    }
+                }
+                if (message.networkInterfaces != null && Object.hasOwnProperty.call(message, "networkInterfaces")) {
+                    if (!Array.isArray(message.networkInterfaces))
+                        return "networkInterfaces: array expected";
+                    for (let i = 0; i < message.networkInterfaces.length; ++i) {
+                        let error = $root.enoki.v1.NetworkInterfaceInventory.verify(message.networkInterfaces[i], long + 1);
+                        if (error)
+                            return "networkInterfaces." + error;
+                    }
+                }
+                if (message.probeVersion != null && Object.hasOwnProperty.call(message, "probeVersion"))
+                    if (!$util.isString(message.probeVersion))
+                        return "probeVersion: string expected";
+                if (message.cpuModel != null && Object.hasOwnProperty.call(message, "cpuModel"))
+                    if (!$util.isString(message.cpuModel))
+                        return "cpuModel: string expected";
+                if (message.processCount != null && Object.hasOwnProperty.call(message, "processCount"))
+                    if (!$util.isInteger(message.processCount))
+                        return "processCount: integer expected";
+                if (message.threadCount != null && Object.hasOwnProperty.call(message, "threadCount"))
+                    if (!$util.isInteger(message.threadCount))
+                        return "threadCount: integer expected";
+                if (message.cpuCacheL3Bytes != null && Object.hasOwnProperty.call(message, "cpuCacheL3Bytes"))
+                    if (!$util.isInteger(message.cpuCacheL3Bytes) && !(message.cpuCacheL3Bytes && $util.isInteger(message.cpuCacheL3Bytes.low) && $util.isInteger(message.cpuCacheL3Bytes.high)))
+                        return "cpuCacheL3Bytes: integer|Long expected";
+                if (message.cpuBaseFrequencyMhz != null && Object.hasOwnProperty.call(message, "cpuBaseFrequencyMhz"))
+                    if (!$util.isInteger(message.cpuBaseFrequencyMhz))
+                        return "cpuBaseFrequencyMhz: integer expected";
+                if (message.cpuSocketCount != null && Object.hasOwnProperty.call(message, "cpuSocketCount"))
+                    if (!$util.isInteger(message.cpuSocketCount))
+                        return "cpuSocketCount: integer expected";
+                if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
+                    if (!$util.isInteger(message.cpuPhysicalCount))
+                        return "cpuPhysicalCount: integer expected";
+                if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities")) {
+                    let error = $root.enoki.v1.CollectorCapabilities.verify(message.collectorCapabilities, long + 1);
+                    if (error)
+                        return "collectorCapabilities." + error;
+                }
+                return null;
+            };
+
+            /**
+             * Creates a HostProfileSnapshot message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.HostProfileSnapshot} HostProfileSnapshot
+             */
+            HostProfileSnapshot.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.HostProfileSnapshot)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.HostProfileSnapshot: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.HostProfileSnapshot();
+                if (object.hostname != null)
+                    message.hostname = String(object.hostname);
+                if (object.os != null)
+                    message.os = String(object.os);
+                if (object.kernel != null)
+                    message.kernel = String(object.kernel);
+                if (object.architecture != null)
+                    message.architecture = String(object.architecture);
+                if (object.cpuCount != null)
+                    message.cpuCount = object.cpuCount >>> 0;
+                if (object.memoryTotalBytes != null)
+                    if ($util.Long)
+                        message.memoryTotalBytes = $util.Long.fromValue(object.memoryTotalBytes, true);
+                    else if (typeof object.memoryTotalBytes === "string")
+                        message.memoryTotalBytes = parseInt(object.memoryTotalBytes, 10);
+                    else if (typeof object.memoryTotalBytes === "number")
+                        message.memoryTotalBytes = object.memoryTotalBytes;
+                    else if (typeof object.memoryTotalBytes === "object")
+                        message.memoryTotalBytes = new $util.LongBits(object.memoryTotalBytes.low >>> 0, object.memoryTotalBytes.high >>> 0).toNumber(true);
+                if (object.filesystems) {
+                    if (!Array.isArray(object.filesystems))
+                        throw TypeError(".enoki.v1.HostProfileSnapshot.filesystems: array expected");
+                    message.filesystems = [];
+                    for (let i = 0; i < object.filesystems.length; ++i) {
+                        if (!$util.isObject(object.filesystems[i]))
+                            throw TypeError(".enoki.v1.HostProfileSnapshot.filesystems: object expected");
+                        message.filesystems[i] = $root.enoki.v1.FilesystemInventory.fromObject(object.filesystems[i], long + 1);
+                    }
+                }
+                if (object.networkInterfaces) {
+                    if (!Array.isArray(object.networkInterfaces))
+                        throw TypeError(".enoki.v1.HostProfileSnapshot.networkInterfaces: array expected");
+                    message.networkInterfaces = [];
+                    for (let i = 0; i < object.networkInterfaces.length; ++i) {
+                        if (!$util.isObject(object.networkInterfaces[i]))
+                            throw TypeError(".enoki.v1.HostProfileSnapshot.networkInterfaces: object expected");
+                        message.networkInterfaces[i] = $root.enoki.v1.NetworkInterfaceInventory.fromObject(object.networkInterfaces[i], long + 1);
+                    }
+                }
+                if (object.probeVersion != null)
+                    message.probeVersion = String(object.probeVersion);
+                if (object.cpuModel != null)
+                    message.cpuModel = String(object.cpuModel);
+                if (object.processCount != null)
+                    message.processCount = object.processCount >>> 0;
+                if (object.threadCount != null)
+                    message.threadCount = object.threadCount >>> 0;
+                if (object.cpuCacheL3Bytes != null)
+                    if ($util.Long)
+                        message.cpuCacheL3Bytes = $util.Long.fromValue(object.cpuCacheL3Bytes, true);
+                    else if (typeof object.cpuCacheL3Bytes === "string")
+                        message.cpuCacheL3Bytes = parseInt(object.cpuCacheL3Bytes, 10);
+                    else if (typeof object.cpuCacheL3Bytes === "number")
+                        message.cpuCacheL3Bytes = object.cpuCacheL3Bytes;
+                    else if (typeof object.cpuCacheL3Bytes === "object")
+                        message.cpuCacheL3Bytes = new $util.LongBits(object.cpuCacheL3Bytes.low >>> 0, object.cpuCacheL3Bytes.high >>> 0).toNumber(true);
+                if (object.cpuBaseFrequencyMhz != null)
+                    message.cpuBaseFrequencyMhz = object.cpuBaseFrequencyMhz >>> 0;
+                if (object.cpuSocketCount != null)
+                    message.cpuSocketCount = object.cpuSocketCount >>> 0;
+                if (object.cpuPhysicalCount != null)
+                    message.cpuPhysicalCount = object.cpuPhysicalCount >>> 0;
+                if (object.collectorCapabilities != null) {
+                    if (!$util.isObject(object.collectorCapabilities))
+                        throw TypeError(".enoki.v1.HostProfileSnapshot.collectorCapabilities: object expected");
+                    message.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.fromObject(object.collectorCapabilities, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a HostProfileSnapshot message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {enoki.v1.HostProfileSnapshot} message HostProfileSnapshot
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            HostProfileSnapshot.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.arrays || options.defaults) {
+                    object.filesystems = [];
+                    object.networkInterfaces = [];
+                }
+                if (options.defaults) {
+                    object.hostname = "";
+                    object.os = "";
+                    object.kernel = "";
+                    object.architecture = "";
+                    object.cpuCount = 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.memoryTotalBytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.memoryTotalBytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    object.probeVersion = "";
+                    object.cpuModel = "";
+                    object.processCount = 0;
+                    object.threadCount = 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.cpuCacheL3Bytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.cpuCacheL3Bytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    object.cpuBaseFrequencyMhz = 0;
+                    object.cpuSocketCount = 0;
+                    object.cpuPhysicalCount = 0;
+                    object.collectorCapabilities = null;
+                }
+                if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
+                    object.hostname = message.hostname;
+                if (message.os != null && Object.hasOwnProperty.call(message, "os"))
+                    object.os = message.os;
+                if (message.kernel != null && Object.hasOwnProperty.call(message, "kernel"))
+                    object.kernel = message.kernel;
+                if (message.architecture != null && Object.hasOwnProperty.call(message, "architecture"))
+                    object.architecture = message.architecture;
+                if (message.cpuCount != null && Object.hasOwnProperty.call(message, "cpuCount"))
+                    object.cpuCount = message.cpuCount;
+                if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.memoryTotalBytes = typeof message.memoryTotalBytes === "number" ? BigInt(message.memoryTotalBytes) : $util.Long.fromBits(message.memoryTotalBytes.low >>> 0, message.memoryTotalBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.memoryTotalBytes === "number")
+                        object.memoryTotalBytes = options.longs === String ? String(message.memoryTotalBytes) : message.memoryTotalBytes;
+                    else
+                        object.memoryTotalBytes = options.longs === String ? $util.Long.prototype.toString.call(message.memoryTotalBytes) : options.longs === Number ? new $util.LongBits(message.memoryTotalBytes.low >>> 0, message.memoryTotalBytes.high >>> 0).toNumber(true) : message.memoryTotalBytes;
+                if (message.filesystems && message.filesystems.length) {
+                    object.filesystems = [];
+                    for (let j = 0; j < message.filesystems.length; ++j)
+                        object.filesystems[j] = $root.enoki.v1.FilesystemInventory.toObject(message.filesystems[j], options, q + 1);
+                }
+                if (message.networkInterfaces && message.networkInterfaces.length) {
+                    object.networkInterfaces = [];
+                    for (let j = 0; j < message.networkInterfaces.length; ++j)
+                        object.networkInterfaces[j] = $root.enoki.v1.NetworkInterfaceInventory.toObject(message.networkInterfaces[j], options, q + 1);
+                }
+                if (message.probeVersion != null && Object.hasOwnProperty.call(message, "probeVersion"))
+                    object.probeVersion = message.probeVersion;
+                if (message.cpuModel != null && Object.hasOwnProperty.call(message, "cpuModel"))
+                    object.cpuModel = message.cpuModel;
+                if (message.processCount != null && Object.hasOwnProperty.call(message, "processCount"))
+                    object.processCount = message.processCount;
+                if (message.threadCount != null && Object.hasOwnProperty.call(message, "threadCount"))
+                    object.threadCount = message.threadCount;
+                if (message.cpuCacheL3Bytes != null && Object.hasOwnProperty.call(message, "cpuCacheL3Bytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.cpuCacheL3Bytes = typeof message.cpuCacheL3Bytes === "number" ? BigInt(message.cpuCacheL3Bytes) : $util.Long.fromBits(message.cpuCacheL3Bytes.low >>> 0, message.cpuCacheL3Bytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.cpuCacheL3Bytes === "number")
+                        object.cpuCacheL3Bytes = options.longs === String ? String(message.cpuCacheL3Bytes) : message.cpuCacheL3Bytes;
+                    else
+                        object.cpuCacheL3Bytes = options.longs === String ? $util.Long.prototype.toString.call(message.cpuCacheL3Bytes) : options.longs === Number ? new $util.LongBits(message.cpuCacheL3Bytes.low >>> 0, message.cpuCacheL3Bytes.high >>> 0).toNumber(true) : message.cpuCacheL3Bytes;
+                if (message.cpuBaseFrequencyMhz != null && Object.hasOwnProperty.call(message, "cpuBaseFrequencyMhz"))
+                    object.cpuBaseFrequencyMhz = message.cpuBaseFrequencyMhz;
+                if (message.cpuSocketCount != null && Object.hasOwnProperty.call(message, "cpuSocketCount"))
+                    object.cpuSocketCount = message.cpuSocketCount;
+                if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
+                    object.cpuPhysicalCount = message.cpuPhysicalCount;
+                if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities"))
+                    object.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.toObject(message.collectorCapabilities, options, q + 1);
+                return object;
+            };
+
+            /**
+             * Converts this HostProfileSnapshot to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            HostProfileSnapshot.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for HostProfileSnapshot
+             * @function getTypeUrl
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            HostProfileSnapshot.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.HostProfileSnapshot";
+            };
+
+            return HostProfileSnapshot;
+        })();
+
+        v1.Snapshot = (function() {
+
+            /**
+             * Properties of a Snapshot.
+             * @memberof enoki.v1
+             * @interface ISnapshot
+             * @property {string|null} [collectorId] Snapshot collectorId
+             * @property {string|null} [snapshotHash] Snapshot snapshotHash
+             * @property {enoki.v1.IHostProfileSnapshot|null} [hostProfile] Snapshot hostProfile
+             */
+
+            /**
+             * Constructs a new Snapshot.
+             * @memberof enoki.v1
+             * @classdesc Represents a Snapshot.
+             * @implements ISnapshot
+             * @constructor
+             * @param {enoki.v1.ISnapshot=} [properties] Properties to set
+             */
+            function Snapshot(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * Snapshot collectorId.
+             * @member {string} collectorId
+             * @memberof enoki.v1.Snapshot
+             * @instance
+             */
+            Snapshot.prototype.collectorId = "";
+
+            /**
+             * Snapshot snapshotHash.
+             * @member {string} snapshotHash
+             * @memberof enoki.v1.Snapshot
+             * @instance
+             */
+            Snapshot.prototype.snapshotHash = "";
+
+            /**
+             * Snapshot hostProfile.
+             * @member {enoki.v1.IHostProfileSnapshot|null|undefined} hostProfile
+             * @memberof enoki.v1.Snapshot
+             * @instance
+             */
+            Snapshot.prototype.hostProfile = null;
+
+            // OneOf field names bound to virtual getters and setters
+            let $oneOfFields;
+
+            /**
+             * Snapshot payload.
+             * @member {"hostProfile"|undefined} payload
+             * @memberof enoki.v1.Snapshot
+             * @instance
+             */
+            Object.defineProperty(Snapshot.prototype, "payload", {
+                get: $util.oneOfGetter($oneOfFields = ["hostProfile"]),
+                set: $util.oneOfSetter($oneOfFields)
+            });
+
+            /**
+             * Creates a new Snapshot instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {enoki.v1.ISnapshot=} [properties] Properties to set
+             * @returns {enoki.v1.Snapshot} Snapshot instance
+             */
+            Snapshot.create = function create(properties) {
+                return new Snapshot(properties);
+            };
+
+            /**
+             * Encodes the specified Snapshot message. Does not implicitly {@link enoki.v1.Snapshot.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {enoki.v1.ISnapshot} message Snapshot message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            Snapshot.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.collectorId != null && Object.hasOwnProperty.call(message, "collectorId"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.collectorId);
+                if (message.snapshotHash != null && Object.hasOwnProperty.call(message, "snapshotHash"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.snapshotHash);
+                if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile"))
+                    $root.enoki.v1.HostProfileSnapshot.encode(message.hostProfile, writer.uint32(/* id 10, wireType 2 =*/82).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified Snapshot message, length delimited. Does not implicitly {@link enoki.v1.Snapshot.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {enoki.v1.ISnapshot} message Snapshot message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            Snapshot.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a Snapshot message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.Snapshot} Snapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            Snapshot.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.Snapshot();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.collectorId = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.snapshotHash = reader.string();
+                            break;
+                        }
+                    case 10: {
+                            message.hostProfile = $root.enoki.v1.HostProfileSnapshot.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a Snapshot message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.Snapshot} Snapshot
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            Snapshot.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a Snapshot message.
+             * @function verify
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            Snapshot.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                let properties = {};
+                if (message.collectorId != null && Object.hasOwnProperty.call(message, "collectorId"))
+                    if (!$util.isString(message.collectorId))
+                        return "collectorId: string expected";
+                if (message.snapshotHash != null && Object.hasOwnProperty.call(message, "snapshotHash"))
+                    if (!$util.isString(message.snapshotHash))
+                        return "snapshotHash: string expected";
+                if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile")) {
+                    properties.payload = 1;
+                    {
+                        let error = $root.enoki.v1.HostProfileSnapshot.verify(message.hostProfile, long + 1);
+                        if (error)
+                            return "hostProfile." + error;
+                    }
+                }
+                return null;
+            };
+
+            /**
+             * Creates a Snapshot message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.Snapshot} Snapshot
+             */
+            Snapshot.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.Snapshot)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.Snapshot: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.Snapshot();
+                if (object.collectorId != null)
+                    message.collectorId = String(object.collectorId);
+                if (object.snapshotHash != null)
+                    message.snapshotHash = String(object.snapshotHash);
+                if (object.hostProfile != null) {
+                    if (!$util.isObject(object.hostProfile))
+                        throw TypeError(".enoki.v1.Snapshot.hostProfile: object expected");
+                    message.hostProfile = $root.enoki.v1.HostProfileSnapshot.fromObject(object.hostProfile, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a Snapshot message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {enoki.v1.Snapshot} message Snapshot
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            Snapshot.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.collectorId = "";
+                    object.snapshotHash = "";
+                }
+                if (message.collectorId != null && Object.hasOwnProperty.call(message, "collectorId"))
+                    object.collectorId = message.collectorId;
+                if (message.snapshotHash != null && Object.hasOwnProperty.call(message, "snapshotHash"))
+                    object.snapshotHash = message.snapshotHash;
+                if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile")) {
+                    object.hostProfile = $root.enoki.v1.HostProfileSnapshot.toObject(message.hostProfile, options, q + 1);
+                    if (options.oneofs)
+                        object.payload = "hostProfile";
+                }
+                return object;
+            };
+
+            /**
+             * Converts this Snapshot to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.Snapshot
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            Snapshot.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for Snapshot
+             * @function getTypeUrl
+             * @memberof enoki.v1.Snapshot
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            Snapshot.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.Snapshot";
+            };
+
+            return Snapshot;
         })();
 
         v1.FilesystemInventory = (function() {

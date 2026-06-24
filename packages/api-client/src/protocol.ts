@@ -14,6 +14,13 @@ type OptionalJsonFields<T, Key extends keyof T> = {
 type RepeatedItem<T> = NonNullable<T> extends Array<infer Item> ? Item : never;
 
 type ProtoMetricSample = enoki.v1.IMetricSample;
+type ProtoHostProfileSnapshot = enoki.v1.IHostProfileSnapshot;
+type ProtoFilesystemProfile = RepeatedItem<
+  ProtoHostProfileSnapshot["filesystems"]
+>;
+type ProtoNetworkInterfaceProfile = RepeatedItem<
+  ProtoHostProfileSnapshot["networkInterfaces"]
+>;
 type ProtoCpuCoreMetric = RepeatedItem<ProtoMetricSample["cpuCores"]>;
 type ProtoDiskUsageMetric = RepeatedItem<ProtoMetricSample["disks"]>;
 type ProtoDiskHealthMetric = RepeatedItem<ProtoMetricSample["diskHealth"]>;
@@ -33,6 +40,43 @@ export type OfficialCollectorCapabilities = {
 export type CollectorCapabilities = {
   official?: OfficialCollectorCapabilities;
 };
+
+export type FilesystemProfile = RequiredJsonFields<
+  ProtoFilesystemProfile,
+  "availableBytes" | "filesystemType" | "mountPoint" | "totalBytes"
+>;
+
+export type NetworkInterfaceProfile = RequiredJsonFields<
+  ProtoNetworkInterfaceProfile,
+  "name"
+> & {
+  addresses: string[];
+};
+
+export type HostProfileSnapshot = RequiredJsonFields<
+  ProtoHostProfileSnapshot,
+  | "architecture"
+  | "cpuCount"
+  | "hostname"
+  | "kernel"
+  | "memoryTotalBytes"
+  | "os"
+  | "probeVersion"
+> &
+  OptionalJsonFields<
+    ProtoHostProfileSnapshot,
+    | "cpuBaseFrequencyMhz"
+    | "cpuCacheL3Bytes"
+    | "cpuModel"
+    | "cpuPhysicalCount"
+    | "cpuSocketCount"
+    | "processCount"
+    | "threadCount"
+  > & {
+    collectorCapabilities?: CollectorCapabilities | null;
+    filesystems: FilesystemProfile[];
+    networkInterfaces: NetworkInterfaceProfile[];
+  };
 
 export type CpuCoreMetric = RequiredJsonFields<
   ProtoCpuCoreMetric,

@@ -94,6 +94,60 @@ pub struct Inventory {
     #[prost(message, optional, tag = "17")]
     pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HostProfileSnapshot {
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub os: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub kernel: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub architecture: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub cpu_count: u32,
+    #[prost(uint64, tag = "6")]
+    pub memory_total_bytes: u64,
+    #[prost(message, repeated, tag = "7")]
+    pub filesystems: ::prost::alloc::vec::Vec<FilesystemInventory>,
+    #[prost(message, repeated, tag = "8")]
+    pub network_interfaces: ::prost::alloc::vec::Vec<NetworkInterfaceInventory>,
+    #[prost(string, tag = "9")]
+    pub probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub cpu_model: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "11")]
+    pub process_count: u32,
+    #[prost(uint32, tag = "12")]
+    pub thread_count: u32,
+    #[prost(uint64, tag = "13")]
+    pub cpu_cache_l3_bytes: u64,
+    #[prost(uint32, tag = "14")]
+    pub cpu_base_frequency_mhz: u32,
+    #[prost(uint32, tag = "15")]
+    pub cpu_socket_count: u32,
+    #[prost(uint32, tag = "16")]
+    pub cpu_physical_count: u32,
+    #[prost(message, optional, tag = "17")]
+    pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Snapshot {
+    #[prost(string, tag = "1")]
+    pub collector_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub snapshot_hash: ::prost::alloc::string::String,
+    #[prost(oneof = "snapshot::Payload", tags = "10")]
+    pub payload: ::core::option::Option<snapshot::Payload>,
+}
+/// Nested message and enum types in `Snapshot`.
+pub mod snapshot {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag = "10")]
+        HostProfile(super::HostProfileSnapshot),
+    }
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FilesystemInventory {
     #[prost(string, tag = "1")]
@@ -321,6 +375,8 @@ pub struct ProbeRegistrationRequest {
     pub inventory: ::core::option::Option<Inventory>,
     #[prost(string, tag = "3")]
     pub probe_public_key_pem: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "4")]
+    pub snapshots: ::prost::alloc::vec::Vec<Snapshot>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeRegistrationResponse {

@@ -32,6 +32,7 @@ fn generated_rust_protocol_encodes_probe_registration() {
         }),
         probe_public_key_pem: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----\n"
             .to_string(),
+        snapshots: Vec::new(),
     };
 
     let encoded = request.encode_to_vec();

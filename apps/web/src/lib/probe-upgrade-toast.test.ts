@@ -130,8 +130,16 @@ describe("Probe upgrade failure toast", () => {
       probeUpgradeToastTitle(
         hostDetail({
           displayName: " ",
-          inventory: {
+          hostProfile: {
+            architecture: "x86_64",
+            cpuCount: 1,
+            filesystems: [],
             hostname: "racknerd-01",
+            kernel: "6.8.0",
+            memoryTotalBytes: 1,
+            networkInterfaces: [],
+            os: "linux",
+            probeVersion: "0.1.45",
           },
         }),
         "failed",
@@ -158,6 +166,7 @@ function hostDetail(overrides: Partial<HostDetail>) {
       displayName: "测试主机",
       observedIp: null,
     },
+    hostProfile: null,
     id: 1,
     inventory: null,
     lastReportAtMs: null,

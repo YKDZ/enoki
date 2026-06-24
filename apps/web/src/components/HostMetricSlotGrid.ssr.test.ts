@@ -51,6 +51,17 @@ const host: HostDetail = {
     displayName: "managed-host-01",
     observedIp: null,
   },
+  hostProfile: {
+    architecture: "x86_64",
+    cpuCount: 2,
+    filesystems: [],
+    hostname: "managed-host-01",
+    kernel: "6.8.0",
+    memoryTotalBytes: 8_589_934_592,
+    networkInterfaces: [],
+    os: "linux",
+    probeVersion: "0.1.0",
+  },
   id: 1,
   inventory: {
     cpuCount: 2,
