@@ -1,4 +1,12 @@
-import type { HostProfileSnapshot } from "@enoki/api-client";
+import type {
+  HostDetailResponse,
+  HostMetadataResponse,
+  HostMetricSample,
+  HostMetricsResponse,
+  HostProfileSnapshot,
+  ProbeUpgradeRequestResponse,
+  ProbeUpgradeStatus,
+} from "@enoki/api-client";
 import { Hono } from "hono";
 
 import type { ProbeOperationConfig } from "../config.js";
@@ -15,6 +23,7 @@ import {
   evaluateProbeUpgradeEligibility,
   readProbeAssetSetVersionFromDirectory,
 } from "../probe/asset-set.js";
+import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import {
   acceptedTimedOutProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
@@ -24,6 +33,7 @@ import {
   runningTimedOutProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromInventory,
 } from "../probe/operation.js";
+import { hostSummaryResponse } from "./api-response.js";
 
 export type HostRouteServices = {
   audit?: AuditRepository;
@@ -117,9 +127,9 @@ export function createHostRoutes(services: HostRouteServices) {
           userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
         });
 
-    return context.json({
+    const response = {
       host: {
-        ...hostSummary,
+        ...hostSummaryResponse(hostSummary),
         hostMetadata: {
           connectAddress: host.connectAddress,
           description: host.description,
@@ -133,7 +143,7 @@ export function createHostRoutes(services: HostRouteServices) {
         probeConfiguration: services.probeConfigurations?.getEffectiveForHost(
           hostId,
         ) ?? {
-          configuration: null,
+          configuration: defaultProbeConfiguration,
           mode: "inherit",
         },
         probeUpgradeEligibility: evaluateProbeUpgradeEligibility({
@@ -150,7 +160,9 @@ export function createHostRoutes(services: HostRouteServices) {
         ),
         warnings: warningList(host),
       },
-    });
+    } satisfies HostDetailResponse;
+
+    return context.json(response);
   });
 
   routes.post("/:hostId/probe-upgrade-requests", async (context) => {
@@ -261,12 +273,11 @@ export function createHostRoutes(services: HostRouteServices) {
       }
     }
 
-    return context.json(
-      {
-        probeUpgradeRequest: probeUpgradeStatus(operation),
-      },
-      isDuplicate ? 200 : 201,
-    );
+    const response = {
+      probeUpgradeRequest: probeUpgradeStatus(operation),
+    } satisfies ProbeUpgradeRequestResponse;
+
+    return context.json(response, isDuplicate ? 200 : 201);
   });
 
   routes.delete("/:hostId/probe-upgrade-requests/:operationId", (context) => {
@@ -312,9 +323,11 @@ export function createHostRoutes(services: HostRouteServices) {
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    return context.json({
+    const response = {
       probeUpgradeRequest: probeUpgradeStatus(canceled),
-    });
+    } satisfies ProbeUpgradeRequestResponse;
+
+    return context.json(response);
   });
 
   routes.get("/:hostId/metrics", (context) => {
@@ -335,7 +348,7 @@ export function createHostRoutes(services: HostRouteServices) {
     const intervalSeconds =
       effectiveConfiguration?.metricsCollectionIntervalSeconds ?? 5;
 
-    return context.json({
+    const response = {
       metrics: {
         samples:
           services.metrics
@@ -344,7 +357,7 @@ export function createHostRoutes(services: HostRouteServices) {
               hostId,
               toCollectedAtMs,
             })
-            .map((sample) => ({
+            .map((sample): HostMetricSample => ({
               batteryPercent: sample.batteryPercent,
               batteryState: sample.batteryState,
               collectedAtMs: sample.collectedAtMs,
@@ -396,7 +409,9 @@ export function createHostRoutes(services: HostRouteServices) {
             })) ?? [],
         window,
       },
-    });
+    } satisfies HostMetricsResponse;
+
+    return context.json(response);
   });
 
   routes.put("/:hostId/metadata", async (context) => {
@@ -425,12 +440,14 @@ export function createHostRoutes(services: HostRouteServices) {
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    return context.json({
+    const response = {
       connectAddress: host.connectAddress,
       description: host.description,
       displayName: host.displayName,
       id: host.id,
-    });
+    } satisfies HostMetadataResponse;
+
+    return context.json(response);
   });
 
   routes.delete("/:hostId", (context) => {
@@ -692,7 +709,14 @@ function succeedActiveProbeUpgradeRequestFromHost(input: {
   );
 }
 
-function probeUpgradeStatus(operation: ProbeUpgradeRequest | null) {
+function probeUpgradeStatus(operation: ProbeUpgradeRequest): ProbeUpgradeStatus;
+function probeUpgradeStatus(operation: null): null;
+function probeUpgradeStatus(
+  operation: ProbeUpgradeRequest | null,
+): ProbeUpgradeStatus | null;
+function probeUpgradeStatus(
+  operation: ProbeUpgradeRequest | null,
+): ProbeUpgradeStatus | null {
   if (!operation) {
     return null;
   }
@@ -705,7 +729,7 @@ function probeUpgradeStatus(operation: ProbeUpgradeRequest | null) {
           message: operation.failureMessage ?? "",
         }
       : null,
-    id: operation.id,
+    id: requiredOperationId(operation),
     state: operation.state,
     targetProbeVersion: operation.targetProbeVersion,
     updatedAtMs: operation.updatedAtMs,
@@ -724,13 +748,28 @@ function metricsWindow(value: string | undefined): MetricsWindow | null {
     : null;
 }
 
-function parseInventory(inventoryJson: string | null) {
+function requiredOperationId(operation: ProbeUpgradeRequest) {
+  if (operation.id === null) {
+    throw new Error("Probe operation must be persisted before formatting.");
+  }
+
+  return operation.id;
+}
+
+function parseInventory(inventoryJson: string | null): Record<
+  string,
+  unknown
+> | null {
   if (!inventoryJson) {
     return null;
   }
 
   try {
-    return JSON.parse(inventoryJson) as unknown;
+    const parsed = JSON.parse(inventoryJson) as unknown;
+
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
   } catch {
     return null;
   }

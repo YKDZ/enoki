@@ -91,7 +91,6 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
         version: "fixture-v1",
       },
       mode: "inherit",
-      version: "fixture-v1",
     },
     probeUpgradeEligibility: {
       currentProbeAssetSetVersion: null,

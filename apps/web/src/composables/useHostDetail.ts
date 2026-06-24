@@ -21,6 +21,7 @@ import type {
   HostMetricSample,
   HostMetricsResponse,
   MetricsWindow,
+  ProbeUpgradeRequestResponse,
 } from "../types";
 
 type FetchJson = <T>(path: string) => Promise<T>;
@@ -226,11 +227,12 @@ export function useHostDetail(
     isCreatingProbeUpgradeRequest.value = true;
 
     try {
-      const response = await mutateJson<{
-        probeUpgradeRequest: NonNullable<HostDetail["probeUpgradeStatus"]>;
-      }>(`/api/web/hosts/${currentHostId()}/probe-upgrade-requests`, {
-        method: "POST",
-      });
+      const response = await mutateJson<ProbeUpgradeRequestResponse>(
+        `/api/web/hosts/${currentHostId()}/probe-upgrade-requests`,
+        {
+          method: "POST",
+        },
+      );
 
       if (host.value) {
         host.value = {

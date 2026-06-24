@@ -1,3 +1,4 @@
+import type { HostsResponse } from "@enoki/api-client";
 import { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
 
@@ -11,6 +12,7 @@ import type { HostStatusThresholds } from "./database/hosts.js";
 import type { HubDatabase } from "./database/index.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createEnrollmentRoutes } from "./enrollment/routes.js";
+import { hostSummaryResponse } from "./hosts/api-response.js";
 import { createHostRoutes } from "./hosts/routes.js";
 import {
   createLiveUpdateBroadcaster,
@@ -164,7 +166,7 @@ export function createHubApp(options: HubAppOptions = {}) {
     app.get("/api/web/hosts", (context) => {
       const nowMs = options.now?.() ?? Date.now();
 
-      return context.json({
+      const response = {
         hosts:
           options.database?.hosts
             .listSummaries({
@@ -195,24 +197,13 @@ export function createHubApp(options: HubAppOptions = {}) {
               const intervalSeconds =
                 effective?.configuration.metricsCollectionIntervalSeconds ?? 5;
 
-              return {
-                ...host,
-                latestMetrics: host.latestMetrics
-                  ? {
-                      ...host.latestMetrics,
-                      networkRxBitsPerSecond: bitsPerSecond(
-                        host.latestMetrics.networkRxBytesDelta,
-                        intervalSeconds,
-                      ),
-                      networkTxBitsPerSecond: bitsPerSecond(
-                        host.latestMetrics.networkTxBytesDelta,
-                        intervalSeconds,
-                      ),
-                    }
-                  : null,
-              };
+              return hostSummaryResponse(host, {
+                metricsCollectionIntervalSeconds: intervalSeconds,
+              });
             }) ?? [],
-      });
+      } satisfies HostsResponse;
+
+      return context.json(response);
     });
   }
 
@@ -252,14 +243,6 @@ export function createHubAppFromEnvironment(
     probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
     probeOperations: config.probeOperations,
   });
-}
-
-function bitsPerSecond(bytes: number | null, intervalSeconds: number) {
-  if (bytes === null || intervalSeconds <= 0) {
-    return null;
-  }
-
-  return (bytes * 8) / intervalSeconds;
 }
 
 function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {

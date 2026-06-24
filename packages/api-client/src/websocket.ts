@@ -8,6 +8,94 @@ import type {
   NetworkInterfaceDeltaMetric,
 } from "./protocol.js";
 
+type HostStatus = "online" | "stale" | "offline";
+
+export type WebSocketClientMessage =
+  | {
+      hostId: number;
+      type: "subscribe_host_detail";
+    }
+  | {
+      hostId: number;
+      type: "unsubscribe_host_detail";
+    };
+
+export type HostLiveSummaryMetricSample = {
+  batteryPercent?: number | null;
+  batteryState?: string | null;
+  collectedAtMs: number;
+  cpuIdlePercent?: number | null;
+  cpuIowaitPercent?: number | null;
+  cpuPercent: number | null;
+  cpuStealPercent?: number | null;
+  cpuSystemPercent?: number | null;
+  cpuUserPercent?: number | null;
+  diskHealth?: DiskHealthMetric[];
+  diskTotalBytes: number | null;
+  diskUsedBytes: number | null;
+  memoryCacheBytes?: number | null;
+  memoryTotalBytes: number | null;
+  memoryUsedBytes: number | null;
+  networkRxBitsPerSecond: number | null;
+  networkRxBytesDelta: number | null;
+  networkTxBitsPerSecond: number | null;
+  networkTxBytesDelta: number | null;
+  receivedAtMs: number;
+  swapTotalBytes?: number | null;
+  swapUsedBytes?: number | null;
+  temperatureCelsius?: number | null;
+  uptimeSeconds: number | null;
+};
+
+export type HostLiveSummary = {
+  collectorCapabilities?: CollectorCapabilities | null;
+  id: number;
+  lastSeenAtMs: number | null;
+  latestMetrics: HostLiveSummaryMetricSample | null;
+  status: HostStatus;
+  warningFlags: {
+    clockSkew: boolean;
+    probeConfigurationError: boolean;
+  };
+};
+
+export type HostDetailSample = {
+  batteryPercent?: number | null;
+  batteryState?: string | null;
+  collectedAtMs: number;
+  cpuCores: CpuCoreMetric[];
+  cpuIdlePercent?: number | null;
+  cpuIowaitPercent?: number | null;
+  cpuPercent: number | null;
+  cpuStealPercent?: number | null;
+  cpuSystemPercent?: number | null;
+  cpuUserPercent?: number | null;
+  diskHealth?: DiskHealthMetric[];
+  disks: DiskUsageMetric[];
+  hostId: number;
+  memoryCacheBytes?: number | null;
+  memoryTotalBytes: number | null;
+  memoryUsedBytes: number | null;
+  networkInterfaces: NetworkInterfaceDeltaMetric[];
+  receivedAtMs: number;
+  sequence: number;
+  swapTotalBytes?: number | null;
+  swapUsedBytes?: number | null;
+  temperatureCelsius?: number | null;
+  uptimeSeconds: number | null;
+};
+
+export type WebSocketServerMessage =
+  | {
+      host: HostLiveSummary;
+      type: "host_summary";
+    }
+  | {
+      hostId: number;
+      sample: HostDetailSample;
+      type: "host_detail_sample";
+    };
+
 const hostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const nullableNumberSchema = v.nullable(v.number());
 const timestampMsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
@@ -56,10 +144,6 @@ export const webSocketClientMessageSchema = v.variant("type", [
   }),
 ]);
 
-export type WebSocketClientMessage = v.InferOutput<
-  typeof webSocketClientMessageSchema
->;
-
 export const hostLiveSummarySchema = v.object({
   collectorCapabilities: v.optional(collectorCapabilitiesSchema),
   id: hostIdSchema,
@@ -98,23 +182,6 @@ export const hostLiveSummarySchema = v.object({
     probeConfigurationError: v.boolean(),
   }),
 });
-
-type HostLiveSummarySchemaOutput = v.InferOutput<typeof hostLiveSummarySchema>;
-type HostLiveSummaryLatestMetrics = NonNullable<
-  HostLiveSummarySchemaOutput["latestMetrics"]
->;
-
-export type HostLiveSummary = Omit<
-  HostLiveSummarySchemaOutput,
-  "collectorCapabilities" | "latestMetrics"
-> & {
-  collectorCapabilities?: CollectorCapabilities | null;
-  latestMetrics:
-    | (Omit<HostLiveSummaryLatestMetrics, "diskHealth"> & {
-        diskHealth?: DiskHealthMetric[];
-      })
-    | null;
-};
 
 export const hostDetailSampleSchema = v.object({
   collectedAtMs: timestampMsSchema,
@@ -171,16 +238,6 @@ export const hostDetailSampleSchema = v.object({
   uptimeSeconds: nullableNumberSchema,
 });
 
-export type HostDetailSample = Omit<
-  v.InferOutput<typeof hostDetailSampleSchema>,
-  "cpuCores" | "diskHealth" | "disks" | "networkInterfaces"
-> & {
-  cpuCores: CpuCoreMetric[];
-  diskHealth?: DiskHealthMetric[];
-  disks: DiskUsageMetric[];
-  networkInterfaces: NetworkInterfaceDeltaMetric[];
-};
-
 export const webSocketServerMessageSchema = v.variant("type", [
   v.object({
     host: hostLiveSummarySchema,
@@ -193,23 +250,35 @@ export const webSocketServerMessageSchema = v.variant("type", [
   }),
 ]);
 
-export type WebSocketServerMessage =
-  | {
-      host: HostLiveSummary;
-      type: "host_summary";
-    }
-  | {
-      hostId: number;
-      sample: HostDetailSample;
-      type: "host_detail_sample";
-    };
+type SchemaOutputMatchesContract<SchemaOutput, Contract> =
+  SchemaOutput extends Contract
+    ? Contract extends SchemaOutput
+      ? true
+      : never
+    : never;
+
+type AssertTrue<Value extends true> = Value;
+
+type _WebSocketClientMessageSchemaMatchesContract = AssertTrue<
+  SchemaOutputMatchesContract<
+    v.InferOutput<typeof webSocketClientMessageSchema>,
+    WebSocketClientMessage
+  >
+>;
+
+type _WebSocketServerMessageSchemaMatchesContract = AssertTrue<
+  SchemaOutputMatchesContract<
+    v.InferOutput<typeof webSocketServerMessageSchema>,
+    WebSocketServerMessage
+  >
+>;
 
 export function parseWebSocketClientMessage(
   message: unknown,
 ): WebSocketClientMessage | null {
   const result = v.safeParse(webSocketClientMessageSchema, message);
 
-  return result.success ? result.output : null;
+  return result.success ? (result.output as WebSocketClientMessage) : null;
 }
 
 export function parseWebSocketServerMessage(

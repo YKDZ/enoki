@@ -1,3 +1,7 @@
+import type {
+  HostProbeConfigurationResponse,
+  ProbeConfigurationResponse,
+} from "@enoki/api-client";
 import { Hono } from "hono";
 
 import type { AuditRepository } from "../database/audit.js";
@@ -21,11 +25,13 @@ export function createProbeConfigurationRoutes(
   const routes = new Hono();
   const now = services.now ?? Date.now;
 
-  routes.get("/", (context) =>
-    context.json({
+  routes.get("/", (context) => {
+    const response = {
       configuration: services.probeConfigurations.getGlobal(),
-    }),
-  );
+    } satisfies ProbeConfigurationResponse;
+
+    return context.json(response);
+  });
 
   routes.put("/", async (context) => {
     const input = parseProbeConfigurationValues(await context.req.json());
@@ -57,9 +63,11 @@ export function createProbeConfigurationRoutes(
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    return context.json({
+    const response = {
       configuration,
-    });
+    } satisfies ProbeConfigurationResponse;
+
+    return context.json(response);
   });
 
   return routes;
@@ -81,9 +89,12 @@ export function createHostProbeConfigurationRoutes(
       return configurationError("host_not_found", 404);
     }
 
-    return context.json(
-      services.probeConfigurations.getEffectiveForHost(hostId),
-    );
+    const response =
+      services.probeConfigurations.getEffectiveForHost(
+        hostId,
+      ) satisfies HostProbeConfigurationResponse;
+
+    return context.json(response);
   });
 
   routes.put("/", async (context) => {
@@ -123,7 +134,9 @@ export function createHostProbeConfigurationRoutes(
         userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
       });
 
-      return context.json(effective);
+      const response = effective satisfies HostProbeConfigurationResponse;
+
+      return context.json(response);
     }
 
     if (candidate.mode !== "override") {
@@ -160,7 +173,9 @@ export function createHostProbeConfigurationRoutes(
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    return context.json(effective);
+    const response = effective satisfies HostProbeConfigurationResponse;
+
+    return context.json(response);
   });
 
   return routes;

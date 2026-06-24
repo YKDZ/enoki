@@ -1,4 +1,4 @@
-import type { ProbeConfiguration } from "../types";
+import type { ProbeConfiguration, ProbeConfigurationResponse } from "../types";
 
 export class ApiError extends Error {
   constructor(
@@ -52,7 +52,7 @@ export async function apiMutate<T>(
 export async function saveConfiguration(
   path: string,
   configuration: ProbeConfiguration,
-) {
+): Promise<ProbeConfigurationResponse> {
   const response = await fetch(path, {
     body: JSON.stringify(configuration),
     credentials: "same-origin",
@@ -70,7 +70,7 @@ export async function saveConfiguration(
     );
   }
 
-  return (await response.json()) as { configuration: ProbeConfiguration };
+  return (await response.json()) as ProbeConfigurationResponse;
 }
 
 export function isUnauthorizedError(error: unknown) {

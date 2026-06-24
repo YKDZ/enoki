@@ -594,6 +594,59 @@ describe("Host detail API", () => {
     database.close();
   });
 
+  it("does not expose database-only Host summary fields in Owner responses", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_005_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+    await sendReport(app, registration, {
+      collectedAtMs: 1_725_000_004_500,
+      cpuPercent: 33.5,
+      sequence: 1,
+    });
+
+    const listResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    expect(listResponse.status).toBe(200);
+    const listBody = (await listResponse.json()) as {
+      hosts: Array<Record<string, unknown> & { latestMetrics: unknown }>;
+    };
+    expect(listBody.hosts[0]).toBeDefined();
+    expect(listBody.hosts[0]).not.toHaveProperty("probeConfigurationError");
+    expect(listBody.hosts[0]?.latestMetrics).not.toHaveProperty("load1");
+    expect(listBody.hosts[0]?.latestMetrics).not.toHaveProperty("load5");
+    expect(listBody.hosts[0]?.latestMetrics).not.toHaveProperty("load15");
+
+    const detailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    expect(detailResponse.status).toBe(200);
+    const detailBody = (await detailResponse.json()) as {
+      host: Record<string, unknown> & { latestMetrics: unknown };
+    };
+    expect(detailBody.host).not.toHaveProperty("probeConfigurationError");
+    expect(detailBody.host.latestMetrics).not.toHaveProperty("load1");
+    expect(detailBody.host.latestMetrics).not.toHaveProperty("load5");
+    expect(detailBody.host.latestMetrics).not.toHaveProperty("load15");
+
+    database.close();
+  });
+
   it("returns latest-known Disk Health from sparse low-frequency Probe reports", async () => {
     const database = await createTemporaryDatabase();
     let nowMs = 1_725_000_000_000;

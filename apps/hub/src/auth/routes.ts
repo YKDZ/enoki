@@ -1,5 +1,6 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
+import type { SessionResponse } from "@enoki/api-client";
 import { vValidator } from "@hono/valibot-validator";
 import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
@@ -46,7 +47,9 @@ export function createOwnerAuth(
 
   if (config.noPasswordWebUi) {
     routes.post("/login", (context) => {
-      return context.json({ authenticated: true });
+      const response = { authenticated: true } satisfies SessionResponse;
+
+      return context.json(response);
     });
   } else {
     routes.post(
@@ -85,14 +88,18 @@ export function createOwnerAuth(
 
         recordLoginAuditEvent(context.req.raw, authServices, "success");
 
-        return context.json({ authenticated: true });
+        const response = { authenticated: true } satisfies SessionResponse;
+
+        return context.json(response);
       },
     );
   }
 
   routes.post("/logout", (context) => {
     if (config.noPasswordWebUi) {
-      return context.json({ authenticated: true });
+      const response = { authenticated: true } satisfies SessionResponse;
+
+      return context.json(response);
     }
 
     const sessionId = getCookie(context, config.sessionCookieName);
@@ -107,13 +114,17 @@ export function createOwnerAuth(
       secure: isSecureRequest(context.req.raw, config),
     });
 
-    return context.json({ authenticated: false });
+    const response = { authenticated: false } satisfies SessionResponse;
+
+    return context.json(response);
   });
 
   routes.get("/session", (context) => {
-    return context.json({
+    const response = {
       authenticated: Boolean(currentOwnerSessionId(context.req.raw)),
-    });
+    } satisfies SessionResponse;
+
+    return context.json(response);
   });
 
   const requireOwnerSession: MiddlewareHandler = async (context, next) => {

@@ -179,7 +179,6 @@ function hostDetail(overrides: Partial<HostDetail>) {
         version: "default",
       },
       mode: "inherit",
-      version: "default",
     },
     probeUpgradeEligibility: {
       currentProbeAssetSetVersion: null,

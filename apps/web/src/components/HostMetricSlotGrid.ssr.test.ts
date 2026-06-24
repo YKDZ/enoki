@@ -76,7 +76,6 @@ const host: HostDetail = {
       version: "default-v1",
     },
     mode: "inherit",
-    version: "default-v1",
   },
   probeUpgradeEligibility: {
     currentProbeAssetSetVersion: null,

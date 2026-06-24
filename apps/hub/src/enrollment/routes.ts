@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 
+import type { EnrollmentResponse } from "@enoki/api-client";
 import { Hono } from "hono";
 
 import type { AuditRepository } from "../database/audit.js";
@@ -48,17 +49,16 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    return context.json(
-      {
+    const response = {
+      enrollmentToken,
+      expiresAtMs,
+      ...renderInstallCommand(installation, {
         enrollmentToken,
-        expiresAtMs,
-        ...renderInstallCommand(installation, {
-          enrollmentToken,
-          requestUrl: context.req.url,
-        }),
-      },
-      201,
-    );
+        requestUrl: context.req.url,
+      }),
+    } satisfies EnrollmentResponse;
+
+    return context.json(response, 201);
   });
 
   return routes;

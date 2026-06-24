@@ -51,11 +51,13 @@ import { probeUpgradeToastTitle } from "./lib/probe-upgrade-toast";
 import type {
   EnrollmentResponse,
   HostMetadataDraft,
+  HostMetadataResponse,
   HostProbeConfigurationResponse,
   HostDetail,
   HostSummary,
   HostsResponse,
   ProbeConfiguration,
+  ProbeConfigurationResponse,
   SessionResponse,
 } from "./types";
 
@@ -427,7 +429,7 @@ async function loadGlobalConfiguration() {
   globalConfigurationError.value = "";
 
   try {
-    const response = await apiGet<{ configuration: ProbeConfiguration }>(
+    const response = await apiGet<ProbeConfigurationResponse>(
       "/api/web/probe-configuration",
     );
     globalConfigurationDraft.value = { ...response.configuration };
@@ -630,9 +632,7 @@ async function saveHostMetadata() {
       throw new Error(((await response.json()) as { error?: string }).error);
     }
 
-    const metadata = (await response.json()) as HostMetadataDraft & {
-      id: number;
-    };
+    const metadata = (await response.json()) as HostMetadataResponse;
     applyHostMetadataUpdate(targetHostId, metadata);
 
     if (activeHostMetadataId.value === targetHostId) {

@@ -1593,9 +1593,6 @@ describe("Probe report API", () => {
             cpuPercent: 42.5,
             diskTotalBytes: 2_048,
             diskUsedBytes: 1_536,
-            load1: 0.12,
-            load5: 0.34,
-            load15: 0.56,
             memoryTotalBytes: 2_147_483_648,
             memoryUsedBytes: 1_073_741_824,
             networkRxBitsPerSecond: 6_400,
@@ -1701,9 +1698,6 @@ describe("Probe report API", () => {
             cpuPercent: null,
             diskTotalBytes: null,
             diskUsedBytes: null,
-            load1: null,
-            load5: null,
-            load15: null,
             memoryTotalBytes: 2_147_483_648,
             memoryUsedBytes: 1_073_741_824,
             networkRxBytesDelta: null,
@@ -2142,23 +2136,27 @@ describe("Probe report API", () => {
 
     expect(response.status).toBe(200);
 
+    expect(database.hosts.listSummaries()).toEqual([
+      expect.objectContaining({
+        probeConfigurationError: {
+          errorCode: "probe_configuration_fetch_failed",
+          failedVersion: "global-1725000700000-1",
+          message: "report request failed: 503 Service Unavailable",
+          reportedAtMs: 1_725_000_700_000,
+        },
+      }),
+    ]);
+
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,
       },
     });
-    await expect(hostsResponse.json()).resolves.toEqual({
-      hosts: [
-        expect.objectContaining({
-          probeConfigurationError: {
-            errorCode: "probe_configuration_fetch_failed",
-            failedVersion: "global-1725000700000-1",
-            message: "report request failed: 503 Service Unavailable",
-            reportedAtMs: 1_725_000_700_000,
-          },
-        }),
-      ],
-    });
+    expect(hostsResponse.status).toBe(200);
+    const hostsBody = (await hostsResponse.json()) as {
+      hosts: Array<Record<string, unknown>>;
+    };
+    expect(hostsBody.hosts[0]).not.toHaveProperty("probeConfigurationError");
 
     database.close();
   });
@@ -2222,18 +2220,11 @@ describe("Probe report API", () => {
     );
     expect(cleanResponse.status).toBe(200);
 
-    const hostsResponse = await app.request("/api/web/hosts", {
-      headers: {
-        cookie: ownerSession,
-      },
-    });
-    await expect(hostsResponse.json()).resolves.toEqual({
-      hosts: [
-        expect.objectContaining({
-          probeConfigurationError: null,
-        }),
-      ],
-    });
+    expect(database.hosts.listSummaries()).toEqual([
+      expect.objectContaining({
+        probeConfigurationError: null,
+      }),
+    ]);
 
     database.close();
   });
