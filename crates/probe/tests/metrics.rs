@@ -1,4 +1,4 @@
-use enoki_probe::inventory::collect_local_inventory;
+use enoki_probe::host_profile::collect_local_host_profile;
 use enoki_probe::metrics::{
     CollectorCadence, CollectorCadenceSchedule, CollectorDefinition, CollectorError, CollectorId,
     CollectorRegistry, DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner,
@@ -374,7 +374,7 @@ fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results
 }
 
 #[test]
-fn disk_health_collector_result_updates_inventory_capability() {
+fn disk_health_collector_result_updates_host_profile_capability() {
     let mut sample = MetricSample::default();
     let mut successful_collector = DiskHealthMetricCollector::new(FakeDiskHealthRunner {
         batches: vec![vec![DiskHealthMetric {
@@ -432,7 +432,7 @@ impl DiskHealthMetricsRunner for FailingDiskHealthRunner {
 }
 
 fn local_disk_health_capability() -> Option<bool> {
-    collect_local_inventory()
+    collect_local_host_profile()
         .collector_capabilities
         .and_then(|capabilities| capabilities.official)
         .and_then(|official| official.disk_health)

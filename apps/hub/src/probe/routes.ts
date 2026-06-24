@@ -45,7 +45,6 @@ const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
 const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
 const ReportRequest = enoki.v1.ProbeReportRequest as any;
 const ReportResponse = enoki.v1.ProbeReportResponse as any;
-const InventoryMessage = enoki.v1.Inventory as any;
 const HostProfileSnapshotMessage = enoki.v1.HostProfileSnapshot as any;
 const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest as any;
 const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse as any;
@@ -98,6 +97,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_public_key_required", 400);
     }
 
+    if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
+      return probeJsonError("malformed_probe_registration", 400);
+    }
+
     const hostProfileSnapshot = hostProfileSnapshotFromRegistration(request);
     if (
       hostProfileSnapshot?.snapshotHash &&
@@ -119,52 +122,44 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const probeId = createProbeId();
     const probeSecretPlaceholder = createProbeSecret();
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    const registrationProfile = hostProfile ? null : request.inventory;
-    const registrationMetadataProfile = hostProfile ?? registrationProfile;
-    const inventory = request.inventory;
-    const inventoryJson = registrationProfile
-      ? serializeHostProfile(registrationProfile)
-      : null;
-    const inventoryHash = registrationProfile
-      ? inventory
-        ? hashInventory(inventory)
-        : null
-      : null;
+    if (!hostProfile) {
+      return probeJsonError("malformed_probe_registration", 400);
+    }
+
     const hostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const observedIp = observedIpFromContext(
       context,
       services.trustForwardedHeaders,
     );
     const displayName =
-      registrationMetadataProfile?.hostname?.trim() ||
-      fallbackDisplayName(probeId);
+      hostProfile.hostname?.trim() || fallbackDisplayName(probeId);
 
     const createdHost = services.hosts.create({
-      architecture: registrationProfile?.architecture || null,
+      architecture: hostProfile.architecture || null,
       clockSkewDetected: false,
       connectAddress:
-        firstInventoryAddress(registrationMetadataProfile) ?? observedIp ?? "",
+        firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
       createdAtMs: registeredAtMs,
-      cpuCount: registrationProfile?.cpuCount || null,
-      cpuModel: registrationProfile?.cpuModel?.trim() || null,
+      cpuCount: hostProfile.cpuCount || null,
+      cpuModel: hostProfile.cpuModel?.trim() || null,
       displayName,
       displayNameEdited: false,
-      hostname: registrationProfile?.hostname || null,
-      inventoryHash,
-      inventoryJson,
-      kernel: registrationProfile?.kernel || null,
+      hostname: hostProfile.hostname || null,
+      inventoryHash: hostProfileHash,
+      inventoryJson: serializeHostProfile(hostProfile),
+      kernel: hostProfile.kernel || null,
       lastClockSkewMs: null,
       lastReportAtMs: null,
-      memoryTotalBytes: registrationProfile?.memoryTotalBytes
-        ? Number(registrationProfile.memoryTotalBytes)
+      memoryTotalBytes: hostProfile.memoryTotalBytes
+        ? Number(hostProfile.memoryTotalBytes)
         : null,
       observedIp,
       probePublicKeyPem: request.probePublicKeyPem,
-      os: registrationProfile?.os || null,
+      os: hostProfile.os || null,
       probeConfigurationVersion: defaultProbeConfiguration.version,
       probeId,
       probeSecretHash: hashSecret(probeSecretPlaceholder),
-      probeVersion: registrationProfile?.probeVersion || null,
+      probeVersion: hostProfile.probeVersion || null,
     });
     if (hostProfile && hostProfileHash) {
       services.snapshotCollectors?.write({
@@ -233,18 +228,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("malformed_probe_report", 400);
     }
 
-    const suppliedInventoryHash = request.inventory
-      ? hashInventory(request.inventory)
-      : null;
-    const hostProfileSnapshot = hostProfileSnapshotFromReport(request);
-
-    if (
-      request.inventory &&
-      request.inventoryHash &&
-      request.inventoryHash !== suppliedInventoryHash
-    ) {
+    if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
       return probeJsonError("malformed_probe_report", 400);
     }
+
+    const hostProfileSnapshot = hostProfileSnapshotFromReport(request);
 
     if (
       hostProfileSnapshot?.hostProfile &&
@@ -268,17 +256,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    const reportedProfile = reportedHostProfile ? null : request.inventory;
-    const inventoryJson = reportedHostProfile
-      ? undefined
-      : request.inventory
-        ? serializeInventory(request.inventory)
-        : host.inventoryJson;
-    const inventoryHash = reportedHostProfile
-      ? undefined
-      : request.inventory
-        ? suppliedInventoryHash
-        : host.inventoryHash;
     const reportedHostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
     const knownHostProfileSnapshot =
@@ -286,23 +263,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         host.id,
         reportedSnapshotHash,
       ) ?? reportedSnapshotHash === host.inventoryHash;
-    const acceptedLegacyInventoryReport =
-      Boolean(request.inventory) ||
-      (!hostProfileSnapshot &&
-        Boolean(request.inventoryHash) &&
-        request.inventoryHash === host.inventoryHash);
     const requestedSnapshotCollectorIds =
-      !reportedHostProfile &&
-      !acceptedLegacyInventoryReport &&
-      !knownHostProfileSnapshot
+      !reportedHostProfile && !knownHostProfileSnapshot
         ? [hostProfileCollectorId]
         : [];
-    const inventoryNeeded =
-      requestedSnapshotCollectorIds.includes(hostProfileCollectorId) ||
-      (!request.inventory &&
-        !hostProfileSnapshot &&
-        (!request.inventoryHash ||
-          request.inventoryHash !== host.inventoryHash));
     const clockSkew = detectClockSkew(
       request.metrics ?? [],
       reportReceivedAtMs,
@@ -315,24 +279,28 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     );
 
     services.hosts.recordReport(host.id, {
-      architecture: reportedProfile?.architecture || undefined,
+      architecture: reportedHostProfile?.architecture || undefined,
       clockSkewDetected: clockSkew.detected,
-      connectAddress: reportConnectAddress(reportedProfile, host, observedIp),
-      cpuCount: reportedProfile ? reportedProfile.cpuCount || null : undefined,
-      cpuModel: reportedProfile
-        ? reportedProfile.cpuModel?.trim() || null
+      connectAddress: reportConnectAddress(reportedHostProfile, host, observedIp),
+      cpuCount: reportedHostProfile
+        ? reportedHostProfile.cpuCount || null
         : undefined,
-      hostname: reportedProfile?.hostname || undefined,
-      inventoryHash,
-      inventoryJson,
-      kernel: reportedProfile?.kernel || undefined,
+      cpuModel: reportedHostProfile
+        ? reportedHostProfile.cpuModel?.trim() || null
+        : undefined,
+      hostname: reportedHostProfile?.hostname || undefined,
+      inventoryHash: reportedHostProfileHash ?? undefined,
+      inventoryJson: reportedHostProfile
+        ? serializeHostProfile(reportedHostProfile)
+        : undefined,
+      kernel: reportedHostProfile?.kernel || undefined,
       lastClockSkewMs: clockSkew.lastDeltaMs,
       lastReportAtMs: reportReceivedAtMs,
-      memoryTotalBytes: reportedProfile
-        ? unsignedNumber(reportedProfile.memoryTotalBytes) || null
+      memoryTotalBytes: reportedHostProfile
+        ? unsignedNumber(reportedHostProfile.memoryTotalBytes) || null
         : undefined,
       observedIp,
-      os: reportedProfile?.os || undefined,
+      os: reportedHostProfile?.os || undefined,
       probeConfigurationError: request.probeConfigurationError
         ? {
             errorCode: request.probeConfigurationError.errorCode ?? "",
@@ -341,7 +309,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             reportedAtMs: reportReceivedAtMs,
           }
         : null,
-      probeVersion: reportedProfile?.probeVersion || undefined,
+      probeVersion: reportedHostProfile?.probeVersion || undefined,
     });
     if (reportedHostProfile && reportedHostProfileHash) {
       const result = services.snapshotCollectors?.write({
@@ -532,7 +500,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const responseBody = ReportResponse.encode(
       ReportResponse.create({
         acceptedSequenceEnd: validatedReport.sequenceEnd,
-        inventoryNeeded,
         requestedSnapshotCollectorIds,
         currentProbeConfigurationVersion:
           services.probeConfigurations.getEffectiveForHost(host.id)
@@ -1317,6 +1284,16 @@ function hostProfileSnapshotFromReport(request: ProtoMessage) {
   };
 }
 
+function snapshotPayloadBranchesMatchCollectorIds(request: ProtoMessage) {
+  return ((request.snapshots ?? []) as ProtoMessage[]).every((snapshot) => {
+    if (snapshot.hostProfile) {
+      return snapshot.collectorId === hostProfileCollectorId;
+    }
+
+    return true;
+  });
+}
+
 const probeRequestSignatureNonceTtlMs = 5 * 60 * 1000;
 const acceptedProbeRequestClockSkewMs = 5 * 60 * 1000;
 
@@ -1546,31 +1523,12 @@ function createProbeSecret() {
   return `enk_probe_${randomBytes(32).toString("base64url")}`;
 }
 
-function hashInventory(inventory: ProtoMessage) {
-  const bytes = InventoryMessage.encode(
-    InventoryMessage.create(stableInventory(inventory)),
-  ).finish();
-
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 function hashHostProfile(hostProfile: ProtoMessage) {
   const bytes = HostProfileSnapshotMessage.encode(
     HostProfileSnapshotMessage.create(stableHostProfile(hostProfile)),
   ).finish();
 
   return createHash("sha256").update(bytes).digest("hex");
-}
-
-function serializeInventory(inventory: ProtoMessage) {
-  return JSON.stringify(
-    InventoryMessage.toObject(
-      InventoryMessage.create(stableInventory(inventory)),
-      {
-        longs: String,
-      },
-    ),
-  );
 }
 
 function serializeHostProfile(hostProfile: ProtoMessage) {
@@ -1582,10 +1540,6 @@ function serializeHostProfile(hostProfile: ProtoMessage) {
       },
     ),
   );
-}
-
-function stableInventory(inventory: ProtoMessage): ProtoMessage {
-  return stableHostProfile(inventory);
 }
 
 function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
@@ -1690,8 +1644,8 @@ function detectClockSkew(
   };
 }
 
-function firstInventoryAddress(inventory: ProtoMessage | null | undefined) {
-  for (const networkInterface of (inventory?.networkInterfaces ??
+function firstHostProfileAddress(hostProfile: ProtoMessage | null | undefined) {
+  for (const networkInterface of (hostProfile?.networkInterfaces ??
     []) as ProtoMessage[]) {
     const address = (networkInterface.addresses as string[] | undefined)?.find(
       (candidate: string) => candidate.trim() !== "",
@@ -1706,16 +1660,16 @@ function firstInventoryAddress(inventory: ProtoMessage | null | undefined) {
 }
 
 function reportConnectAddress(
-  inventory: ProtoMessage | null | undefined,
+  hostProfile: ProtoMessage | null | undefined,
   host: {
     connectAddress: string;
     observedIp: string | null;
   },
   observedIp: string | null,
 ) {
-  const inventoryAddress = firstInventoryAddress(inventory);
-  if (inventoryAddress) {
-    return inventoryAddress;
+  const hostProfileAddress = firstHostProfileAddress(hostProfile);
+  if (hostProfileAddress) {
+    return hostProfileAddress;
   }
 
   if (!host.connectAddress || host.connectAddress === host.observedIp) {

@@ -89,16 +89,21 @@ async function registerProbe(baseUrl: string, enrollmentToken: string) {
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 2_147_483_648,
-          os: "linux",
-          probeVersion: "0.1.0",
-        },
         probePublicKeyPem: identity.publicKeyPem,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              os: "linux",
+              probeVersion: "0.1.0",
+            },
+          },
+        ],
       }),
     ).finish(),
     headers: {
@@ -133,23 +138,6 @@ async function sendReport(
   const body = ReportRequest.encode(
     ReportRequest.create({
       bootId: options.bootId ?? "boot-live-summary",
-      inventory:
-        options.diskAvailable === undefined
-          ? undefined
-          : {
-              architecture: "x86_64",
-              collectorCapabilities: {
-                official: {
-                  disk: { available: options.diskAvailable },
-                },
-              },
-              cpuCount: 2,
-              hostname: "managed-host-01",
-              kernel: "6.8.0",
-              memoryTotalBytes: 2_147_483_648,
-              os: "linux",
-              probeVersion: "0.1.0",
-            },
       metrics: [
         {
           collectedAtMs: 1_725_000_009_500,
@@ -194,11 +182,42 @@ async function sendReport(
       probeId: registration.probeId,
       sequenceEnd: sequence,
       sequenceStart: sequence,
-      snapshots: options.hostProfile
+      snapshots: (options.hostProfile ??
+      (options.diskAvailable === undefined
+        ? null
+        : {
+            architecture: "x86_64",
+            collectorCapabilities: {
+              official: {
+                disk: { available: options.diskAvailable },
+              },
+            },
+            cpuCount: 2,
+            hostname: "managed-host-01",
+            kernel: "6.8.0",
+            memoryTotalBytes: 2_147_483_648,
+            os: "linux",
+            probeVersion: "0.1.0",
+          }))
         ? [
             {
               collectorId: "official.host-profile",
-              hostProfile: options.hostProfile,
+              hostProfile:
+                options.hostProfile ??
+                ({
+                  architecture: "x86_64",
+                  collectorCapabilities: {
+                    official: {
+                      disk: { available: options.diskAvailable },
+                    },
+                  },
+                  cpuCount: 2,
+                  hostname: "managed-host-01",
+                  kernel: "6.8.0",
+                  memoryTotalBytes: 2_147_483_648,
+                  os: "linux",
+                  probeVersion: "0.1.0",
+                } satisfies root.enoki.v1.IHostProfileSnapshot),
             },
           ]
         : [],

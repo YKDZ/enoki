@@ -11,15 +11,15 @@ use crate::registration::{
 };
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
-    inventory::collect_local_inventory,
+    host_profile::collect_local_host_profile,
     metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
-        Inventory, ProbeConfigurationError, ProbeConfigurationRequest, ProbeConfigurationResponse,
-        ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationRunning,
-        ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse, probe_operation::Operation,
-        probe_operation_status::Status,
+        HostProfileSnapshot, ProbeConfigurationError, ProbeConfigurationRequest,
+        ProbeConfigurationResponse, ProbeOperationAcknowledgement, ProbeOperationFailed,
+        ProbeOperationRunning, ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse,
+        probe_operation::Operation, probe_operation_status::Status,
     },
-    report::{full_inventory_report, regular_report, startup_report},
+    report::{full_host_profile_report, regular_report, startup_report},
     upgrader::{
         ProbeUninstallerLaunch, ProbeUpgraderCommandOutput, ProbeUpgraderLaunch,
         ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
@@ -97,15 +97,15 @@ pub trait ProbeRuntimeSleeper {
     fn sleep(&mut self, duration: Duration);
 }
 
-pub trait InventoryProvider {
-    fn collect_inventory(&mut self) -> Inventory;
+pub trait HostProfileProvider {
+    fn collect_host_profile(&mut self) -> HostProfileSnapshot;
 }
 
-pub struct LocalInventoryProvider;
+pub struct LocalHostProfileProvider;
 
-impl InventoryProvider for LocalInventoryProvider {
-    fn collect_inventory(&mut self) -> Inventory {
-        collect_local_inventory()
+impl HostProfileProvider for LocalHostProfileProvider {
+    fn collect_host_profile(&mut self) -> HostProfileSnapshot {
+        collect_local_host_profile()
     }
 }
 
@@ -254,30 +254,30 @@ pub fn run_probe_with_loop_control(
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
 ) -> Result<(), ProbeRunError> {
-    let mut inventory_provider = LocalInventoryProvider;
+    let mut host_profile_provider = LocalHostProfileProvider;
 
-    run_probe_with_loop_control_and_inventory_provider(
+    run_probe_with_loop_control_and_host_profile_provider(
         input,
         transport,
         sleeper,
         control,
-        &mut inventory_provider,
+        &mut host_profile_provider,
     )
 }
 
-pub fn run_probe_with_loop_control_and_inventory_provider(
+pub fn run_probe_with_loop_control_and_host_profile_provider(
     input: ProbeRunInput,
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    inventory_provider: &mut impl InventoryProvider,
+    host_profile_provider: &mut impl HostProfileProvider,
 ) -> Result<(), ProbeRunError> {
     run_probe_with_loop_control_and_runner_factory(
         input,
         transport,
         sleeper,
         control,
-        inventory_provider,
+        host_profile_provider,
         InstalledProbeOperationRunner::from_bootstrap,
     )
 }
@@ -287,7 +287,7 @@ fn run_probe_with_loop_control_and_runner_factory<Runner>(
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    inventory_provider: &mut impl InventoryProvider,
+    host_profile_provider: &mut impl HostProfileProvider,
     mut runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
 ) -> Result<(), ProbeRunError>
 where
@@ -303,7 +303,7 @@ where
             transport,
             sleeper,
             control,
-            inventory_provider,
+            host_profile_provider,
             &mut operation_runner,
         )?;
         return Ok(());
@@ -335,7 +335,7 @@ where
         transport,
         sleeper,
         control,
-        inventory_provider,
+        host_profile_provider,
         &mut operation_runner,
     )?;
 
@@ -347,7 +347,7 @@ fn run_reporting_loop(
     transport: &mut impl ReportTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    inventory_provider: &mut impl InventoryProvider,
+    host_profile_provider: &mut impl HostProfileProvider,
     operation_runner: &mut impl ProbeOperationRunner,
 ) -> Result<(), ReportError> {
     if report_limit_reached(0, control) {
@@ -374,7 +374,7 @@ fn run_reporting_loop(
         .probe_configuration_version
         .as_deref()
         .unwrap_or("");
-    let mut inventory = inventory_provider.collect_inventory();
+    let mut host_profile = host_profile_provider.collect_host_profile();
     let boot_id = new_boot_id();
     let local_operation_statuses = read_local_operation_statuses(bootstrap_config);
     let mut active_configuration =
@@ -390,7 +390,7 @@ fn run_reporting_loop(
         &boot_id,
         sequence,
         &active_configuration.version,
-        inventory.clone(),
+        host_profile.clone(),
         Vec::new(),
     );
     for status in &local_operation_statuses {
@@ -424,13 +424,14 @@ fn run_reporting_loop(
         }
 
         sequence += 1;
-        inventory = inventory_provider.collect_inventory();
-        let request = full_inventory_report(
+        host_profile = host_profile_provider.collect_host_profile();
+        let request = full_host_profile_report(
             probe_id,
             &boot_id,
             sequence,
+            sequence,
             &active_configuration.version,
-            inventory.clone(),
+            host_profile.clone(),
             Vec::new(),
         );
         let response = post_report(transport, hub_url, &request_auth, request.encode_to_vec())?;
@@ -463,23 +464,32 @@ fn run_reporting_loop(
                 &mut metrics_collector,
             );
 
-            let latest_inventory = inventory_provider.collect_inventory();
+            let latest_host_profile = host_profile_provider.collect_host_profile();
             let collector_capability_changed =
-                latest_inventory.collector_capabilities != inventory.collector_capabilities;
-            inventory = latest_inventory;
+                latest_host_profile.collector_capabilities != host_profile.collector_capabilities;
+            host_profile = latest_host_profile;
 
-            let mut request = regular_report(
-                probe_id,
-                &boot_id,
-                sequence_start,
-                sequence_end,
-                &active_configuration.version,
-                &inventory,
-                metrics,
-            );
-            if collector_capability_changed {
-                request.inventory = Some(inventory.clone());
-            }
+            let request = if collector_capability_changed {
+                full_host_profile_report(
+                    probe_id,
+                    &boot_id,
+                    sequence_start,
+                    sequence_end,
+                    &active_configuration.version,
+                    host_profile.clone(),
+                    metrics,
+                )
+            } else {
+                regular_report(
+                    probe_id,
+                    &boot_id,
+                    sequence_start,
+                    sequence_end,
+                    &active_configuration.version,
+                    &host_profile,
+                    metrics,
+                )
+            };
             let request = with_configuration_error(request, pending_configuration_error.take());
             let request = operation_reports.with_operation_reports(request);
 
@@ -512,13 +522,14 @@ fn run_reporting_loop(
             && !report_limit_reached(reports_sent, control)
         {
             sequence += 1;
-            inventory = inventory_provider.collect_inventory();
-            let request = full_inventory_report(
+            host_profile = host_profile_provider.collect_host_profile();
+            let request = full_host_profile_report(
                 probe_id,
                 &boot_id,
                 sequence,
+                sequence,
                 &active_configuration.version,
-                inventory.clone(),
+                host_profile.clone(),
                 Vec::new(),
             );
             let request = with_configuration_error(request, pending_configuration_error.take());
@@ -566,11 +577,10 @@ fn refresh_probe_request_auth(auth: &mut ProbeRequestAuth<'_>, response: &ProbeR
 }
 
 fn host_profile_snapshot_requested(response: &ProbeReportResponse) -> bool {
-    response.inventory_needed
-        || response
-            .requested_snapshot_collector_ids
-            .iter()
-            .any(|collector_id| collector_id == HOST_PROFILE_COLLECTOR_ID)
+    response
+        .requested_snapshot_collector_ids
+        .iter()
+        .any(|collector_id| collector_id == HOST_PROFILE_COLLECTOR_ID)
 }
 
 fn current_unix_time_ms_i128() -> Option<i128> {
@@ -874,7 +884,6 @@ mod operation_report_tests {
             &ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "default-v1".to_string(),
-                inventory_needed: false,
                 pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
                     id: "operation-01".to_string(),
                     operation: Some(Operation::ProbeUpgrade(
@@ -1630,7 +1639,6 @@ mod tests {
         let response = ProbeReportResponse {
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_string(),
-            inventory_needed: false,
             pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
                 id: "operation-01".to_string(),
                 operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
@@ -1673,7 +1681,6 @@ mod tests {
         let response = ProbeReportResponse {
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_string(),
-            inventory_needed: false,
             pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
                 id: "operation-01".to_string(),
                 operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
@@ -1738,7 +1745,6 @@ mod tests {
                 ProbeReportResponse {
                     accepted_sequence_end: 1,
                     current_probe_configuration_version: "default-v1".to_string(),
-                    inventory_needed: false,
                     pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
                         id: "operation-01".to_string(),
                         operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
@@ -1754,7 +1760,6 @@ mod tests {
                 ProbeReportResponse {
                     accepted_sequence_end: 2,
                     current_probe_configuration_version: "default-v1".to_string(),
-                    inventory_needed: false,
                     pending_operation: None,
                     requested_snapshot_collector_ids: Vec::new(),
                     server_time_ms: 2,
@@ -1765,7 +1770,7 @@ mod tests {
         let observed_launches = Rc::new(RefCell::new(Vec::new()));
         let observed_launches_for_factory = Rc::clone(&observed_launches);
         let mut sleeper = NoopSleeper;
-        let mut inventory_provider = LocalInventoryProvider;
+        let mut host_profile_provider = LocalHostProfileProvider;
 
         run_probe_with_loop_control_and_runner_factory(
             ProbeRunInput {
@@ -1776,7 +1781,7 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(2),
             },
-            &mut inventory_provider,
+            &mut host_profile_provider,
             move |bootstrap_config, _bootstrap_config_path| {
                 assert_eq!(
                     bootstrap_config.install_path.as_deref(),

@@ -84,16 +84,21 @@ async function registerProbe(
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 2_147_483_648,
-          os: "linux",
-          probeVersion: "0.1.0",
-        },
         probePublicKeyPem: identity.publicKeyPem,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              os: "linux",
+              probeVersion: "0.1.0",
+            },
+          },
+        ],
       }),
     ).finish(),
     headers: {
@@ -236,7 +241,6 @@ describe("Probe Configuration API", () => {
     const reportBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-01",
-        inventoryHash: "",
         metrics: [],
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,

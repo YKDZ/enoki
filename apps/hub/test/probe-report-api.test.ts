@@ -77,16 +77,21 @@ async function registerProbe(
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 2_147_483_648,
-          os: "linux",
-          probeVersion: "0.1.0",
-        },
         probePublicKeyPem: identity.publicKeyPem,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              os: "linux",
+              probeVersion: "0.1.0",
+            },
+          },
+        ],
       }),
     ).finish(),
     headers: {
@@ -380,7 +385,6 @@ describe("Probe report API", () => {
       new Uint8Array(await response.arrayBuffer()),
     );
     expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([]);
-    expect(acknowledgement.inventoryNeeded).toBe(false);
 
     const storedHost = database.sqlite
       .prepare(
@@ -546,7 +550,6 @@ describe("Probe report API", () => {
       new Uint8Array(await response.arrayBuffer()),
     );
     expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([]);
-    expect(acknowledgement.inventoryNeeded).toBe(false);
 
     const storedHost = database.sqlite
       .prepare("select hostname, inventory_hash from managed_hosts")
@@ -602,6 +605,72 @@ describe("Probe report API", () => {
     await expect(response.json()).resolves.toEqual({
       error: "malformed_probe_report",
     });
+
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    await expect(hostsResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          displayName: "managed-host-01",
+          lastReportAtMs: null,
+        }),
+      ],
+    });
+
+    database.close();
+  });
+
+  it("rejects a snapshot payload when the collector id does not own the oneof branch", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const hostProfile = sampleHostProfileSnapshot({
+      hostname: "wrong-collector-branch-host",
+    });
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-wrong-snapshot-branch",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.disk",
+            hostProfile,
+            snapshotHash: hashStableHostProfile(hostProfile),
+          },
+        ],
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+
+    const storedHostProfile = database.sqlite
+      .prepare("select hostname from official_host_profiles")
+      .get() as { hostname: string };
+    expect(storedHostProfile.hostname).toBe("managed-host-01");
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
@@ -1066,7 +1135,7 @@ describe("Probe report API", () => {
     );
   });
 
-  it("does not mark a Probe Upgrade Request succeeded from legacy Inventory only", async () => {
+  it("marks a Probe Upgrade Request succeeded from a Host Profile snapshot", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1124,7 +1193,7 @@ describe("Probe report API", () => {
       }),
     );
 
-    const targetInventory = await app.request(
+    const targetHostProfile = await app.request(
       "/api/probe/report",
       signedProbeRequest(
         registration,
@@ -1132,28 +1201,33 @@ describe("Probe report API", () => {
         ReportRequest.encode(
           ReportRequest.create({
             bootId: "boot-after-upgrade",
-            inventory: {
-              architecture: "x86_64",
-              cpuCount: 2,
-              hostname: "managed-host-01",
-              kernel: "6.8.0",
-              memoryTotalBytes: 2_147_483_648,
-              os: "linux",
-              probeVersion: "0.2.0",
-            },
             probeConfigurationVersion: "default-v1",
             probeId: registration.probeId,
             sequenceEnd: 2,
             sequenceStart: 2,
+            snapshots: [
+              {
+                collectorId: "official.host-profile",
+                hostProfile: {
+                  architecture: "x86_64",
+                  cpuCount: 2,
+                  hostname: "managed-host-01",
+                  kernel: "6.8.0",
+                  memoryTotalBytes: 2_147_483_648,
+                  os: "linux",
+                  probeVersion: "0.2.0",
+                },
+              },
+            ],
           }),
         ).finish(),
       ),
     );
-    expect(targetInventory.status).toBe(200);
+    expect(targetHostProfile.status).toBe(200);
     expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
       expect.objectContaining({
-        completedAtMs: null,
-        state: "running",
+        completedAtMs: 1_725_000_010_000,
+        state: "succeeded",
       }),
     );
 
@@ -1438,7 +1512,6 @@ describe("Probe report API", () => {
         ReportRequest.encode(
           ReportRequest.create({
             bootId: "boot-01",
-            inventoryHash: "",
             metrics: [
               {
                 collectedAtMs: 1_725_000_009_500,
@@ -2050,7 +2123,6 @@ describe("Probe report API", () => {
     const reportBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-empty",
-        inventoryHash: "",
         metrics: [],
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
@@ -2499,7 +2571,7 @@ describe("Probe report API", () => {
     database.close();
   });
 
-  it("rejects full Inventory reports when the supplied Inventory hash is not canonical", async () => {
+  it("rejects full Host Profile reports when the supplied Host Profile hash is not canonical", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -2521,22 +2593,27 @@ describe("Probe report API", () => {
         "/api/probe/report",
         ReportRequest.encode(
           ReportRequest.create({
-            bootId: "boot-bad-inventory-hash",
-            inventory: {
-              architecture: "x86_64",
-              cpuCount: 4,
-              hostname: "managed-host-renamed",
-              kernel: "6.8.0",
-              memoryTotalBytes: 4_294_967_296,
-              os: "linux",
-              probeVersion: "0.1.0",
-            },
-            inventoryHash: "not-the-canonical-inventory-hash",
+            bootId: "boot-bad-host-profile-hash",
             metrics: [],
             probeConfigurationVersion: "default-v1",
             probeId: registration.probeId,
             sequenceEnd: 1,
             sequenceStart: 1,
+            snapshots: [
+              {
+                collectorId: "official.host-profile",
+                hostProfile: {
+                  architecture: "x86_64",
+                  cpuCount: 4,
+                  hostname: "managed-host-renamed",
+                  kernel: "6.8.0",
+                  memoryTotalBytes: 4_294_967_296,
+                  os: "linux",
+                  probeVersion: "0.1.0",
+                },
+                snapshotHash: "not-the-canonical-host-profile-hash",
+              },
+            ],
           }),
         ).finish(),
       ),

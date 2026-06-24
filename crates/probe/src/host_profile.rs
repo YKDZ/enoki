@@ -14,8 +14,8 @@ use crate::metrics::{
     last_disk_health_collector_availability,
 };
 use crate::protocol::enoki::v1::{
-    CollectorAvailability, CollectorCapabilities, FilesystemInventory, HostProfileSnapshot,
-    Inventory, NetworkInterfaceInventory, OfficialCollectorCapabilities,
+    CollectorAvailability, CollectorCapabilities, FilesystemProfile, HostProfileSnapshot,
+    NetworkInterfaceProfile, OfficialCollectorCapabilities,
 };
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
@@ -23,42 +23,46 @@ const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "tmpfs", "tracefs",
 ];
 
-pub fn collect_local_inventory() -> Inventory {
-    InventoryCollectorRegistry::official().collect_startup()
+pub fn collect_local_host_profile() -> HostProfileSnapshot {
+    HostProfileCollectorRegistry::official().collect_startup()
 }
 
-trait InventoryCollector {
+trait HostProfileCollector {
     fn definition(&self) -> CollectorDefinition;
 
-    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory);
+    fn collect(
+        &mut self,
+        context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    );
 }
 
-struct RegisteredInventoryCollector {
+struct RegisteredHostProfileCollector {
     definition: CollectorDefinition,
-    collector: Box<dyn InventoryCollector>,
+    collector: Box<dyn HostProfileCollector>,
 }
 
-struct InventoryCollectorRegistry {
-    collectors: Vec<RegisteredInventoryCollector>,
+struct HostProfileCollectorRegistry {
+    collectors: Vec<RegisteredHostProfileCollector>,
 }
 
-impl InventoryCollectorRegistry {
+impl HostProfileCollectorRegistry {
     fn official() -> Self {
         Self::from_collectors(vec![
-            Box::new(SystemInventoryCollector),
-            Box::new(CpuInventoryCollector),
-            Box::new(MemoryInventoryCollector),
-            Box::new(DiskInventoryCollector),
-            Box::new(NetworkInventoryCollector),
-            Box::new(ProcessInventoryCollector),
+            Box::new(SystemHostProfileCollector),
+            Box::new(CpuHostProfileCollector),
+            Box::new(MemoryHostProfileCollector),
+            Box::new(DiskHostProfileCollector),
+            Box::new(NetworkHostProfileCollector),
+            Box::new(ProcessHostProfileCollector),
         ])
     }
 
-    fn from_collectors(collectors: Vec<Box<dyn InventoryCollector>>) -> Self {
+    fn from_collectors(collectors: Vec<Box<dyn HostProfileCollector>>) -> Self {
         Self {
             collectors: collectors
                 .into_iter()
-                .map(|collector| RegisteredInventoryCollector {
+                .map(|collector| RegisteredHostProfileCollector {
                     definition: collector.definition(),
                     collector,
                 })
@@ -66,39 +70,39 @@ impl InventoryCollectorRegistry {
         }
     }
 
-    fn collect_startup(mut self) -> Inventory {
-        let context = InventoryCollectionContext::read();
-        let mut inventory = Inventory::default();
+    fn collect_startup(mut self) -> HostProfileSnapshot {
+        let context = HostProfileCollectionContext::read();
+        let mut host_profile = HostProfileSnapshot::default();
 
         for collector in &mut self.collectors {
             if collector.definition.cadence != CollectorCadence::Startup {
                 continue;
             }
 
-            collector.collector.collect(&context, &mut inventory);
+            collector.collector.collect(&context, &mut host_profile);
         }
 
-        inventory.collector_capabilities = Some(official_collector_capabilities(
-            inventory.cpu_count,
-            inventory.memory_total_bytes,
-            &inventory.filesystems,
-            &inventory.network_interfaces,
+        host_profile.collector_capabilities = Some(official_collector_capabilities(
+            host_profile.cpu_count,
+            host_profile.memory_total_bytes,
+            &host_profile.filesystems,
+            &host_profile.network_interfaces,
         ));
 
-        inventory
+        host_profile
     }
 }
 
-struct InventoryCollectionContext {
+struct HostProfileCollectionContext {
     cpu_count: u32,
     cpuinfo: String,
-    filesystems: Vec<FilesystemInventory>,
+    filesystems: Vec<FilesystemProfile>,
     memory_total_bytes: u64,
-    network_interfaces: Vec<NetworkInterfaceInventory>,
+    network_interfaces: Vec<NetworkInterfaceProfile>,
     process_snapshot: ProcessSnapshot,
 }
 
-impl InventoryCollectionContext {
+impl HostProfileCollectionContext {
     fn read() -> Self {
         let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
         let cpu_count = std::thread::available_parallelism()
@@ -116,96 +120,120 @@ impl InventoryCollectionContext {
     }
 }
 
-struct SystemInventoryCollector;
+struct SystemHostProfileCollector;
 
-impl InventoryCollector for SystemInventoryCollector {
+impl HostProfileCollector for SystemHostProfileCollector {
     fn definition(&self) -> CollectorDefinition {
         CollectorDefinition::new(CollectorId::Uptime, CollectorCadence::Startup)
     }
 
-    fn collect(&mut self, _context: &InventoryCollectionContext, inventory: &mut Inventory) {
-        inventory.architecture = std::env::consts::ARCH.to_string();
-        inventory.hostname = read_trimmed("/proc/sys/kernel/hostname")
+    fn collect(
+        &mut self,
+        _context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    ) {
+        host_profile.architecture = std::env::consts::ARCH.to_string();
+        host_profile.hostname = read_trimmed("/proc/sys/kernel/hostname")
             .or_else(|| std::env::var("HOSTNAME").ok())
             .unwrap_or_default();
-        inventory.kernel = read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default();
-        inventory.os = read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string());
-        inventory.probe_version = crate::version::probe_version().to_string();
+        host_profile.kernel = read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default();
+        host_profile.os = read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string());
+        host_profile.probe_version = crate::version::probe_version().to_string();
     }
 }
 
-struct CpuInventoryCollector;
+struct CpuHostProfileCollector;
 
-impl InventoryCollector for CpuInventoryCollector {
+impl HostProfileCollector for CpuHostProfileCollector {
     fn definition(&self) -> CollectorDefinition {
         CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::Startup)
     }
 
-    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
-        inventory.cpu_base_frequency_mhz =
+    fn collect(
+        &mut self,
+        context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    ) {
+        host_profile.cpu_base_frequency_mhz =
             read_cpu_base_frequency_mhz(&context.cpuinfo).unwrap_or(0);
-        inventory.cpu_cache_l3_bytes = read_cpu_l3_cache_bytes(&context.cpuinfo).unwrap_or(0);
-        inventory.cpu_count = context.cpu_count;
-        inventory.cpu_model = read_cpu_model(&context.cpuinfo).unwrap_or_default();
-        inventory.cpu_physical_count = read_cpu_physical_count(&context.cpuinfo).unwrap_or(0);
-        inventory.cpu_socket_count = read_cpu_socket_count(&context.cpuinfo).unwrap_or(0);
+        host_profile.cpu_cache_l3_bytes = read_cpu_l3_cache_bytes(&context.cpuinfo).unwrap_or(0);
+        host_profile.cpu_count = context.cpu_count;
+        host_profile.cpu_model = read_cpu_model(&context.cpuinfo).unwrap_or_default();
+        host_profile.cpu_physical_count = read_cpu_physical_count(&context.cpuinfo).unwrap_or(0);
+        host_profile.cpu_socket_count = read_cpu_socket_count(&context.cpuinfo).unwrap_or(0);
     }
 }
 
-struct MemoryInventoryCollector;
+struct MemoryHostProfileCollector;
 
-impl InventoryCollector for MemoryInventoryCollector {
+impl HostProfileCollector for MemoryHostProfileCollector {
     fn definition(&self) -> CollectorDefinition {
         CollectorDefinition::new(CollectorId::Memory, CollectorCadence::Startup)
     }
 
-    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
-        inventory.memory_total_bytes = context.memory_total_bytes;
+    fn collect(
+        &mut self,
+        context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    ) {
+        host_profile.memory_total_bytes = context.memory_total_bytes;
     }
 }
 
-struct DiskInventoryCollector;
+struct DiskHostProfileCollector;
 
-impl InventoryCollector for DiskInventoryCollector {
+impl HostProfileCollector for DiskHostProfileCollector {
     fn definition(&self) -> CollectorDefinition {
         CollectorDefinition::new(CollectorId::Disk, CollectorCadence::Startup)
     }
 
-    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
-        inventory.filesystems = context.filesystems.clone();
+    fn collect(
+        &mut self,
+        context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    ) {
+        host_profile.filesystems = context.filesystems.clone();
     }
 }
 
-struct NetworkInventoryCollector;
+struct NetworkHostProfileCollector;
 
-impl InventoryCollector for NetworkInventoryCollector {
+impl HostProfileCollector for NetworkHostProfileCollector {
     fn definition(&self) -> CollectorDefinition {
         CollectorDefinition::new(CollectorId::Network, CollectorCadence::Startup)
     }
 
-    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
-        inventory.network_interfaces = context.network_interfaces.clone();
+    fn collect(
+        &mut self,
+        context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    ) {
+        host_profile.network_interfaces = context.network_interfaces.clone();
     }
 }
 
-struct ProcessInventoryCollector;
+struct ProcessHostProfileCollector;
 
-impl InventoryCollector for ProcessInventoryCollector {
+impl HostProfileCollector for ProcessHostProfileCollector {
     fn definition(&self) -> CollectorDefinition {
         CollectorDefinition::new(CollectorId::Load, CollectorCadence::Startup)
     }
 
-    fn collect(&mut self, context: &InventoryCollectionContext, inventory: &mut Inventory) {
-        inventory.process_count = context.process_snapshot.process_count;
-        inventory.thread_count = context.process_snapshot.thread_count;
+    fn collect(
+        &mut self,
+        context: &HostProfileCollectionContext,
+        host_profile: &mut HostProfileSnapshot,
+    ) {
+        host_profile.process_count = context.process_snapshot.process_count;
+        host_profile.thread_count = context.process_snapshot.thread_count;
     }
 }
 
 fn official_collector_capabilities(
     cpu_count: u32,
     memory_total_bytes: u64,
-    filesystems: &[FilesystemInventory],
-    network_interfaces: &[NetworkInterfaceInventory],
+    filesystems: &[FilesystemProfile],
+    network_interfaces: &[NetworkInterfaceProfile],
 ) -> CollectorCapabilities {
     CollectorCapabilities {
         official: Some(OfficialCollectorCapabilities {
@@ -221,7 +249,7 @@ fn official_collector_capabilities(
             disk_health: Some(CollectorAvailability {
                 available: disk_health_available(),
             }),
-            inventory: Some(CollectorAvailability { available: true }),
+            host_profile: Some(CollectorAvailability { available: true }),
             load: Some(CollectorAvailability { available: true }),
             memory: Some(CollectorAvailability {
                 available: memory_total_bytes > 0,
@@ -403,57 +431,11 @@ fn read_process_thread_count(process_path: impl AsRef<Path>) -> Option<u32> {
     })
 }
 
-pub fn inventory_hash(inventory: &Inventory) -> String {
-    let canonical = stable_inventory(inventory.clone());
-    let digest = Sha256::digest(canonical.encode_to_vec());
-
-    hex_lower(&digest)
-}
-
 pub fn host_profile_hash(host_profile: &HostProfileSnapshot) -> String {
     let canonical = stable_host_profile(host_profile.clone());
     let digest = Sha256::digest(canonical.encode_to_vec());
 
     hex_lower(&digest)
-}
-
-pub fn host_profile_from_inventory(inventory: Inventory) -> HostProfileSnapshot {
-    HostProfileSnapshot {
-        architecture: inventory.architecture,
-        collector_capabilities: inventory.collector_capabilities,
-        cpu_base_frequency_mhz: inventory.cpu_base_frequency_mhz,
-        cpu_cache_l3_bytes: inventory.cpu_cache_l3_bytes,
-        cpu_count: inventory.cpu_count,
-        cpu_model: inventory.cpu_model,
-        cpu_physical_count: inventory.cpu_physical_count,
-        cpu_socket_count: inventory.cpu_socket_count,
-        filesystems: inventory.filesystems,
-        hostname: inventory.hostname,
-        kernel: inventory.kernel,
-        memory_total_bytes: inventory.memory_total_bytes,
-        network_interfaces: inventory.network_interfaces,
-        os: inventory.os,
-        probe_version: inventory.probe_version,
-        process_count: inventory.process_count,
-        thread_count: inventory.thread_count,
-    }
-}
-
-pub fn stable_inventory(mut inventory: Inventory) -> Inventory {
-    inventory.filesystems.sort_by(|left, right| {
-        left.mount_point
-            .cmp(&right.mount_point)
-            .then_with(|| left.filesystem_type.cmp(&right.filesystem_type))
-    });
-    for network_interface in &mut inventory.network_interfaces {
-        network_interface.addresses.sort();
-        network_interface.addresses.dedup();
-    }
-    inventory
-        .network_interfaces
-        .sort_by(|left, right| left.name.cmp(&right.name));
-
-    inventory
 }
 
 pub fn stable_host_profile(mut host_profile: HostProfileSnapshot) -> HostProfileSnapshot {
@@ -503,7 +485,7 @@ fn read_memory_total_bytes() -> Option<u64> {
     Some(kilobytes * 1024)
 }
 
-fn collect_filesystems() -> Vec<FilesystemInventory> {
+fn collect_filesystems() -> Vec<FilesystemProfile> {
     let contents = fs::read_to_string("/proc/mounts").unwrap_or_default();
     let mut filesystems = contents
         .lines()
@@ -514,7 +496,7 @@ fn collect_filesystems() -> Vec<FilesystemInventory> {
             filesystem_capacity(&mount.mount_point).map(|capacity| (mount, capacity))
         })
         .filter(|(_, capacity)| capacity.total_bytes > 0)
-        .map(|(mount, capacity)| FilesystemInventory {
+        .map(|(mount, capacity)| FilesystemProfile {
             available_bytes: capacity.available_bytes,
             filesystem_type: mount.filesystem_type,
             mount_point: mount.mount_point,
@@ -570,7 +552,7 @@ fn filesystem_capacity(path: &str) -> Option<FilesystemCapacity> {
     })
 }
 
-fn collect_network_interfaces() -> Vec<NetworkInterfaceInventory> {
+fn collect_network_interfaces() -> Vec<NetworkInterfaceProfile> {
     let mut addresses_by_name = BTreeMap::<String, Vec<String>>::new();
     let mut ifaddrs = std::ptr::null_mut();
     // SAFETY: getifaddrs initializes ifaddrs on success and it is released with freeifaddrs below.
@@ -610,7 +592,7 @@ fn collect_network_interfaces() -> Vec<NetworkInterfaceInventory> {
             addresses.sort();
             addresses.dedup();
 
-            NetworkInterfaceInventory { addresses, name }
+            NetworkInterfaceProfile { addresses, name }
         })
         .collect()
 }

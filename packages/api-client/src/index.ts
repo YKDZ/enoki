@@ -195,7 +195,6 @@ export type HostDetail = Omit<HostSummary, "probeConfiguration"> & {
     observedIp: string | null;
   };
   hostProfile: HostProfileSnapshot | null;
-  inventory: Record<string, unknown> | null;
   probeConfiguration: HostProbeConfigurationResponse;
   probeUpgradeEligibility: ProbeUpgradeEligibility;
   probeUpgradeStatus: ProbeUpgradeStatus | null;

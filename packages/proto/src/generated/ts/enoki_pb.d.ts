@@ -12,9 +12,6 @@ export namespace enoki {
             /** ProbeRegistrationRequest enrollmentToken */
             enrollmentToken?: (string|null);
 
-            /** ProbeRegistrationRequest inventory */
-            inventory?: (enoki.v1.IInventory|null);
-
             /** ProbeRegistrationRequest probePublicKeyPem */
             probePublicKeyPem?: (string|null);
 
@@ -33,9 +30,6 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest enrollmentToken. */
             public enrollmentToken: string;
-
-            /** ProbeRegistrationRequest inventory. */
-            public inventory?: (enoki.v1.IInventory|null);
 
             /** ProbeRegistrationRequest probePublicKeyPem. */
             public probePublicKeyPem: string;
@@ -251,17 +245,11 @@ export namespace enoki {
             /** ProbeReportRequest sequenceEnd */
             sequenceEnd?: (Long|null);
 
-            /** ProbeReportRequest inventoryHash */
-            inventoryHash?: (string|null);
-
             /** ProbeReportRequest probeConfigurationVersion */
             probeConfigurationVersion?: (string|null);
 
             /** ProbeReportRequest metrics */
             metrics?: (enoki.v1.IMetricSample[]|null);
-
-            /** ProbeReportRequest inventory */
-            inventory?: (enoki.v1.IInventory|null);
 
             /** ProbeReportRequest probeConfigurationError */
             probeConfigurationError?: (enoki.v1.IProbeConfigurationError|null);
@@ -297,17 +285,11 @@ export namespace enoki {
             /** ProbeReportRequest sequenceEnd. */
             public sequenceEnd: Long;
 
-            /** ProbeReportRequest inventoryHash. */
-            public inventoryHash: string;
-
             /** ProbeReportRequest probeConfigurationVersion. */
             public probeConfigurationVersion: string;
 
             /** ProbeReportRequest metrics. */
             public metrics: enoki.v1.IMetricSample[];
-
-            /** ProbeReportRequest inventory. */
-            public inventory?: (enoki.v1.IInventory|null);
 
             /** ProbeReportRequest probeConfigurationError. */
             public probeConfigurationError?: (enoki.v1.IProbeConfigurationError|null);
@@ -411,9 +393,6 @@ export namespace enoki {
             /** ProbeReportResponse currentProbeConfigurationVersion */
             currentProbeConfigurationVersion?: (string|null);
 
-            /** ProbeReportResponse inventoryNeeded */
-            inventoryNeeded?: (boolean|null);
-
             /** ProbeReportResponse pendingOperation */
             pendingOperation?: (enoki.v1.IProbeOperation|null);
 
@@ -438,9 +417,6 @@ export namespace enoki {
 
             /** ProbeReportResponse currentProbeConfigurationVersion. */
             public currentProbeConfigurationVersion: string;
-
-            /** ProbeReportResponse inventoryNeeded. */
-            public inventoryNeeded: boolean;
 
             /** ProbeReportResponse pendingOperation. */
             public pendingOperation?: (enoki.v1.IProbeOperation|null);
@@ -847,199 +823,6 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
-        /** Properties of an Inventory. */
-        interface IInventory {
-
-            /** Inventory hostname */
-            hostname?: (string|null);
-
-            /** Inventory os */
-            os?: (string|null);
-
-            /** Inventory kernel */
-            kernel?: (string|null);
-
-            /** Inventory architecture */
-            architecture?: (string|null);
-
-            /** Inventory cpuCount */
-            cpuCount?: (number|null);
-
-            /** Inventory memoryTotalBytes */
-            memoryTotalBytes?: (Long|null);
-
-            /** Inventory filesystems */
-            filesystems?: (enoki.v1.IFilesystemInventory[]|null);
-
-            /** Inventory networkInterfaces */
-            networkInterfaces?: (enoki.v1.INetworkInterfaceInventory[]|null);
-
-            /** Inventory probeVersion */
-            probeVersion?: (string|null);
-
-            /** Inventory cpuModel */
-            cpuModel?: (string|null);
-
-            /** Inventory processCount */
-            processCount?: (number|null);
-
-            /** Inventory threadCount */
-            threadCount?: (number|null);
-
-            /** Inventory cpuCacheL3Bytes */
-            cpuCacheL3Bytes?: (Long|null);
-
-            /** Inventory cpuBaseFrequencyMhz */
-            cpuBaseFrequencyMhz?: (number|null);
-
-            /** Inventory cpuSocketCount */
-            cpuSocketCount?: (number|null);
-
-            /** Inventory cpuPhysicalCount */
-            cpuPhysicalCount?: (number|null);
-
-            /** Inventory collectorCapabilities */
-            collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
-        }
-
-        /** Represents an Inventory. */
-        class Inventory implements IInventory {
-
-            /**
-             * Constructs a new Inventory.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IInventory);
-
-            /** Inventory hostname. */
-            public hostname: string;
-
-            /** Inventory os. */
-            public os: string;
-
-            /** Inventory kernel. */
-            public kernel: string;
-
-            /** Inventory architecture. */
-            public architecture: string;
-
-            /** Inventory cpuCount. */
-            public cpuCount: number;
-
-            /** Inventory memoryTotalBytes. */
-            public memoryTotalBytes: Long;
-
-            /** Inventory filesystems. */
-            public filesystems: enoki.v1.IFilesystemInventory[];
-
-            /** Inventory networkInterfaces. */
-            public networkInterfaces: enoki.v1.INetworkInterfaceInventory[];
-
-            /** Inventory probeVersion. */
-            public probeVersion: string;
-
-            /** Inventory cpuModel. */
-            public cpuModel: string;
-
-            /** Inventory processCount. */
-            public processCount: number;
-
-            /** Inventory threadCount. */
-            public threadCount: number;
-
-            /** Inventory cpuCacheL3Bytes. */
-            public cpuCacheL3Bytes: Long;
-
-            /** Inventory cpuBaseFrequencyMhz. */
-            public cpuBaseFrequencyMhz: number;
-
-            /** Inventory cpuSocketCount. */
-            public cpuSocketCount: number;
-
-            /** Inventory cpuPhysicalCount. */
-            public cpuPhysicalCount: number;
-
-            /** Inventory collectorCapabilities. */
-            public collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
-
-            /**
-             * Creates a new Inventory instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns Inventory instance
-             */
-            public static create(properties?: enoki.v1.IInventory): enoki.v1.Inventory;
-
-            /**
-             * Encodes the specified Inventory message. Does not implicitly {@link enoki.v1.Inventory.verify|verify} messages.
-             * @param message Inventory message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IInventory, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified Inventory message, length delimited. Does not implicitly {@link enoki.v1.Inventory.verify|verify} messages.
-             * @param message Inventory message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IInventory, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes an Inventory message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns Inventory
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.Inventory;
-
-            /**
-             * Decodes an Inventory message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns Inventory
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.Inventory;
-
-            /**
-             * Verifies an Inventory message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates an Inventory message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns Inventory
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.Inventory;
-
-            /**
-             * Creates a plain object from an Inventory message. Also converts values to other types if specified.
-             * @param message Inventory
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.Inventory, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this Inventory to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for Inventory
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
         /** Properties of a HostProfileSnapshot. */
         interface IHostProfileSnapshot {
 
@@ -1062,10 +845,10 @@ export namespace enoki {
             memoryTotalBytes?: (Long|null);
 
             /** HostProfileSnapshot filesystems */
-            filesystems?: (enoki.v1.IFilesystemInventory[]|null);
+            filesystems?: (enoki.v1.IFilesystemProfile[]|null);
 
             /** HostProfileSnapshot networkInterfaces */
-            networkInterfaces?: (enoki.v1.INetworkInterfaceInventory[]|null);
+            networkInterfaces?: (enoki.v1.INetworkInterfaceProfile[]|null);
 
             /** HostProfileSnapshot probeVersion */
             probeVersion?: (string|null);
@@ -1123,10 +906,10 @@ export namespace enoki {
             public memoryTotalBytes: Long;
 
             /** HostProfileSnapshot filesystems. */
-            public filesystems: enoki.v1.IFilesystemInventory[];
+            public filesystems: enoki.v1.IFilesystemProfile[];
 
             /** HostProfileSnapshot networkInterfaces. */
-            public networkInterfaces: enoki.v1.INetworkInterfaceInventory[];
+            public networkInterfaces: enoki.v1.INetworkInterfaceProfile[];
 
             /** HostProfileSnapshot probeVersion. */
             public probeVersion: string;
@@ -1345,218 +1128,218 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
-        /** Properties of a FilesystemInventory. */
-        interface IFilesystemInventory {
+        /** Properties of a FilesystemProfile. */
+        interface IFilesystemProfile {
 
-            /** FilesystemInventory mountPoint */
+            /** FilesystemProfile mountPoint */
             mountPoint?: (string|null);
 
-            /** FilesystemInventory filesystemType */
+            /** FilesystemProfile filesystemType */
             filesystemType?: (string|null);
 
-            /** FilesystemInventory totalBytes */
+            /** FilesystemProfile totalBytes */
             totalBytes?: (Long|null);
 
-            /** FilesystemInventory availableBytes */
+            /** FilesystemProfile availableBytes */
             availableBytes?: (Long|null);
         }
 
-        /** Represents a FilesystemInventory. */
-        class FilesystemInventory implements IFilesystemInventory {
+        /** Represents a FilesystemProfile. */
+        class FilesystemProfile implements IFilesystemProfile {
 
             /**
-             * Constructs a new FilesystemInventory.
+             * Constructs a new FilesystemProfile.
              * @param [properties] Properties to set
              */
-            constructor(properties?: enoki.v1.IFilesystemInventory);
+            constructor(properties?: enoki.v1.IFilesystemProfile);
 
-            /** FilesystemInventory mountPoint. */
+            /** FilesystemProfile mountPoint. */
             public mountPoint: string;
 
-            /** FilesystemInventory filesystemType. */
+            /** FilesystemProfile filesystemType. */
             public filesystemType: string;
 
-            /** FilesystemInventory totalBytes. */
+            /** FilesystemProfile totalBytes. */
             public totalBytes: Long;
 
-            /** FilesystemInventory availableBytes. */
+            /** FilesystemProfile availableBytes. */
             public availableBytes: Long;
 
             /**
-             * Creates a new FilesystemInventory instance using the specified properties.
+             * Creates a new FilesystemProfile instance using the specified properties.
              * @param [properties] Properties to set
-             * @returns FilesystemInventory instance
+             * @returns FilesystemProfile instance
              */
-            public static create(properties?: enoki.v1.IFilesystemInventory): enoki.v1.FilesystemInventory;
+            public static create(properties?: enoki.v1.IFilesystemProfile): enoki.v1.FilesystemProfile;
 
             /**
-             * Encodes the specified FilesystemInventory message. Does not implicitly {@link enoki.v1.FilesystemInventory.verify|verify} messages.
-             * @param message FilesystemInventory message or plain object to encode
+             * Encodes the specified FilesystemProfile message. Does not implicitly {@link enoki.v1.FilesystemProfile.verify|verify} messages.
+             * @param message FilesystemProfile message or plain object to encode
              * @param [writer] Writer to encode to
              * @returns Writer
              */
-            public static encode(message: enoki.v1.IFilesystemInventory, writer?: $protobuf.Writer): $protobuf.Writer;
+            public static encode(message: enoki.v1.IFilesystemProfile, writer?: $protobuf.Writer): $protobuf.Writer;
 
             /**
-             * Encodes the specified FilesystemInventory message, length delimited. Does not implicitly {@link enoki.v1.FilesystemInventory.verify|verify} messages.
-             * @param message FilesystemInventory message or plain object to encode
+             * Encodes the specified FilesystemProfile message, length delimited. Does not implicitly {@link enoki.v1.FilesystemProfile.verify|verify} messages.
+             * @param message FilesystemProfile message or plain object to encode
              * @param [writer] Writer to encode to
              * @returns Writer
              */
-            public static encodeDelimited(message: enoki.v1.IFilesystemInventory, writer?: $protobuf.Writer): $protobuf.Writer;
+            public static encodeDelimited(message: enoki.v1.IFilesystemProfile, writer?: $protobuf.Writer): $protobuf.Writer;
 
             /**
-             * Decodes a FilesystemInventory message from the specified reader or buffer.
+             * Decodes a FilesystemProfile message from the specified reader or buffer.
              * @param reader Reader or buffer to decode from
              * @param [length] Message length if known beforehand
-             * @returns FilesystemInventory
+             * @returns FilesystemProfile
              * @throws {Error} If the payload is not a reader or valid buffer
              * @throws {$protobuf.util.ProtocolError} If required fields are missing
              */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.FilesystemInventory;
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.FilesystemProfile;
 
             /**
-             * Decodes a FilesystemInventory message from the specified reader or buffer, length delimited.
+             * Decodes a FilesystemProfile message from the specified reader or buffer, length delimited.
              * @param reader Reader or buffer to decode from
-             * @returns FilesystemInventory
+             * @returns FilesystemProfile
              * @throws {Error} If the payload is not a reader or valid buffer
              * @throws {$protobuf.util.ProtocolError} If required fields are missing
              */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.FilesystemInventory;
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.FilesystemProfile;
 
             /**
-             * Verifies a FilesystemInventory message.
+             * Verifies a FilesystemProfile message.
              * @param message Plain object to verify
              * @returns `null` if valid, otherwise the reason why it is not
              */
             public static verify(message: { [k: string]: any }): (string|null);
 
             /**
-             * Creates a FilesystemInventory message from a plain object. Also converts values to their respective internal types.
+             * Creates a FilesystemProfile message from a plain object. Also converts values to their respective internal types.
              * @param object Plain object
-             * @returns FilesystemInventory
+             * @returns FilesystemProfile
              */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.FilesystemInventory;
+            public static fromObject(object: { [k: string]: any }): enoki.v1.FilesystemProfile;
 
             /**
-             * Creates a plain object from a FilesystemInventory message. Also converts values to other types if specified.
-             * @param message FilesystemInventory
+             * Creates a plain object from a FilesystemProfile message. Also converts values to other types if specified.
+             * @param message FilesystemProfile
              * @param [options] Conversion options
              * @returns Plain object
              */
-            public static toObject(message: enoki.v1.FilesystemInventory, options?: $protobuf.IConversionOptions): { [k: string]: any };
+            public static toObject(message: enoki.v1.FilesystemProfile, options?: $protobuf.IConversionOptions): { [k: string]: any };
 
             /**
-             * Converts this FilesystemInventory to JSON.
+             * Converts this FilesystemProfile to JSON.
              * @returns JSON object
              */
             public toJSON(): { [k: string]: any };
 
             /**
-             * Gets the default type url for FilesystemInventory
+             * Gets the default type url for FilesystemProfile
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
-        /** Properties of a NetworkInterfaceInventory. */
-        interface INetworkInterfaceInventory {
+        /** Properties of a NetworkInterfaceProfile. */
+        interface INetworkInterfaceProfile {
 
-            /** NetworkInterfaceInventory name */
+            /** NetworkInterfaceProfile name */
             name?: (string|null);
 
-            /** NetworkInterfaceInventory addresses */
+            /** NetworkInterfaceProfile addresses */
             addresses?: (string[]|null);
         }
 
-        /** Represents a NetworkInterfaceInventory. */
-        class NetworkInterfaceInventory implements INetworkInterfaceInventory {
+        /** Represents a NetworkInterfaceProfile. */
+        class NetworkInterfaceProfile implements INetworkInterfaceProfile {
 
             /**
-             * Constructs a new NetworkInterfaceInventory.
+             * Constructs a new NetworkInterfaceProfile.
              * @param [properties] Properties to set
              */
-            constructor(properties?: enoki.v1.INetworkInterfaceInventory);
+            constructor(properties?: enoki.v1.INetworkInterfaceProfile);
 
-            /** NetworkInterfaceInventory name. */
+            /** NetworkInterfaceProfile name. */
             public name: string;
 
-            /** NetworkInterfaceInventory addresses. */
+            /** NetworkInterfaceProfile addresses. */
             public addresses: string[];
 
             /**
-             * Creates a new NetworkInterfaceInventory instance using the specified properties.
+             * Creates a new NetworkInterfaceProfile instance using the specified properties.
              * @param [properties] Properties to set
-             * @returns NetworkInterfaceInventory instance
+             * @returns NetworkInterfaceProfile instance
              */
-            public static create(properties?: enoki.v1.INetworkInterfaceInventory): enoki.v1.NetworkInterfaceInventory;
+            public static create(properties?: enoki.v1.INetworkInterfaceProfile): enoki.v1.NetworkInterfaceProfile;
 
             /**
-             * Encodes the specified NetworkInterfaceInventory message. Does not implicitly {@link enoki.v1.NetworkInterfaceInventory.verify|verify} messages.
-             * @param message NetworkInterfaceInventory message or plain object to encode
+             * Encodes the specified NetworkInterfaceProfile message. Does not implicitly {@link enoki.v1.NetworkInterfaceProfile.verify|verify} messages.
+             * @param message NetworkInterfaceProfile message or plain object to encode
              * @param [writer] Writer to encode to
              * @returns Writer
              */
-            public static encode(message: enoki.v1.INetworkInterfaceInventory, writer?: $protobuf.Writer): $protobuf.Writer;
+            public static encode(message: enoki.v1.INetworkInterfaceProfile, writer?: $protobuf.Writer): $protobuf.Writer;
 
             /**
-             * Encodes the specified NetworkInterfaceInventory message, length delimited. Does not implicitly {@link enoki.v1.NetworkInterfaceInventory.verify|verify} messages.
-             * @param message NetworkInterfaceInventory message or plain object to encode
+             * Encodes the specified NetworkInterfaceProfile message, length delimited. Does not implicitly {@link enoki.v1.NetworkInterfaceProfile.verify|verify} messages.
+             * @param message NetworkInterfaceProfile message or plain object to encode
              * @param [writer] Writer to encode to
              * @returns Writer
              */
-            public static encodeDelimited(message: enoki.v1.INetworkInterfaceInventory, writer?: $protobuf.Writer): $protobuf.Writer;
+            public static encodeDelimited(message: enoki.v1.INetworkInterfaceProfile, writer?: $protobuf.Writer): $protobuf.Writer;
 
             /**
-             * Decodes a NetworkInterfaceInventory message from the specified reader or buffer.
+             * Decodes a NetworkInterfaceProfile message from the specified reader or buffer.
              * @param reader Reader or buffer to decode from
              * @param [length] Message length if known beforehand
-             * @returns NetworkInterfaceInventory
+             * @returns NetworkInterfaceProfile
              * @throws {Error} If the payload is not a reader or valid buffer
              * @throws {$protobuf.util.ProtocolError} If required fields are missing
              */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.NetworkInterfaceInventory;
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.NetworkInterfaceProfile;
 
             /**
-             * Decodes a NetworkInterfaceInventory message from the specified reader or buffer, length delimited.
+             * Decodes a NetworkInterfaceProfile message from the specified reader or buffer, length delimited.
              * @param reader Reader or buffer to decode from
-             * @returns NetworkInterfaceInventory
+             * @returns NetworkInterfaceProfile
              * @throws {Error} If the payload is not a reader or valid buffer
              * @throws {$protobuf.util.ProtocolError} If required fields are missing
              */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.NetworkInterfaceInventory;
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.NetworkInterfaceProfile;
 
             /**
-             * Verifies a NetworkInterfaceInventory message.
+             * Verifies a NetworkInterfaceProfile message.
              * @param message Plain object to verify
              * @returns `null` if valid, otherwise the reason why it is not
              */
             public static verify(message: { [k: string]: any }): (string|null);
 
             /**
-             * Creates a NetworkInterfaceInventory message from a plain object. Also converts values to their respective internal types.
+             * Creates a NetworkInterfaceProfile message from a plain object. Also converts values to their respective internal types.
              * @param object Plain object
-             * @returns NetworkInterfaceInventory
+             * @returns NetworkInterfaceProfile
              */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.NetworkInterfaceInventory;
+            public static fromObject(object: { [k: string]: any }): enoki.v1.NetworkInterfaceProfile;
 
             /**
-             * Creates a plain object from a NetworkInterfaceInventory message. Also converts values to other types if specified.
-             * @param message NetworkInterfaceInventory
+             * Creates a plain object from a NetworkInterfaceProfile message. Also converts values to other types if specified.
+             * @param message NetworkInterfaceProfile
              * @param [options] Conversion options
              * @returns Plain object
              */
-            public static toObject(message: enoki.v1.NetworkInterfaceInventory, options?: $protobuf.IConversionOptions): { [k: string]: any };
+            public static toObject(message: enoki.v1.NetworkInterfaceProfile, options?: $protobuf.IConversionOptions): { [k: string]: any };
 
             /**
-             * Converts this NetworkInterfaceInventory to JSON.
+             * Converts this NetworkInterfaceProfile to JSON.
              * @returns JSON object
              */
             public toJSON(): { [k: string]: any };
 
             /**
-             * Gets the default type url for NetworkInterfaceInventory
+             * Gets the default type url for NetworkInterfaceProfile
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */
@@ -1690,8 +1473,8 @@ export namespace enoki {
             /** OfficialCollectorCapabilities diskHealth */
             diskHealth?: (enoki.v1.ICollectorAvailability|null);
 
-            /** OfficialCollectorCapabilities inventory */
-            inventory?: (enoki.v1.ICollectorAvailability|null);
+            /** OfficialCollectorCapabilities hostProfile */
+            hostProfile?: (enoki.v1.ICollectorAvailability|null);
         }
 
         /** Represents an OfficialCollectorCapabilities. */
@@ -1730,8 +1513,8 @@ export namespace enoki {
             /** OfficialCollectorCapabilities diskHealth. */
             public diskHealth?: (enoki.v1.ICollectorAvailability|null);
 
-            /** OfficialCollectorCapabilities inventory. */
-            public inventory?: (enoki.v1.ICollectorAvailability|null);
+            /** OfficialCollectorCapabilities hostProfile. */
+            public hostProfile?: (enoki.v1.ICollectorAvailability|null);
 
             /**
              * Creates a new OfficialCollectorCapabilities instance using the specified properties.

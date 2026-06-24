@@ -61,7 +61,7 @@ describe("WebSocket contracts", () => {
         diskHealth: {
           available: true,
         },
-        inventory: {
+        hostProfile: {
           available: true,
         },
       },

@@ -15,7 +15,6 @@ import { hashSecret } from "../src/enrollment/routes";
 import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
-const Inventory = root.enoki.v1.Inventory;
 const HostProfileSnapshot = root.enoki.v1.HostProfileSnapshot;
 const testProbePrivateKeys = new WeakMap<Response, string>();
 const hostProfileCrossRuntimeCanonicalHash =
@@ -77,8 +76,13 @@ async function registerProbe(
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
-        inventory: sampleInventory({ hostname }),
         ...(options.publicKey === false ? {} : { probePublicKeyPem }),
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sampleHostProfile({ hostname }),
+          },
+        ],
       }),
     ).finish(),
     headers: {
@@ -109,9 +113,9 @@ async function decodeRegisteredProbe(response: Response) {
   return { ...registration, privateKeyPem };
 }
 
-function sampleInventory(
-  overrides: Partial<root.enoki.v1.IInventory> = {},
-): root.enoki.v1.IInventory {
+function sampleHostProfile(
+  overrides: Partial<root.enoki.v1.IHostProfileSnapshot> = {},
+): root.enoki.v1.IHostProfileSnapshot {
   return {
     architecture: "x86_64",
     cpuCount: 2,
@@ -235,14 +239,6 @@ function hostProfileCrossRuntimeCanonicalFixture(): root.enoki.v1.IHostProfileSn
   });
 }
 
-function hashStableInventory(inventory: root.enoki.v1.IInventory) {
-  return createHash("sha256")
-    .update(
-      Inventory.encode(Inventory.create(stableInventory(inventory))).finish(),
-    )
-    .digest("hex");
-}
-
 function hashStableHostProfile(
   hostProfile: root.enoki.v1.IHostProfileSnapshot,
 ) {
@@ -253,12 +249,6 @@ function hashStableHostProfile(
       ).finish(),
     )
     .digest("hex");
-}
-
-function stableInventory(
-  inventory: root.enoki.v1.IInventory,
-): root.enoki.v1.IInventory {
-  return stableHostProfile(inventory);
 }
 
 function stableHostProfile<T extends root.enoki.v1.IHostProfileSnapshot>(
@@ -701,13 +691,18 @@ describe("Probe registration API", () => {
     const response = await app.request("/api/probe/register", {
       body: RegistrationRequest.encode(
         RegistrationRequest.create({
-          inventory: {
-            architecture: "x86_64",
-            hostname: "managed-host-01",
-            kernel: "6.8.0",
-            os: "linux",
-            probeVersion: "0.1.0",
-          },
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: {
+                architecture: "x86_64",
+                hostname: "managed-host-01",
+                kernel: "6.8.0",
+                os: "linux",
+                probeVersion: "0.1.0",
+              },
+            },
+          ],
         }),
       ).finish(),
       headers: {
@@ -875,7 +870,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("asks a Probe for full Inventory when a report hash is unknown", async () => {
+  it("asks a Probe for full Host Profile when a report hash is unknown", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -896,12 +891,17 @@ describe("Probe registration API", () => {
     const reportBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-01",
-        inventoryHash:
-          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 1,
         sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            snapshotHash:
+              "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          },
+        ],
       }),
     ).finish();
     const response = await app.request(
@@ -914,7 +914,9 @@ describe("Probe registration API", () => {
     const acknowledgement = ReportResponse.decode(
       new Uint8Array(await response.arrayBuffer()),
     );
-    expect(acknowledgement.inventoryNeeded).toBe(true);
+    expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([
+      "official.host-profile",
+    ]);
     expect(acknowledgement.acceptedSequenceEnd.toString()).toBe("1");
     expect(acknowledgement.currentProbeConfigurationVersion).toBe("default-v1");
     expect(acknowledgement.serverTimeMs.toString()).toBe("1725000000000");
@@ -922,7 +924,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("stores a changed full Inventory snapshot from a Probe report", async () => {
+  it("stores a changed full Host Profile snapshot from a Probe report", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -938,8 +940,7 @@ describe("Probe registration API", () => {
     const registrationResponse = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const Inventory = root.enoki.v1.Inventory;
-    const changedInventory = Inventory.create({
+    const changedHostProfile = HostProfileSnapshot.create({
       architecture: "x86_64",
       cpuCount: 4,
       cpuModel: "AMD EPYC 7B13",
@@ -963,20 +964,23 @@ describe("Probe registration API", () => {
       os: "linux",
       probeVersion: "0.2.0",
     });
-    const changedInventoryHash = createHash("sha256")
-      .update(Inventory.encode(changedInventory).finish())
-      .digest("hex");
+    const changedHostProfileHash = hashStableHostProfile(changedHostProfile);
     const registration = await decodeRegisteredProbe(registrationResponse);
 
     const reportBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-01",
-        inventory: changedInventory,
-        inventoryHash: changedInventoryHash,
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 2,
         sequenceStart: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: changedHostProfile,
+            snapshotHash: changedHostProfileHash,
+          },
+        ],
       }),
     ).finish();
     const response = await app.request(
@@ -988,7 +992,7 @@ describe("Probe registration API", () => {
     const acknowledgement = ReportResponse.decode(
       new Uint8Array(await response.arrayBuffer()),
     );
-    expect(acknowledgement.inventoryNeeded).toBe(false);
+    expect(acknowledgement.requestedSnapshotCollectorIds).toEqual([]);
 
     const storedHost = database.sqlite
       .prepare(
@@ -1008,7 +1012,7 @@ describe("Probe registration API", () => {
         cpu_count: 4,
         cpu_model: "AMD EPYC 7B13",
         hostname: "renamed-host",
-        inventory_hash: changedInventoryHash,
+        inventory_hash: changedHostProfileHash,
         memory_total_bytes: 4_294_967_296,
         probe_version: "0.2.0",
       }),
@@ -1043,7 +1047,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("accepts hash-only reports after shuffled Inventory repeated fields are canonicalized", async () => {
+  it("accepts hash-only reports after shuffled Host Profile repeated fields are canonicalized", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1059,7 +1063,7 @@ describe("Probe registration API", () => {
     const registrationResponse = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const shuffledInventory = sampleInventory({
+    const shuffledHostProfile = sampleHostProfile({
       filesystems: [
         {
           availableBytes: 30_000,
@@ -1081,7 +1085,7 @@ describe("Probe registration API", () => {
         },
       ],
     });
-    const canonicalHash = hashStableInventory(shuffledInventory);
+    const canonicalHash = hashStableHostProfile(shuffledHostProfile);
     expect(canonicalHash).toBe(
       "81b44963b7d5790b078d36ad59ac8ffa3da60b6684b58ca152252dfb5574c013",
     );
@@ -1090,12 +1094,17 @@ describe("Probe registration API", () => {
     const fullSnapshotBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-01",
-        inventory: shuffledInventory,
-        inventoryHash: canonicalHash,
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 2,
         sequenceStart: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: shuffledHostProfile,
+            snapshotHash: canonicalHash,
+          },
+        ],
       }),
     ).finish();
     const fullSnapshotResponse = await app.request(
@@ -1107,16 +1116,21 @@ describe("Probe registration API", () => {
     const fullSnapshotAck = ReportResponse.decode(
       new Uint8Array(await fullSnapshotResponse.arrayBuffer()),
     );
-    expect(fullSnapshotAck.inventoryNeeded).toBe(false);
+    expect(fullSnapshotAck.requestedSnapshotCollectorIds).toEqual([]);
 
     const hashOnlyBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-01",
-        inventoryHash: canonicalHash,
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 3,
         sequenceStart: 3,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            snapshotHash: canonicalHash,
+          },
+        ],
       }),
     ).finish();
     const hashOnlyResponse = await app.request(
@@ -1128,7 +1142,7 @@ describe("Probe registration API", () => {
     const hashOnlyAck = ReportResponse.decode(
       new Uint8Array(await hashOnlyResponse.arrayBuffer()),
     );
-    expect(hashOnlyAck.inventoryNeeded).toBe(false);
+    expect(hashOnlyAck.requestedSnapshotCollectorIds).toEqual([]);
 
     const storedHost = database.sqlite
       .prepare("select inventory_hash from managed_hosts")
@@ -1216,8 +1230,13 @@ describe("Probe registration API", () => {
         body: RegistrationRequest.encode(
           RegistrationRequest.create({
             enrollmentToken,
-            inventory: sampleInventory(),
             probePublicKeyPem: identity.publicKeyPem,
+            snapshots: [
+              {
+                collectorId: "official.host-profile",
+                hostProfile: sampleHostProfile(),
+              },
+            ],
           }),
         ).finish(),
         headers: {

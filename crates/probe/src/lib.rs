@@ -1,6 +1,6 @@
 pub mod cli;
 pub mod collectors;
-pub mod inventory;
+pub mod host_profile;
 pub mod metrics;
 pub mod privileged_collectors;
 pub mod privileged_runtime;

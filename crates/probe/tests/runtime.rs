@@ -6,18 +6,18 @@ use std::os::unix::fs::PermissionsExt;
 use enoki_probe::{
     metrics::CollectorId,
     protocol::enoki::v1::{
-        CollectorAvailability, CollectorCapabilities, Inventory, OfficialCollectorCapabilities,
-        ProbeConfigurationRequest, ProbeConfigurationResponse, ProbeOperation,
-        ProbeOperationStatus, ProbeRegistrationRequest, ProbeRegistrationResponse,
+        CollectorAvailability, CollectorCapabilities, HostProfileSnapshot,
+        OfficialCollectorCapabilities, ProbeConfigurationRequest, ProbeConfigurationResponse,
+        ProbeOperation, ProbeOperationStatus, ProbeRegistrationRequest, ProbeRegistrationResponse,
         ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation, probe_operation::Operation,
         probe_operation_status::Status, snapshot,
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
-        InventoryProvider, ProbeRequestAuth, ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper,
+        HostProfileProvider, ProbeRequestAuth, ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper,
         ProbeTransport, ReportError, ReportTransport, RunLoopControl,
         run_loop_control_from_environment, run_probe, run_probe_with_loop_control,
-        run_probe_with_loop_control_and_inventory_provider,
+        run_probe_with_loop_control_and_host_profile_provider,
     },
 };
 use prost::Message;
@@ -51,6 +51,19 @@ fn write_secure_bootstrap_config(path: &Path, contents: String) {
 
     #[cfg(unix)]
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("set permissions");
+}
+
+fn full_host_profile_payload(report: &ProbeReportRequest) -> &HostProfileSnapshot {
+    report
+        .snapshots
+        .iter()
+        .find_map(|reported_snapshot| {
+            reported_snapshot
+                .payload
+                .as_ref()
+                .map(|snapshot::Payload::HostProfile(host_profile)| host_profile)
+        })
+        .expect("report includes full Host Profile snapshot")
 }
 
 fn all_collector_ids() -> Vec<String> {
@@ -137,11 +150,16 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     assert_eq!(report.probe_id, "probe_01");
     assert_eq!(report.sequence_start, 1);
     assert_eq!(report.sequence_end, 1);
-    assert!(report.inventory.is_some());
+    assert!(
+        report
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.payload.is_some())
+    );
 }
 
 #[test]
-fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics() {
+fn probe_run_with_existing_identity_sends_startup_host_profile_even_without_metrics() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -158,7 +176,6 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
         response: ProbeReportResponse {
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_string(),
-            inventory_needed: false,
             pending_operation: None,
             requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
@@ -201,14 +218,12 @@ fn probe_run_with_existing_identity_sends_startup_inventory_even_without_metrics
     assert_eq!(request.probe_configuration_version, "default-v1");
     assert_eq!(request.sequence_start, 1);
     assert_eq!(request.sequence_end, 1);
-    let inventory = request
-        .inventory
-        .expect("startup report includes Inventory");
-    assert!(!inventory.architecture.is_empty());
-    assert!(inventory.cpu_count >= 1);
-    assert!(inventory.memory_total_bytes > 0);
-    assert!(!inventory.os.is_empty());
-    assert!(!request.inventory_hash.is_empty());
+    let host_profile = full_host_profile_payload(&request);
+    assert!(!host_profile.architecture.is_empty());
+    assert!(host_profile.cpu_count >= 1);
+    assert!(host_profile.memory_total_bytes > 0);
+    assert!(!host_profile.os.is_empty());
+    assert!(!request.snapshots[0].snapshot_hash.is_empty());
     assert!(request.metrics.is_empty());
 }
 
@@ -280,7 +295,6 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
         response: ProbeReportResponse {
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_string(),
-            inventory_needed: false,
             pending_operation: None,
             requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
@@ -312,7 +326,12 @@ fn probe_run_reports_local_probe_operation_status_on_startup() {
         request.operation_statuses[0].status,
         Some(Status::Running(_))
     ));
-    assert!(request.inventory.is_some());
+    assert!(
+        request
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.payload.is_some())
+    );
 }
 
 #[test]
@@ -348,7 +367,6 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
         response: ProbeReportResponse {
             accepted_sequence_end: 1,
             current_probe_configuration_version: "default-v1".to_string(),
-            inventory_needed: false,
             pending_operation: None,
             requested_snapshot_collector_ids: Vec::new(),
             server_time_ms: 1_725_000_000_000,
@@ -384,7 +402,7 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
 }
 
 #[test]
-fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() {
+fn probe_run_sends_full_host_profile_on_the_next_report_when_the_hub_requests_it() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -402,16 +420,14 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
             ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "default-v1".to_string(),
-                inventory_needed: true,
                 pending_operation: None,
-                requested_snapshot_collector_ids: Vec::new(),
+                requested_snapshot_collector_ids: vec!["official.host-profile".to_string()],
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec(),
             ProbeReportResponse {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "default-v1".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
@@ -444,8 +460,13 @@ fn probe_run_sends_full_inventory_on_the_next_report_when_the_hub_requests_it() 
     assert_eq!(follow_up.boot_id, startup.boot_id);
     assert_eq!(follow_up.sequence_start, 2);
     assert_eq!(follow_up.sequence_end, 2);
-    assert!(follow_up.inventory.is_some());
-    assert!(!follow_up.inventory_hash.is_empty());
+    assert!(
+        follow_up
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.payload.is_some())
+    );
+    assert!(!follow_up.snapshots[0].snapshot_hash.is_empty());
     assert!(follow_up.metrics.is_empty());
 }
 
@@ -501,7 +522,7 @@ fn probe_run_sends_full_host_profile_snapshot_when_the_hub_requests_it() {
 }
 
 #[test]
-fn probe_run_loop_sends_full_inventory_when_collector_capability_changes() {
+fn probe_run_loop_sends_full_host_profile_when_collector_capability_changes() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -518,22 +539,22 @@ fn probe_run_loop_sends_full_inventory_when_collector_capability_changes() {
     );
     let mut transport = RecordingProbeTransport {
         responses: vec![
-            report_response_with_version(1, false, "disabled-v1"),
-            report_response_with_version(2, false, "disabled-v1"),
-            report_response_with_version(3, false, "disabled-v1"),
+            report_response_with_version(1, "disabled-v1"),
+            report_response_with_version(2, "disabled-v1"),
+            report_response_with_version(3, "disabled-v1"),
         ],
         ..RecordingProbeTransport::default()
     };
     let mut sleeper = RecordingSleeper::default();
-    let mut inventory_provider = RecordingInventoryProvider {
-        inventories: vec![
-            inventory_with_disk_capability(true),
-            inventory_with_disk_capability(false),
-            inventory_with_disk_capability(false),
+    let mut host_profile_provider = RecordingHostProfileProvider {
+        host_profiles: vec![
+            host_profile_with_disk_capability(true),
+            host_profile_with_disk_capability(false),
+            host_profile_with_disk_capability(false),
         ],
     };
 
-    run_probe_with_loop_control_and_inventory_provider(
+    run_probe_with_loop_control_and_host_profile_provider(
         ProbeRunInput {
             bootstrap_config_path,
         },
@@ -542,21 +563,25 @@ fn probe_run_loop_sends_full_inventory_when_collector_capability_changes() {
         RunLoopControl {
             max_reports: Some(3),
         },
-        &mut inventory_provider,
+        &mut host_profile_provider,
     )
-    .expect("run loop refreshes Inventory facts");
+    .expect("run loop refreshes HostProfileSnapshot facts");
 
     let reports = transport
         .observed_report_bodies
         .iter()
         .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
         .collect::<Vec<_>>();
-    assert!(reports[0].inventory.is_some());
-    assert_eq!(
+    assert!(
         reports[0]
-            .inventory
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.payload.is_some())
+    );
+    assert_eq!(
+        full_host_profile_payload(&reports[0])
+            .collector_capabilities
             .as_ref()
-            .and_then(|inventory| inventory.collector_capabilities.as_ref())
             .and_then(|capabilities| capabilities.official.as_ref())
             .and_then(|official| official.disk.as_ref())
             .map(|disk| disk.available),
@@ -565,19 +590,97 @@ fn probe_run_loop_sends_full_inventory_when_collector_capability_changes() {
     assert_eq!(reports[1].sequence_start, 2);
     assert_eq!(reports[1].sequence_end, 2);
     assert_eq!(
-        reports[1]
-            .inventory
+        full_host_profile_payload(&reports[1])
+            .collector_capabilities
             .as_ref()
-            .and_then(|inventory| inventory.collector_capabilities.as_ref())
             .and_then(|capabilities| capabilities.official.as_ref())
             .and_then(|official| official.disk.as_ref())
             .map(|disk| disk.available),
         Some(false),
     );
-    assert_ne!(reports[0].inventory_hash, reports[1].inventory_hash);
-    assert_eq!(reports[2].inventory, None);
-    assert_eq!(reports[2].inventory_hash, reports[1].inventory_hash);
+    assert_ne!(
+        reports[0].snapshots[0].snapshot_hash,
+        reports[1].snapshots[0].snapshot_hash
+    );
+    assert!(
+        reports[2]
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.payload.is_none())
+    );
+    assert_eq!(
+        reports[2].snapshots[0].snapshot_hash,
+        reports[1].snapshots[0].snapshot_hash
+    );
     assert!(reports.iter().all(|report| report.metrics.is_empty()));
+}
+
+#[test]
+fn probe_run_loop_preserves_metric_batch_sequence_range_when_capability_changes() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 1",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![report_response(1, false), report_response(4, false)],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+    let mut host_profile_provider = RecordingHostProfileProvider {
+        host_profiles: vec![
+            host_profile_with_disk_capability(true),
+            host_profile_with_disk_capability(false),
+        ],
+    };
+
+    run_probe_with_loop_control_and_host_profile_provider(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+        &mut host_profile_provider,
+    )
+    .expect("run loop sends full Host Profile with the metric batch");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    let report = &reports[1];
+
+    assert_eq!(report.sequence_start, 2);
+    assert_eq!(report.sequence_end, 4);
+    assert_eq!(
+        report
+            .metrics
+            .iter()
+            .map(|sample| sample.sequence)
+            .collect::<Vec<_>>(),
+        vec![2, 3, 4],
+    );
+    assert_eq!(
+        full_host_profile_payload(report)
+            .collector_capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.official.as_ref())
+            .and_then(|official| official.disk.as_ref())
+            .map(|disk| disk.available),
+        Some(false),
+    );
 }
 
 #[test]
@@ -638,11 +741,26 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
             .collect::<Vec<_>>(),
         vec![(1, 1), (2, 4), (5, 7)],
     );
-    assert!(reports[0].inventory.is_some());
+    assert!(
+        reports[0]
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.payload.is_some())
+    );
     assert_eq!(reports[1].boot_id, boot_id);
     assert_eq!(reports[2].boot_id, boot_id);
-    assert!(reports[1].inventory.is_none());
-    assert!(reports[2].inventory.is_none());
+    assert!(
+        reports[1]
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.payload.is_none())
+    );
+    assert!(
+        reports[2]
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.payload.is_none())
+    );
     assert!(reports[0].metrics.is_empty());
     assert_eq!(reports[1].metrics.len(), 3);
     assert_eq!(reports[1].metrics[0].sequence, 2);
@@ -685,8 +803,8 @@ fn probe_run_loop_omits_disabled_individual_metric_fields() {
     );
     let mut transport = RecordingProbeTransport {
         responses: vec![
-            report_response_with_version(1, false, "memory-only-v1"),
-            report_response_with_version(2, false, "memory-only-v1"),
+            report_response_with_version(1, "memory-only-v1"),
+            report_response_with_version(2, "memory-only-v1"),
         ],
         ..RecordingProbeTransport::default()
     };
@@ -836,8 +954,8 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
     );
     let mut transport = RecordingProbeTransport {
         responses: vec![
-            report_response_with_version(1, false, "disabled-v1"),
-            report_response_with_version(2, false, "disabled-v1"),
+            report_response_with_version(1, "disabled-v1"),
+            report_response_with_version(2, "disabled-v1"),
         ],
         ..RecordingProbeTransport::default()
     };
@@ -870,7 +988,12 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
         vec![(1, 1), (2, 2)],
     );
     assert!(reports.iter().all(|report| report.metrics.is_empty()));
-    assert!(reports[0].inventory.is_some());
+    assert!(
+        reports[0]
+            .snapshots
+            .iter()
+            .any(|snapshot| snapshot.payload.is_some())
+    );
     let startup_host_profile = reports[0]
         .snapshots
         .iter()
@@ -908,7 +1031,6 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-2".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
@@ -923,7 +1045,6 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             ProbeReportResponse {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-2".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
@@ -998,7 +1119,6 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-bad".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
@@ -1013,7 +1133,6 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             ProbeReportResponse {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-bad".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
@@ -1080,7 +1199,6 @@ fn probe_run_rejects_host_profile_in_fetched_probe_configuration() {
             ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-host-profile".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
@@ -1095,7 +1213,6 @@ fn probe_run_rejects_host_profile_in_fetched_probe_configuration() {
             ProbeReportResponse {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-host-profile".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
@@ -1160,7 +1277,6 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
             Ok(ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-2".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
@@ -1170,7 +1286,6 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
             Ok(ProbeReportResponse {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-2".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
@@ -1249,7 +1364,6 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
             ProbeReportResponse {
                 accepted_sequence_end: 1,
                 current_probe_configuration_version: "global-2".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_000,
@@ -1259,7 +1373,6 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
             ProbeReportResponse {
                 accepted_sequence_end: 2,
                 current_probe_configuration_version: "global-2".to_string(),
-                inventory_needed: false,
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
@@ -1420,15 +1533,18 @@ fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
     assert!(reports[2].operation_statuses.is_empty());
 }
 
-fn report_response(accepted_sequence_end: u64, inventory_needed: bool) -> Vec<u8> {
-    report_response_with_version(accepted_sequence_end, inventory_needed, "default-v1")
+fn report_response(accepted_sequence_end: u64, host_profile_needed: bool) -> Vec<u8> {
+    if host_profile_needed {
+        return report_response_requesting_host_profile_snapshot(accepted_sequence_end);
+    }
+
+    report_response_with_version(accepted_sequence_end, "default-v1")
 }
 
 fn report_response_requesting_host_profile_snapshot(accepted_sequence_end: u64) -> Vec<u8> {
     ProbeReportResponse {
         accepted_sequence_end,
         current_probe_configuration_version: "default-v1".to_string(),
-        inventory_needed: false,
         pending_operation: None,
         requested_snapshot_collector_ids: vec!["official.host-profile".to_string()],
         server_time_ms: 1_725_000_000_000,
@@ -1436,15 +1552,10 @@ fn report_response_requesting_host_profile_snapshot(accepted_sequence_end: u64) 
     .encode_to_vec()
 }
 
-fn report_response_with_version(
-    accepted_sequence_end: u64,
-    inventory_needed: bool,
-    version: &str,
-) -> Vec<u8> {
+fn report_response_with_version(accepted_sequence_end: u64, version: &str) -> Vec<u8> {
     ProbeReportResponse {
         accepted_sequence_end,
         current_probe_configuration_version: version.to_string(),
-        inventory_needed,
         pending_operation: None,
         requested_snapshot_collector_ids: Vec::new(),
         server_time_ms: 1_725_000_000_000,
@@ -1460,7 +1571,6 @@ fn report_response_with_operation(
     ProbeReportResponse {
         accepted_sequence_end: 1,
         current_probe_configuration_version: "default-v1".to_string(),
-        inventory_needed: false,
         pending_operation: Some(ProbeOperation {
             id: operation_id.to_string(),
             operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
@@ -1530,25 +1640,25 @@ impl ReportTransport for RecordingTransport {
 
 impl ProbeTransport for RecordingTransport {}
 
-struct RecordingInventoryProvider {
-    inventories: Vec<Inventory>,
+struct RecordingHostProfileProvider {
+    host_profiles: Vec<HostProfileSnapshot>,
 }
 
-impl InventoryProvider for RecordingInventoryProvider {
-    fn collect_inventory(&mut self) -> Inventory {
-        if self.inventories.len() > 1 {
-            return self.inventories.remove(0);
+impl HostProfileProvider for RecordingHostProfileProvider {
+    fn collect_host_profile(&mut self) -> HostProfileSnapshot {
+        if self.host_profiles.len() > 1 {
+            return self.host_profiles.remove(0);
         }
 
-        self.inventories
+        self.host_profiles
             .first()
             .cloned()
-            .expect("Inventory provider has a snapshot")
+            .expect("HostProfileSnapshot provider has a snapshot")
     }
 }
 
-fn inventory_with_disk_capability(available: bool) -> Inventory {
-    Inventory {
+fn host_profile_with_disk_capability(available: bool) -> HostProfileSnapshot {
+    HostProfileSnapshot {
         architecture: "x86_64".to_string(),
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
@@ -1567,7 +1677,7 @@ fn inventory_with_disk_capability(available: bool) -> Inventory {
         memory_total_bytes: 8_589_934_592,
         os: "linux".to_string(),
         probe_version: "test".to_string(),
-        ..Inventory::default()
+        ..HostProfileSnapshot::default()
     }
 }
 

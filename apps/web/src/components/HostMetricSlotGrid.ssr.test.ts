@@ -69,7 +69,6 @@ const host: HostDetail = {
     threadCount: 4255,
   },
   id: 1,
-  inventory: null,
   lastReportAtMs: 1_725_000_000_000,
   latestMetrics: null,
   memory: "8 GB",
@@ -215,7 +214,6 @@ describe("Host metric slot grid", () => {
           cpuCount: 4,
           memoryTotalBytes: 200 * 1024 * 1024,
         },
-        inventory: null,
       },
       {
         chartData: {

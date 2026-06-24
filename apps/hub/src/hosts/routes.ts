@@ -140,7 +140,6 @@ export function createHostRoutes(services: HostRouteServices) {
           observedIp: host.observedIp,
         },
         hostProfile,
-        inventory: parseInventory(host.inventoryJson),
         probeConfiguration: services.probeConfigurations?.getEffectiveForHost(
           hostId,
         ) ?? {
@@ -757,25 +756,6 @@ function requiredOperationId(operation: ProbeUpgradeRequest) {
   }
 
   return operation.id;
-}
-
-function parseInventory(inventoryJson: string | null): Record<
-  string,
-  unknown
-> | null {
-  if (!inventoryJson) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(inventoryJson) as unknown;
-
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 function parseHostProfile(

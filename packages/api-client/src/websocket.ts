@@ -116,7 +116,7 @@ const collectorCapabilitiesSchema = v.nullable(
         cpu: v.optional(collectorAvailabilitySchema),
         disk: v.optional(collectorAvailabilitySchema),
         diskHealth: v.optional(collectorAvailabilitySchema),
-        inventory: v.optional(collectorAvailabilitySchema),
+        hostProfile: v.optional(collectorAvailabilitySchema),
         load: v.optional(collectorAvailabilitySchema),
         memory: v.optional(collectorAvailabilitySchema),
         network: v.optional(collectorAvailabilitySchema),

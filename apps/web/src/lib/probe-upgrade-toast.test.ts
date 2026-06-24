@@ -168,7 +168,6 @@ function hostDetail(overrides: Partial<HostDetail>) {
     },
     hostProfile: null,
     id: 1,
-    inventory: null,
     lastReportAtMs: null,
     latestMetrics: null,
     memory: "n/a",

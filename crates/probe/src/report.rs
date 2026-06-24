@@ -1,34 +1,18 @@
 use crate::{
     collectors::HOST_PROFILE_COLLECTOR_ID,
-    inventory::{host_profile_from_inventory, host_profile_hash, inventory_hash},
+    host_profile::host_profile_hash,
     protocol::enoki::v1::{
-        HostProfileSnapshot, Inventory, MetricSample, ProbeReportRequest, Snapshot, snapshot,
+        HostProfileSnapshot, MetricSample, ProbeReportRequest, Snapshot, snapshot,
     },
 };
 
 pub trait HostProfileSnapshotSource {
     fn host_profile_snapshot(&self) -> HostProfileSnapshot;
-
-    fn legacy_inventory_hash(&self) -> String;
-}
-
-impl HostProfileSnapshotSource for Inventory {
-    fn host_profile_snapshot(&self) -> HostProfileSnapshot {
-        host_profile_from_inventory(self.clone())
-    }
-
-    fn legacy_inventory_hash(&self) -> String {
-        inventory_hash(self)
-    }
 }
 
 impl HostProfileSnapshotSource for HostProfileSnapshot {
     fn host_profile_snapshot(&self) -> HostProfileSnapshot {
         self.clone()
-    }
-
-    fn legacy_inventory_hash(&self) -> String {
-        host_profile_hash(self)
     }
 }
 
@@ -37,16 +21,11 @@ pub fn startup_report(
     boot_id: &str,
     sequence: u64,
     probe_configuration_version: &str,
-    inventory: Inventory,
+    host_profile: HostProfileSnapshot,
     metrics: Vec<MetricSample>,
 ) -> ProbeReportRequest {
-    let inventory_hash = inventory_hash(&inventory);
-    let host_profile = host_profile_from_inventory(inventory.clone());
-
     ProbeReportRequest {
         boot_id: boot_id.to_string(),
-        inventory: Some(inventory),
-        inventory_hash,
         metrics,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
@@ -59,29 +38,25 @@ pub fn startup_report(
     }
 }
 
-pub fn full_inventory_report(
+pub fn full_host_profile_report(
     probe_id: &str,
     boot_id: &str,
-    sequence: u64,
+    sequence_start: u64,
+    sequence_end: u64,
     probe_configuration_version: &str,
-    inventory: Inventory,
+    host_profile: HostProfileSnapshot,
     metrics: Vec<MetricSample>,
 ) -> ProbeReportRequest {
-    let inventory_hash = inventory_hash(&inventory);
-    let host_profile = host_profile_from_inventory(inventory.clone());
-
     ProbeReportRequest {
         boot_id: boot_id.to_string(),
-        inventory: Some(inventory),
-        inventory_hash,
         metrics,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
         probe_configuration_error: None,
         probe_configuration_version: probe_configuration_version.to_string(),
         probe_id: probe_id.to_string(),
-        sequence_end: sequence,
-        sequence_start: sequence,
+        sequence_end,
+        sequence_start,
         snapshots: vec![full_host_profile_snapshot(host_profile)],
     }
 }
@@ -99,8 +74,6 @@ pub fn regular_report(
 
     ProbeReportRequest {
         boot_id: boot_id.to_string(),
-        inventory: None,
-        inventory_hash: host_profile_source.legacy_inventory_hash(),
         metrics,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),

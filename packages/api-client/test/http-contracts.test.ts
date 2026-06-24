@@ -26,7 +26,7 @@ describe("HTTP API contracts", () => {
           cpu: {
             available: true,
           },
-          inventory: {
+          hostProfile: {
             available: true,
           },
         },
@@ -69,7 +69,6 @@ describe("HTTP API contracts", () => {
         os: "Linux",
         probeVersion: "0.1.0",
       },
-      inventory: null,
       probeConfiguration: {
         configuration: {
           enabledCollectorIds: ["official.cpu"],

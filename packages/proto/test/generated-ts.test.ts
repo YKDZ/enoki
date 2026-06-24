@@ -9,51 +9,57 @@ describe("generated Probe protocol TypeScript", () => {
     const encoded = RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken: "enrollment-token",
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-          filesystems: [
-            {
-              availableBytes: 60000,
-              filesystemType: "ext4",
-              mountPoint: "/",
-              totalBytes: 100000,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+              filesystems: [
+                {
+                  availableBytes: 60000,
+                  filesystemType: "ext4",
+                  mountPoint: "/",
+                  totalBytes: 100000,
+                },
+              ],
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2147483648,
+              networkInterfaces: [
+                {
+                  addresses: ["10.0.0.10"],
+                  name: "eth0",
+                },
+              ],
+              os: "linux",
+              probeVersion: "0.1.0",
             },
-          ],
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 2147483648,
-          networkInterfaces: [
-            {
-              addresses: ["10.0.0.10"],
-              name: "eth0",
-            },
-          ],
-          os: "linux",
-          probeVersion: "0.1.0",
-        },
+          },
+        ],
       }),
     ).finish();
 
     const decoded = RegistrationRequest.decode(encoded);
+    const hostProfile = decoded.snapshots[0]?.hostProfile;
 
     expect(decoded.enrollmentToken).toBe("enrollment-token");
-    expect(decoded.inventory?.hostname).toBe("managed-host-01");
-    expect(decoded.inventory?.cpuModel).toBe(
+    expect(hostProfile?.hostname).toBe("managed-host-01");
+    expect(hostProfile?.cpuModel).toBe(
       "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
     );
-    expect(decoded.inventory?.probeVersion).toBe("0.1.0");
-    expect(decoded.inventory?.filesystems?.[0]?.mountPoint).toBe("/");
+    expect(hostProfile?.probeVersion).toBe("0.1.0");
+    expect(hostProfile?.filesystems?.[0]?.mountPoint).toBe("/");
   });
 
-  it("encodes Collector Capability as an Inventory fact", () => {
-    const Inventory = root.enoki.v1.Inventory;
+  it("encodes Collector Capability as a Host Profile fact", () => {
+    const HostProfileSnapshot = root.enoki.v1.HostProfileSnapshot;
     const MetricSample = root.enoki.v1.MetricSample;
 
-    const decoded = Inventory.decode(
-      Inventory.encode(
-        Inventory.create({
+    const decoded = HostProfileSnapshot.decode(
+      HostProfileSnapshot.encode(
+        HostProfileSnapshot.create({
           collectorCapabilities: {
             official: {
               cpu: { available: true },
@@ -115,7 +121,6 @@ describe("generated Probe protocol TypeScript", () => {
     const encoded = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-01",
-        inventoryHash: "inventory-hash",
         metrics: [
           {
             cpuPercent: 42.5,
@@ -152,7 +157,7 @@ describe("generated Probe protocol TypeScript", () => {
       ReportResponse.create({
         acceptedSequenceEnd: 8,
         currentProbeConfigurationVersion: "default-v1",
-        inventoryNeeded: false,
+        requestedSnapshotCollectorIds: [],
         serverTimeMs: 1710000005000,
       }),
     ).finish();
@@ -162,7 +167,7 @@ describe("generated Probe protocol TypeScript", () => {
     expect(decoded.acceptedSequenceEnd.toString()).toBe("8");
     expect(decoded.currentProbeConfigurationVersion).toBe("default-v1");
     expect(decoded.serverTimeMs.toString()).toBe("1710000005000");
-    expect(decoded.inventoryNeeded).toBe(false);
+    expect(decoded.requestedSnapshotCollectorIds).toEqual([]);
   });
 
   it("encodes and decodes Probe Operation delivery and status reports", () => {

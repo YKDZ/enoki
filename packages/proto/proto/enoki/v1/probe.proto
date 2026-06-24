@@ -3,13 +3,12 @@ syntax = "proto3";
 package enoki.v1;
 
 import "enoki/v1/configuration.proto";
-import "enoki/v1/collectors/inventory.proto";
+import "enoki/v1/collectors/host_profile.proto";
 import "enoki/v1/metrics.proto";
 import "enoki/v1/operations.proto";
 
 message ProbeRegistrationRequest {
   string enrollment_token = 1;
-  Inventory inventory = 2;
   string probe_public_key_pem = 3;
   repeated Snapshot snapshots = 4;
 }
@@ -26,10 +25,8 @@ message ProbeReportRequest {
   string boot_id = 2;
   uint64 sequence_start = 3;
   uint64 sequence_end = 4;
-  string inventory_hash = 5;
   string probe_configuration_version = 6;
   repeated MetricSample metrics = 7;
-  Inventory inventory = 8;
   ProbeConfigurationError probe_configuration_error = 9;
   repeated ProbeOperationAcknowledgement operation_acknowledgements = 10;
   repeated ProbeOperationStatus operation_statuses = 11;
@@ -40,7 +37,6 @@ message ProbeReportResponse {
   uint64 accepted_sequence_end = 1;
   int64 server_time_ms = 2;
   string current_probe_configuration_version = 3;
-  bool inventory_needed = 4;
   ProbeOperation pending_operation = 5;
   repeated string requested_snapshot_collector_ids = 6;
 }

@@ -16,7 +16,7 @@ message OfficialCollectorCapabilities {
   CollectorAvailability temperature = 7;
   CollectorAvailability battery = 8;
   CollectorAvailability disk_health = 9;
-  CollectorAvailability inventory = 10;
+  CollectorAvailability host_profile = 10;
 }
 
 message CollectorCapabilities {

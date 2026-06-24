@@ -1,7 +1,7 @@
 use std::fs;
 
 use enoki_probe::{
-    inventory::host_profile_hash,
+    host_profile::host_profile_hash,
     metrics::CollectorId,
     protocol::enoki::v1::{
         ProbeConfigurationResponse, ProbeRegistrationRequest, ProbeRegistrationResponse, snapshot,
@@ -57,7 +57,6 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
             .probe_public_key_pem
             .starts_with("-----BEGIN PUBLIC KEY-----")
     );
-    assert_eq!(request.inventory.expect("inventory").probe_version, "dev");
     let host_profile_snapshot = request
         .snapshots
         .iter()

@@ -63,22 +63,27 @@ async function registerProbe(
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 2_147_483_648,
-          networkInterfaces: [
-            {
-              addresses: ["10.0.0.10"],
-              name: "eth0",
-            },
-          ],
-          os: "linux",
-          probeVersion: "0.1.0",
-        },
         probePublicKeyPem: identity.publicKeyPem,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 2_147_483_648,
+              networkInterfaces: [
+                {
+                  addresses: ["10.0.0.10"],
+                  name: "eth0",
+                },
+              ],
+              os: "linux",
+              probeVersion: "0.1.0",
+            },
+          },
+        ],
       }),
     ).finish(),
     headers: {
@@ -94,7 +99,7 @@ async function registerProbe(
   return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
-async function reportInventory(
+async function reportHostProfile(
   app: ReturnType<typeof createHubApp>,
   registration: {
     privateKeyPem: string;
@@ -111,26 +116,31 @@ async function reportInventory(
   const body = ReportRequest.encode(
     ReportRequest.create({
       bootId: input.bootId,
-      inventory: {
-        architecture: "x86_64",
-        cpuCount: 2,
-        hostname: input.hostname,
-        kernel: "6.8.0",
-        memoryTotalBytes: 2_147_483_648,
-        networkInterfaces: [
-          {
-            addresses: [input.address],
-            name: "eth0",
-          },
-        ],
-        os: "linux",
-        probeVersion: "0.1.0",
-      },
       metrics: [],
       probeConfigurationVersion: "default-v1",
       probeId: registration.probeId,
       sequenceEnd: input.sequence,
       sequenceStart: input.sequence,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile: {
+            architecture: "x86_64",
+            cpuCount: 2,
+            hostname: input.hostname,
+            kernel: "6.8.0",
+            memoryTotalBytes: 2_147_483_648,
+            networkInterfaces: [
+              {
+                addresses: [input.address],
+                name: "eth0",
+              },
+            ],
+            os: "linux",
+            probeVersion: "0.1.0",
+          },
+        },
+      ],
     }),
   ).finish();
   const response = await app.request(
@@ -335,7 +345,7 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
-  it("keeps an inventory-derived Connect Address when hash-only reports only have Observed IP", async () => {
+  it("keeps an Host Profile-derived Connect Address when hash-only reports only have Observed IP", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -408,7 +418,7 @@ describe("Host Metadata API", () => {
       id: hostId,
     });
 
-    await reportInventory(app, registration, {
+    await reportHostProfile(app, registration, {
       address: "10.0.0.20",
       bootId: "boot-connect-only-edit",
       hostname: "managed-host-02",
@@ -470,7 +480,7 @@ describe("Host Metadata API", () => {
       id: hostId,
     });
 
-    await reportInventory(app, registration, {
+    await reportHostProfile(app, registration, {
       address: "10.0.0.20",
       bootId: "boot-display-only-edit",
       hostname: "managed-host-02",
@@ -495,7 +505,7 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
-  it("syncs Display Name and Connect Address from Inventory until the Owner edits them", async () => {
+  it("syncs Display Name and Connect Address from Host Profile until the Owner edits them", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -511,7 +521,7 @@ describe("Host Metadata API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const hostId = await firstHostId(app, ownerSession);
 
-    await reportInventory(app, registration, {
+    await reportHostProfile(app, registration, {
       address: "10.0.0.20",
       bootId: "boot-sync-before-edit",
       hostname: "managed-host-02",
@@ -549,7 +559,7 @@ describe("Host Metadata API", () => {
     );
     expect(updateResponse.status).toBe(200);
 
-    await reportInventory(app, registration, {
+    await reportHostProfile(app, registration, {
       address: "10.0.0.30",
       bootId: "boot-sync-after-edit",
       hostname: "managed-host-03",

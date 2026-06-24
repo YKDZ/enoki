@@ -1,38 +1,42 @@
 use enoki_probe::protocol::enoki::v1::{
-    CollectorAvailability, CollectorCapabilities, DiskHealthMetric, Inventory, MetricSample,
-    OfficialCollectorCapabilities, ProbeConfigurationResponse, ProbeOperation,
+    CollectorAvailability, CollectorCapabilities, DiskHealthMetric, HostProfileSnapshot,
+    MetricSample, OfficialCollectorCapabilities, ProbeConfigurationResponse, ProbeOperation,
     ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationStatus,
     ProbeRegistrationRequest, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
-    probe_operation::Operation, probe_operation_status::Status,
+    Snapshot, probe_operation::Operation, probe_operation_status::Status, snapshot,
 };
 use prost::Message;
 
 #[test]
 fn generated_rust_protocol_encodes_probe_registration() {
+    let host_profile = HostProfileSnapshot {
+        architecture: "x86_64".to_string(),
+        cpu_base_frequency_mhz: 2_100,
+        cpu_cache_l3_bytes: 36 * 1024 * 1024,
+        cpu_count: 2,
+        cpu_model: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz".to_string(),
+        cpu_physical_count: 1,
+        cpu_socket_count: 1,
+        collector_capabilities: None,
+        filesystems: Vec::new(),
+        hostname: "managed-host-01".to_string(),
+        kernel: "6.8.0".to_string(),
+        memory_total_bytes: 2_147_483_648,
+        network_interfaces: Vec::new(),
+        os: "linux".to_string(),
+        process_count: 123,
+        probe_version: "0.1.0".to_string(),
+        thread_count: 456,
+    };
     let request = ProbeRegistrationRequest {
         enrollment_token: "enrollment-token".to_string(),
-        inventory: Some(Inventory {
-            architecture: "x86_64".to_string(),
-            cpu_base_frequency_mhz: 2_100,
-            cpu_cache_l3_bytes: 36 * 1024 * 1024,
-            cpu_count: 2,
-            cpu_model: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz".to_string(),
-            cpu_physical_count: 1,
-            cpu_socket_count: 1,
-            collector_capabilities: None,
-            filesystems: Vec::new(),
-            hostname: "managed-host-01".to_string(),
-            kernel: "6.8.0".to_string(),
-            memory_total_bytes: 2_147_483_648,
-            network_interfaces: Vec::new(),
-            os: "linux".to_string(),
-            process_count: 123,
-            probe_version: "0.1.0".to_string(),
-            thread_count: 456,
-        }),
         probe_public_key_pem: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----\n"
             .to_string(),
-        snapshots: Vec::new(),
+        snapshots: vec![Snapshot {
+            collector_id: "official.host-profile".to_string(),
+            snapshot_hash: "host-profile-hash".to_string(),
+            payload: Some(snapshot::Payload::HostProfile(host_profile)),
+        }],
     };
 
     let encoded = request.encode_to_vec();
@@ -41,19 +45,22 @@ fn generated_rust_protocol_encodes_probe_registration() {
 
     assert_eq!(decoded.enrollment_token, "enrollment-token");
     assert!(decoded.probe_public_key_pem.contains("BEGIN PUBLIC KEY"));
-    let inventory = decoded.inventory.expect("inventory");
-    assert_eq!(inventory.hostname, "managed-host-01");
+    let host_profile = match decoded.snapshots[0].payload.as_ref() {
+        Some(snapshot::Payload::HostProfile(host_profile)) => host_profile,
+        None => panic!("Host Profile payload is missing"),
+    };
+    assert_eq!(host_profile.hostname, "managed-host-01");
     assert_eq!(
-        inventory.cpu_model,
+        host_profile.cpu_model,
         "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz"
     );
-    assert_eq!(inventory.process_count, 123);
-    assert_eq!(inventory.thread_count, 456);
+    assert_eq!(host_profile.process_count, 123);
+    assert_eq!(host_profile.thread_count, 456);
 }
 
 #[test]
-fn generated_rust_protocol_encodes_collector_capabilities_as_inventory() {
-    let inventory = Inventory {
+fn generated_rust_protocol_encodes_collector_capabilities_as_host_profile() {
+    let host_profile = HostProfileSnapshot {
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
                 cpu: Some(CollectorAvailability { available: true }),
@@ -64,11 +71,11 @@ fn generated_rust_protocol_encodes_collector_capabilities_as_inventory() {
             }),
         }),
         hostname: "managed-host-01".to_string(),
-        ..Inventory::default()
+        ..HostProfileSnapshot::default()
     };
 
-    let decoded = Inventory::decode(inventory.encode_to_vec().as_slice())
-        .expect("generated Inventory should decode");
+    let decoded = HostProfileSnapshot::decode(host_profile.encode_to_vec().as_slice())
+        .expect("generated HostProfileSnapshot should decode");
 
     let official = decoded
         .collector_capabilities
@@ -82,8 +89,6 @@ fn generated_rust_protocol_encodes_collector_capabilities_as_inventory() {
 fn generated_rust_protocol_encodes_repeated_metric_samples() {
     let request = ProbeReportRequest {
         boot_id: "boot-01".to_string(),
-        inventory_hash: "inventory-hash".to_string(),
-        inventory: None,
         metrics: vec![
             MetricSample {
                 collected_at_ms: 1_710_000_000_000,
@@ -147,20 +152,20 @@ fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
         sequence_start: 7,
         ..ProbeReportRequest::default()
     };
-    let inventory = Inventory {
+    let host_profile = HostProfileSnapshot {
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
                 disk_health: Some(CollectorAvailability { available: true }),
                 ..OfficialCollectorCapabilities::default()
             }),
         }),
-        ..Inventory::default()
+        ..HostProfileSnapshot::default()
     };
 
     let decoded_request = ProbeReportRequest::decode(request.encode_to_vec().as_slice())
         .expect("generated Probe report should decode Disk Health");
-    let decoded_inventory =
-        Inventory::decode(inventory.encode_to_vec().as_slice()).expect("inventory decodes");
+    let decoded_host_profile = HostProfileSnapshot::decode(host_profile.encode_to_vec().as_slice())
+        .expect("host_profile decodes");
 
     assert_eq!(
         decoded_request.metrics[0].disk_health[0].device_name,
@@ -171,7 +176,7 @@ fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
         Some(12_345)
     );
     assert!(
-        decoded_inventory
+        decoded_host_profile
             .collector_capabilities
             .and_then(|capabilities| capabilities.official)
             .and_then(|official| official.disk_health)
@@ -185,7 +190,6 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
     let response = ProbeReportResponse {
         accepted_sequence_end: 8,
         current_probe_configuration_version: "default-v1".to_string(),
-        inventory_needed: false,
         pending_operation: Some(ProbeOperation {
             id: "operation-01".to_string(),
             operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
@@ -215,8 +219,6 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
 
     let request = ProbeReportRequest {
         boot_id: "boot-01".to_string(),
-        inventory: None,
-        inventory_hash: "inventory-hash".to_string(),
         metrics: Vec::new(),
         operation_acknowledgements: vec![ProbeOperationAcknowledgement {
             operation_id: "operation-01".to_string(),

@@ -50,49 +50,12 @@ pub struct OfficialCollectorCapabilities {
     #[prost(message, optional, tag = "9")]
     pub disk_health: ::core::option::Option<CollectorAvailability>,
     #[prost(message, optional, tag = "10")]
-    pub inventory: ::core::option::Option<CollectorAvailability>,
+    pub host_profile: ::core::option::Option<CollectorAvailability>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CollectorCapabilities {
     #[prost(message, optional, tag = "1")]
     pub official: ::core::option::Option<OfficialCollectorCapabilities>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Inventory {
-    #[prost(string, tag = "1")]
-    pub hostname: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub os: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub kernel: ::prost::alloc::string::String,
-    #[prost(string, tag = "4")]
-    pub architecture: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "5")]
-    pub cpu_count: u32,
-    #[prost(uint64, tag = "6")]
-    pub memory_total_bytes: u64,
-    #[prost(message, repeated, tag = "7")]
-    pub filesystems: ::prost::alloc::vec::Vec<FilesystemInventory>,
-    #[prost(message, repeated, tag = "8")]
-    pub network_interfaces: ::prost::alloc::vec::Vec<NetworkInterfaceInventory>,
-    #[prost(string, tag = "9")]
-    pub probe_version: ::prost::alloc::string::String,
-    #[prost(string, tag = "10")]
-    pub cpu_model: ::prost::alloc::string::String,
-    #[prost(uint32, tag = "11")]
-    pub process_count: u32,
-    #[prost(uint32, tag = "12")]
-    pub thread_count: u32,
-    #[prost(uint64, tag = "13")]
-    pub cpu_cache_l3_bytes: u64,
-    #[prost(uint32, tag = "14")]
-    pub cpu_base_frequency_mhz: u32,
-    #[prost(uint32, tag = "15")]
-    pub cpu_socket_count: u32,
-    #[prost(uint32, tag = "16")]
-    pub cpu_physical_count: u32,
-    #[prost(message, optional, tag = "17")]
-    pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HostProfileSnapshot {
@@ -109,9 +72,9 @@ pub struct HostProfileSnapshot {
     #[prost(uint64, tag = "6")]
     pub memory_total_bytes: u64,
     #[prost(message, repeated, tag = "7")]
-    pub filesystems: ::prost::alloc::vec::Vec<FilesystemInventory>,
+    pub filesystems: ::prost::alloc::vec::Vec<FilesystemProfile>,
     #[prost(message, repeated, tag = "8")]
-    pub network_interfaces: ::prost::alloc::vec::Vec<NetworkInterfaceInventory>,
+    pub network_interfaces: ::prost::alloc::vec::Vec<NetworkInterfaceProfile>,
     #[prost(string, tag = "9")]
     pub probe_version: ::prost::alloc::string::String,
     #[prost(string, tag = "10")]
@@ -149,7 +112,7 @@ pub mod snapshot {
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FilesystemInventory {
+pub struct FilesystemProfile {
     #[prost(string, tag = "1")]
     pub mount_point: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
@@ -160,7 +123,7 @@ pub struct FilesystemInventory {
     pub available_bytes: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct NetworkInterfaceInventory {
+pub struct NetworkInterfaceProfile {
     #[prost(string, tag = "1")]
     pub name: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "2")]
@@ -371,8 +334,6 @@ pub struct ProbeOperationFailed {
 pub struct ProbeRegistrationRequest {
     #[prost(string, tag = "1")]
     pub enrollment_token: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "2")]
-    pub inventory: ::core::option::Option<Inventory>,
     #[prost(string, tag = "3")]
     pub probe_public_key_pem: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "4")]
@@ -399,14 +360,10 @@ pub struct ProbeReportRequest {
     pub sequence_start: u64,
     #[prost(uint64, tag = "4")]
     pub sequence_end: u64,
-    #[prost(string, tag = "5")]
-    pub inventory_hash: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub probe_configuration_version: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "7")]
     pub metrics: ::prost::alloc::vec::Vec<MetricSample>,
-    #[prost(message, optional, tag = "8")]
-    pub inventory: ::core::option::Option<Inventory>,
     #[prost(message, optional, tag = "9")]
     pub probe_configuration_error: ::core::option::Option<ProbeConfigurationError>,
     #[prost(message, repeated, tag = "10")]
@@ -426,8 +383,6 @@ pub struct ProbeReportResponse {
     pub server_time_ms: i64,
     #[prost(string, tag = "3")]
     pub current_probe_configuration_version: ::prost::alloc::string::String,
-    #[prost(bool, tag = "4")]
-    pub inventory_needed: bool,
     #[prost(message, optional, tag = "5")]
     pub pending_operation: ::core::option::Option<ProbeOperation>,
     #[prost(string, repeated, tag = "6")]

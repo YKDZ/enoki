@@ -60,7 +60,6 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
       threadCount: 4255,
     },
     id: kind === "dense" ? 9_001 : 9_002,
-    inventory: null,
     lastReportAtMs: nowMs,
     latestMetrics: null,
     memory: "61.9 GiB",

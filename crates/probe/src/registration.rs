@@ -14,7 +14,7 @@ use rsa::{
 
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
-    inventory::{collect_local_inventory, host_profile_from_inventory, host_profile_hash},
+    host_profile::{collect_local_host_profile, host_profile_hash},
     metrics::MetricsCollectionConfig,
     protocol::enoki::v1::{
         ProbeRegistrationRequest, ProbeRegistrationResponse, Snapshot, snapshot,
@@ -104,11 +104,9 @@ pub fn register_probe(
     transport: &mut impl RegistrationTransport,
 ) -> Result<ProbeRegistrationOutcome, RegistrationError> {
     let signing_key = generate_probe_signing_key()?;
-    let inventory = collect_local_inventory();
-    let host_profile = host_profile_from_inventory(inventory.clone());
+    let host_profile = collect_local_host_profile();
     let request = ProbeRegistrationRequest {
         enrollment_token: input.enrollment_token,
-        inventory: Some(inventory.clone()),
         probe_public_key_pem: signing_key.public_key_pem.clone(),
         snapshots: vec![Snapshot {
             collector_id: HOST_PROFILE_COLLECTOR_ID.to_string(),

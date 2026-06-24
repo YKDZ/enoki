@@ -69,40 +69,45 @@ async function registerProbe(
     body: RegistrationRequest.encode(
       RegistrationRequest.create({
         enrollmentToken,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-          collectorCapabilities: {
-            official: {
-              cpu: { available: true },
-              disk: { available: true },
-              load: { available: true },
-              memory: { available: true },
-              network: { available: true },
-              uptime: { available: true },
+        probePublicKeyPem: identity.publicKeyPem,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: {
+              architecture: "x86_64",
+              cpuCount: 2,
+              cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+              collectorCapabilities: {
+                official: {
+                  cpu: { available: true },
+                  disk: { available: true },
+                  load: { available: true },
+                  memory: { available: true },
+                  network: { available: true },
+                  uptime: { available: true },
+                },
+              },
+              filesystems: [
+                {
+                  filesystemType: "ext4",
+                  mountPoint: "/",
+                  totalBytes: 20_000,
+                },
+              ],
+              hostname: "managed-host-01",
+              kernel: "6.8.0",
+              memoryTotalBytes: 8_589_934_592,
+              networkInterfaces: [
+                {
+                  addresses: ["10.0.0.10"],
+                  name: "eth0",
+                },
+              ],
+              os: "linux",
+              ...(input.probeVersion === null ? {} : { probeVersion }),
             },
           },
-          filesystems: [
-            {
-              filesystemType: "ext4",
-              mountPoint: "/",
-              totalBytes: 20_000,
-            },
-          ],
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: 8_589_934_592,
-          networkInterfaces: [
-            {
-              addresses: ["10.0.0.10"],
-              name: "eth0",
-            },
-          ],
-          os: "linux",
-          ...(input.probeVersion === null ? {} : { probeVersion }),
-        },
-        probePublicKeyPem: identity.publicKeyPem,
+        ],
       }),
     ).finish(),
     headers: {
@@ -118,7 +123,7 @@ async function registerProbe(
   return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
-async function reportInventory(
+async function reportHostProfile(
   app: ReturnType<typeof createHubApp>,
   registration: RegisteredTestProbe,
   input: { diskAvailable: boolean | null; sequence: number },
@@ -127,50 +132,55 @@ async function reportInventory(
   const body = ReportRequest.encode(
     ReportRequest.create({
       bootId: "boot-capability",
-      inventory: {
-        architecture: "x86_64",
-        ...(input.diskAvailable === null
-          ? {}
-          : {
-              collectorCapabilities: {
-                official: {
-                  cpu: { available: true },
-                  disk: { available: input.diskAvailable },
-                  load: { available: true },
-                  memory: { available: true },
-                  network: { available: true },
-                  uptime: { available: true },
-                },
-              },
-            }),
-        cpuCount: 2,
-        cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-        filesystems: input.diskAvailable
-          ? [
-              {
-                filesystemType: "ext4",
-                mountPoint: "/",
-                totalBytes: 20_000,
-              },
-            ]
-          : [],
-        hostname: "managed-host-01",
-        kernel: "6.8.0",
-        memoryTotalBytes: 8_589_934_592,
-        networkInterfaces: [
-          {
-            addresses: ["10.0.0.10"],
-            name: "eth0",
-          },
-        ],
-        os: "linux",
-        probeVersion: "0.1.0",
-      },
       metrics: [],
       probeConfigurationVersion: "default-v1",
       probeId: registration.probeId,
       sequenceEnd: input.sequence,
       sequenceStart: input.sequence,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile: {
+            architecture: "x86_64",
+            ...(input.diskAvailable === null
+              ? {}
+              : {
+                  collectorCapabilities: {
+                    official: {
+                      cpu: { available: true },
+                      disk: { available: input.diskAvailable },
+                      load: { available: true },
+                      memory: { available: true },
+                      network: { available: true },
+                      uptime: { available: true },
+                    },
+                  },
+                }),
+            cpuCount: 2,
+            cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+            filesystems: input.diskAvailable
+              ? [
+                  {
+                    filesystemType: "ext4",
+                    mountPoint: "/",
+                    totalBytes: 20_000,
+                  },
+                ]
+              : [],
+            hostname: "managed-host-01",
+            kernel: "6.8.0",
+            memoryTotalBytes: 8_589_934_592,
+            networkInterfaces: [
+              {
+                addresses: ["10.0.0.10"],
+                name: "eth0",
+              },
+            ],
+            os: "linux",
+            probeVersion: "0.1.0",
+          },
+        },
+      ],
     }),
   ).finish();
   const response = await app.request(
@@ -438,12 +448,12 @@ describe("Host detail API", () => {
         },
         cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
         id: hostId,
-        inventory: expect.objectContaining({
+        hostProfile: expect.objectContaining({
           architecture: "x86_64",
           cpuCount: 2,
           cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
           hostname: "managed-host-01",
-          memoryTotalBytes: "8589934592",
+          memoryTotalBytes: 8_589_934_592,
           networkInterfaces: [
             {
               addresses: ["10.0.0.10"],
@@ -745,7 +755,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("persists Collector Capability with Inventory and exposes it on Host summary and detail", async () => {
+  it("persists Collector Capability with Host Profile and exposes it on Host summary and detail", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -778,7 +788,7 @@ describe("Host detail API", () => {
       ],
     });
 
-    await reportInventory(app, registration, {
+    await reportHostProfile(app, registration, {
       diskAvailable: false,
       sequence: 1,
     });
@@ -811,7 +821,7 @@ describe("Host detail API", () => {
             disk: { available: false },
           }),
         }),
-        inventory: expect.objectContaining({
+        hostProfile: expect.objectContaining({
           collectorCapabilities: expect.objectContaining({
             official: expect.objectContaining({
               disk: { available: false },
@@ -821,7 +831,7 @@ describe("Host detail API", () => {
       }),
     });
 
-    const persistedInventory = JSON.parse(
+    const persistedHostProfile = JSON.parse(
       database.sqlite
         .prepare("select inventory_json from managed_hosts where id = ?")
         .get(hostId)!.inventory_json as string,
@@ -830,10 +840,10 @@ describe("Host detail API", () => {
         official: Record<string, unknown>;
       };
     };
-    persistedInventory.collectorCapabilities.official.diskHealth = {};
+    persistedHostProfile.collectorCapabilities.official.diskHealth = {};
     database.sqlite
       .prepare("update managed_hosts set inventory_json = ? where id = ?")
-      .run(JSON.stringify(persistedInventory), hostId);
+      .run(JSON.stringify(persistedHostProfile), hostId);
 
     const protoJsonFalseCapabilityResponse = await app.request(
       `/api/web/hosts/${hostId}`,
@@ -846,13 +856,13 @@ describe("Host detail API", () => {
       host: expect.objectContaining({
         collectorCapabilities: expect.objectContaining({
           official: expect.objectContaining({
-            diskHealth: { available: false },
+            disk: { available: false },
           }),
         }),
       }),
     });
 
-    await reportInventory(app, registration, {
+    await reportHostProfile(app, registration, {
       diskAvailable: null,
       sequence: 2,
     });
@@ -880,9 +890,6 @@ describe("Host detail API", () => {
     await expect(disappearedDetailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         collectorCapabilities: null,
-        inventory: expect.not.objectContaining({
-          collectorCapabilities: expect.anything(),
-        }),
       }),
     });
 
@@ -896,7 +903,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("uses stored Host Profile Collector Capability for Host summaries before legacy Inventory JSON", async () => {
+  it("uses stored Host Profile Collector Capability for Host summaries before legacy Host Profile JSON", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1428,7 +1435,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("does not mark an active Probe Upgrade Request succeeded from legacy Inventory detail fallback", async () => {
+  it("keeps an active Probe Upgrade Request running when only the legacy Host row changes", async () => {
     const database = await createTemporaryDatabase();
     const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
     tempRoots.push(assetRoot);
@@ -1513,8 +1520,9 @@ describe("Host detail API", () => {
     await expect(detailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         hostProfile: expect.objectContaining({
-          probeVersion: "v0.2.0",
+          probeVersion: "0.1.0",
         }),
+        probeVersion: "v0.2.0",
         probeUpgradeStatus: expect.objectContaining({
           id: created.probeUpgradeRequest.id,
           state: "running",
