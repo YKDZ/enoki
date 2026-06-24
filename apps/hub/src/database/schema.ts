@@ -96,6 +96,36 @@ export const hosts = sqliteTable(
 export type HostRow = typeof hosts.$inferSelect;
 export type NewHostRow = typeof hosts.$inferInsert;
 
+export const officialHostProfiles = sqliteTable(
+  "official_host_profiles",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    hostId: integer("managed_host_id").notNull(),
+    snapshotHash: text().notNull(),
+    payloadJson: text().notNull(),
+    hostname: text().notNull(),
+    os: text().notNull(),
+    kernel: text().notNull(),
+    architecture: text().notNull(),
+    cpuCount: integer().notNull(),
+    cpuModel: text(),
+    memoryTotalBytes: integer().notNull(),
+    probeVersion: text().notNull(),
+    collectorCapabilitiesJson: text(),
+    filesystemsJson: text().notNull(),
+    networkInterfacesJson: text().notNull(),
+    updatedAtMs: integer().notNull(),
+  },
+  (table) => [
+    uniqueIndex("official_host_profiles_host_idx").on(table.hostId),
+    index("official_host_profiles_snapshot_hash_idx").on(table.snapshotHash),
+  ],
+);
+
+export type OfficialHostProfileRow = typeof officialHostProfiles.$inferSelect;
+export type NewOfficialHostProfileRow =
+  typeof officialHostProfiles.$inferInsert;
+
 export const probeRequestNonces = sqliteTable(
   "probe_request_nonces",
   {

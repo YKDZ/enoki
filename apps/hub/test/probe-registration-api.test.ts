@@ -505,10 +505,20 @@ describe("Probe registration API", () => {
     });
 
     expect(detailResponse.status).toBe(200);
-    const storedHost = database.sqlite
-      .prepare("select inventory_hash from managed_hosts where id = ?")
-      .get(hostId) as { inventory_hash: string };
-    expect(storedHost.inventory_hash).toBe(hostProfileHash);
+    const storedHostProfile = database.sqlite
+      .prepare(
+        "select snapshot_hash, hostname, probe_version from official_host_profiles where managed_host_id = ?",
+      )
+      .get(hostId) as {
+      hostname: string;
+      probe_version: string;
+      snapshot_hash: string;
+    };
+    expect(storedHostProfile).toEqual({
+      hostname: "snapshot-host-01",
+      probe_version: "0.2.0",
+      snapshot_hash: hostProfileHash,
+    });
     await expect(detailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         displayName: "snapshot-host-01",

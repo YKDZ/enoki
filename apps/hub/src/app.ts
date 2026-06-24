@@ -140,6 +140,7 @@ export function createHubApp(options: HubAppOptions = {}) {
           probeOperationTimeouts: options.probeOperations,
           probeConfigurations: options.database.probeConfigurations,
           probeOperations: options.database.probeOperations,
+          snapshotCollectors: options.database.snapshotCollectors,
         }),
       );
       app.route(
@@ -167,6 +168,9 @@ export function createHubApp(options: HubAppOptions = {}) {
         hosts:
           options.database?.hosts
             .listSummaries({
+              hostProfileForHost: (hostId) =>
+                options.database?.snapshotCollectors.hostProfile.read(hostId) ??
+                null,
               latestMetricForHost: (hostId) =>
                 options.database?.metrics.findLatestSample(hostId) ?? null,
               nowMs,
@@ -278,6 +282,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,
       probeOperations: options.database.probeOperations,
+      snapshotCollectors: options.database.snapshotCollectors,
       clockSkewThresholdMs: options.clockSkewThresholdMs,
       hostStatus: options.hostStatus,
       liveUpdates: options.liveUpdates ?? null,

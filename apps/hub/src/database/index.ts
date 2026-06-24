@@ -11,6 +11,10 @@ import {
   createEnrollmentRepository,
   type EnrollmentRepository,
 } from "./enrollments.js";
+import {
+  createSnapshotCollectorStorageRegistry,
+  type SnapshotCollectorStorageRegistry,
+} from "./host-profiles.js";
 import { createHostRepository, type HostRepository } from "./hosts.js";
 import { createMetricsRepository, type MetricsRepository } from "./metrics.js";
 import {
@@ -31,6 +35,7 @@ export type HubDatabase = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations: ProbeOperationRepository;
+  snapshotCollectors: SnapshotCollectorStorageRegistry;
   sqlite: DatabaseSync;
 };
 
@@ -72,6 +77,7 @@ export function initializeHubDatabase(
     metrics: createMetricsRepository(database),
     probeConfigurations: createProbeConfigurationRepository(database),
     probeOperations: createProbeOperationRepository(database),
+    snapshotCollectors: createSnapshotCollectorStorageRegistry(database),
     sqlite,
   };
 }

@@ -384,28 +384,28 @@ describe("Probe report API", () => {
 
     const storedHost = database.sqlite
       .prepare(
-        "select hostname, probe_version, cpu_count, cpu_model, memory_total_bytes, inventory_hash, inventory_json from managed_hosts",
+        "select h.hostname, h.probe_version, h.cpu_count, h.cpu_model, h.memory_total_bytes, hp.snapshot_hash, hp.payload_json from managed_hosts h join official_host_profiles hp on hp.managed_host_id = h.id",
       )
       .get() as {
       cpu_count: number;
       cpu_model: string;
       hostname: string;
-      inventory_hash: string;
-      inventory_json: string;
       memory_total_bytes: number;
+      payload_json: string;
       probe_version: string;
+      snapshot_hash: string;
     };
     expect(storedHost).toEqual(
       expect.objectContaining({
         cpu_count: 4,
         cpu_model: "AMD EPYC 7B13",
         hostname: "snapshot-renamed-host",
-        inventory_hash: changedHash,
         memory_total_bytes: 4_294_967_296,
         probe_version: "0.2.0",
+        snapshot_hash: changedHash,
       }),
     );
-    expect(JSON.parse(storedHost.inventory_json)).toEqual(
+    expect(JSON.parse(storedHost.payload_json)).toEqual(
       expect.objectContaining({
         cpuModel: "AMD EPYC 7B13",
         hostname: "snapshot-renamed-host",

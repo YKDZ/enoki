@@ -843,6 +843,78 @@ describe("Host detail API", () => {
     database.close();
   });
 
+  it("uses stored Host Profile Collector Capability for Host summaries before legacy Inventory JSON", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    database.snapshotCollectors.write({
+      collectorId: "official.host-profile",
+      hostId,
+      payload: {
+        architecture: "x86_64",
+        collectorCapabilities: {
+          official: {
+            disk: { available: true },
+          },
+        },
+        cpuCount: 2,
+        filesystems: [],
+        hostname: "managed-host-01",
+        kernel: "6.8.0",
+        memoryTotalBytes: 8_589_934_592,
+        networkInterfaces: [],
+        os: "linux",
+        probeVersion: "0.1.0",
+      },
+      snapshotHash: "host-profile-summary-hash",
+      updatedAtMs: 1_725_000_000_100,
+    });
+    database.sqlite
+      .prepare("update managed_hosts set inventory_json = ? where id = ?")
+      .run(
+        JSON.stringify({
+          collectorCapabilities: {
+            official: {
+              disk: { available: false },
+            },
+          },
+        }),
+        hostId,
+      );
+
+    const summaryResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+
+    expect(summaryResponse.status).toBe(200);
+    await expect(summaryResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          collectorCapabilities: expect.objectContaining({
+            official: expect.objectContaining({
+              disk: { available: true },
+            }),
+          }),
+          id: hostId,
+        }),
+      ],
+    });
+
+    database.close();
+  });
+
   it("keeps raw Probe Configuration errors out of primary detail warning copy", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

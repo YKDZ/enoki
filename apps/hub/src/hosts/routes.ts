@@ -7,6 +7,7 @@ import type {
   HostStatusThresholds,
   HostRepository,
 } from "../database/hosts.js";
+import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
@@ -34,6 +35,7 @@ export type HostRouteServices = {
   probeOperationTimeouts?: ProbeOperationConfig;
   probeConfigurations?: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+  snapshotCollectors?: SnapshotCollectorStorageRegistry;
 };
 
 const defaultProbeOperationTimeouts: ProbeOperationConfig = {
@@ -70,6 +72,8 @@ export function createHostRoutes(services: HostRouteServices) {
 
     const hostSummary = services.hosts
       .listSummaries({
+        hostProfileForHost: (hostId) =>
+          services.snapshotCollectors?.hostProfile.read(hostId) ?? null,
         latestMetricForHost: (hostId) =>
           services.metrics?.findLatestSample(hostId) ?? null,
         nowMs: now(),
@@ -122,7 +126,9 @@ export function createHostRoutes(services: HostRouteServices) {
           displayName: host.displayName,
           observedIp: host.observedIp,
         },
-        hostProfile: parseHostProfile(host.inventoryJson),
+        hostProfile:
+          services.snapshotCollectors?.hostProfile.read(hostId) ??
+          parseHostProfile(host.inventoryJson),
         inventory: parseInventory(host.inventoryJson),
         probeConfiguration: services.probeConfigurations?.getEffectiveForHost(
           hostId,

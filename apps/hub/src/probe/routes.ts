@@ -17,6 +17,7 @@ import type {
   HostStatusThresholds,
   HostRepository,
 } from "../database/hosts.js";
+import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
@@ -63,6 +64,7 @@ export type ProbeRouteServices = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+  snapshotCollectors?: SnapshotCollectorStorageRegistry;
   clockSkewThresholdMs?: number;
   hostStatus?: HostStatusThresholds;
   liveUpdates?: LiveUpdateBroadcaster | null;
@@ -117,16 +119,17 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const probeId = createProbeId();
     const probeSecretPlaceholder = createProbeSecret();
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    const registrationProfile = hostProfile ?? request.inventory;
+    const registrationProfile = hostProfile ? null : request.inventory;
     const inventory = request.inventory;
     const inventoryJson = registrationProfile
       ? serializeHostProfile(registrationProfile)
       : null;
-    const inventoryHash = hostProfile
-      ? (hostProfileSnapshot?.canonicalHash ?? hashHostProfile(hostProfile))
-      : inventory
+    const inventoryHash = registrationProfile
+      ? inventory
         ? hashInventory(inventory)
-        : null;
+        : null
+      : null;
+    const hostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const observedIp = observedIpFromContext(
       context,
       services.trustForwardedHeaders,
@@ -134,7 +137,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const displayName =
       registrationProfile?.hostname?.trim() || fallbackDisplayName(probeId);
 
-    services.hosts.create({
+    const createdHost = services.hosts.create({
       architecture: registrationProfile?.architecture || null,
       clockSkewDetected: false,
       connectAddress:
@@ -161,6 +164,16 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       probeSecretHash: hashSecret(probeSecretPlaceholder),
       probeVersion: registrationProfile?.probeVersion || null,
     });
+    if (hostProfile && hostProfileHash) {
+      services.snapshotCollectors?.write({
+        collectorId: hostProfileCollectorId,
+        hostId: createdHost.id,
+        observedIp,
+        payload: hostProfile,
+        snapshotHash: hostProfileHash,
+        updatedAtMs: registeredAtMs,
+      });
+    }
 
     const body = RegistrationResponse.encode(
       RegistrationResponse.create({
@@ -253,18 +266,25 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    const reportedProfile = reportedHostProfile ?? request.inventory;
+    const reportedProfile = reportedHostProfile ? null : request.inventory;
+    const reportedOperationProfile = reportedHostProfile ?? request.inventory;
     const inventoryJson = reportedHostProfile
-      ? serializeHostProfile(reportedHostProfile)
+      ? undefined
       : request.inventory
         ? serializeInventory(request.inventory)
         : host.inventoryJson;
     const inventoryHash = reportedHostProfile
-      ? hostProfileSnapshot?.canonicalHash
+      ? undefined
       : request.inventory
         ? suppliedInventoryHash
         : host.inventoryHash;
+    const reportedHostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
+    const knownHostProfileSnapshot =
+      services.snapshotCollectors?.get(hostProfileCollectorId)?.hasSnapshot(
+        host.id,
+        reportedSnapshotHash,
+      ) ?? reportedSnapshotHash === host.inventoryHash;
     const acceptedLegacyInventoryReport =
       Boolean(request.inventory) ||
       (!hostProfileSnapshot &&
@@ -273,7 +293,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const requestedSnapshotCollectorIds =
       !reportedHostProfile &&
       !acceptedLegacyInventoryReport &&
-      (!reportedSnapshotHash || reportedSnapshotHash !== host.inventoryHash)
+      !knownHostProfileSnapshot
         ? [hostProfileCollectorId]
         : [];
     const inventoryNeeded =
@@ -322,10 +342,20 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         : null,
       probeVersion: reportedProfile?.probeVersion || undefined,
     });
+    if (reportedHostProfile && reportedHostProfileHash) {
+      services.snapshotCollectors?.write({
+        collectorId: hostProfileCollectorId,
+        hostId: host.id,
+        observedIp,
+        payload: reportedHostProfile,
+        snapshotHash: reportedHostProfileHash,
+        updatedAtMs: reportReceivedAtMs,
+      });
+    }
     markProbeUpgradeSucceededFromInventory({
       hostId: host.id,
       nowMs: reportReceivedAtMs,
-      probeVersion: reportedProfile?.probeVersion,
+      probeVersion: reportedOperationProfile?.probeVersion,
       services,
     });
 
@@ -1101,6 +1131,8 @@ function broadcastHostSummary(
 
   const hostSummary = services.hosts
     .listSummaries({
+      hostProfileForHost: (hostId) =>
+        services.snapshotCollectors?.hostProfile.read(hostId) ?? null,
       latestMetricForHost: (hostId) =>
         services.metrics.findLatestSample(hostId),
       nowMs,

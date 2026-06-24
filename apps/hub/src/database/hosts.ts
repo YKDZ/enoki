@@ -1,6 +1,7 @@
 import type {
   CollectorAvailability,
   CollectorCapabilities,
+  HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { and, eq, isNull, lte } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
@@ -130,6 +131,7 @@ export type HostSummaryOptions = {
     temperatureCelsius: number | null;
     uptimeSeconds: number | null;
   } | null;
+  hostProfileForHost?: (hostId: number) => HostProfileSnapshot | null;
   nowMs?: number;
   probeConfigurationForHost?: (hostId: number) => {
     mode: "inherit" | "override";
@@ -256,6 +258,7 @@ export function createHostRepository(database: HostDatabase): HostRepository {
         .all()
         .map((host) => {
           const latestMetric = options.latestMetricForHost?.(host.id) ?? null;
+          const hostProfile = options.hostProfileForHost?.(host.id) ?? null;
 
           return {
             connectAddress: host.connectAddress,
@@ -264,6 +267,7 @@ export function createHostRepository(database: HostDatabase): HostRepository {
               lastDeltaMs: host.lastClockSkewMs,
             },
             collectorCapabilities: parseCollectorCapabilities(
+              hostProfile,
               host.inventoryJson,
             ),
             cpu: formatCpu(host.cpuCount),
@@ -464,8 +468,13 @@ export function createHostRepository(database: HostDatabase): HostRepository {
 }
 
 function parseCollectorCapabilities(
+  hostProfile: HostProfileSnapshot | null,
   inventoryJson: string | null,
 ): CollectorCapabilities | null {
+  if (hostProfile) {
+    return normalizeCollectorCapabilities(hostProfile.collectorCapabilities);
+  }
+
   if (!inventoryJson) {
     return null;
   }
