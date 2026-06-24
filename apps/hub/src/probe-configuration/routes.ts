@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import type { AuditRepository } from "../database/audit.js";
 import type { HostRepository } from "../database/hosts.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
+import { readJsonBody } from "../http/json.js";
 import {
   parseProbeConfigurationValues,
   validateProbeConfigurationValues,
@@ -34,7 +35,12 @@ export function createProbeConfigurationRoutes(
   });
 
   routes.put("/", async (context) => {
-    const input = parseProbeConfigurationValues(await context.req.json());
+    const body = await readJsonBody(context.req);
+    if (!body.ok) {
+      return configurationError("malformed_json");
+    }
+
+    const input = parseProbeConfigurationValues(body.value);
 
     if (!input) {
       return configurationError("invalid_probe_configuration");
@@ -106,12 +112,16 @@ export function createHostProbeConfigurationRoutes(
       return configurationError("host_not_found", 404);
     }
 
-    const body = (await context.req.json()) as unknown;
-    if (!body || typeof body !== "object") {
+    const body = await readJsonBody(context.req);
+    if (!body.ok) {
+      return configurationError("malformed_json");
+    }
+
+    if (!body.value || typeof body.value !== "object") {
       return configurationError("invalid_probe_configuration");
     }
 
-    const candidate = body as {
+    const candidate = body.value as {
       configuration?: unknown;
       mode?: unknown;
     };

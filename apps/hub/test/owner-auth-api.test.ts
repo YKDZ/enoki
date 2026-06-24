@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
+import { createOwnerAuth } from "../src/auth/routes";
 import { initializeHubDatabase } from "../src/database/index";
 
 const tempRoots: string[] = [];
@@ -246,6 +247,134 @@ describe("Owner authentication API", () => {
     expect(logoutResponse.status).toBe(200);
     await expect(logoutResponse.json()).resolves.toEqual({
       authenticated: true,
+    });
+  });
+
+  it("rate limits repeated failed Owner login attempts from the same remote address", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+        trustProxyHeaders: true,
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const request = {
+      body: JSON.stringify({
+        password: "wrong password",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "owner-login-test",
+        "x-forwarded-for": "203.0.113.7",
+      },
+      method: "POST",
+    };
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await app.request("/api/web/auth/login", request);
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_credentials",
+      });
+    }
+
+    const limitedResponse = await app.request("/api/web/auth/login", request);
+
+    expect(limitedResponse.status).toBe(429);
+    await expect(limitedResponse.json()).resolves.toEqual({
+      error: "too_many_login_attempts",
+    });
+    expect(database.audit.recent(1)).toEqual([
+      expect.objectContaining({
+        action: "owner.login",
+        outcome: "failure",
+        remoteAddress: "203.0.113.7",
+        userAgent: "owner-login-test",
+      }),
+    ]);
+
+    database.close();
+  });
+
+  it("clears failed Owner login attempts for a remote address after a successful login", async () => {
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+        trustProxyHeaders: true,
+      },
+    });
+    const loginRequest = (password: string) => ({
+      body: JSON.stringify({ password }),
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "203.0.113.8",
+      },
+      method: "POST",
+    });
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await app.request(
+        "/api/web/auth/login",
+        loginRequest("wrong password"),
+      );
+      expect(response.status).toBe(401);
+    }
+
+    const successResponse = await app.request(
+      "/api/web/auth/login",
+      loginRequest("correct horse battery staple"),
+    );
+    expect(successResponse.status).toBe(200);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await app.request(
+        "/api/web/auth/login",
+        loginRequest("wrong password"),
+      );
+      expect(response.status).toBe(401);
+    }
+  });
+
+  it("expires failed Owner login attempts outside the rate limit window", async () => {
+    let now = 1_725_000_000_000;
+    const auth = createOwnerAuth(
+      {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+        trustProxyHeaders: true,
+      },
+      {
+        delay: async () => {},
+        now: () => now,
+      },
+    );
+    const loginRequest = {
+      body: JSON.stringify({ password: "wrong password" }),
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "203.0.113.9",
+      },
+      method: "POST",
+    };
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await auth.routes.request("/login", loginRequest);
+      expect(response.status).toBe(401);
+    }
+
+    now += 15 * 60 * 1000 + 1;
+    const response = await auth.routes.request("/login", loginRequest);
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_credentials",
     });
   });
 

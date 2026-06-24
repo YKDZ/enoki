@@ -15,6 +15,7 @@ use rsa::{
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
     host_profile::{collect_local_host_profile, host_profile_hash},
+    hub_url,
     metrics::MetricsCollectionConfig,
     protocol::enoki::v1::{
         ProbeRegistrationRequest, ProbeRegistrationResponse, Snapshot, snapshot,
@@ -115,7 +116,7 @@ pub fn register_probe(
         }],
     };
     let response_body =
-        transport.post_protobuf(&registration_url(&input.hub_url), request.encode_to_vec())?;
+        transport.post_protobuf(&registration_url(&input.hub_url)?, request.encode_to_vec())?;
     let response = ProbeRegistrationResponse::decode(response_body.as_slice())
         .map_err(|error| RegistrationError::Decode(error.to_string()))?;
 
@@ -185,8 +186,9 @@ fn generate_probe_signing_key() -> Result<GeneratedProbeSigningKey, Registration
     })
 }
 
-fn registration_url(hub_url: &str) -> String {
-    format!("{}/api/probe/register", hub_url.trim_end_matches('/'))
+fn registration_url(hub_url: &str) -> Result<String, RegistrationError> {
+    hub_url::endpoint(hub_url, "/api/probe/register")
+        .map_err(|()| RegistrationError::InvalidResponse("invalid Hub URL"))
 }
 
 fn current_unix_time_ms_i128() -> i128 {
@@ -220,6 +222,7 @@ struct InstallerOwnedFields {
 }
 
 fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, RegistrationError> {
+    reject_existing_symlink(path).map_err(RegistrationError::Io)?;
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -240,6 +243,24 @@ fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, Regi
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
+}
+
+#[cfg(unix)]
+fn reject_existing_symlink(path: &Path) -> Result<(), std::io::Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "bootstrap config must not be a symlink",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn reject_existing_symlink(_path: &Path) -> Result<(), std::io::Error> {
+    Ok(())
 }
 
 fn store_bootstrap_config(
@@ -397,9 +418,11 @@ fn toml_string(value: &str) -> String {
 fn write_secret_file(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
     use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
 
+    reject_existing_symlink(path)?;
     let mut file = OpenOptions::new()
         .create(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .truncate(true)
         .write(true)
         .open(path)?;

@@ -1,5 +1,8 @@
 use std::fs;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 use enoki_probe::{
     host_profile::host_profile_hash,
     metrics::CollectorId,
@@ -237,11 +240,116 @@ fn probe_registration_drops_unknown_initial_collector_ids_from_bootstrap_config(
     assert!(!bootstrap_config.contains("\"official.not-real\""));
 }
 
+#[test]
+fn probe_registration_rejects_unsafe_hub_urls_before_posting() {
+    for hub_url in [
+        "http://hub.example",
+        "https://user:pass@hub.example",
+        "https://hub.example/#fragment",
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        let mut transport = RecordingTransport {
+            observed_body: Vec::new(),
+            observed_url: String::new(),
+            response: registration_response(),
+        };
+
+        let error = register_probe(
+            ProbeRegistrationInput {
+                bootstrap_config_path: bootstrap_config_path.clone(),
+                enrollment_token: "enk_enroll_secret".to_string(),
+                hub_url: hub_url.to_string(),
+            },
+            &mut transport,
+        )
+        .expect_err("unsafe Hub URL is rejected");
+
+        assert!(
+            matches!(error, RegistrationError::InvalidResponse("invalid Hub URL")),
+            "unexpected error for {hub_url}: {error}"
+        );
+        assert_eq!(transport.observed_url, "");
+        assert!(!bootstrap_config_path.exists());
+    }
+}
+
+#[test]
+fn probe_registration_allows_localhost_http_hub_for_development() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response: registration_response(),
+    };
+
+    register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path,
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "http://127.0.0.1:8787/base/".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("localhost HTTP Hub is accepted for development");
+
+    assert_eq!(
+        transport.observed_url,
+        "http://127.0.0.1:8787/base/api/probe/register",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn probe_registration_rejects_existing_bootstrap_symlink_without_overwriting_target() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let target_path = temp.path().join("target.toml");
+    fs::write(&target_path, "log_level = \"debug\"\n").expect("target");
+    symlink(&target_path, &bootstrap_config_path).expect("bootstrap symlink");
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response: registration_response(),
+    };
+
+    let error = register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path,
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect_err("bootstrap symlink is rejected");
+
+    assert!(matches!(error, RegistrationError::Io(_)));
+    assert_eq!(
+        fs::read_to_string(target_path).expect("target unchanged"),
+        "log_level = \"debug\"\n",
+    );
+}
+
 fn all_collector_ids() -> Vec<String> {
     CollectorId::all_official()
         .iter()
         .map(|collector_id| collector_id.as_config_id().to_string())
         .collect()
+}
+
+fn registration_response() -> Vec<u8> {
+    ProbeRegistrationResponse {
+        initial_configuration: Some(ProbeConfigurationResponse {
+            enabled_collector_ids: all_collector_ids(),
+            metrics_collection_interval_seconds: 5,
+            version: "default-v1".to_string(),
+        }),
+        probe_id: "probe_01".to_string(),
+        probe_secret: String::new(),
+        server_time_ms: 1_725_000_000_000,
+    }
+    .encode_to_vec()
 }
 
 struct RecordingTransport {

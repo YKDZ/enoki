@@ -39,6 +39,8 @@ export default defineConfig({
     timeout: 10_000,
   },
   fullyParallel: true,
+  timeout: 60_000,
+  workers: 4,
   projects: [
     {
       name: "chromium",

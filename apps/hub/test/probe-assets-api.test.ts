@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,7 +20,7 @@ describe("Probe asset API", () => {
   it("serves the installer and signed Probe assets without owner auth", async () => {
     const root = await createTempRoot();
     const assetDir = path.join(root, "assets");
-    const installScriptPath = path.join(root, "install-probe.sh");
+    const installScriptPath = path.join(assetDir, "install-probe.sh");
     await mkdir(assetDir, { recursive: true });
     await writeFile(installScriptPath, "#!/usr/bin/env bash\necho install\n");
     await writeFile(path.join(assetDir, "manifest.json"), '{"assets":[]}');
@@ -67,6 +67,49 @@ describe("Probe asset API", () => {
     const response = await app.request("/api/probe/assets/..%2Fsecret");
 
     expect(response.status).toBe(404);
+  });
+
+  it("does not serve an installer from outside the Probe asset directory", async () => {
+    const root = await createTempRoot();
+    const assetDir = path.join(root, "assets");
+    const installScriptPath = path.join(root, "install-probe.sh");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(installScriptPath, "secret installer");
+
+    const app = createHubApp({
+      probeAssets: {
+        assetDir,
+        installScriptPath,
+      },
+    });
+
+    const response = await app.request("/api/probe/install.sh");
+
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.not.toContain("secret installer");
+  });
+
+  it("does not follow asset symlinks outside the Probe asset directory", async () => {
+    const root = await createTempRoot();
+    const assetDir = path.join(root, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(path.join(root, "secret.pem"), "secret");
+    await symlink(
+      path.join(root, "secret.pem"),
+      path.join(assetDir, "signing-key.pem"),
+    );
+
+    const app = createHubApp({
+      probeAssets: {
+        assetDir,
+        installScriptPath: path.join(assetDir, "install-probe.sh"),
+      },
+    });
+
+    const response = await app.request("/api/probe/assets/signing-key.pem");
+
+    expect(response.status).toBe(404);
+    await expect(response.text()).resolves.not.toContain("secret");
   });
 });
 

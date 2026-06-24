@@ -319,6 +319,61 @@ describe("Probe registration API", () => {
     );
   });
 
+  it("rejects Probe registration requests with a declared body larger than the registration limit", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      database,
+    });
+
+    const response = await app.request("/api/probe/register", {
+      body: new Uint8Array(),
+      headers: {
+        "content-length": String(256 * 1024 + 1),
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "probe_registration_too_large",
+    });
+
+    database.close();
+  });
+
+  it("rejects Probe registration requests that stream past the registration limit", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      database,
+    });
+    const oversizedBody = new Uint8Array(256 * 1024 + 1);
+
+    const response = await app.request(
+      new Request("http://localhost/api/probe/register", {
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(oversizedBody.subarray(0, 128 * 1024));
+            controller.enqueue(oversizedBody.subarray(128 * 1024));
+            controller.close();
+          },
+        }),
+        duplex: "half",
+        headers: {
+          "content-type": "application/x-protobuf",
+        },
+        method: "POST",
+      } as RequestInit & { duplex: "half" }),
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "probe_registration_too_large",
+    });
+
+    database.close();
+  });
+
   it("creates a pending Enrollment Token without creating a Host card", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

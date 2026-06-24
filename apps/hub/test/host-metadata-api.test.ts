@@ -280,6 +280,38 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
+  it("returns a JSON error for malformed Host Metadata JSON", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    const response = await app.request(`/api/web/hosts/${hostId}/metadata`, {
+      body: "{",
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerSession,
+      },
+      method: "PUT",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_json",
+    });
+
+    database.close();
+  });
+
   it("does not send Host Metadata in Probe Configuration", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

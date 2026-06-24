@@ -228,6 +228,83 @@ fn probe_run_with_existing_identity_sends_startup_host_profile_even_without_metr
 }
 
 #[test]
+fn probe_run_rejects_unsafe_hub_url_before_reporting() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"http://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        response: report_response(1, false),
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    let error = run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(1),
+        },
+    )
+    .expect_err("unsafe Hub URL is rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "invalid Probe bootstrap config: invalid Hub URL",
+    );
+    assert!(transport.observed_calls.is_empty());
+}
+
+#[test]
+fn probe_run_allows_localhost_http_hub_for_development() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"http://localhost:8787/base/\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        response: report_response(1, false),
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(1),
+        },
+    )
+    .expect("localhost HTTP Hub is accepted for development");
+
+    assert_eq!(
+        transport.observed_report_url,
+        "http://localhost:8787/base/api/probe/report",
+    );
+}
+
+#[test]
 fn probe_run_rejects_host_profile_as_a_configurable_collector() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");

@@ -49,6 +49,7 @@ const HostProfileSnapshotMessage = enoki.v1.HostProfileSnapshot as any;
 const ConfigurationRequest = enoki.v1.ProbeConfigurationRequest as any;
 const ConfigurationResponse = enoki.v1.ProbeConfigurationResponse as any;
 const hostProfileCollectorId = "official.host-profile";
+const maxProbeRegistrationPayloadBytes = 256 * 1024;
 const maxProbeReportPayloadBytes = 1024 * 1024;
 const maxProbeOperationPayloadBytes = 16 * 1024;
 const maxReportObservationRange = 10_000;
@@ -85,9 +86,25 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   });
 
   routes.post("/register", async (context) => {
-    const request = decodeRegistrationRequest(
-      new Uint8Array(await context.req.arrayBuffer()),
+    if (
+      contentLengthExceeds(
+        context.req.raw.headers,
+        maxProbeRegistrationPayloadBytes,
+      )
+    ) {
+      return probeJsonError("probe_registration_too_large", 413);
+    }
+
+    const requestBody = await readCappedRequestBody(
+      context.req.raw,
+      maxProbeRegistrationPayloadBytes,
     );
+
+    if (!requestBody) {
+      return probeJsonError("probe_registration_too_large", 413);
+    }
+
+    const request = decodeRegistrationRequest(requestBody);
 
     if (!request?.enrollmentToken) {
       return probeJsonError("invalid_enrollment_token", 401);
@@ -203,6 +220,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
+      services.trustForwardedHeaders,
     );
 
     if (!host) {
@@ -530,6 +548,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
+      services.trustForwardedHeaders,
     );
 
     if (!host) {
@@ -587,6 +606,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
+      services.trustForwardedHeaders,
     );
 
     if (!host) {
@@ -671,6 +691,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
+      services.trustForwardedHeaders,
     );
 
     if (!host) {
@@ -1304,11 +1325,13 @@ function authenticateProbe(
   hosts: HostRepository,
   request: Request,
   body: Uint8Array,
+  trustForwardedHeaders = false,
 ) {
   const signedAuthentication = authenticateSignedProbeRequest(
     hosts,
     request,
     body,
+    trustForwardedHeaders,
   );
   if (signedAuthentication.kind === "authenticated") {
     return signedAuthentication.host;
@@ -1321,6 +1344,7 @@ function authenticateSignedProbeRequest(
   hosts: HostRepository,
   request: Request,
   body: Uint8Array,
+  trustForwardedHeaders = false,
 ): SignedProbeAuthentication {
   const headers = request.headers;
   const probeId = headers.get("x-enoki-probe-id")?.trim() ?? "";
@@ -1360,12 +1384,14 @@ function authenticateSignedProbeRequest(
     return { kind: "invalid" };
   }
 
-  const url = new URL(request.url);
   const payload = probeRequestSignaturePayload({
     bodySha256,
     method: request.method,
     nonce,
-    pathAndQuery: `${url.pathname}${url.search}`,
+    canonicalOriginPathAndQuery: canonicalOriginPathAndQuery(
+      request,
+      trustForwardedHeaders,
+    ),
     timestampMs: timestamp,
   });
 
@@ -1392,18 +1418,71 @@ function authenticateSignedProbeRequest(
 
 function probeRequestSignaturePayload(input: {
   bodySha256: string;
+  canonicalOriginPathAndQuery: string;
   method: string;
   nonce: string;
-  pathAndQuery: string;
   timestampMs: string;
 }) {
   return [
     input.method.toUpperCase(),
-    input.pathAndQuery,
+    input.canonicalOriginPathAndQuery,
     input.timestampMs,
     input.nonce,
     input.bodySha256,
   ].join("\n");
+}
+
+function canonicalOriginPathAndQuery(
+  request: Request,
+  trustForwardedHeaders = false,
+) {
+  const url = new URL(request.url);
+  if (!trustForwardedHeaders) {
+    return `${url.protocol}//${url.host}${url.pathname}${url.search}`;
+  }
+
+  const protocol = trustedForwardedProtocol(request.headers, url);
+  const host = trustedForwardedHost(request.headers, url);
+
+  return `${protocol}://${host}${url.pathname}${url.search}`;
+}
+
+function trustedForwardedProtocol(headers: Headers, url: URL) {
+  const forwardedProto = firstHeaderValue(headers.get("x-forwarded-proto"));
+  if (forwardedProto && /^(?:http|https)$/i.test(forwardedProto)) {
+    return forwardedProto.toLowerCase();
+  }
+
+  return url.protocol.slice(0, -1);
+}
+
+function trustedForwardedHost(headers: Headers, url: URL) {
+  const forwardedHost =
+    firstHeaderValue(headers.get("x-forwarded-host")) ??
+    firstHeaderValue(headers.get("host"));
+
+  if (forwardedHost && isValidHttpHostHeader(forwardedHost)) {
+    return forwardedHost.toLowerCase();
+  }
+
+  return url.host;
+}
+
+function firstHeaderValue(value: string | null) {
+  return value?.split(",")[0]?.trim() || null;
+}
+
+function isValidHttpHostHeader(host: string) {
+  if (!host || /[\s/@\\]/.test(host)) {
+    return false;
+  }
+
+  try {
+    new URL(`http://${host}/`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function verifyProbeRequestSignature(

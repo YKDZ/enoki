@@ -166,6 +166,7 @@ dependencies = [
  "tempfile",
  "toml",
  "ureq",
+ "url",
 ]
 
 [[package]]

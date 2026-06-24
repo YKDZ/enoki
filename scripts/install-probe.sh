@@ -2,17 +2,17 @@
 set -euo pipefail
 
 SERVICE_NAME="enoki-probe"
-SERVICE_USER="${ENOKI_SERVICE_USER:-enoki-probe}"
-SERVICE_GROUP="${ENOKI_SERVICE_GROUP:-enoki-probe}"
-INSTALL_PATH="${ENOKI_INSTALL_PATH:-/usr/local/bin/enoki-probe}"
-CONFIG_PATH="${ENOKI_CONFIG_PATH:-/etc/enoki/probe-bootstrap.toml}"
+DEFAULT_SERVICE_USER="enoki-probe"
+DEFAULT_SERVICE_GROUP="enoki-probe"
+SERVICE_USER="${ENOKI_SERVICE_USER-$DEFAULT_SERVICE_USER}"
+SERVICE_GROUP="${ENOKI_SERVICE_GROUP-$DEFAULT_SERVICE_GROUP}"
+INSTALL_PATH="${ENOKI_INSTALL_PATH-/usr/local/bin/enoki-probe}"
+CONFIG_PATH="${ENOKI_CONFIG_PATH-/etc/enoki/probe-bootstrap.toml}"
 INSTALL_METADATA_PATH="/etc/enoki/probe-install.toml"
-STATE_DIR="${ENOKI_STATE_DIR:-/var/lib/enoki-probe}"
+STATE_DIR="${ENOKI_STATE_DIR-/var/lib/enoki-probe}"
 LOG_LEVEL="${ENOKI_LOG_LEVEL:-info}"
 TEST_ROOT="${ENOKI_TEST_ROOT:-}"
 EMBEDDED_PUBLIC_KEY_SHA256="__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__"
-DEFAULT_SERVICE_USER="enoki-probe"
-DEFAULT_SERVICE_GROUP="enoki-probe"
 
 fail() {
   echo "Enoki Probe install failed: $*" >&2
@@ -127,7 +127,11 @@ hub_api_url() {
 validate_hub_url() {
   case "$ENOKI_HUB_URL" in
     https://*) return ;;
-    http://localhost* | http://127.0.0.1* | http://[::1]*) return ;;
+    http://*)
+      if is_local_http_url "$ENOKI_HUB_URL"; then
+        return
+      fi
+      ;;
   esac
 
   if [ -n "$TEST_ROOT" ] && [[ "$ENOKI_HUB_URL" = file://* ]]; then
@@ -135,6 +139,36 @@ validate_hub_url() {
   fi
 
   fail "ENOKI_HUB_URL must use https, except localhost development URLs."
+}
+
+is_local_http_url() {
+  local url="$1"
+  local rest="${url#http://}"
+  local authority="${rest%%[/?#]*}"
+
+  [ -n "$authority" ] || return 1
+  [[ "$authority" != *"@"* ]] || return 1
+
+  case "$authority" in
+    "[::1]") return 0 ;;
+    "[::1]":*)
+      is_numeric_port "${authority#"[::1]:"}"
+      return
+      ;;
+    localhost | 127.0.0.1) return 0 ;;
+    localhost:* | 127.0.0.1:*)
+      is_numeric_port "${authority#*:}"
+      return
+      ;;
+  esac
+
+  return 1
+}
+
+is_numeric_port() {
+  local port="$1"
+
+  [[ "$port" =~ ^[0-9]+$ ]]
 }
 
 verify_manifest_signature() {
@@ -207,6 +241,53 @@ validate_upgrader_sudoers_paths() {
       fail "Probe Upgrader sudoers paths must not contain whitespace or control characters."
     fi
   done
+}
+
+validate_linux_account_name() {
+  local name="$1"
+  local value="$2"
+
+  if [ -z "$value" ]; then
+    fail "$name is required."
+  fi
+  if [[ "$value" =~ [[:space:][:cntrl:]] ]]; then
+    fail "$name must not contain whitespace or control characters."
+  fi
+  if ! [[ "$value" =~ ^[a-z_][a-z0-9_-]{0,30}\$?$ ]]; then
+    fail "$name must be a safe Linux user or group name."
+  fi
+}
+
+validate_absolute_safe_path() {
+  local name="$1"
+  local value="$2"
+
+  if [ -z "$value" ]; then
+    fail "$name is required."
+  fi
+  if [[ "$value" != /* ]]; then
+    fail "$name must be an absolute path."
+  fi
+  if [ "$value" = "/" ]; then
+    fail "$name must not be the filesystem root."
+  fi
+  if [[ "$value" =~ [[:space:][:cntrl:]] ]]; then
+    fail "$name must not contain whitespace or control characters."
+  fi
+  if [[ "$value" = */../* ]] || [[ "$value" = */.. ]] || [[ "$value" = */./* ]] || [[ "$value" = */. ]]; then
+    fail "$name must not contain . or .. path components."
+  fi
+  if ! [[ "$value" =~ ^/[A-Za-z0-9._/@+-]+$ ]]; then
+    fail "$name contains characters that are unsafe for systemd or sudoers."
+  fi
+}
+
+validate_install_settings() {
+  validate_linux_account_name "ENOKI_SERVICE_USER" "$SERVICE_USER"
+  validate_linux_account_name "ENOKI_SERVICE_GROUP" "$SERVICE_GROUP"
+  validate_absolute_safe_path "ENOKI_INSTALL_PATH" "$INSTALL_PATH"
+  validate_absolute_safe_path "ENOKI_CONFIG_PATH" "$CONFIG_PATH"
+  validate_absolute_safe_path "ENOKI_STATE_DIR" "$STATE_DIR"
 }
 
 ensure_service_user() {
@@ -403,6 +484,9 @@ write_install_metadata() {
   mkdir -p "$(dirname "$metadata_path_rooted")"
 
   {
+    printf 'hub_url = '
+    toml_string "$(normalized_url "$ENOKI_HUB_URL")"
+    printf '\n'
     printf 'install_path = '
     toml_string "$INSTALL_PATH"
     printf '\n'
@@ -535,6 +619,9 @@ RestartSec=5s
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
+ProtectKernelTunables=true
+ProtectControlGroups=true
+LockPersonality=true
 ReadWritePaths=$(host_path "$STATE_DIR") $(dirname "$(host_path "$CONFIG_PATH")")
 
 [Install]
@@ -582,6 +669,7 @@ main() {
 
   require_value "ENOKI_HUB_URL" "${ENOKI_HUB_URL:-}"
   require_value "ENOKI_ENROLLMENT_TOKEN" "${ENOKI_ENROLLMENT_TOKEN:-}"
+  validate_install_settings
   validate_hub_url
   ensure_root
   ensure_systemd

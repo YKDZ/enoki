@@ -18,6 +18,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    hub_url,
     privileged_runtime::{
         PrivilegedRuntimeExecutionPlan, PrivilegedRuntimeInvocation,
         compiled_privileged_collector_specs,
@@ -367,10 +368,11 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     }
 
     let bootstrap_config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
-    let hub_url = bootstrap_config
-        .hub_url
-        .as_ref()
-        .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?;
+    validate_bootstrap_config_matches_trusted_install_metadata(
+        &bootstrap_config,
+        install_metadata,
+    )?;
+    let hub_url = &install_metadata.hub_url;
     let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
     let body = format!(
         "{{\"targetProbeVersion\":\"{}\",\"token\":\"{}\"}}",
@@ -379,11 +381,7 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     );
 
     transport.post_token_validation(
-        &format!(
-            "{}/api/probe/operations/{}/token/validate",
-            hub_url.trim_end_matches('/'),
-            operation.operation_id,
-        ),
+        &operation_token_validation_url(hub_url, &operation.operation_id)?,
         &request_auth,
         &body,
     )?;
@@ -452,36 +450,24 @@ fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
     }
 
     let bootstrap_config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
-    let hub_url = bootstrap_config
-        .hub_url
-        .as_ref()
-        .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?
-        .clone();
-    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
     validate_bootstrap_config_matches_trusted_install_metadata(
         &bootstrap_config,
         install_metadata,
     )?;
+    let hub_url = &install_metadata.hub_url;
+    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
 
     let token_body = format!(
         "{{\"token\":\"{}\"}}",
         json_string_fragment(&operation.token)
     );
     transport.post_token_validation(
-        &format!(
-            "{}/api/probe/operations/{}/token/validate",
-            hub_url.trim_end_matches('/'),
-            operation.operation_id,
-        ),
+        &operation_token_validation_url(hub_url, &operation.operation_id)?,
         &request_auth,
         &token_body,
     )?;
 
-    let status_url = format!(
-        "{}/api/probe/operations/{}/status",
-        hub_url.trim_end_matches('/'),
-        operation.operation_id,
-    );
+    let status_url = operation_status_url(hub_url, &operation.operation_id)?;
 
     if let Err(error) = execute_probe_uninstall(&input, install_metadata, systemd) {
         let failed = failed_probe_uninstaller_result(&operation, &error);
@@ -684,6 +670,7 @@ struct ProbeUpgraderBootstrapConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrustedProbeInstallMetadata {
+    hub_url: String,
     install_path: PathBuf,
     operation_status_path: PathBuf,
     probe_asset_public_key_sha256: String,
@@ -755,6 +742,7 @@ fn parse_trusted_probe_install_metadata(
         .parse::<toml::Value>()
         .map_err(|_| ProbeUpgraderRunError::InvalidInstallMetadata("invalid TOML"))?;
     let install_path = required_install_metadata_path(&value, "install_path")?;
+    let hub_url = required_install_metadata_string(&value, "hub_url")?;
     let operation_status_path = required_install_metadata_path(&value, "operation_status_path")?;
     let state_dir = required_install_metadata_path(&value, "state_dir")?;
     let sudoers_path = optional_install_metadata_path(&value, "sudoers_path")?
@@ -780,8 +768,12 @@ fn parse_trusted_probe_install_metadata(
             "trusted Probe asset signing key fingerprint is not a valid sha256 value",
         ));
     }
+    let hub_url = hub_url::normalized_base(&hub_url).map_err(|()| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("trusted Hub URL is invalid")
+    })?;
 
     Ok(TrustedProbeInstallMetadata {
+        hub_url,
         install_path,
         operation_status_path,
         probe_asset_public_key_sha256,
@@ -802,6 +794,11 @@ fn required_install_metadata_path(
             "paths must be absolute",
         ));
     }
+    if path == Path::new("/") {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "paths must not be filesystem root",
+        ));
+    }
 
     Ok(path)
 }
@@ -817,6 +814,11 @@ fn optional_install_metadata_path(
     if !path.is_absolute() {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "paths must be absolute",
+        ));
+    }
+    if path == Path::new("/") {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "paths must not be filesystem root",
         ));
     }
 
@@ -936,11 +938,8 @@ fn execute_probe_upgrade_with_current_version(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     current_probe_version: &str,
 ) -> Result<(), ProbeUpgraderRunError> {
-    let hub_url = bootstrap_config
-        .hub_url
-        .as_deref()
-        .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?;
     validate_bootstrap_config_matches_trusted_install_metadata(bootstrap_config, install_metadata)?;
+    let hub_url = &install_metadata.hub_url;
 
     let manifest_bytes = download_hub_asset(transport, hub_url, "manifest.json")?;
     let signature_bytes = download_hub_asset(transport, hub_url, "manifest.json.sig")?;
@@ -1131,6 +1130,17 @@ fn validate_bootstrap_config_matches_trusted_install_metadata(
     bootstrap_config: &ProbeUpgraderBootstrapConfig,
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let bootstrap_hub_url = bootstrap_config
+        .hub_url
+        .as_deref()
+        .ok_or(ProbeUpgraderRunError::InvalidConfig("missing Hub URL"))?;
+    let bootstrap_hub_url = hub_url::normalized_base(bootstrap_hub_url)
+        .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))?;
+    if bootstrap_hub_url != install_metadata.hub_url {
+        return Err(ProbeUpgraderRunError::InvalidConfig(
+            "Hub URL does not match trusted install metadata",
+        ));
+    }
     validate_optional_bootstrap_path(
         bootstrap_config.install_path.as_deref(),
         &install_metadata.install_path,
@@ -1187,11 +1197,34 @@ fn download_hub_asset(
         return Err(ProbeUpgraderRunError::AssetMissing);
     }
 
-    transport.get_asset(&format!(
-        "{}/api/probe/assets/{}",
-        hub_url.trim_end_matches('/'),
-        file_name,
-    ))
+    transport.get_asset(&hub_asset_url(hub_url, file_name)?)
+}
+
+fn operation_token_validation_url(
+    hub_url: &str,
+    operation_id: &str,
+) -> Result<String, ProbeUpgraderRunError> {
+    hub_url::endpoint(
+        hub_url,
+        &format!("/api/probe/operations/{operation_id}/token/validate"),
+    )
+    .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
+}
+
+fn operation_status_url(
+    hub_url: &str,
+    operation_id: &str,
+) -> Result<String, ProbeUpgraderRunError> {
+    hub_url::endpoint(
+        hub_url,
+        &format!("/api/probe/operations/{operation_id}/status"),
+    )
+    .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
+}
+
+fn hub_asset_url(hub_url: &str, file_name: &str) -> Result<String, ProbeUpgraderRunError> {
+    hub_url::endpoint(hub_url, &format!("/api/probe/assets/{file_name}"))
+        .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
 }
 
 fn verify_public_key_trust(public_key: &[u8], expected: &str) -> Result<(), ProbeUpgraderRunError> {
@@ -1332,14 +1365,8 @@ fn preflight_local_operation_status_writable(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
     let status_path = operation_status_path(install_metadata);
-    if let Some(parent) = status_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-    fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&status_path)
-        .map_err(ProbeUpgraderRunError::Io)?;
+    prepare_local_operation_status_path(&status_path)?;
+    open_local_operation_status_for_append(&status_path)?;
     set_operation_status_permissions(&status_path)?;
 
     Ok(())
@@ -1350,12 +1377,9 @@ fn write_local_operation_status(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
     let status_path = operation_status_path(install_metadata);
-    if let Some(parent) = status_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-    fs::write(
+    write_local_operation_status_contents(
         &status_path,
-        [
+        &[
             format!("operation_id = {}", toml_string(&operation.operation_id)),
             format!(
                 "target_probe_version = {}",
@@ -1365,8 +1389,7 @@ fn write_local_operation_status(
             String::new(),
         ]
         .join("\n"),
-    )
-    .map_err(ProbeUpgraderRunError::Io)?;
+    )?;
     set_operation_status_permissions(&status_path)
 }
 
@@ -1376,12 +1399,9 @@ fn write_failed_local_operation_status(
     result: &ProbeUpgraderResult,
 ) -> Result<(), ProbeUpgraderRunError> {
     let status_path = operation_status_path(install_metadata);
-    if let Some(parent) = status_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-    fs::write(
+    write_local_operation_status_contents(
         &status_path,
-        [
+        &[
             format!("operation_id = {}", toml_string(&operation.operation_id)),
             format!(
                 "target_probe_version = {}",
@@ -1404,9 +1424,110 @@ fn write_failed_local_operation_status(
             String::new(),
         ]
         .join("\n"),
-    )
-    .map_err(ProbeUpgraderRunError::Io)?;
+    )?;
     set_operation_status_permissions(&status_path)
+}
+
+fn prepare_local_operation_status_path(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    if let Some(parent) = status_path.parent() {
+        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
+        validate_local_operation_status_parent(parent)?;
+    }
+    reject_local_operation_status_symlink(status_path)?;
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_local_operation_status_parent(parent: &Path) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = fs::symlink_metadata(parent).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "operation status parent must be a directory",
+        ));
+    }
+    if metadata.mode() & 0o022 != 0 {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "operation status parent must not be writable by group or other",
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_local_operation_status_parent(_parent: &Path) -> Result<(), ProbeUpgraderRunError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn reject_local_operation_status_symlink(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    match fs::symlink_metadata(status_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "operation status path must not be a symlink",
+            ))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
+    }
+}
+
+#[cfg(not(unix))]
+fn reject_local_operation_status_symlink(_status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_local_operation_status_for_append(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(status_path)
+        .map(|_| ())
+        .map_err(ProbeUpgraderRunError::Io)
+}
+
+#[cfg(not(unix))]
+fn open_local_operation_status_for_append(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(status_path)
+        .map(|_| ())
+        .map_err(ProbeUpgraderRunError::Io)
+}
+
+#[cfg(unix)]
+fn write_local_operation_status_contents(
+    status_path: &Path,
+    contents: &str,
+) -> Result<(), ProbeUpgraderRunError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    prepare_local_operation_status_path(status_path)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(status_path)
+        .map_err(ProbeUpgraderRunError::Io)?;
+    file.write_all(contents.as_bytes())
+        .map_err(ProbeUpgraderRunError::Io)
+}
+
+#[cfg(not(unix))]
+fn write_local_operation_status_contents(
+    status_path: &Path,
+    contents: &str,
+) -> Result<(), ProbeUpgraderRunError> {
+    prepare_local_operation_status_path(status_path)?;
+    fs::write(status_path, contents).map_err(ProbeUpgraderRunError::Io)
 }
 
 fn set_operation_status_permissions(status_path: &Path) -> Result<(), ProbeUpgraderRunError> {
@@ -2150,8 +2271,56 @@ mod tests {
     }
 
     #[test]
+    fn internal_probe_uninstaller_rejects_bootstrap_hub_url_mismatch_before_token_validation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://attacker.example\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .expect("write bootstrap config");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let error = run_probe_uninstaller_with_systemd_runner_and_install_metadata(
+            ProbeUninstallerRunInput {
+                bootstrap_config_path,
+            },
+            &[
+                "operation_id = \"42\"",
+                "token = \"probe-operation-token\"",
+                "",
+            ]
+            .join("\n"),
+            &mut transport,
+            &mut systemd,
+            &install_metadata,
+        )
+        .expect_err("Hub URL mismatch is rejected before network calls");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidConfig("Hub URL does not match trusted install metadata")
+        ));
+        assert_eq!(transport.url, "");
+        assert_eq!(transport.status_url, "");
+        assert!(transport.downloads.is_empty());
+    }
+
+    #[test]
     fn trusted_install_metadata_rejects_unsafe_service_user_for_sudoers() {
         let contents = [
+            "hub_url = \"https://hub.example\"",
             "install_path = \"/usr/local/bin/enoki-probe\"",
             "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
             "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
@@ -2168,6 +2337,28 @@ mod tests {
         assert!(matches!(
             error,
             ProbeUpgraderRunError::InvalidInstallMetadata("service user is not safe for sudoers")
+        ));
+    }
+
+    #[test]
+    fn trusted_install_metadata_rejects_root_paths() {
+        let contents = [
+            "hub_url = \"https://hub.example\"",
+            "install_path = \"/\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "service_name = \"enoki-probe\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "",
+        ]
+        .join("\n");
+
+        let error =
+            parse_trusted_probe_install_metadata(&contents).expect_err("root path is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata("paths must not be filesystem root")
         ));
     }
 
@@ -2298,6 +2489,137 @@ mod tests {
     }
 
     #[test]
+    fn internal_probe_upgrader_rejects_unsafe_hub_url_before_token_validation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"http://hub.example\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .expect("write bootstrap config");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
+            ProbeUpgraderRunInput {
+                bootstrap_config_path,
+            },
+            &operation_stdin(),
+            &mut transport,
+            &mut systemd,
+            &install_metadata,
+        )
+        .expect_err("unsafe Hub URL is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidConfig("invalid Hub URL")
+        ));
+        assert_eq!(transport.url, "");
+        assert!(transport.downloads.is_empty());
+    }
+
+    #[test]
+    fn internal_probe_upgrader_rejects_bootstrap_hub_url_mismatch_before_token_validation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://attacker.example\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .expect("write bootstrap config");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
+            ProbeUpgraderRunInput {
+                bootstrap_config_path,
+            },
+            &operation_stdin(),
+            &mut transport,
+            &mut systemd,
+            &install_metadata,
+        )
+        .expect_err("Hub URL mismatch is rejected before network calls");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidConfig("Hub URL does not match trusted install metadata")
+        ));
+        assert_eq!(transport.url, "");
+        assert_eq!(transport.status_url, "");
+        assert!(transport.downloads.is_empty());
+    }
+
+    #[test]
+    fn internal_probe_upgrader_allows_localhost_http_hub_for_development() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let install_metadata = trusted_install_metadata_for_hub(
+            "http://127.0.0.1:8787/base/",
+            &install_path,
+            &status_path,
+            assets_public_key_sha256(),
+        );
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"http://127.0.0.1:8787/base/\"".to_string(),
+                "probe_id = \"probe_01\"".to_string(),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .expect("write bootstrap config");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
+            ProbeUpgraderRunInput {
+                bootstrap_config_path,
+            },
+            &operation_stdin(),
+            &mut transport,
+            &mut systemd,
+            &install_metadata,
+        )
+        .expect("missing assets are reported as operation failure");
+
+        assert_eq!(
+            transport.url,
+            "http://127.0.0.1:8787/base/api/probe/operations/42/token/validate",
+        );
+        assert_eq!(
+            transport.downloads,
+            vec!["http://127.0.0.1:8787/base/api/probe/assets/manifest.json"],
+        );
+        assert_eq!(result.error_code.as_deref(), Some("asset_missing"));
+    }
+
+    #[test]
     fn formats_probe_upgrader_running_result_for_probe_runtime() {
         let result = ProbeUpgraderResult {
             error_code: None,
@@ -2322,7 +2644,8 @@ mod tests {
         let status_path = state_dir.join("probe-operation-status.toml");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         let assets = signed_assets("0.2.0", "new probe", None);
-        let install_metadata = trusted_install_metadata(
+        let install_metadata = trusted_install_metadata_for_hub(
+            "https://hub.example/base",
             &install_path,
             &status_path,
             assets.public_key_sha256.clone(),
@@ -2741,6 +3064,58 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_operation_status_preflight_rejects_existing_status_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        fs::create_dir_all(status_path.parent().expect("status dir")).expect("status dir");
+        let target_path = temp.path().join("attacker-target.toml");
+        fs::write(&target_path, "target").expect("target");
+        symlink(&target_path, &status_path).expect("status symlink");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+
+        let error = preflight_local_operation_status_writable(&install_metadata)
+            .expect_err("status symlink is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "operation status path must not be a symlink"
+            )
+        ));
+        assert_eq!(fs::read_to_string(target_path).expect("target"), "target");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_operation_status_preflight_rejects_group_writable_status_parent() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("bin/enoki-probe");
+        let status_dir = temp.path().join("state");
+        let status_path = status_dir.join("probe-operation-status.toml");
+        fs::create_dir_all(&status_dir).expect("status dir");
+        fs::set_permissions(&status_dir, fs::Permissions::from_mode(0o775))
+            .expect("status dir perms");
+        let install_metadata =
+            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
+
+        let error = preflight_local_operation_status_writable(&install_metadata)
+            .expect_err("writable status parent is rejected");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "operation status parent must not be writable by group or other"
+            )
+        ));
+        assert!(!status_path.exists());
+    }
+
     #[test]
     fn internal_probe_upgrader_rejects_bootstrap_privileged_field_mismatch() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -2777,7 +3152,7 @@ mod tests {
         };
         let mut systemd = RecordingSystemdRunner::default();
 
-        let result = run_probe_upgrader_with_systemd_runner_and_install_metadata(
+        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
             ProbeUpgraderRunInput {
                 bootstrap_config_path,
             },
@@ -2786,15 +3161,16 @@ mod tests {
             &mut systemd,
             &install_metadata,
         )
-        .expect("mismatch is reported as operation failure");
+        .expect_err("mismatch is rejected before network calls");
 
-        assert_eq!(result.error_code.as_deref(), Some("probe_upgrader_failed"));
-        assert_eq!(
-            result.message.as_deref(),
-            Some(
-                "invalid Probe bootstrap config: install path does not match trusted install metadata"
-            ),
-        );
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidConfig(
+                "install path does not match trusted install metadata"
+            )
+        ));
+        assert_eq!(transport.url, "");
+        assert!(transport.downloads.is_empty());
         assert_eq!(
             fs::read_to_string(&install_path).expect("binary"),
             "old probe"
@@ -2973,7 +3349,22 @@ mod tests {
         operation_status_path: &Path,
         probe_asset_public_key_sha256: String,
     ) -> TrustedProbeInstallMetadata {
+        trusted_install_metadata_for_hub(
+            "https://hub.example",
+            install_path,
+            operation_status_path,
+            probe_asset_public_key_sha256,
+        )
+    }
+
+    fn trusted_install_metadata_for_hub(
+        hub_url: &str,
+        install_path: &Path,
+        operation_status_path: &Path,
+        probe_asset_public_key_sha256: String,
+    ) -> TrustedProbeInstallMetadata {
         TrustedProbeInstallMetadata {
+            hub_url: hub_url::normalized_base(hub_url).expect("valid test Hub URL"),
             install_path: install_path.to_path_buf(),
             operation_status_path: operation_status_path.to_path_buf(),
             probe_asset_public_key_sha256,

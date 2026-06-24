@@ -20,10 +20,29 @@ describe("Hub Owner authentication configuration", () => {
     ).toThrow("OWNER_PASSWORD");
   });
 
-  it("allows explicit no-password Web UI mode in Docker mode", () => {
+  it("rejects no-password Web UI mode in production unless insecure mode is explicitly allowed", () => {
+    expect(() =>
+      createHubAppFromEnvironment({
+        ENOKI_WEB_UI_NO_PASSWORD: "true",
+        NODE_ENV: "production",
+      }),
+    ).toThrow("ENOKI_ALLOW_INSECURE_NO_PASSWORD");
+  });
+
+  it("rejects no-password Web UI mode in Docker mode unless insecure mode is explicitly allowed", () => {
+    expect(() =>
+      createHubAppFromEnvironment({
+        ENOKI_DEPLOYMENT: "docker",
+        ENOKI_WEB_UI_NO_PASSWORD: "true",
+      }),
+    ).toThrow("ENOKI_ALLOW_INSECURE_NO_PASSWORD");
+  });
+
+  it("allows explicitly insecure no-password Web UI mode in Docker mode", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const app = createHubAppFromEnvironment({
+      ENOKI_ALLOW_INSECURE_NO_PASSWORD: "true",
       ENOKI_DEPLOYMENT: "docker",
       ENOKI_WEB_UI_NO_PASSWORD: "true",
     });

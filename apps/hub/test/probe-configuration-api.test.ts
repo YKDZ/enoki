@@ -290,6 +290,35 @@ describe("Probe Configuration API", () => {
     database.close();
   });
 
+  it("returns a JSON error for malformed global Probe Configuration JSON", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+
+    const response = await app.request("/api/web/probe-configuration", {
+      body: "{",
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerSession,
+      },
+      method: "PUT",
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_json",
+    });
+
+    database.close();
+  });
+
   it("does not let Owner Probe Configuration inject privileged runtime commands or policy", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -403,6 +432,47 @@ describe("Probe Configuration API", () => {
     );
     expect(probeConfiguration.version).toBe(override.configuration.version);
     expectNoPrivilegedRuntimeInjection(probeConfiguration);
+
+    database.close();
+  });
+
+  it("returns a JSON error for malformed Host Probe Configuration JSON", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken);
+    const hostsResponse = await app.request("/api/web/hosts", {
+      headers: {
+        cookie: ownerSession,
+      },
+    });
+    const hostId = ((await hostsResponse.json()) as { hosts: { id: number }[] })
+      .hosts[0]?.id;
+
+    const response = await app.request(
+      `/api/web/hosts/${hostId}/probe-configuration`,
+      {
+        body: "{",
+        headers: {
+          "content-type": "application/json",
+          cookie: ownerSession,
+        },
+        method: "PUT",
+      },
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_json",
+    });
 
     database.close();
   });

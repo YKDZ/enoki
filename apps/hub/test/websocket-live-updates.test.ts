@@ -224,11 +224,12 @@ async function sendReport(
           : [],
     }),
   ).finish();
-  const response = await fetch(`${baseUrl}/api/probe/report`, {
+  const reportUrl = `${baseUrl}/api/probe/report`;
+  const response = await fetch(reportUrl, {
     body,
     headers: signedProbeHeaders({
       body,
-      pathAndQuery: "/api/probe/report",
+      pathAndQuery: reportUrl,
       privateKeyPem: registration.privateKeyPem,
       probeId: registration.probeId,
     }),

@@ -47,7 +47,7 @@ export function signedProbeHeaders(input: {
   const nonce = input.nonce ?? randomHex(16);
   const payload = [
     (input.method ?? "POST").toUpperCase(),
-    input.pathAndQuery,
+    canonicalOriginPathAndQuery(input.pathAndQuery),
     timestampMs,
     nonce,
     bodySha256,
@@ -123,4 +123,10 @@ export function signedProbeRequest(
 
 function randomHex(byteCount: number) {
   return randomBytes(byteCount).toString("hex");
+}
+
+function canonicalOriginPathAndQuery(pathOrUrl: string) {
+  const url = new URL(pathOrUrl, "http://localhost");
+
+  return `${url.protocol}//${url.host}${url.pathname}${url.search}`;
 }

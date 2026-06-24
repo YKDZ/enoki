@@ -76,6 +76,7 @@ describe("Probe systemd installer", () => {
       readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
     ).resolves.toBe(
       [
+        'hub_url = "https://hub.example"',
         'install_path = "/usr/local/bin/enoki-probe"',
         'state_dir = "/var/lib/enoki-probe"',
         'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
@@ -97,7 +98,12 @@ describe("Probe systemd installer", () => {
     );
     expect(serviceFile).toContain("User=enoki-probe");
     expect(serviceFile).toContain("Group=enoki-probe");
+    expect(serviceFile).toContain("ProtectKernelTunables=true");
+    expect(serviceFile).toContain("ProtectControlGroups=true");
+    expect(serviceFile).toContain("LockPersonality=true");
     expect(serviceFile).not.toContain("NoNewPrivileges=true");
+    expect(serviceFile).not.toContain("RestrictSUIDSGID=true");
+    expect(serviceFile).not.toContain("CapabilityBoundingSet=");
     await expect(
       readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
     ).resolves.toBe(
@@ -143,6 +149,91 @@ describe("Probe systemd installer", () => {
     await expect(
       readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
     ).resolves.toContain("restart enoki-probe.service");
+  });
+
+  it("rejects install settings that could inject systemd or sudoers directives before writing privileged files", async () => {
+    const root = await createTempRoot("enoki-install-invalid-settings-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_CONFIG_PATH: "/etc/enoki/probe bootstrap.toml",
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SERVICE_USER: "enoki-probe\nroot ALL=(root) NOPASSWD: ALL",
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("ENOKI_SERVICE_USER");
+    await expect(
+      readFile(
+        path.join(root, "etc/systemd/system/enoki-probe.service"),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects explicitly empty install settings instead of falling back to defaults", async () => {
+    const root = await createTempRoot("enoki-install-empty-settings-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_INSTALL_PATH: "",
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("ENOKI_INSTALL_PATH is required");
+    await expect(
+      readFile(
+        path.join(root, "etc/systemd/system/enoki-probe.service"),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects install paths with spaces before writing privileged files", async () => {
+    const root = await createTempRoot("enoki-install-path-space-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_INSTALL_PATH: "/opt/enoki probe/bin/enoki-probe",
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("ENOKI_INSTALL_PATH");
+    await expect(
+      readFile(
+        path.join(root, "etc/systemd/system/enoki-probe.service"),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("reinstalls as an in-place update when the existing Probe belongs to the same Hub", async () => {
@@ -637,6 +728,27 @@ describe("Probe systemd installer", () => {
       "Probe release archive did not contain an enoki-probe binary",
     );
   });
+
+  it.each(["http://localhost.evil", "http://localhost@evil.example"])(
+    "rejects HTTP Hub URLs whose host is not exactly localhost: %s",
+    async (hubUrl) => {
+      const root = await createTempRoot("enoki-install-root-");
+      const assets = await createProbeAssets(root);
+      const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+      const result = await runInstaller({
+        ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+        ENOKI_HUB_URL: hubUrl,
+        ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+        ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+        ENOKI_TEST_ROOT: root,
+        PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+      });
+
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain("ENOKI_HUB_URL must use https");
+    },
+  );
 });
 
 async function createTempRoot(prefix: string) {

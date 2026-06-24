@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Hono } from "hono";
@@ -18,8 +18,16 @@ export function createProbeAssetRoutes(options: ProbeAssetRouteOptions = {}) {
   const installScriptPath = path.resolve(
     options.installScriptPath ?? defaultInstallScriptPath,
   );
+  const canServeInstallScript = isPathInsideDirectory(
+    installScriptPath,
+    assetDir,
+  );
 
   app.get("/install.sh", async (context) => {
+    if (!canServeInstallScript) {
+      return context.text("Probe installer is not available.", 404);
+    }
+
     const file = await readExistingFile(installScriptPath);
     if (!file) {
       return context.text("Probe installer is not available.", 404);
@@ -41,7 +49,7 @@ export function createProbeAssetRoutes(options: ProbeAssetRouteOptions = {}) {
     }
 
     const assetPath = path.resolve(assetDir, fileName);
-    if (!assetPath.startsWith(`${assetDir}${path.sep}`)) {
+    if (!isPathInsideDirectory(assetPath, assetDir)) {
       return context.text("Probe asset not found.", 404);
     }
 
@@ -64,9 +72,19 @@ export function createProbeAssetRoutes(options: ProbeAssetRouteOptions = {}) {
   return app;
 }
 
+function isPathInsideDirectory(filePath: string, directoryPath: string) {
+  const relativePath = path.relative(directoryPath, filePath);
+
+  return (
+    relativePath !== "" &&
+    !relativePath.startsWith("..") &&
+    !path.isAbsolute(relativePath)
+  );
+}
+
 async function readExistingFile(filePath: string) {
   try {
-    const details = await stat(filePath);
+    const details = await lstat(filePath);
     if (!details.isFile()) {
       return null;
     }

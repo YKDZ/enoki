@@ -1,9 +1,10 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
 import type { SessionResponse } from "@enoki/api-client";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { vValidator } from "@hono/valibot-validator";
 import { Hono } from "hono";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as v from "valibot";
 
@@ -32,6 +33,8 @@ export type OwnerAuth = {
 };
 
 const sessionDurationMs = 1000 * 60 * 60 * 24 * 7;
+const failedLoginWindowMs = 15 * 60 * 1000;
+const maxFailedLoginsPerWindow = 5;
 
 export function createOwnerAuth(
   config: AuthConfig,
@@ -43,6 +46,7 @@ export function createOwnerAuth(
     ...services,
   };
   const sessions = new Map<string, SessionRecord>();
+  const failedLoginsByRemoteAddress = new Map<string, number[]>();
   const routes = new Hono();
 
   if (config.noPasswordWebUi) {
@@ -63,15 +67,28 @@ export function createOwnerAuth(
       }),
       async (context) => {
         const { password } = context.req.valid("json");
+        const remoteAddress = ownerRemoteAddress(context, config);
+        const rateLimitKey = remoteAddress ?? "unknown";
 
         if (
           !config.ownerPassword ||
           !constantTimeEqual(password, config.ownerPassword)
         ) {
-          recordLoginAuditEvent(context.req.raw, authServices, "failure");
+          const failedAttempts = recordFailedLoginAttempt(
+            failedLoginsByRemoteAddress,
+            rateLimitKey,
+            authServices.now(),
+          );
+          recordLoginAuditEvent(context, authServices, "failure", config);
+          if (failedAttempts > maxFailedLoginsPerWindow) {
+            return context.json({ error: "too_many_login_attempts" }, 429);
+          }
+
           await authServices.delay(config.failureDelayMs);
           return context.json({ error: "invalid_credentials" }, 401);
         }
+
+        failedLoginsByRemoteAddress.delete(rateLimitKey);
 
         const sessionId = randomBytes(32).toString("base64url");
         sessions.set(sessionId, {
@@ -86,7 +103,7 @@ export function createOwnerAuth(
           secure: isSecureRequest(context.req.raw, config),
         });
 
-        recordLoginAuditEvent(context.req.raw, authServices, "success");
+        recordLoginAuditEvent(context, authServices, "success", config);
 
         const response = { authenticated: true } satisfies SessionResponse;
 
@@ -180,17 +197,64 @@ export function createOwnerAuth(
 }
 
 function recordLoginAuditEvent(
-  request: Request,
+  context: Context,
   services: AuthServices,
   outcome: "success" | "failure",
+  config: AuthConfig,
 ) {
+  const request = context.req.raw;
+
   services.audit?.record({
     action: "owner.login",
     actor: "owner",
     occurredAtMs: services.now(),
     outcome,
+    remoteAddress: ownerRemoteAddress(context, config) ?? undefined,
     userAgent: request.headers.get("user-agent") ?? undefined,
   });
+}
+
+function recordFailedLoginAttempt(
+  failedLoginsByRemoteAddress: Map<string, number[]>,
+  remoteAddress: string,
+  nowMs: number,
+) {
+  const windowStartMs = nowMs - failedLoginWindowMs;
+  const attempts = (
+    failedLoginsByRemoteAddress.get(remoteAddress) ?? []
+  ).filter((attemptedAtMs) => attemptedAtMs > windowStartMs);
+
+  attempts.push(nowMs);
+  failedLoginsByRemoteAddress.set(remoteAddress, attempts);
+
+  return attempts.length;
+}
+
+function ownerRemoteAddress(context: Context, config: AuthConfig) {
+  const request = context.req.raw;
+  const forwardedAddress = config.trustProxyHeaders
+    ? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+      request.headers.get("x-real-ip")?.trim() ||
+      null
+    : null;
+
+  return forwardedAddress || directRemoteAddress(context);
+}
+
+function directRemoteAddress(context: Context) {
+  try {
+    return normalizeRemoteAddress(getConnInfo(context).remote.address);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRemoteAddress(address: string | undefined) {
+  if (!address) {
+    return null;
+  }
+
+  return address.startsWith("::ffff:") ? address.slice(7) : address;
 }
 
 function isSecureRequest(request: Request, config: AuthConfig) {

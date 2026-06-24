@@ -18,6 +18,7 @@ import type {
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import { readJsonBody } from "../http/json.js";
 import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import {
   evaluateProbeUpgradeEligibility,
@@ -420,7 +421,12 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    const input = parseHostMetadata(await context.req.json());
+    const body = await readJsonBody(context.req);
+    if (!body.ok) {
+      return hostMetadataError("malformed_json");
+    }
+
+    const input = parseHostMetadata(body.value);
     if (!input) {
       return hostMetadataError("invalid_host_metadata");
     }

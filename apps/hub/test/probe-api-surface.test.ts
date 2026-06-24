@@ -62,7 +62,7 @@ describe("Probe-only API surface", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-probe-assets-"));
     tempRoots.push(root);
     const assetDir = path.join(root, "assets");
-    const installScriptPath = path.join(root, "install-probe.sh");
+    const installScriptPath = path.join(assetDir, "install-probe.sh");
     await mkdir(assetDir, { recursive: true });
     await writeFile(installScriptPath, "#!/usr/bin/env bash\necho install\n");
     await writeFile(path.join(assetDir, "manifest.json"), '{"assets":[]}');

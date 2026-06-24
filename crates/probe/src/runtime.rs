@@ -12,6 +12,7 @@ use crate::registration::{
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
     host_profile::collect_local_host_profile,
+    hub_url,
     metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
         HostProfileSnapshot, ProbeConfigurationError, ProbeConfigurationRequest,
@@ -923,7 +924,7 @@ fn post_report(
     auth: &ProbeRequestAuth<'_>,
     body: Vec<u8>,
 ) -> Result<ProbeReportResponse, ReportError> {
-    let response_body = transport.post_protobuf_with_auth(&report_url(hub_url), auth, body)?;
+    let response_body = transport.post_protobuf_with_auth(&report_url(hub_url)?, auth, body)?;
 
     ProbeReportResponse::decode(response_body.as_slice())
         .map_err(|error| ReportError::Decode(error.to_string()))
@@ -1043,7 +1044,7 @@ fn post_probe_configuration(
         probe_id: probe_id.to_string(),
     };
     let response_body =
-        transport.post_protobuf_with_auth(&config_url(hub_url), auth, request.encode_to_vec())?;
+        transport.post_protobuf_with_auth(&config_url(hub_url)?, auth, request.encode_to_vec())?;
 
     ProbeConfigurationResponse::decode(response_body.as_slice())
         .map_err(|error| ReportError::Decode(error.to_string()))
@@ -1270,12 +1271,14 @@ fn derived_reporting_batch_interval_seconds(metrics_collection_interval_seconds:
     metrics_collection_interval_seconds.saturating_mul(REPORTING_WINDOW_TICKS)
 }
 
-fn report_url(hub_url: &str) -> String {
-    format!("{}/api/probe/report", hub_url.trim_end_matches('/'))
+fn report_url(hub_url: &str) -> Result<String, ReportError> {
+    hub_url::endpoint(hub_url, "/api/probe/report")
+        .map_err(|()| ReportError::InvalidConfig("invalid Hub URL"))
 }
 
-fn config_url(hub_url: &str) -> String {
-    format!("{}/api/probe/config", hub_url.trim_end_matches('/'))
+fn config_url(hub_url: &str) -> Result<String, ReportError> {
+    hub_url::endpoint(hub_url, "/api/probe/config")
+        .map_err(|()| ReportError::InvalidConfig("invalid Hub URL"))
 }
 
 fn new_boot_id() -> String {

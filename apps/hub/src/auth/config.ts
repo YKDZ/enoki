@@ -21,6 +21,15 @@ export function createAuthConfigFromEnvironment(
   const noPasswordWebUi = readBoolean(environment.ENOKI_WEB_UI_NO_PASSWORD);
 
   if (noPasswordWebUi) {
+    if (
+      isProductionLike(environment) &&
+      !readBoolean(environment.ENOKI_ALLOW_INSECURE_NO_PASSWORD)
+    ) {
+      throw new Error(
+        "ENOKI_ALLOW_INSECURE_NO_PASSWORD=true is required to enable ENOKI_WEB_UI_NO_PASSWORD in production-like deployments.",
+      );
+    }
+
     console.warn(
       "ENOKI_WEB_UI_NO_PASSWORD is enabled. Enoki Web UI and management APIs are accessible without login.",
     );
