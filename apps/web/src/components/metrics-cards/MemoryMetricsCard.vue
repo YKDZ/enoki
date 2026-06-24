@@ -35,7 +35,7 @@ defineProps<MemoryMetricCardProps>();
     </template>
     <MemoryDetails
       v-if="data.latestMetric"
-      :inventory="data.inventory"
+      :host-profile="data.hostProfile"
       :latest-metric="data.latestMetric"
     />
     <MetricCardLoading v-else />

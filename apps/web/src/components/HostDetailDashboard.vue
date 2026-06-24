@@ -61,10 +61,10 @@ const metadataDisplayMetric = computed(
 const metadataItems = computed(() =>
   [
     metadataItem(Network, "IP", props.host.connectAddress),
-    metadataItem(Server, "主机名", inventoryOptionalText("hostname")),
-    metadataItem(Monitor, "系统", inventoryOptionalText("os")),
-    metadataItem(Info, "内核", inventoryOptionalText("kernel")),
-    metadataItem(Activity, "架构", inventoryOptionalText("architecture")),
+    metadataItem(Server, "主机名", props.host.hostProfile?.hostname),
+    metadataItem(Monitor, "系统", props.host.hostProfile?.os),
+    metadataItem(Info, "内核", props.host.hostProfile?.kernel),
+    metadataItem(Activity, "架构", props.host.hostProfile?.architecture),
     metadataCapabilityMetric.value?.uptimeSeconds === null ||
     metadataCapabilityMetric.value?.uptimeSeconds === undefined
       ? null
@@ -122,13 +122,6 @@ function optionalText(value: string | null | undefined) {
 
   const normalized = value.trim();
   return normalized && normalized !== "n/a" ? normalized : null;
-}
-
-function inventoryOptionalText(key: string) {
-  const value = props.host.inventory?.[key];
-  return value === null || value === undefined || value === ""
-    ? null
-    : String(value);
 }
 
 function statusClass(status: string) {

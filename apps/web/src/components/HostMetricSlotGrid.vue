@@ -25,8 +25,8 @@ const metricsData = computed(() => ({
   chartStartContinuityGapMs: props.chartStartContinuityGapMs,
   hostFacts: {
     cpuModel: props.host.cpuModel,
+    hostProfile: props.host.hostProfile,
     id: props.host.id,
-    inventory: props.host.inventory,
   },
   latestMetric: props.latestMetric,
   latestSample: props.latestSample,

@@ -11,7 +11,7 @@ import {
 } from "@/lib/format";
 import type { MetricSeries } from "@/lib/metrics-chart-data";
 
-import type { HostMetricSample } from "../types";
+import type { HostMetricSample, HostProfileSnapshot } from "../types";
 import MetricsChart from "./MetricsChart.vue";
 import SparklineChart from "./SparklineChart.vue";
 
@@ -23,7 +23,7 @@ const props = defineProps<{
   aggregateNetworkSeries: MetricSeries[];
   cpuCoreSeries: MetricSeries[];
   cpuModel: string | null;
-  inventory: Record<string, unknown> | null;
+  hostProfile: HostProfileSnapshot | null;
   latestSample: HostMetricSample | null;
   panel: "cpu" | "disk" | "network";
   samples: HostMetricSample[];
@@ -135,20 +135,23 @@ function boundedPercent(value: number | null | undefined) {
   return Math.min(100, Math.max(0, value ?? 0));
 }
 
-function inventoryNumber(key: string) {
-  const value = Number(props.inventory?.[key] ?? 0);
-
-  return Number.isFinite(value) && value > 0 ? value : null;
+function positiveNumber(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null;
 }
 
-function inventoryText(key: string, formatter?: (value: number) => string) {
-  const value = inventoryNumber(key);
+function hostProfileText(
+  value: number | null | undefined,
+  formatter?: (value: number) => string,
+) {
+  const normalized = positiveNumber(value);
 
-  if (value === null) {
+  if (normalized === null) {
     return "暂无";
   }
 
-  return formatter ? formatter(value) : String(value);
+  return formatter ? formatter(normalized) : String(normalized);
 }
 
 function frequencyText(value: number) {
@@ -220,7 +223,7 @@ function formatMilliseconds(value: number | null) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("processCount") }}
+          {{ hostProfileText(hostProfile?.processCount) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -228,7 +231,7 @@ function formatMilliseconds(value: number | null) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("threadCount") }}
+          {{ hostProfileText(hostProfile?.threadCount) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -236,7 +239,7 @@ function formatMilliseconds(value: number | null) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuCacheL3Bytes", formatBytes) }}
+          {{ hostProfileText(hostProfile?.cpuCacheL3Bytes, formatBytes) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -244,7 +247,7 @@ function formatMilliseconds(value: number | null) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuBaseFrequencyMhz", frequencyText) }}
+          {{ hostProfileText(hostProfile?.cpuBaseFrequencyMhz, frequencyText) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -252,7 +255,7 @@ function formatMilliseconds(value: number | null) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuPhysicalCount") }}
+          {{ hostProfileText(hostProfile?.cpuPhysicalCount) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -260,7 +263,7 @@ function formatMilliseconds(value: number | null) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuSocketCount") }}
+          {{ hostProfileText(hostProfile?.cpuSocketCount) }}
         </p>
       </div>
     </div>

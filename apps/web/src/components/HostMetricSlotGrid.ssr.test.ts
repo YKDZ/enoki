@@ -54,18 +54,22 @@ const host: HostDetail = {
   hostProfile: {
     architecture: "x86_64",
     cpuCount: 2,
+    cpuBaseFrequencyMhz: 2_900,
+    cpuCacheL3Bytes: 8 * 1024 * 1024,
+    cpuPhysicalCount: 8,
+    cpuSocketCount: 1,
     filesystems: [],
     hostname: "managed-host-01",
     kernel: "6.8.0",
     memoryTotalBytes: 8_589_934_592,
     networkInterfaces: [],
     os: "linux",
+    processCount: 286,
     probeVersion: "0.1.0",
+    threadCount: 4255,
   },
   id: 1,
-  inventory: {
-    cpuCount: 2,
-  },
+  inventory: null,
   lastReportAtMs: 1_725_000_000_000,
   latestMetrics: null,
   memory: "8 GB",
@@ -91,6 +95,11 @@ const host: HostDetail = {
 };
 
 describe("Host metric slot grid", () => {
+  const hostProfile = host.hostProfile;
+  if (!hostProfile) {
+    throw new Error("Host fixture is missing a Host Profile.");
+  }
+
   async function renderHostMetricSlotGrid(
     inputHost: HostDetail,
     options: {
@@ -201,10 +210,12 @@ describe("Host metric slot grid", () => {
             network: { available: true },
           },
         },
-        inventory: {
-          cpuCount: 2,
-          memoryTotalBytes: 100,
+        hostProfile: {
+          ...hostProfile,
+          cpuCount: 4,
+          memoryTotalBytes: 200 * 1024 * 1024,
         },
+        inventory: null,
       },
       {
         chartData: {
@@ -248,6 +259,9 @@ describe("Host metric slot grid", () => {
     expect(html).toContain('data-smoke-chart-title="内存"');
     expect(html).toContain('data-smoke-chart-title="占用率"');
     expect(html).toContain('data-smoke-point-count="1"');
+    expect(html).toContain("Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz / 4 核心");
+    expect(html).toContain("RAM 总量");
+    expect(html).toContain("200 MB");
     expect(html).toContain("eth0");
     expect(html).toContain("挂载点");
     expect(html).not.toContain("正在加载指标");

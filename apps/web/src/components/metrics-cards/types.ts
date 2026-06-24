@@ -4,6 +4,7 @@ import type {
   CollectorAvailability,
   HostDetail,
   HostMetricSample,
+  HostProfileSnapshot,
 } from "../../types";
 
 export type OfficialMetricDomain =
@@ -15,8 +16,8 @@ export type OfficialMetricDomain =
 
 export type MetricCardHostFacts = {
   cpuModel: string | null;
+  hostProfile: HostProfileSnapshot | null;
   id: number;
-  inventory: Record<string, unknown> | null;
 };
 
 export type OfficialMetricCardSourceData = {
@@ -41,7 +42,7 @@ export type MemoryMetricCardData = {
   chartData: MetricsChartData["memory"];
   chartStartContinuityGapMs: number;
   hostId: number;
-  inventory: Record<string, unknown> | null;
+  hostProfile: HostProfileSnapshot | null;
   latestMetric: HostMetricSample | HostDetail["latestMetrics"] | null;
   xAxisMaxMs: number;
   xAxisMinMs: number;

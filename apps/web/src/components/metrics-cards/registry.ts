@@ -70,8 +70,8 @@ export function officialMetricCardProps(
       return memoryMetricCardProps(capability, {
         chartData: data.chartData.memory,
         chartStartContinuityGapMs: data.chartStartContinuityGapMs,
+        hostProfile: data.hostFacts.hostProfile,
         hostId: data.hostFacts.id,
-        inventory: data.hostFacts.inventory,
         latestMetric: data.latestMetric,
         xAxisMaxMs: data.xAxisMaxMs,
         xAxisMinMs: data.xAxisMinMs,

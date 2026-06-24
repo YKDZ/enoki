@@ -7,6 +7,19 @@ import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
 
 import HostDetailPage from "./HostDetailPage.vue";
 
+const hostProfile = {
+  architecture: "x86_64",
+  cpuCount: 2,
+  cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+  filesystems: [],
+  hostname: "managed-host-01",
+  kernel: "6.8.0",
+  memoryTotalBytes: 2_147_483_648,
+  networkInterfaces: [],
+  os: "linux",
+  probeVersion: "0.1.0",
+};
+
 describe("Host detail page", () => {
   it("renders warning copy separately from technical probe error detail", async () => {
     const detail = {
@@ -35,15 +48,8 @@ describe("Host detail page", () => {
           observedIp: "203.0.113.10",
         },
         id: 1,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: "2147483648",
-          os: "linux",
-        },
+        hostProfile,
+        inventory: null,
         lastReportAtMs: 1_725_000_000_000,
         latestMetrics: null,
         memory: "2 GB",
@@ -138,6 +144,9 @@ describe("Host detail page", () => {
     expect(html).toContain("时间范围");
     expect(html).toContain("IP");
     expect(html).toContain("系统");
+    expect(html).toContain("managed-host-01");
+    expect(html).toContain("6.8.0");
+    expect(html).toContain("x86_64");
     expect(html).toContain(
       "探针未能应用最新配置，请检查探针连通性或配置下发状态。",
     );
@@ -214,15 +223,11 @@ describe("Host detail page", () => {
           observedIp: "203.0.113.10",
         },
         id: 1,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: "2147483648",
-          os: "linux",
+        hostProfile: {
+          ...hostProfile,
+          probeVersion: "0.1.14",
         },
+        inventory: null,
         lastReportAtMs: 1_725_000_000_000,
         latestMetrics: null,
         memory: "2 GB",
@@ -304,15 +309,11 @@ describe("Host detail page", () => {
           observedIp: "203.0.113.10",
         },
         id: 1,
-        inventory: {
-          architecture: "x86_64",
-          cpuCount: 2,
-          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-          hostname: "managed-host-01",
-          kernel: "6.8.0",
-          memoryTotalBytes: "2147483648",
-          os: "linux",
+        hostProfile: {
+          ...hostProfile,
+          probeVersion: "0.1.14",
         },
+        inventory: null,
         lastReportAtMs: 1_725_000_000_000,
         latestMetrics: null,
         memory: "2 GB",

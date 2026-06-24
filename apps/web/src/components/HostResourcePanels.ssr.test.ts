@@ -30,7 +30,7 @@ const cpuSample: HostMetricSample = {
 };
 
 describe("Host resource panels", () => {
-  it("renders CPU inventory details below the core charts", async () => {
+  it("renders CPU Host Profile details below the core charts", async () => {
     const html = await renderToString(
       createSSRApp(HostResourcePanels, {
         aggregateDiskIoSeries: [],
@@ -46,12 +46,21 @@ describe("Host resource panels", () => {
           },
         ],
         cpuModel: "AMD Ryzen 7 4800H with Radeon Graphics",
-        inventory: {
+        hostProfile: {
+          architecture: "x86_64",
+          cpuCount: 8,
           cpuBaseFrequencyMhz: 2_900,
           cpuCacheL3Bytes: 8 * 1024 * 1024,
           cpuPhysicalCount: 8,
           cpuSocketCount: 1,
+          filesystems: [],
+          hostname: "managed-host-01",
+          kernel: "6.8.0",
+          memoryTotalBytes: 8_589_934_592,
+          networkInterfaces: [],
+          os: "linux",
           processCount: 286,
+          probeVersion: "0.1.0",
           threadCount: 4255,
         },
         latestSample: cpuSample,
@@ -119,7 +128,7 @@ describe("Host resource panels", () => {
         aggregateNetworkSeries: [],
         cpuCoreSeries: [],
         cpuModel: null,
-        inventory: null,
+        hostProfile: null,
         latestSample: nextSample,
         panel: "network",
         samples: [sample, nextSample],

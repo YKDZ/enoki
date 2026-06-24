@@ -2,17 +2,23 @@
 import CpuCoreGrid from "../CpuCoreGrid.vue";
 import CpuDetails from "../CpuDetails.vue";
 import MetricPanel from "../MetricPanel.vue";
-import { inventoryText, panelStorageKey } from "./card-utils";
+import { panelStorageKey } from "./card-utils";
 import MetricCardLoading from "./MetricCardLoading.vue";
 import type { CpuMetricCardProps } from "./types";
 
 defineProps<CpuMetricCardProps>();
+
+function optionalProfileText(value: string | number | null | undefined) {
+  return value === null || value === undefined || value === ""
+    ? "暂无"
+    : String(value);
+}
 </script>
 
 <template>
   <MetricPanel
     title="CPU"
-    :description="`${data.hostFacts.cpuModel || '暂无型号'} / ${inventoryText(data.hostFacts.inventory, 'cpuCount')} 核心`"
+    :description="`${data.hostFacts.cpuModel || '暂无型号'} / ${optionalProfileText(data.hostFacts.hostProfile?.cpuCount)} 核心`"
     size="xl"
     height="tall"
     :storage-key="panelStorageKey(data.hostFacts.id, 'cpu')"
@@ -28,7 +34,7 @@ defineProps<CpuMetricCardProps>();
     <CpuDetails
       v-if="data.latestSample"
       :cpu-model="data.hostFacts.cpuModel"
-      :inventory="data.hostFacts.inventory"
+      :host-profile="data.hostFacts.hostProfile"
       :latest-sample="data.latestSample"
     />
     <MetricCardLoading v-else />

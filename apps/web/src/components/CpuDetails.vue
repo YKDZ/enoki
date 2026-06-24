@@ -3,11 +3,11 @@ import { computed } from "vue";
 
 import { formatBytes, formatPercent } from "@/lib/format";
 
-import type { HostMetricSample } from "../types";
+import type { HostMetricSample, HostProfileSnapshot } from "../types";
 
 const props = defineProps<{
   cpuModel: string | null;
-  inventory: Record<string, unknown> | null;
+  hostProfile: HostProfileSnapshot | null;
   latestSample: HostMetricSample | null;
 }>();
 
@@ -19,20 +19,23 @@ const cpuBreakdownRows = computed<Array<[string, number | null]>>(() => [
   ["空闲", props.latestSample?.cpuIdlePercent ?? null],
 ]);
 
-function inventoryNumber(key: string) {
-  const value = Number(props.inventory?.[key] ?? 0);
-
-  return Number.isFinite(value) && value > 0 ? value : null;
+function positiveNumber(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : null;
 }
 
-function inventoryText(key: string, formatter?: (value: number) => string) {
-  const value = inventoryNumber(key);
+function hostProfileText(
+  value: number | null | undefined,
+  formatter?: (value: number) => string,
+) {
+  const normalized = positiveNumber(value);
 
-  if (value === null) {
+  if (normalized === null) {
     return "暂无";
   }
 
-  return formatter ? formatter(value) : String(value);
+  return formatter ? formatter(normalized) : String(normalized);
 }
 
 function frequencyText(value: number) {
@@ -71,7 +74,7 @@ function frequencyText(value: number) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("processCount") }}
+          {{ hostProfileText(hostProfile?.processCount) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -79,7 +82,7 @@ function frequencyText(value: number) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("threadCount") }}
+          {{ hostProfileText(hostProfile?.threadCount) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -87,7 +90,7 @@ function frequencyText(value: number) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuCacheL3Bytes", formatBytes) }}
+          {{ hostProfileText(hostProfile?.cpuCacheL3Bytes, formatBytes) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -95,7 +98,7 @@ function frequencyText(value: number) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuBaseFrequencyMhz", frequencyText) }}
+          {{ hostProfileText(hostProfile?.cpuBaseFrequencyMhz, frequencyText) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -103,7 +106,7 @@ function frequencyText(value: number) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuPhysicalCount") }}
+          {{ hostProfileText(hostProfile?.cpuPhysicalCount) }}
         </p>
       </div>
       <div class="min-w-0">
@@ -111,7 +114,7 @@ function frequencyText(value: number) {
         <p
           class="text-foreground mt-1 min-w-0 font-medium wrap-break-word whitespace-normal"
         >
-          {{ inventoryText("cpuSocketCount") }}
+          {{ hostProfileText(hostProfile?.cpuSocketCount) }}
         </p>
       </div>
     </div>
