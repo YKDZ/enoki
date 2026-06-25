@@ -590,6 +590,40 @@ describe("Host detail API", () => {
       },
     });
 
+    const tenMinuteHistoryResponse = await app.request(
+      `/api/web/hosts/${hostId}/metrics?window=10m`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+      },
+    );
+
+    expect(tenMinuteHistoryResponse.status).toBe(200);
+    await expect(tenMinuteHistoryResponse.json()).resolves.toEqual({
+      metrics: {
+        samples: [expect.objectContaining({ sequence: 1 })],
+        window: "10m",
+      },
+    });
+
+    const threeDayHistoryResponse = await app.request(
+      `/api/web/hosts/${hostId}/metrics?window=3d`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+      },
+    );
+
+    expect(threeDayHistoryResponse.status).toBe(200);
+    await expect(threeDayHistoryResponse.json()).resolves.toEqual({
+      metrics: {
+        samples: [expect.objectContaining({ sequence: 1 })],
+        window: "3d",
+      },
+    });
+
     const invalidWindowResponse = await app.request(
       `/api/web/hosts/${hostId}/metrics?window=2h`,
       {

@@ -61,9 +61,11 @@ describe("Host detail data", () => {
                   ],
             window: path.endsWith("window=6h")
               ? "6h"
-              : path.endsWith("window=1m")
-                ? "1m"
-                : "1h",
+              : path.endsWith("window=10m")
+                ? "10m"
+                : path.endsWith("window=1m")
+                  ? "1m"
+                  : "1h",
           },
         } as T;
       },
@@ -92,6 +94,16 @@ describe("Host detail data", () => {
     expect(detail.chartRange.value).toEqual({
       maxMs: 1_725_000_050_000,
       minMs: 1_725_000_050_000 - 6 * 60 * 60 * 1000,
+    });
+
+    await detail.switchWindow("10m");
+
+    expect(requestedPaths.at(-1)).toBe("/api/web/hosts/1/metrics?window=10m");
+    expect(detail.selectedWindow.value).toBe("10m");
+    expect(detail.samples.value).toHaveLength(1);
+    expect(detail.chartRange.value).toEqual({
+      maxMs: 1_725_000_000_000,
+      minMs: 1_725_000_000_000 - 10 * 60 * 1000,
     });
 
     await detail.switchWindow("1m");

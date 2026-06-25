@@ -36,9 +36,11 @@ type ProbeUpgradeStatus = HostDetail["probeUpgradeStatus"];
 
 const metricsWindowDurationsMs: Record<MetricsWindow, number> = {
   "1m": 60 * 1000,
+  "10m": 10 * 60 * 1000,
   "1h": 60 * 60 * 1000,
   "6h": 6 * 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
+  "3d": 3 * 24 * 60 * 60 * 1000,
   "7d": 7 * 24 * 60 * 60 * 1000,
 };
 

@@ -3,7 +3,15 @@ import { defineStore } from "pinia";
 import type { MetricsWindow } from "../types";
 
 const defaultWindow: MetricsWindow = "1h";
-const metricsWindows = new Set<MetricsWindow>(["1m", "1h", "6h", "24h", "7d"]);
+const metricsWindows = new Set<MetricsWindow>([
+  "1m",
+  "10m",
+  "1h",
+  "6h",
+  "24h",
+  "3d",
+  "7d",
+]);
 
 export type HostMetricsWindowPreferences = {
   selectedWindowForHost: (hostId: number) => MetricsWindow;

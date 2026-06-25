@@ -14,10 +14,10 @@ describe("Host metrics window preferences", () => {
     expect(store.selectedWindowForHost(1)).toBe("1h");
     expect(store.selectedWindowForHost(2)).toBe("1h");
 
-    store.setSelectedWindowForHost(1, "1m");
-    store.setSelectedWindowForHost(2, "7d");
+    store.setSelectedWindowForHost(1, "10m");
+    store.setSelectedWindowForHost(2, "3d");
 
-    expect(store.selectedWindowForHost(1)).toBe("1m");
-    expect(store.selectedWindowForHost(2)).toBe("7d");
+    expect(store.selectedWindowForHost(1)).toBe("10m");
+    expect(store.selectedWindowForHost(2)).toBe("3d");
   });
 });

@@ -141,7 +141,7 @@ export type HostMetricSample = {
   uptimeSeconds: number | null;
 };
 
-export type MetricsWindow = "1m" | "1h" | "6h" | "24h" | "7d";
+export type MetricsWindow = "1m" | "10m" | "1h" | "6h" | "24h" | "3d" | "7d";
 
 export type ProbeUpgradeEligibility = {
   currentProbeAssetSetVersion: string | null;

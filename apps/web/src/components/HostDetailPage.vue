@@ -68,6 +68,10 @@ const windowOptions = [
     value: "1m",
   },
   {
+    label: "10 分钟",
+    value: "10m",
+  },
+  {
     label: "1 小时",
     value: "1h",
   },
@@ -78,6 +82,10 @@ const windowOptions = [
   {
     label: "24 小时",
     value: "24h",
+  },
+  {
+    label: "3 天",
+    value: "3d",
   },
   {
     label: "7 天",
