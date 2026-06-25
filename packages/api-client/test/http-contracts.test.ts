@@ -23,11 +23,9 @@ describe("HTTP API contracts", () => {
       },
       collectorCapabilities: {
         official: {
-          cpu: {
-            available: true,
-          },
-          hostProfile: {
-            available: true,
+          diskHealth: {
+            diagnostic: "",
+            status: 1,
           },
         },
       },

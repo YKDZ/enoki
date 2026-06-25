@@ -1,32 +1,45 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fs,
+    error::Error,
+    fmt, fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicI8, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicI32, Ordering},
+    },
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
+use crate::local_privilege_boundary::{
+    AutoLocalPrivilegeBoundaryProcessRunner, CollectorHelperExposureEnvironment,
+    CollectorHelperProfile, DISK_HEALTH_SMARTCTL_HELPER_PROFILE,
+    LocalCollectorHelperExposureEnvironment, LocalPrivilegeBoundaryRunner,
+    PrivilegedCollectorHelper, PrivilegedCollectorHelperError, PrivilegedCollectorHelperId,
+    PrivilegedCollectorHelperRunner, ProbeLocalPrivilegeBoundary, disk_health_smartctl_path,
+};
 use crate::metrics::{
     CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
     filesystem_capacity,
 };
-use crate::privileged_runtime::{
-    AutoPrivilegedRuntimeProcessRunner, CollectorRuntimeProfile,
-    DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE, LocalPrivilegedRuntimeRunner, PrivilegedCollector,
-    PrivilegedCollectorId, PrivilegedCollectorRuntime, PrivilegedRuntimeRunner,
+use crate::protocol::enoki::v1::{
+    DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus, DiskHealthMetric,
+    MetricSample,
 };
-use crate::protocol::enoki::v1::{DiskHealthMetric, MetricSample};
 
-const DISK_HEALTH_AVAILABILITY_UNKNOWN: i8 = -1;
-const DISK_HEALTH_AVAILABILITY_UNAVAILABLE: i8 = 0;
-const DISK_HEALTH_AVAILABILITY_AVAILABLE: i8 = 1;
+const DISK_HEALTH_STATUS_UNKNOWN: i32 = -1;
 pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::DiskHealth, CollectorCadence::Every12Ticks);
 
-static LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY: AtomicI8 =
-    AtomicI8::new(DISK_HEALTH_AVAILABILITY_UNKNOWN);
+static LAST_DISK_HEALTH_COLLECTOR_STATUS: AtomicI32 = AtomicI32::new(DISK_HEALTH_STATUS_UNKNOWN);
+static LAST_DISK_HEALTH_COLLECTOR_DIAGNOSTIC: Mutex<String> = Mutex::new(String::new());
+
+thread_local! {
+    static THREAD_DISK_HEALTH_COLLECTOR_CAPABILITY: RefCell<Option<DiskHealthCollectorCapability>> =
+        const { RefCell::new(None) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiskHealthAvailability {
@@ -46,19 +59,49 @@ impl DiskHealthAvailability {
 }
 
 pub fn last_disk_health_collector_availability() -> Option<DiskHealthAvailability> {
-    match LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY.load(Ordering::Relaxed) {
-        DISK_HEALTH_AVAILABILITY_AVAILABLE => Some(DiskHealthAvailability::Available),
-        DISK_HEALTH_AVAILABILITY_UNAVAILABLE => Some(DiskHealthAvailability::Unavailable),
-        _ => None,
+    match last_disk_health_collector_capability().map(|capability| capability.status()) {
+        Some(DiskHealthCollectorCapabilityStatus::Available) => {
+            Some(DiskHealthAvailability::Available)
+        }
+        Some(_) => Some(DiskHealthAvailability::Unavailable),
+        None => None,
     }
 }
 
-fn record_disk_health_collector_availability(availability: DiskHealthAvailability) {
-    let value = match availability {
-        DiskHealthAvailability::Available => DISK_HEALTH_AVAILABILITY_AVAILABLE,
-        DiskHealthAvailability::Unavailable => DISK_HEALTH_AVAILABILITY_UNAVAILABLE,
+pub fn last_disk_health_collector_capability() -> Option<DiskHealthCollectorCapability> {
+    if let Some(capability) =
+        THREAD_DISK_HEALTH_COLLECTOR_CAPABILITY.with(|capability| capability.borrow().clone())
+    {
+        return Some(capability);
+    }
+
+    let status = LAST_DISK_HEALTH_COLLECTOR_STATUS.load(Ordering::Relaxed);
+    if status == DISK_HEALTH_STATUS_UNKNOWN {
+        return None;
+    }
+
+    Some(DiskHealthCollectorCapability {
+        status,
+        diagnostic: LAST_DISK_HEALTH_COLLECTOR_DIAGNOSTIC
+            .lock()
+            .map(|diagnostic| diagnostic.clone())
+            .unwrap_or_default(),
+    })
+}
+
+fn record_disk_health_collector_capability(collection: &DiskHealthCollection) {
+    let capability = DiskHealthCollectorCapability {
+        status: collection.status as i32,
+        diagnostic: collection.diagnostic.clone(),
     };
-    LAST_DISK_HEALTH_COLLECTOR_AVAILABILITY.store(value, Ordering::Relaxed);
+
+    THREAD_DISK_HEALTH_COLLECTOR_CAPABILITY.with(|thread_capability| {
+        *thread_capability.borrow_mut() = Some(capability);
+    });
+    LAST_DISK_HEALTH_COLLECTOR_STATUS.store(collection.status as i32, Ordering::Relaxed);
+    if let Ok(mut diagnostic) = LAST_DISK_HEALTH_COLLECTOR_DIAGNOSTIC.lock() {
+        *diagnostic = collection.diagnostic.clone();
+    }
 }
 
 pub fn collect_disk_health_metrics_from_smartctl_json(
@@ -96,39 +139,87 @@ pub fn collect_disk_health_metrics_from_smartctl_json(
     }))
 }
 
-pub fn collect_disk_health_metrics_with_smartctl() -> Result<Vec<DiskHealthMetric>, CollectorError>
-{
-    let scan_output = Command::new("smartctl")
+pub fn collect_disk_health_metrics_with_smartctl()
+-> Result<Vec<DiskHealthMetric>, DiskHealthCollectionError> {
+    let environment = LocalCollectorHelperExposureEnvironment;
+    let Some(smartctl_path) = disk_health_smartctl_path(&environment) else {
+        return Err(DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::MissingSmartctl,
+            "smartctl is not installed",
+        ));
+    };
+
+    collect_disk_health_metrics_with_smartctl_at(&smartctl_path)
+}
+
+pub fn collect_disk_health_metrics_with_smartctl_at(
+    smartctl_path: &Path,
+) -> Result<Vec<DiskHealthMetric>, DiskHealthCollectionError> {
+    let scan_output = Command::new(smartctl_path)
         .args(["--scan-open", "--json"])
         .output()
-        .map_err(|error| CollectorError::new(format!("smartctl unavailable: {error}")))?;
+        .map_err(|error| {
+            DiskHealthCollectionError::new(
+                DiskHealthCollectorCapabilityStatus::MissingSmartctl,
+                format!("smartctl unavailable: {error}"),
+            )
+        })?;
     if !scan_output.status.success() {
-        return Err(CollectorError::new("smartctl scan failed"));
+        return Err(DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::ScanFailed,
+            "smartctl scan failed",
+        ));
     }
 
     let scan_json = String::from_utf8_lossy(&scan_output.stdout);
-    let devices = smartctl_scan_devices(&scan_json)
-        .map_err(|error| CollectorError::new(format!("smartctl scan output malformed: {error}")))?;
+    let devices = smartctl_scan_devices(&scan_json).map_err(|error| {
+        DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::MalformedOutput,
+            format!("smartctl scan output malformed: {error}"),
+        )
+    })?;
     let mut metrics = Vec::new();
+    let mut unsupported_count = 0;
+    let mut malformed_count = 0;
 
     for device in devices {
-        let output = Command::new("smartctl")
+        let output = Command::new(smartctl_path)
             .args(["-a", "--json", &device])
             .output()
             .map_err(|error| {
-                CollectorError::new(format!("smartctl failed for {device}: {error}"))
+                DiskHealthCollectionError::new(
+                    DiskHealthCollectorCapabilityStatus::HelperFailed,
+                    format!("smartctl failed for {device}: {error}"),
+                )
             })?;
 
         if !output.status.success() && output.stdout.is_empty() {
-            continue;
+            return Err(DiskHealthCollectionError::new(
+                DiskHealthCollectorCapabilityStatus::HelperFailed,
+                format!("smartctl failed for {device}"),
+            ));
         }
 
         let json = String::from_utf8_lossy(&output.stdout);
         match collect_disk_health_metrics_from_smartctl_json(&device, &json) {
             Ok(Some(metric)) => metrics.push(metric),
-            Ok(None) => {}
-            Err(_) => {}
+            Ok(None) => unsupported_count += 1,
+            Err(_) => malformed_count += 1,
         }
+    }
+
+    if metrics.is_empty() && malformed_count > 0 {
+        return Err(DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::MalformedOutput,
+            "smartctl device output malformed",
+        ));
+    }
+
+    if metrics.is_empty() && unsupported_count > 0 {
+        return Err(DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+            "SMART data is unsupported for scanned devices",
+        ));
     }
 
     enrich_disk_health_metrics_with_usage(&mut metrics);
@@ -158,8 +249,61 @@ pub fn format_disk_health_metrics_json(metrics: &[DiskHealthMetric]) -> String {
 }
 
 pub trait DiskHealthMetricsRunner {
-    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError>;
+    fn collect_disk_health_metrics(
+        &mut self,
+    ) -> Result<DiskHealthCollection, DiskHealthCollectionError>;
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskHealthCollection {
+    pub metrics: Vec<DiskHealthMetric>,
+    pub status: DiskHealthCollectorCapabilityStatus,
+    pub diagnostic: String,
+}
+
+impl DiskHealthCollection {
+    pub fn available(metrics: Vec<DiskHealthMetric>) -> Self {
+        Self {
+            metrics,
+            status: DiskHealthCollectorCapabilityStatus::Available,
+            diagnostic: String::new(),
+        }
+    }
+
+    pub fn unavailable(
+        status: DiskHealthCollectorCapabilityStatus,
+        diagnostic: impl Into<String>,
+    ) -> Self {
+        Self {
+            metrics: Vec::new(),
+            status,
+            diagnostic: diagnostic.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiskHealthCollectionError {
+    pub status: DiskHealthCollectorCapabilityStatus,
+    pub diagnostic: String,
+}
+
+impl DiskHealthCollectionError {
+    pub fn new(status: DiskHealthCollectorCapabilityStatus, diagnostic: impl Into<String>) -> Self {
+        Self {
+            status,
+            diagnostic: diagnostic.into(),
+        }
+    }
+}
+
+impl fmt::Display for DiskHealthCollectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.diagnostic)
+    }
+}
+
+impl Error for DiskHealthCollectionError {}
 
 pub struct DiskHealthMetricCollector<R = PrivilegedDiskHealthMetricsRunner> {
     runner: R,
@@ -186,74 +330,121 @@ where
     }
 
     fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let metrics = match self.runner.collect_disk_health_metrics() {
-            Ok(metrics) => metrics,
+        let collection = match self.runner.collect_disk_health_metrics() {
+            Ok(collection) => collection,
             Err(error) => {
-                record_disk_health_collector_availability(DiskHealthAvailability::Unavailable);
-                return Err(error);
+                let collection =
+                    DiskHealthCollection::unavailable(error.status, error.diagnostic.clone());
+                record_disk_health_collector_capability(&collection);
+                return Err(CollectorError::new(error.to_string()));
             }
         };
-        if metrics.is_empty() {
-            record_disk_health_collector_availability(DiskHealthAvailability::Unavailable);
+        record_disk_health_collector_capability(&collection);
+        if collection.metrics.is_empty() {
             return Ok(false);
         }
 
-        record_disk_health_collector_availability(DiskHealthAvailability::Available);
-        sample.disk_health = metrics;
+        sample.disk_health = collection.metrics;
         Ok(true)
     }
 }
 
-pub struct PrivilegedDiskHealthMetricsRunner<R = LocalPrivilegedRuntimeRunner> {
-    runtime: PrivilegedCollectorRuntime<R>,
+pub struct PrivilegedDiskHealthMetricsRunner<
+    R = LocalPrivilegeBoundaryRunner,
+    E = LocalCollectorHelperExposureEnvironment,
+> {
+    local_privilege_boundary: ProbeLocalPrivilegeBoundary<R>,
+    exposure_environment: E,
 }
 
 impl Default for PrivilegedDiskHealthMetricsRunner {
     fn default() -> Self {
         let probe_binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("enoki-probe"));
-        Self::new(LocalPrivilegedRuntimeRunner::new(
+        Self::new(LocalPrivilegeBoundaryRunner::new(
             probe_binary,
-            AutoPrivilegedRuntimeProcessRunner::default(),
+            AutoLocalPrivilegeBoundaryProcessRunner::default(),
         ))
     }
 }
 
 impl<R> PrivilegedDiskHealthMetricsRunner<R> {
     pub fn new(runner: R) -> Self {
+        Self::new_with_exposure_environment(runner, LocalCollectorHelperExposureEnvironment)
+    }
+}
+
+impl<R, E> PrivilegedDiskHealthMetricsRunner<R, E> {
+    pub fn new_with_exposure_environment(runner: R, exposure_environment: E) -> Self {
         Self {
-            runtime: PrivilegedCollectorRuntime::new(runner),
+            local_privilege_boundary: ProbeLocalPrivilegeBoundary::new(runner),
+            exposure_environment,
         }
     }
 }
 
-impl<R> DiskHealthMetricsRunner for PrivilegedDiskHealthMetricsRunner<R>
+impl<R, E> DiskHealthMetricsRunner for PrivilegedDiskHealthMetricsRunner<R, E>
 where
-    R: PrivilegedRuntimeRunner,
+    R: PrivilegedCollectorHelperRunner,
+    E: CollectorHelperExposureEnvironment,
 {
-    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError> {
+    fn collect_disk_health_metrics(
+        &mut self,
+    ) -> Result<DiskHealthCollection, DiskHealthCollectionError> {
+        if disk_health_smartctl_path(&self.exposure_environment).is_none() {
+            return Err(DiskHealthCollectionError::new(
+                DiskHealthCollectorCapabilityStatus::MissingSmartctl,
+                "smartctl is not installed",
+            ));
+        }
+
         let output = self
-            .runtime
-            .run(&DiskHealthSmartctlPrivilegedCollector)
-            .map_err(|error| CollectorError::new(error.to_string()))?;
+            .local_privilege_boundary
+            .run(&DiskHealthSmartctlPrivilegedCollectorHelper)
+            .map_err(disk_health_collection_error_from_helper_error)?;
 
-        parse_privileged_disk_health_output(&output.stdout)
-            .map_err(|error| CollectorError::new(error.to_string()))
+        parse_privileged_disk_health_collection_output(&output.stdout).map_err(|error| {
+            DiskHealthCollectionError::new(
+                DiskHealthCollectorCapabilityStatus::MalformedOutput,
+                format!("privileged disk health output malformed: {error}"),
+            )
+        })
     }
 }
 
-struct DiskHealthSmartctlPrivilegedCollector;
-
-impl PrivilegedCollector for DiskHealthSmartctlPrivilegedCollector {
-    fn collector_id(&self) -> PrivilegedCollectorId {
-        PrivilegedCollectorId::DiskHealthSmartctl
-    }
-
-    fn runtime_profile(&self) -> &'static CollectorRuntimeProfile {
-        &DISK_HEALTH_SMARTCTL_RUNTIME_PROFILE
+fn disk_health_collection_error_from_helper_error(
+    error: PrivilegedCollectorHelperError,
+) -> DiskHealthCollectionError {
+    match error {
+        PrivilegedCollectorHelperError::TimedOut { timeout } => DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::HelperFailed,
+            format!("privileged collector helper timed out after {timeout:?}"),
+        ),
+        PrivilegedCollectorHelperError::LocalPrivilegeBoundaryUnavailable(message) => {
+            DiskHealthCollectionError::new(
+                DiskHealthCollectorCapabilityStatus::InsufficientLocalPrivilege,
+                message,
+            )
+        }
+        PrivilegedCollectorHelperError::CollectorFailed(message) => DiskHealthCollectionError::new(
+            DiskHealthCollectorCapabilityStatus::HelperFailed,
+            message,
+        ),
     }
 }
 
-#[derive(Deserialize)]
+struct DiskHealthSmartctlPrivilegedCollectorHelper;
+
+impl PrivilegedCollectorHelper for DiskHealthSmartctlPrivilegedCollectorHelper {
+    fn helper_id(&self) -> PrivilegedCollectorHelperId {
+        PrivilegedCollectorHelperId::DiskHealthSmartctl
+    }
+
+    fn helper_profile(&self) -> &'static CollectorHelperProfile {
+        &DISK_HEALTH_SMARTCTL_HELPER_PROFILE
+    }
+}
+
+#[derive(Deserialize, Serialize)]
 struct PrivilegedDiskHealthOutput {
     device_name: String,
     #[serde(default)]
@@ -271,12 +462,87 @@ struct PrivilegedDiskHealthOutput {
     used_bytes: Option<u64>,
 }
 
-fn parse_privileged_disk_health_output(
-    contents: &str,
-) -> Result<Vec<DiskHealthMetric>, serde_json::Error> {
-    let disks: Vec<PrivilegedDiskHealthOutput> = serde_json::from_str(contents)?;
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PrivilegedDiskHealthPayload {
+    Collection(PrivilegedDiskHealthCollectionOutput),
+    LegacyMetrics(Vec<PrivilegedDiskHealthOutput>),
+}
 
-    Ok(disks
+#[derive(Deserialize)]
+struct PrivilegedDiskHealthCollectionOutput {
+    status: i32,
+    #[serde(default)]
+    diagnostic: String,
+    #[serde(default)]
+    metrics: Vec<PrivilegedDiskHealthOutput>,
+}
+
+pub fn format_disk_health_collection_json(collection: &DiskHealthCollection) -> String {
+    let metrics = collection
+        .metrics
+        .iter()
+        .map(|metric| {
+            serde_json::json!({
+                "device_name": metric.device_name,
+                "model": metric.model,
+                "serial_number": metric.serial_number,
+                "passed": metric.passed,
+                "temperature_celsius": metric.temperature_celsius,
+                "power_on_hours": metric.power_on_hours,
+                "role": metric.role,
+                "total_bytes": metric.total_bytes,
+                "usage_mount_point": metric.usage_mount_point,
+                "used_bytes": metric.used_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::json!({
+        "status": collection.status as i32,
+        "diagnostic": collection.diagnostic,
+        "metrics": metrics,
+    })
+    .to_string()
+}
+
+fn parse_privileged_disk_health_collection_output(
+    contents: &str,
+) -> Result<DiskHealthCollection, serde_json::Error> {
+    match serde_json::from_str::<PrivilegedDiskHealthPayload>(contents)? {
+        PrivilegedDiskHealthPayload::Collection(collection) => {
+            let status = DiskHealthCollectorCapabilityStatus::try_from(collection.status)
+                .unwrap_or(DiskHealthCollectorCapabilityStatus::Unspecified);
+            let metrics = disk_health_metrics_from_privileged_output(collection.metrics);
+
+            if status == DiskHealthCollectorCapabilityStatus::Available {
+                return Ok(DiskHealthCollection::available(metrics));
+            }
+
+            Ok(DiskHealthCollection::unavailable(
+                status,
+                collection.diagnostic,
+            ))
+        }
+        PrivilegedDiskHealthPayload::LegacyMetrics(disks) => {
+            let metrics = disk_health_metrics_from_privileged_output(disks);
+
+            if metrics.is_empty() {
+                return Ok(DiskHealthCollection::unavailable(
+                    DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+                    "no supported SMART data returned",
+                ));
+            }
+
+            Ok(DiskHealthCollection::available(metrics))
+        }
+    }
+}
+
+fn disk_health_metrics_from_privileged_output(
+    disks: Vec<PrivilegedDiskHealthOutput>,
+) -> Vec<DiskHealthMetric> {
+    disks
         .into_iter()
         .map(|disk| DiskHealthMetric {
             device_name: disk.device_name,
@@ -290,7 +556,7 @@ fn parse_privileged_disk_health_output(
             usage_mount_point: disk.usage_mount_point,
             used_bytes: disk.used_bytes,
         })
-        .collect())
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -780,7 +1046,7 @@ fsUsed="90"
 
     #[test]
     fn privileged_disk_health_output_preserves_usage_fields() {
-        let metrics = parse_privileged_disk_health_output(
+        let collection = parse_privileged_disk_health_collection_output(
             r#"[
   {
     "device_name": "/dev/sdc",
@@ -797,6 +1063,7 @@ fsUsed="90"
 ]"#,
         )
         .expect("privileged output parses");
+        let metrics = collection.metrics;
 
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].role, "Data");

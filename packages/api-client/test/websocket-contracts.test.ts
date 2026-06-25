@@ -59,10 +59,8 @@ describe("WebSocket contracts", () => {
     const capabilities = {
       official: {
         diskHealth: {
-          available: true,
-        },
-        hostProfile: {
-          available: true,
+          diagnostic: "",
+          status: 1,
         },
       },
     } satisfies CollectorCapabilities;
@@ -112,8 +110,9 @@ describe("WebSocket contracts", () => {
         host: {
           collectorCapabilities: {
             official: {
-              disk: {
-                available: false,
+              diskHealth: {
+                diagnostic: "SMART data is unsupported",
+                status: 6,
               },
             },
           },
@@ -132,8 +131,9 @@ describe("WebSocket contracts", () => {
       host: {
         collectorCapabilities: {
           official: {
-            disk: {
-              available: false,
+            diskHealth: {
+              diagnostic: "SMART data is unsupported",
+              status: 6,
             },
           },
         },
@@ -207,57 +207,78 @@ describe("WebSocket contracts", () => {
   });
 
   it("validates server Host Profile live update messages", () => {
-    expect(
-      parseWebSocketServerMessage({
-        hostId: 1,
-        hostProfile: {
-          architecture: "x86_64",
-          collectorCapabilities: {
-            official: {
-              cpu: {
-                available: true,
-              },
+    const parsed = parseWebSocketServerMessage({
+      hostId: 1,
+      hostProfile: {
+        architecture: "x86_64",
+        collectorCapabilities: {
+          official: {
+            diskHealth: {
+              diagnostic: "",
+              status: 1,
             },
           },
-          cpuBaseFrequencyMhz: null,
-          cpuCacheL3Bytes: null,
-          cpuCount: 4,
-          cpuModel: "AMD EPYC",
-          cpuPhysicalCount: null,
-          cpuSocketCount: null,
-          filesystems: [
-            {
-              availableBytes: 10,
-              filesystemType: "xfs",
-              mountPoint: "/data",
-              totalBytes: 20,
-            },
-          ],
-          hostname: "profile-host",
-          kernel: "6.9.0",
-          memoryTotalBytes: 34_359_738_368,
-          networkInterfaces: [
-            {
-              addresses: ["10.0.0.20"],
-              name: "eth0",
-            },
-          ],
-          os: "linux",
-          probeVersion: "0.3.0",
-          processCount: 120,
-          threadCount: null,
         },
-        type: "host_profile",
-      }),
-    ).toEqual({
+        cpuBaseFrequencyMhz: null,
+        cpuCacheL3Bytes: null,
+        cpuCount: 4,
+        cpuModel: "AMD EPYC",
+        cpuPhysicalCount: null,
+        cpuSocketCount: null,
+        filesystems: [
+          {
+            availableBytes: 10,
+            filesystemType: "xfs",
+            mountPoint: "/data",
+            totalBytes: 20,
+          },
+        ],
+        hostname: "profile-host",
+        kernel: "6.9.0",
+        memoryTotalBytes: 34_359_738_368,
+        networkInterfaces: [
+          {
+            addresses: ["10.0.0.20"],
+            name: "eth0",
+          },
+        ],
+        os: "linux",
+        probeVersion: "0.3.0",
+        processCount: 120,
+        threadCount: null,
+      },
+      type: "host_profile",
+    });
+
+    expect(parsed).toEqual({
       hostId: 1,
       hostProfile: expect.objectContaining({
+        collectorCapabilities: {
+          official: {
+            diskHealth: {
+              diagnostic: "",
+              status: 1,
+            },
+          },
+        },
         cpuCount: 4,
         hostname: "profile-host",
         probeVersion: "0.3.0",
       }),
       type: "host_profile",
     });
+    if (parsed?.type !== "host_profile") {
+      throw new Error("Expected a host profile WebSocket message.");
+    }
+    expect(
+      parsed?.hostProfile.collectorCapabilities?.official,
+    ).not.toHaveProperty("cpu");
+    expect(
+      parsed?.hostProfile.collectorCapabilities?.official,
+    ).not.toHaveProperty("disk");
+    expect(
+      parsed?.hostProfile.collectorCapabilities?.official,
+    ).not.toHaveProperty("hostProfile");
   });
 
   it("validates uptime in live detail samples", () => {

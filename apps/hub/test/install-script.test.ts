@@ -36,6 +36,11 @@ describe("Probe systemd installer", () => {
     const root = await createTempRoot("enoki-install-root-");
     const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, { assetDir: assets.dir });
+    await mkdir(path.join(root, "etc/sudoers.d"), { recursive: true });
+    await writeFile(
+      path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
+      "legacy sudoers",
+    );
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
@@ -53,7 +58,7 @@ describe("Probe systemd installer", () => {
     });
     await expect(
       readFile(path.join(root, "usr/local/bin/enoki-probe"), "utf8"),
-    ).resolves.toBe("#!/bin/sh\necho probe\n");
+    ).resolves.toContain("echo probe");
     await expect(
       readFile(path.join(root, "etc/enoki/probe-bootstrap.toml"), "utf8"),
     ).resolves.toBe(
@@ -65,7 +70,8 @@ describe("Probe systemd installer", () => {
         'install_path = "/usr/local/bin/enoki-probe"',
         'service_name = "enoki-probe"',
         'service_user = "enoki-probe"',
-        'sudoers_path = "/etc/sudoers.d/enoki-probe-upgrader"',
+        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
+        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
         `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
         'upgrader_launch = "systemd"',
         'log_level = "info"',
@@ -82,7 +88,8 @@ describe("Probe systemd installer", () => {
         'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
         'service_name = "enoki-probe"',
         'service_user = "enoki-probe"',
-        'sudoers_path = "/etc/sudoers.d/enoki-probe-upgrader"',
+        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
+        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
         `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
         "",
       ].join("\n"),
@@ -105,29 +112,64 @@ describe("Probe systemd installer", () => {
     expect(serviceFile).not.toContain("RestrictSUIDSGID=true");
     expect(serviceFile).not.toContain("CapabilityBoundingSet=");
     await expect(
-      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-operations"), "utf8"),
     ).resolves.toBe(
       [
         "# Managed by Enoki Probe installer.",
         "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap.toml",
         "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /etc/enoki/probe-bootstrap.toml",
-        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes /usr/local/bin/enoki-probe internal-privileged-collector --collector disk-health.smartctl",
         "",
       ].join("\n"),
     );
-    const sudoers = await readFile(
-      path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
+    const collectorHelperSudoers = await readFile(
+      path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
       "utf8",
     );
-    expect(sudoers).not.toContain("*");
-    expect(sudoers).not.toContain("--operation-id");
-    expect(sudoers).not.toContain("--target-probe-version");
-    expect(sudoers).toContain("--collect");
-    expect(sudoers).toContain(" -- /usr/local/bin/enoki-probe ");
-    expect(sudoers).toContain("--collector disk-health.smartctl");
+    expect(collectorHelperSudoers).toBe(
+      [
+        "# Managed by Enoki Probe installer.",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes /usr/local/bin/enoki-probe internal-privileged-collector-helper --helper disk-health.smartctl",
+        "",
+      ].join("\n"),
+    );
+    expect(collectorHelperSudoers).not.toContain("*");
+    expect(collectorHelperSudoers).not.toContain("--operation-id");
+    expect(collectorHelperSudoers).not.toContain("--target-probe-version");
+    expect(collectorHelperSudoers).toContain("--collect");
+    expect(collectorHelperSudoers).toContain(" /usr/local/bin/enoki-probe ");
+    expect(collectorHelperSudoers).toContain("--helper disk-health.smartctl");
+    expect(collectorHelperSudoers).not.toContain(
+      "internal-privileged-collector --collector",
+    );
+    expect(collectorHelperSudoers).not.toContain(
+      "--collector disk-health.smartctl",
+    );
     await expect(
-      validateSudoers(path.join(root, "etc/sudoers.d/enoki-probe-upgrader")),
+      validateSudoers(path.join(root, "etc/sudoers.d/enoki-probe-operations")),
     ).resolves.toBe(true);
+    await expect(
+      validateSudoers(
+        path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      stat(path.join(root, "etc/sudoers.d/enoki-probe-operations")).then(
+        (metadata) => metadata.mode & 0o777,
+      ),
+    ).resolves.toBe(0o440);
+    await expect(
+      stat(path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers")).then(
+        (metadata) => metadata.mode & 0o777,
+      ),
+    ).resolves.toBe(0o440);
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "tmp/probe-planner.log"), "utf8"),
+    ).resolves.toContain(
+      "internal-render-collector-helper-sudoers --service-user enoki-probe --probe-binary /usr/local/bin/enoki-probe",
+    );
     await expect(
       readFile(path.join(root, "tmp/groupadd.log"), "utf8"),
     ).resolves.toEqual(expect.stringContaining("--system enoki-probe"));
@@ -149,6 +191,37 @@ describe("Probe systemd installer", () => {
     await expect(
       readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
     ).resolves.toContain("restart enoki-probe.service");
+  });
+
+  it("installs without a collector-helper sudoers file when the Probe planner exposes no helpers", async () => {
+    const root = await createTempRoot("enoki-install-no-helper-root-");
+    const assets = await createProbeAssets(root, {
+      collectorHelperSudoers: "",
+    });
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(0);
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-operations"), "utf8"),
+    ).resolves.toContain("internal-upgrader --config");
+    await expect(
+      readFile(
+        path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
+        "utf8",
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "tmp/probe-planner.log"), "utf8"),
+    ).resolves.toContain("internal-render-collector-helper-sudoers");
   });
 
   it("rejects install settings that could inject systemd or sudoers directives before writing privileged files", async () => {
@@ -293,7 +366,8 @@ describe("Probe systemd installer", () => {
         'install_path = "/usr/local/bin/enoki-probe"',
         'service_name = "enoki-probe"',
         'service_user = "enoki-probe"',
-        'sudoers_path = "/etc/sudoers.d/enoki-probe-upgrader"',
+        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
+        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
         `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
         'upgrader_launch = "systemd"',
         'log_level = "info"',
@@ -432,7 +506,7 @@ describe("Probe systemd installer", () => {
     expect(result.code).toBe(0);
     await expect(
       readFile(path.join(root, "opt/enoki/bin/enoki-probe"), "utf8"),
-    ).resolves.toBe("#!/bin/sh\necho probe\n");
+    ).resolves.toContain("echo probe");
     await expect(
       readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
     ).resolves.toContain('install_path = "/opt/enoki/bin/enoki-probe"');
@@ -511,7 +585,8 @@ describe("Probe systemd installer", () => {
         'install_path = "/usr/local/bin/enoki-probe"',
         'service_name = "enoki-probe"',
         'service_user = "enoki-probe"',
-        'sudoers_path = "/etc/sudoers.d/enoki-probe-upgrader"',
+        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
+        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
         `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
         'upgrader_launch = "systemd"',
         'log_level = "info\\"\\nnext = \\"bad"',
@@ -579,7 +654,15 @@ describe("Probe systemd installer", () => {
     );
     await writeFile(
       path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
-      "sudoers",
+      "legacy sudoers",
+    );
+    await writeFile(
+      path.join(root, "etc/sudoers.d/enoki-probe-operations"),
+      "operation sudoers",
+    );
+    await writeFile(
+      path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
+      "collector helper sudoers",
     );
     await writeFile(
       path.join(root, "etc/enoki/probe-install.toml"),
@@ -613,6 +696,15 @@ describe("Probe systemd installer", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, "etc/sudoers.d/enoki-probe-operations"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(
+        path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
+        "utf8",
+      ),
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
@@ -766,6 +858,7 @@ async function createProbeAssets(
     | string
     | {
         archiveEntry?: "regular" | "symlink";
+        collectorHelperSudoers?: string;
         sha256?: string;
         signature?: Buffer;
         target?: string;
@@ -783,10 +876,33 @@ async function createProbeAssets(
   await mkdir(assetRoot, { recursive: true });
   await mkdir(payloadRoot, { recursive: true });
   const binaryPath = path.join(payloadRoot, "enoki-probe");
+  const collectorHelperSudoers =
+    typeof targetOrOptions === "object" &&
+    "collectorHelperSudoers" in targetOrOptions
+      ? (targetOrOptions.collectorHelperSudoers ?? "")
+      : [
+          "# Managed by Enoki Probe installer.",
+          "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes /usr/local/bin/enoki-probe internal-privileged-collector-helper --helper disk-health.smartctl",
+        ].join("\n");
+  const collectorHelperSudoersIsPresent = collectorHelperSudoers.length > 0;
   if (options.archiveEntry === "symlink") {
     await symlink("/tmp/enoki-probe", binaryPath);
   } else {
-    await writeFile(binaryPath, "#!/bin/sh\necho probe\n");
+    await writeFile(
+      binaryPath,
+      `#!/bin/sh
+if [ "\${1:-}" = "internal-render-collector-helper-sudoers" ]; then
+  printf '%s\\n' "$*" >> '${path.join(root, "tmp/probe-planner.log")}'
+  if [ "${collectorHelperSudoersIsPresent ? "1" : "0"}" = "1" ]; then
+  cat <<'EOF'
+${collectorHelperSudoers}
+EOF
+  fi
+  exit 0
+fi
+echo probe
+`,
+    );
     await chmod(binaryPath, 0o755);
   }
 

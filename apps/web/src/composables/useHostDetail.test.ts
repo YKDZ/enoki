@@ -898,8 +898,9 @@ describe("Host detail data", () => {
     detail.applyLiveSummary({
       collectorCapabilities: {
         official: {
-          disk: {
-            available: false,
+          diskHealth: {
+            diagnostic: "SMART data is unsupported",
+            status: 6,
           },
         },
       },
@@ -948,8 +949,9 @@ describe("Host detail data", () => {
         lastReportAtMs: 1_725_000_020_000,
         collectorCapabilities: {
           official: {
-            disk: {
-              available: false,
+            diskHealth: {
+              diagnostic: "SMART data is unsupported",
+              status: 6,
             },
           },
         },
@@ -1031,7 +1033,7 @@ describe("Host detail data", () => {
       architecture: "x86_64",
       collectorCapabilities: {
         official: {
-          cpu: { available: true },
+          diskHealth: { diagnostic: "", status: 1 },
         },
       },
       cpuBaseFrequencyMhz: null,

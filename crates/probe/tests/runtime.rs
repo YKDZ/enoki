@@ -6,11 +6,11 @@ use std::os::unix::fs::PermissionsExt;
 use enoki_probe::{
     metrics::CollectorId,
     protocol::enoki::v1::{
-        CollectorAvailability, CollectorCapabilities, HostProfileSnapshot,
-        OfficialCollectorCapabilities, ProbeConfigurationRequest, ProbeConfigurationResponse,
-        ProbeOperation, ProbeOperationStatus, ProbeRegistrationRequest, ProbeRegistrationResponse,
-        ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation, probe_operation::Operation,
-        probe_operation_status::Status, snapshot,
+        CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
+        HostProfileSnapshot, OfficialCollectorCapabilities, ProbeConfigurationRequest,
+        ProbeConfigurationResponse, ProbeOperation, ProbeOperationStatus, ProbeRegistrationRequest,
+        ProbeRegistrationResponse, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
+        probe_operation::Operation, probe_operation_status::Status, snapshot,
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
@@ -660,9 +660,9 @@ fn probe_run_loop_sends_full_host_profile_when_collector_capability_changes() {
             .collector_capabilities
             .as_ref()
             .and_then(|capabilities| capabilities.official.as_ref())
-            .and_then(|official| official.disk.as_ref())
-            .map(|disk| disk.available),
-        Some(true),
+            .and_then(|official| official.disk_health.as_ref())
+            .map(|disk_health| disk_health.status()),
+        Some(DiskHealthCollectorCapabilityStatus::Available),
     );
     assert_eq!(reports[1].sequence_start, 2);
     assert_eq!(reports[1].sequence_end, 2);
@@ -671,9 +671,9 @@ fn probe_run_loop_sends_full_host_profile_when_collector_capability_changes() {
             .collector_capabilities
             .as_ref()
             .and_then(|capabilities| capabilities.official.as_ref())
-            .and_then(|official| official.disk.as_ref())
-            .map(|disk| disk.available),
-        Some(false),
+            .and_then(|official| official.disk_health.as_ref())
+            .map(|disk_health| disk_health.status()),
+        Some(DiskHealthCollectorCapabilityStatus::UnsupportedSmartData),
     );
     assert_ne!(
         reports[0].snapshots[0].snapshot_hash,
@@ -754,9 +754,9 @@ fn probe_run_loop_preserves_metric_batch_sequence_range_when_capability_changes(
             .collector_capabilities
             .as_ref()
             .and_then(|capabilities| capabilities.official.as_ref())
-            .and_then(|official| official.disk.as_ref())
-            .map(|disk| disk.available),
-        Some(false),
+            .and_then(|official| official.disk_health.as_ref())
+            .map(|disk_health| disk_health.status()),
+        Some(DiskHealthCollectorCapabilityStatus::UnsupportedSmartData),
     );
 }
 
@@ -1735,17 +1735,20 @@ impl HostProfileProvider for RecordingHostProfileProvider {
 }
 
 fn host_profile_with_disk_capability(available: bool) -> HostProfileSnapshot {
+    let status = if available {
+        DiskHealthCollectorCapabilityStatus::Available
+    } else {
+        DiskHealthCollectorCapabilityStatus::UnsupportedSmartData
+    };
+
     HostProfileSnapshot {
         architecture: "x86_64".to_string(),
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
-                cpu: Some(CollectorAvailability { available: true }),
-                disk: Some(CollectorAvailability { available }),
-                load: Some(CollectorAvailability { available: true }),
-                memory: Some(CollectorAvailability { available: true }),
-                network: Some(CollectorAvailability { available: true }),
-                uptime: Some(CollectorAvailability { available: true }),
-                ..OfficialCollectorCapabilities::default()
+                disk_health: Some(DiskHealthCollectorCapability {
+                    status: status as i32,
+                    diagnostic: String::new(),
+                }),
             }),
         }),
         cpu_count: 2,

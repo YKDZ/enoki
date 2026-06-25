@@ -1,6 +1,6 @@
 import type {
-  CollectorAvailability,
   CollectorCapabilities,
+  DiskHealthCollectorCapability,
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
@@ -273,28 +273,38 @@ function normalizeCollectorCapabilities(
   }
 
   const official = Object.fromEntries(
-    Object.entries(capabilities.official)
-      .map(([key, availability]) => [
-        key,
-        normalizeCollectorAvailability(availability),
-      ])
-      .filter((entry): entry is [string, CollectorAvailability] =>
-        Boolean(entry[1]),
-      ),
+    [
+      [
+        "diskHealth",
+        normalizeDiskHealthCollectorCapability(
+          capabilities.official.diskHealth,
+        ),
+      ],
+    ].filter((entry): entry is [string, DiskHealthCollectorCapability] =>
+      Boolean(entry[1]),
+    ),
   ) as CollectorCapabilities["official"];
 
   return official && Object.keys(official).length > 0 ? { official } : null;
 }
 
-function normalizeCollectorAvailability(
-  availability: { available?: boolean | null } | null | undefined,
+function normalizeDiskHealthCollectorCapability(
+  capability:
+    | { diagnostic?: string | null; status?: number | null }
+    | null
+    | undefined,
 ) {
-  if (availability === null || availability === undefined) {
+  if (capability === null || capability === undefined) {
     return null;
   }
 
   return {
-    available: Boolean(availability.available),
+    diagnostic: stringField(capability.diagnostic),
+    status:
+      typeof capability.status === "number" &&
+      Number.isFinite(capability.status)
+        ? capability.status
+        : 0,
   };
 }
 

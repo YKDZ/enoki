@@ -66,13 +66,17 @@ Enoki 的安全边界尽量保持简单：
 - 探针只会从最初安装时配置的 Hub 下载升级资产。安装器会把 canonical Hub URL 写入 root-owned install metadata，升级和卸载入口会在 token validation、资产下载和状态上报前校验 bootstrap Hub URL 与该 metadata 一致。
 - 官方版使用本仓库配置的资产签名密钥和安装脚本签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针资产。
 - Hub 管理员可以触发探针升级和卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界。
-- 探针常态下不以 root 运行；升级和卸载通过受限的 systemd 入口提权，只允许执行内置操作，不支持下发任意系统命令。
+- 探针常态下不以 root 运行；升级、卸载和需要本机提权的官方采集器通过 Probe Local Privilege Boundary 进入受限 systemd/sudoers 入口，只允许执行内置操作，不支持下发任意系统命令。
+- Probe Operation sudoers 与 Privileged Collector Helper sudoers 分开写入。collector-helper sudoers 只在安装或升级时按本机前置条件暴露；当前官方 helper 是 `disk-health.smartctl`，没有匹配前置条件时不会保留 collector-helper sudoers 文件。
+- 特权采集器 helper 目前只有超时和网络访问限制，不是完整 device/path sandbox。Hub、Owner、Probe Configuration、Host Profile 或 Metrics 上报不能在运行时启用 helper 或改写 sudoers。
 
 ## 部署
 
 部署分为 Hub 和探针两部分。Hub 推荐使用 Docker 部署；探针在 Web UI 中生成安装命令后，复制到目标 Linux 主机执行。
 
 生产环境和 Docker 部署默认必须设置 `OWNER_PASSWORD`。开发环境如果未设置密码，Hub 会在启动日志中生成一个临时管理员密码；容器部署不会自动生成临时密码，除非显式启用无密码模式。
+
+探针的可选本机 helper 前置条件只在安装和升级流程中评估。例如主机后来安装了 `smartctl`，Disk Health helper 不会被 Web UI、Probe Configuration 或运行时 Host Profile 自动启用；需要重新安装或升级 Probe，安装/升级流程才会重新渲染 collector-helper sudoers。相反，移除可选前置条件后也应重新安装或升级，避免保留不再需要的 helper sudoers。
 
 Hub 容器内默认监听两个端口：
 

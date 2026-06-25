@@ -10,9 +10,12 @@ use crate::protocol::enoki::v1::MetricSample;
 pub mod disk_health;
 mod official;
 pub use disk_health::{
-    DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner,
+    DiskHealthAvailability, DiskHealthCollection, DiskHealthCollectionError,
+    DiskHealthMetricCollector, DiskHealthMetricsRunner,
     collect_disk_health_metrics_from_smartctl_json, collect_disk_health_metrics_with_smartctl,
+    collect_disk_health_metrics_with_smartctl_at, format_disk_health_collection_json,
     format_disk_health_metrics_json, last_disk_health_collector_availability,
+    last_disk_health_collector_capability,
 };
 pub use official::{
     BatteryMetrics, CpuBreakdownMetrics, CpuCounterSnapshot, CpuMetrics, DiskCounterSnapshot,

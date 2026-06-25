@@ -1,18 +1,25 @@
 use enoki_probe::host_profile::collect_local_host_profile;
+use enoki_probe::local_privilege_boundary::PrivilegedCollectorHelperId;
 use enoki_probe::metrics::{
     CollectorCadence, CollectorCadenceSchedule, CollectorDefinition, CollectorError, CollectorId,
-    CollectorRegistry, DiskHealthAvailability, DiskHealthMetricCollector, DiskHealthMetricsRunner,
-    FilesystemCapacity, MetricCollector, MetricsCollectionConfig,
-    collect_battery_metrics_from_sysfs, collect_cpu_metrics_from_proc_stat,
-    collect_default_route_interfaces_from_proc_routes, collect_disk_counters_from_proc_diskstats,
-    collect_disk_health_metrics_from_smartctl_json, collect_disk_metrics_from_mounts,
+    CollectorRegistry, DiskHealthAvailability, DiskHealthCollection, DiskHealthCollectionError,
+    DiskHealthMetricCollector, DiskHealthMetricsRunner, FilesystemCapacity, MetricCollector,
+    MetricsCollectionConfig, collect_battery_metrics_from_sysfs,
+    collect_cpu_metrics_from_proc_stat, collect_default_route_interfaces_from_proc_routes,
+    collect_disk_counters_from_proc_diskstats, collect_disk_health_metrics_from_smartctl_json,
+    collect_disk_health_metrics_with_smartctl_at, collect_disk_metrics_from_mounts,
     collect_load_metrics_from_proc_loadavg, collect_memory_metrics_from_proc_meminfo,
     collect_network_metrics_from_proc_net_dev, collect_temperature_celsius_from_sysfs,
     collect_uptime_seconds_from_proc_uptime,
 };
-use enoki_probe::protocol::enoki::v1::DiskHealthMetric;
+use enoki_probe::privileged_collector_helpers::run_compiled_privileged_collector_helper;
 use enoki_probe::protocol::enoki::v1::MetricSample;
-use std::time::Duration;
+use enoki_probe::protocol::enoki::v1::{DiskHealthCollectorCapabilityStatus, DiskHealthMetric};
+use std::{
+    ffi::OsString, fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::Mutex, time::Duration,
+};
+
+static SMARTCTL_PATH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn collector_registry_reports_only_collectors_due_for_their_cadence_class() {
@@ -320,6 +327,140 @@ fn smartctl_capability_detection_distinguishes_parser_errors_from_unavailable_di
 }
 
 #[test]
+fn smartctl_device_failure_without_stdout_is_reported_as_helper_failure() {
+    let _lock = SMARTCTL_PATH_TEST_LOCK.lock().expect("smartctl PATH lock");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let smartctl = tempdir.path().join("smartctl");
+    fs::write(
+        &smartctl,
+        r#"#!/bin/sh
+if [ "$1" = "--scan-open" ]; then
+  printf '{"devices":[{"name":"/dev/sdz"}]}'
+  exit 0
+fi
+if [ "$1" = "-a" ]; then
+  exit 4
+fi
+exit 2
+"#,
+    )
+    .expect("fake smartctl");
+    fs::set_permissions(&smartctl, fs::Permissions::from_mode(0o755))
+        .expect("fake smartctl is executable");
+    let error = collect_disk_health_metrics_with_smartctl_at(&smartctl)
+        .expect_err("smartctl -a failure with no stdout is not silently skipped");
+
+    assert_eq!(
+        error.status,
+        DiskHealthCollectorCapabilityStatus::HelperFailed
+    );
+    assert_eq!(error.diagnostic, "smartctl failed for /dev/sdz");
+}
+
+#[test]
+fn privileged_disk_health_helper_ignores_path_injected_smartctl() {
+    let _lock = SMARTCTL_PATH_TEST_LOCK.lock().expect("smartctl PATH lock");
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let smartctl = tempdir.path().join("smartctl");
+    let marker = tempdir.path().join("path-injected-smartctl-ran");
+    fs::write(
+        &smartctl,
+        r#"#!/bin/sh
+printf ran > "$ENOKI_SMARTCTL_MARKER"
+if [ "$1" = "--scan-open" ]; then
+  printf '{"devices":[{"name":"/dev/path-injected"}]}'
+  exit 0
+fi
+if [ "$1" = "-a" ]; then
+  printf '{"smart_status":{"passed":true}}'
+  exit 0
+fi
+exit 0
+"#,
+    )
+    .expect("fake smartctl");
+    fs::set_permissions(&smartctl, fs::Permissions::from_mode(0o755))
+        .expect("fake smartctl is executable");
+    let path_guard = PathRestoreGuard::new();
+    let marker_guard = EnvVarRestoreGuard::new("ENOKI_SMARTCTL_MARKER");
+    let fake_path = match path_guard.original_path.as_ref() {
+        Some(path) => {
+            let mut paths = vec![PathBuf::from(tempdir.path())];
+            paths.extend(std::env::split_paths(path));
+            std::env::join_paths(paths).expect("joined PATH")
+        }
+        None => tempdir.path().as_os_str().to_os_string(),
+    };
+
+    unsafe {
+        std::env::set_var("PATH", &fake_path);
+        std::env::set_var("ENOKI_SMARTCTL_MARKER", &marker);
+    }
+    let _path_guard = path_guard;
+    let _marker_guard = marker_guard;
+    let output =
+        run_compiled_privileged_collector_helper(PrivilegedCollectorHelperId::DiskHealthSmartctl)
+            .expect("compiled disk health helper returns a typed collection");
+
+    assert!(!marker.exists());
+    assert!(!output.contains("/dev/path-injected"));
+}
+
+struct PathRestoreGuard {
+    original_path: Option<OsString>,
+}
+
+impl PathRestoreGuard {
+    fn new() -> Self {
+        Self {
+            original_path: std::env::var_os("PATH"),
+        }
+    }
+}
+
+impl Drop for PathRestoreGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.original_path.take() {
+            unsafe {
+                std::env::set_var("PATH", path);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
+    }
+}
+
+struct EnvVarRestoreGuard {
+    name: &'static str,
+    original_value: Option<OsString>,
+}
+
+impl EnvVarRestoreGuard {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            original_value: std::env::var_os(name),
+        }
+    }
+}
+
+impl Drop for EnvVarRestoreGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original_value.take() {
+            unsafe {
+                std::env::set_var(self.name, value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+}
+
+#[test]
 fn disk_health_collector_uses_low_frequency_cadence_and_reports_only_new_results() {
     let mut registry = CollectorRegistry::from_collectors(vec![Box::new(
         DiskHealthMetricCollector::new(FakeDiskHealthRunner {
@@ -408,9 +549,83 @@ fn disk_health_collector_result_updates_host_profile_capability() {
     );
     assert_eq!(local_disk_health_capability(), Some(false));
 
-    let mut failing_collector = DiskHealthMetricCollector::new(FailingDiskHealthRunner);
+    let mut failing_collector = DiskHealthMetricCollector::new(FailingDiskHealthRunner {
+        status: DiskHealthCollectorCapabilityStatus::InsufficientLocalPrivilege,
+        diagnostic: "smartctl permission denied",
+    });
     assert!(failing_collector.collect(&mut sample).is_err());
     assert_eq!(local_disk_health_capability(), Some(false));
+}
+
+#[test]
+fn disk_health_success_updates_host_profile_with_domain_status() {
+    let mut sample = MetricSample::default();
+    let mut collector = DiskHealthMetricCollector::new(FakeDiskHealthRunner {
+        batches: vec![vec![DiskHealthMetric {
+            device_name: "/dev/sda".to_string(),
+            model: "Samsung SSD 870 EVO 1TB".to_string(),
+            passed: true,
+            power_on_hours: Some(12_345),
+            role: String::new(),
+            serial_number: "S6PTEST".to_string(),
+            temperature_celsius: Some(31.0),
+            total_bytes: None,
+            usage_mount_point: String::new(),
+            used_bytes: None,
+        }]],
+    });
+
+    assert!(
+        collector
+            .collect(&mut sample)
+            .expect("successful disk health collection emits metrics")
+    );
+
+    assert_eq!(
+        local_disk_health_capability_status(),
+        Some(DiskHealthCollectorCapabilityStatus::Available)
+    );
+}
+
+#[test]
+fn disk_health_failures_update_host_profile_with_domain_status() {
+    for (status, diagnostic) in [
+        (
+            DiskHealthCollectorCapabilityStatus::MissingSmartctl,
+            "smartctl is not installed",
+        ),
+        (
+            DiskHealthCollectorCapabilityStatus::InsufficientLocalPrivilege,
+            "sudo rejected privileged helper execution",
+        ),
+        (
+            DiskHealthCollectorCapabilityStatus::HelperFailed,
+            "privileged helper failed",
+        ),
+        (
+            DiskHealthCollectorCapabilityStatus::ScanFailed,
+            "smartctl scan failed",
+        ),
+        (
+            DiskHealthCollectorCapabilityStatus::MalformedOutput,
+            "smartctl output malformed",
+        ),
+        (
+            DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+            "SMART data is unsupported",
+        ),
+    ] {
+        let mut sample = MetricSample::default();
+        let mut collector =
+            DiskHealthMetricCollector::new(FailingDiskHealthRunner { status, diagnostic });
+
+        assert!(collector.collect(&mut sample).is_err());
+        assert_eq!(local_disk_health_capability_status(), Some(status));
+        assert_eq!(
+            local_disk_health_capability_diagnostic(),
+            Some(diagnostic.to_string())
+        );
+    }
 }
 
 struct FakeDiskHealthRunner {
@@ -418,16 +633,31 @@ struct FakeDiskHealthRunner {
 }
 
 impl DiskHealthMetricsRunner for FakeDiskHealthRunner {
-    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError> {
-        Ok(self.batches.pop().unwrap_or_default())
+    fn collect_disk_health_metrics(
+        &mut self,
+    ) -> Result<DiskHealthCollection, DiskHealthCollectionError> {
+        let metrics = self.batches.pop().unwrap_or_default();
+        if metrics.is_empty() {
+            return Ok(DiskHealthCollection::unavailable(
+                DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+                "SMART data is unsupported",
+            ));
+        }
+
+        Ok(DiskHealthCollection::available(metrics))
     }
 }
 
-struct FailingDiskHealthRunner;
+struct FailingDiskHealthRunner {
+    status: DiskHealthCollectorCapabilityStatus,
+    diagnostic: &'static str,
+}
 
 impl DiskHealthMetricsRunner for FailingDiskHealthRunner {
-    fn collect_disk_health_metrics(&mut self) -> Result<Vec<DiskHealthMetric>, CollectorError> {
-        Err(CollectorError::new("smartctl permission denied"))
+    fn collect_disk_health_metrics(
+        &mut self,
+    ) -> Result<DiskHealthCollection, DiskHealthCollectionError> {
+        Err(DiskHealthCollectionError::new(self.status, self.diagnostic))
     }
 }
 
@@ -436,7 +666,23 @@ fn local_disk_health_capability() -> Option<bool> {
         .collector_capabilities
         .and_then(|capabilities| capabilities.official)
         .and_then(|official| official.disk_health)
-        .map(|availability| availability.available)
+        .map(|capability| capability.status() == DiskHealthCollectorCapabilityStatus::Available)
+}
+
+fn local_disk_health_capability_status() -> Option<DiskHealthCollectorCapabilityStatus> {
+    collect_local_host_profile()
+        .collector_capabilities
+        .and_then(|capabilities| capabilities.official)
+        .and_then(|official| official.disk_health)
+        .map(|capability| capability.status())
+}
+
+fn local_disk_health_capability_diagnostic() -> Option<String> {
+    collect_local_host_profile()
+        .collector_capabilities
+        .and_then(|capabilities| capabilities.official)
+        .and_then(|official| official.disk_health)
+        .map(|capability| capability.diagnostic)
 }
 
 #[derive(Clone, Copy)]

@@ -28,13 +28,13 @@ type ProtoNetworkInterfaceMetric = RepeatedItem<
   ProtoMetricSample["networkInterfaces"]
 >;
 
-export type CollectorAvailability = RequiredJsonFields<
-  enoki.v1.ICollectorAvailability,
-  "available"
+export type DiskHealthCollectorCapability = RequiredJsonFields<
+  enoki.v1.IDiskHealthCollectorCapability,
+  "status" | "diagnostic"
 >;
 
 export type OfficialCollectorCapabilities = {
-  [Field in keyof enoki.v1.IOfficialCollectorCapabilities]?: CollectorAvailability;
+  diskHealth?: DiskHealthCollectorCapability;
 };
 
 export type CollectorCapabilities = {

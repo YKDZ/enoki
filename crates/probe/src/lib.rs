@@ -1,9 +1,9 @@
 pub mod cli;
 pub mod collectors;
 pub mod host_profile;
+pub mod local_privilege_boundary;
 pub mod metrics;
-pub mod privileged_collectors;
-pub mod privileged_runtime;
+pub mod privileged_collector_helpers;
 pub mod probe_auth;
 pub mod protocol;
 pub mod registration;

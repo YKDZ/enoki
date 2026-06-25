@@ -2,21 +2,14 @@ syntax = "proto3";
 
 package enoki.v1;
 
-message CollectorAvailability {
-  bool available = 1;
-}
+import "enoki/v1/collectors/disk_health.proto";
 
 message OfficialCollectorCapabilities {
-  CollectorAvailability cpu = 1;
-  CollectorAvailability memory = 2;
-  CollectorAvailability disk = 3;
-  CollectorAvailability network = 4;
-  CollectorAvailability load = 5;
-  CollectorAvailability uptime = 6;
-  CollectorAvailability temperature = 7;
-  CollectorAvailability battery = 8;
-  CollectorAvailability disk_health = 9;
-  CollectorAvailability host_profile = 10;
+  reserved 1 to 8, 10;
+  reserved "cpu", "memory", "disk", "network", "load", "uptime", "temperature",
+    "battery", "host_profile";
+
+  DiskHealthCollectorCapability disk_health = 9;
 }
 
 message CollectorCapabilities {

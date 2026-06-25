@@ -1,8 +1,9 @@
 use enoki_probe::{
     host_profile::{collect_local_host_profile, host_profile_hash, stable_host_profile},
     protocol::enoki::v1::{
-        CollectorAvailability, CollectorCapabilities, FilesystemProfile, HostProfileSnapshot,
-        MetricSample, NetworkInterfaceProfile, OfficialCollectorCapabilities, snapshot,
+        CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
+        FilesystemProfile, HostProfileSnapshot, MetricSample, NetworkInterfaceProfile,
+        OfficialCollectorCapabilities, snapshot,
     },
     report::{full_host_profile_report, regular_report, startup_report},
 };
@@ -142,8 +143,9 @@ fn collector_capability_changes_are_host_profile_changes_not_metric_samples() {
     let available_host_profile = HostProfileSnapshot {
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
-                disk: Some(CollectorAvailability { available: true }),
-                ..OfficialCollectorCapabilities::default()
+                disk_health: Some(disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::Available,
+                )),
             }),
         }),
         ..sample_host_profile()
@@ -151,8 +153,9 @@ fn collector_capability_changes_are_host_profile_changes_not_metric_samples() {
     let unavailable_host_profile = HostProfileSnapshot {
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
-                disk: Some(CollectorAvailability { available: false }),
-                ..OfficialCollectorCapabilities::default()
+                disk_health: Some(disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+                )),
             }),
         }),
         ..sample_host_profile()
@@ -177,20 +180,21 @@ fn collector_capability_changes_are_host_profile_changes_not_metric_samples() {
         }],
     );
 
-    assert!(
-        !report
+    assert_eq!(
+        report
             .snapshots
             .first()
             .and_then(|snapshot| snapshot.payload.as_ref())
             .and_then(|payload| match payload {
                 snapshot::Payload::HostProfile(host_profile) => {
-                    host_profile.collector_capabilities
+                    host_profile.collector_capabilities.as_ref()
                 }
             })
-            .and_then(|capabilities| capabilities.official)
-            .and_then(|official| official.disk)
-            .expect("disk capability")
-            .available
+            .and_then(|capabilities| capabilities.official.as_ref())
+            .and_then(|official| official.disk_health.as_ref())
+            .expect("disk health capability")
+            .status(),
+        DiskHealthCollectorCapabilityStatus::UnsupportedSmartData
     );
     assert_eq!(report.metrics.len(), 1);
     assert!(report.metrics[0].disks.is_empty());
@@ -254,7 +258,7 @@ fn host_profile_hash_matches_the_cross_runtime_canonical_fixture() {
 
     assert_eq!(
         host_profile_hash(&host_profile),
-        "928378a1b8ba549304607f856b21f97c6ddc06f43bcbebe86f3dc5f9cb44bb06",
+        "22843eb296c1643cd0a9b40706f3609fecbaec0ae0114a041923c9adaef07da3",
     );
 }
 
@@ -294,13 +298,9 @@ fn sample_host_profile() -> HostProfileSnapshot {
         cpu_socket_count: 1,
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
-                cpu: Some(CollectorAvailability { available: true }),
-                disk: Some(CollectorAvailability { available: true }),
-                load: Some(CollectorAvailability { available: true }),
-                memory: Some(CollectorAvailability { available: true }),
-                network: Some(CollectorAvailability { available: true }),
-                uptime: Some(CollectorAvailability { available: true }),
-                ..OfficialCollectorCapabilities::default()
+                disk_health: Some(disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::Available,
+                )),
             }),
         }),
         filesystems: vec![
@@ -334,5 +334,14 @@ fn sample_host_profile() -> HostProfileSnapshot {
         process_count: 123,
         probe_version: "0.1.0".to_string(),
         thread_count: 456,
+    }
+}
+
+fn disk_health_capability(
+    status: DiskHealthCollectorCapabilityStatus,
+) -> DiskHealthCollectorCapability {
+    DiskHealthCollectorCapability {
+        status: status as i32,
+        diagnostic: String::new(),
     }
 }

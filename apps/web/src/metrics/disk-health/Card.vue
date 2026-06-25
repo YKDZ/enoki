@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { Activity, Clock3, HardDrive, Thermometer } from "@lucide/vue";
+import {
+  Activity,
+  Clock3,
+  HardDrive,
+  ShieldAlert,
+  Thermometer,
+} from "@lucide/vue";
 import { computed } from "vue";
 
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +23,29 @@ const disks = computed(() =>
   [...(props.data.latestDiskHealth ?? [])].sort((left, right) =>
     left.deviceName.localeCompare(right.deviceName),
   ),
+);
+
+const statusMessage = computed(() => {
+  switch (props.capability.status) {
+    case 2:
+      return "未安装 smartctl，硬盘健康数据暂不可用";
+    case 3:
+      return "本地权限不足，无法运行硬盘健康辅助程序";
+    case 4:
+      return "硬盘健康辅助程序执行失败";
+    case 5:
+      return "smartctl 扫描失败";
+    case 6:
+      return "当前硬盘不支持 SMART 数据";
+    case 7:
+      return "smartctl 输出格式异常";
+    default:
+      return "等待硬盘健康数据";
+  }
+});
+
+const showUnavailableState = computed(
+  () => disks.value.length === 0 && props.capability.status !== 1,
 );
 
 function powerOnDuration(hours: number | null) {
@@ -48,7 +77,26 @@ function usageText(usedBytes: number | null, totalBytes: number | null) {
     :storage-key="panelStorageKey(data.hostId, 'disk-health')"
     collapsible
   >
-    <div v-if="disks.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+    <div
+      v-if="showUnavailableState"
+      class="border-border/70 bg-background/40 grid gap-2 rounded-md border p-3"
+      role="status"
+    >
+      <div class="text-muted-foreground flex items-center gap-2 text-sm">
+        <ShieldAlert class="size-4" aria-hidden="true" />
+        <span>{{ statusMessage }}</span>
+      </div>
+      <p
+        v-if="capability.diagnostic"
+        class="text-muted-foreground text-xs wrap-break-word"
+      >
+        {{ capability.diagnostic }}
+      </p>
+    </div>
+    <div
+      v-else-if="disks.length"
+      class="grid gap-3 md:grid-cols-2 xl:grid-cols-3"
+    >
       <div
         v-for="disk in disks"
         :key="disk.deviceName"

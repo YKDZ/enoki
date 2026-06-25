@@ -4,7 +4,11 @@ import { computed } from "vue";
 import type { MetricsChartData } from "@/metrics/chart-data";
 
 import type { HostDetail, HostMetricSample } from "../types";
-import { officialMetricCardProps, officialMetricsCards } from "./registry";
+import {
+  officialMetricCardCapability,
+  officialMetricCardProps,
+  officialMetricsCards,
+} from "./registry";
 
 const props = defineProps<{
   chartData: MetricsChartData;
@@ -36,7 +40,10 @@ const visibleMetricCards = computed(() =>
   officialMetricsCards.flatMap((card) => {
     const cardProps = officialMetricCardProps(
       card.domain,
-      props.host.collectorCapabilities,
+      officialMetricCardCapability(
+        card.domain,
+        props.host.collectorCapabilities,
+      ),
       metricsData.value,
     );
 

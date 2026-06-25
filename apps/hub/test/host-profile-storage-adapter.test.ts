@@ -26,8 +26,7 @@ function fakeHostProfile(
     architecture: "x86_64",
     collectorCapabilities: {
       official: {
-        cpu: { available: true },
-        disk: { available: false },
+        diskHealth: { diagnostic: "SMART data is unsupported", status: 6 },
       },
     },
     cpuBaseFrequencyMhz: 2_100,
@@ -92,8 +91,7 @@ describe("Host Profile storage adapter", () => {
       expect.objectContaining({
         collectorCapabilities: {
           official: {
-            cpu: { available: true },
-            disk: { available: false },
+            diskHealth: { diagnostic: "SMART data is unsupported", status: 6 },
           },
         },
         cpuBaseFrequencyMhz: 2_100,

@@ -1,6 +1,6 @@
 import type {
-  CollectorAvailability,
   CollectorCapabilities,
+  DiskHealthCollectorCapability,
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { and, eq, isNull, lte } from "drizzle-orm";
@@ -83,8 +83,8 @@ export type HostSummary = {
 };
 
 export type {
-  CollectorAvailability,
   CollectorCapabilities,
+  DiskHealthCollectorCapability,
 } from "@enoki/api-client/protocol";
 
 export type HostStatusThresholds = {
@@ -478,28 +478,36 @@ function normalizeCollectorCapabilities(
   }
 
   const official = Object.fromEntries(
-    Object.entries(capabilities.official)
-      .map(([key, availability]) => [
-        key,
-        normalizeCollectorAvailability(availability),
-      ])
-      .filter((entry): entry is [string, CollectorAvailability] =>
-        Boolean(entry[1]),
-      ),
+    [
+      [
+        "diskHealth",
+        normalizeDiskHealthCollectorCapability(
+          capabilities.official.diskHealth,
+        ),
+      ],
+    ].filter((entry): entry is [string, DiskHealthCollectorCapability] =>
+      Boolean(entry[1]),
+    ),
   ) as CollectorCapabilities["official"];
 
   return official && Object.keys(official).length > 0 ? { official } : null;
 }
 
-function normalizeCollectorAvailability(
-  availability: CollectorAvailability | null | undefined,
+function normalizeDiskHealthCollectorCapability(
+  capability: DiskHealthCollectorCapability | null | undefined,
 ) {
-  if (availability === null || availability === undefined) {
+  if (capability === null || capability === undefined) {
     return null;
   }
 
   return {
-    available: Boolean(availability.available),
+    diagnostic:
+      typeof capability.diagnostic === "string" ? capability.diagnostic : "",
+    status:
+      typeof capability.status === "number" &&
+      Number.isFinite(capability.status)
+        ? capability.status
+        : 0,
   };
 }
 

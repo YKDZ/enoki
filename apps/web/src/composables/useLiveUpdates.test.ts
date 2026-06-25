@@ -103,8 +103,9 @@ describe("live Host summaries", () => {
     const result = applyHostLiveSummary([existingHost], {
       collectorCapabilities: {
         official: {
-          disk: {
-            available: false,
+          diskHealth: {
+            diagnostic: "SMART data is unsupported",
+            status: 6,
           },
         },
       },
@@ -120,8 +121,9 @@ describe("live Host summaries", () => {
 
     expect(result.hosts[0]?.collectorCapabilities).toEqual({
       official: {
-        disk: {
-          available: false,
+        diskHealth: {
+          diagnostic: "SMART data is unsupported",
+          status: 6,
         },
       },
     });
@@ -133,7 +135,7 @@ describe("live Host summaries", () => {
       architecture: "x86_64",
       collectorCapabilities: {
         official: {
-          cpu: { available: true },
+          diskHealth: { diagnostic: "", status: 1 },
         },
       },
       cpuBaseFrequencyMhz: null,
@@ -162,7 +164,7 @@ describe("live Host summaries", () => {
       expect.objectContaining({
         collectorCapabilities: {
           official: {
-            cpu: { available: true },
+            diskHealth: { diagnostic: "", status: 1 },
           },
         },
         connectAddress: "10.0.0.10",

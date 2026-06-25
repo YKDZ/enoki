@@ -23,7 +23,7 @@ import {
 
 const tempRoots: string[] = [];
 const hostProfileCrossRuntimeCanonicalHash =
-  "928378a1b8ba549304607f856b21f97c6ddc06f43bcbebe86f3dc5f9cb44bb06";
+  "22843eb296c1643cd0a9b40706f3609fecbaec0ae0114a041923c9adaef07da3";
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-report-db-"));
@@ -145,12 +145,7 @@ function hostProfileCrossRuntimeCanonicalFixture(): root.enoki.v1.IHostProfileSn
   return sampleHostProfileSnapshot({
     collectorCapabilities: {
       official: {
-        cpu: { available: true },
-        disk: { available: true },
-        load: { available: true },
-        memory: { available: true },
-        network: { available: true },
-        uptime: { available: true },
+        diskHealth: { status: 1 },
       },
     },
     cpuBaseFrequencyMhz: 2_100,

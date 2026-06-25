@@ -1,8 +1,7 @@
 import type { MetricsChartData } from "@/metrics/chart-data";
 
 import type {
-  CollectorAvailability,
-  CollectorCapabilities,
+  DiskHealthCollectorCapability,
   HostDetail,
   HostMetricSample,
   HostProfileSnapshot,
@@ -14,9 +13,7 @@ export const officialMetricCardDomains = [
   "memory",
   "disk",
   "diskHealth",
-] as const satisfies readonly (keyof NonNullable<
-  CollectorCapabilities["official"]
->)[];
+] as const;
 
 export type OfficialMetricCardDomain =
   (typeof officialMetricCardDomains)[number];
@@ -81,7 +78,6 @@ export type DiskHealthMetricCardViewModel = {
 };
 
 export type MetricCardProps<TViewModel> = {
-  capability: CollectorAvailability;
   data: TViewModel;
 };
 
@@ -91,7 +87,9 @@ export type NetworkMetricCardProps =
   MetricCardProps<NetworkMetricCardViewModel>;
 export type DiskMetricCardProps = MetricCardProps<DiskMetricCardViewModel>;
 export type DiskHealthMetricCardProps =
-  MetricCardProps<DiskHealthMetricCardViewModel>;
+  MetricCardProps<DiskHealthMetricCardViewModel> & {
+    capability: DiskHealthCollectorCapability;
+  };
 
 export type OfficialMetricCardProps =
   | CpuMetricCardProps

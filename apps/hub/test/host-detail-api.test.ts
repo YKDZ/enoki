@@ -14,6 +14,17 @@ import {
 } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
+const diskHealthCapabilityStatus =
+  root.enoki.v1.DiskHealthCollectorCapabilityStatus;
+
+function diskHealthCapability(available: boolean) {
+  return {
+    diagnostic: available ? "" : "SMART data is unsupported",
+    status: available
+      ? diskHealthCapabilityStatus.DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_AVAILABLE
+      : diskHealthCapabilityStatus.DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA,
+  };
+}
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-detail-db-"));
@@ -79,12 +90,7 @@ async function registerProbe(
               cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
               collectorCapabilities: {
                 official: {
-                  cpu: { available: true },
-                  disk: { available: true },
-                  load: { available: true },
-                  memory: { available: true },
-                  network: { available: true },
-                  uptime: { available: true },
+                  diskHealth: { diagnostic: "", status: 1 },
                 },
               },
               filesystems: [
@@ -147,12 +153,7 @@ async function reportHostProfile(
               : {
                   collectorCapabilities: {
                     official: {
-                      cpu: { available: true },
-                      disk: { available: input.diskAvailable },
-                      load: { available: true },
-                      memory: { available: true },
-                      network: { available: true },
-                      uptime: { available: true },
+                      diskHealth: diskHealthCapability(input.diskAvailable),
                     },
                   },
                 }),
@@ -814,7 +815,7 @@ describe("Host detail API", () => {
         expect.objectContaining({
           collectorCapabilities: expect.objectContaining({
             official: expect.objectContaining({
-              disk: { available: true },
+              diskHealth: { diagnostic: "", status: 1 },
             }),
           }),
           id: hostId,
@@ -836,7 +837,10 @@ describe("Host detail API", () => {
         expect.objectContaining({
           collectorCapabilities: expect.objectContaining({
             official: expect.objectContaining({
-              disk: { available: false },
+              diskHealth: {
+                diagnostic: "SMART data is unsupported",
+                status: 6,
+              },
             }),
           }),
           id: hostId,
@@ -852,13 +856,16 @@ describe("Host detail API", () => {
       host: expect.objectContaining({
         collectorCapabilities: expect.objectContaining({
           official: expect.objectContaining({
-            disk: { available: false },
+            diskHealth: { diagnostic: "SMART data is unsupported", status: 6 },
           }),
         }),
         hostProfile: expect.objectContaining({
           collectorCapabilities: expect.objectContaining({
             official: expect.objectContaining({
-              disk: { available: false },
+              diskHealth: {
+                diagnostic: "SMART data is unsupported",
+                status: 6,
+              },
             }),
           }),
         }),

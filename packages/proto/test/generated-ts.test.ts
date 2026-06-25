@@ -62,10 +62,10 @@ describe("generated Probe protocol TypeScript", () => {
         HostProfileSnapshot.create({
           collectorCapabilities: {
             official: {
-              cpu: { available: true },
-              disk: { available: false },
-              memory: { available: true },
-              network: { available: true },
+              diskHealth: {
+                diagnostic: "SMART data is unsupported",
+                status: 6,
+              },
             },
           },
           hostname: "managed-host-01",
@@ -73,10 +73,12 @@ describe("generated Probe protocol TypeScript", () => {
       ).finish(),
     );
 
-    expect(decoded.collectorCapabilities?.official?.cpu?.available).toBe(true);
-    expect(decoded.collectorCapabilities?.official?.disk?.available).toBe(
-      false,
+    expect(decoded.collectorCapabilities?.official?.diskHealth?.status).toBe(
+      root.enoki.v1.DiskHealthCollectorCapabilityStatus
+        .DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA,
     );
+    expect(decoded.collectorCapabilities?.official).not.toHaveProperty("cpu");
+    expect(decoded.collectorCapabilities?.official).not.toHaveProperty("disk");
     expect(
       Object.prototype.hasOwnProperty.call(
         MetricSample.create({}),

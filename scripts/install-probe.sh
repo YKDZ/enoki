@@ -9,6 +9,9 @@ SERVICE_GROUP="${ENOKI_SERVICE_GROUP-$DEFAULT_SERVICE_GROUP}"
 INSTALL_PATH="${ENOKI_INSTALL_PATH-/usr/local/bin/enoki-probe}"
 CONFIG_PATH="${ENOKI_CONFIG_PATH-/etc/enoki/probe-bootstrap.toml}"
 INSTALL_METADATA_PATH="/etc/enoki/probe-install.toml"
+OPERATION_SUDOERS_PATH="/etc/sudoers.d/enoki-probe-operations"
+COLLECTOR_HELPER_SUDOERS_PATH="/etc/sudoers.d/enoki-probe-collector-helpers"
+LEGACY_UPGRADER_SUDOERS_PATH="/etc/sudoers.d/enoki-probe-upgrader"
 STATE_DIR="${ENOKI_STATE_DIR-/var/lib/enoki-probe}"
 LOG_LEVEL="${ENOKI_LOG_LEVEL:-info}"
 TEST_ROOT="${ENOKI_TEST_ROOT:-}"
@@ -233,12 +236,12 @@ verify_checksum() {
   fi
 }
 
-validate_upgrader_sudoers_paths() {
+validate_probe_operation_sudoers_paths() {
   local value
 
   for value in "$INSTALL_PATH" "$CONFIG_PATH"; do
     if [[ "$value" =~ [[:space:][:cntrl:]] ]]; then
-      fail "Probe Upgrader sudoers paths must not contain whitespace or control characters."
+      fail "Probe Operation sudoers paths must not contain whitespace or control characters."
     fi
   done
 }
@@ -358,7 +361,9 @@ uninstall_probe() {
   systemctl reset-failed "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
 
   remove_path "$INSTALL_PATH"
-  remove_path /etc/sudoers.d/enoki-probe-upgrader
+  remove_path "$OPERATION_SUDOERS_PATH"
+  remove_path "$COLLECTOR_HELPER_SUDOERS_PATH"
+  remove_path "$LEGACY_UPGRADER_SUDOERS_PATH"
   remove_path "$INSTALL_METADATA_PATH"
   remove_path "$CONFIG_PATH"
   config_dir="$(dirname "$CONFIG_PATH")"
@@ -451,8 +456,11 @@ write_bootstrap_config() {
     printf 'service_user = '
     toml_string "$SERVICE_USER"
     printf '\n'
-    printf 'sudoers_path = '
-    toml_string "/etc/sudoers.d/enoki-probe-upgrader"
+    printf 'operation_sudoers_path = '
+    toml_string "$OPERATION_SUDOERS_PATH"
+    printf '\n'
+    printf 'collector_helper_sudoers_path = '
+    toml_string "$COLLECTOR_HELPER_SUDOERS_PATH"
     printf '\n'
     printf 'probe_asset_public_key_sha256 = '
     toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
@@ -502,8 +510,11 @@ write_install_metadata() {
     printf 'service_user = '
     toml_string "$SERVICE_USER"
     printf '\n'
-    printf 'sudoers_path = '
-    toml_string "/etc/sudoers.d/enoki-probe-upgrader"
+    printf 'operation_sudoers_path = '
+    toml_string "$OPERATION_SUDOERS_PATH"
+    printf '\n'
+    printf 'collector_helper_sudoers_path = '
+    toml_string "$COLLECTOR_HELPER_SUDOERS_PATH"
     printf '\n'
     printf 'probe_asset_public_key_sha256 = '
     toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
@@ -629,15 +640,15 @@ WantedBy=multi-user.target
 EOF
 }
 
-write_upgrader_sudoers() {
+write_operation_sudoers() {
   local sudoers_dir_rooted
   local sudoers_path_rooted
   local install_path_host
   local config_path_host
 
-  validate_upgrader_sudoers_paths
+  validate_probe_operation_sudoers_paths
   sudoers_dir_rooted="$(rooted_path /etc/sudoers.d)"
-  sudoers_path_rooted="$sudoers_dir_rooted/enoki-probe-upgrader"
+  sudoers_path_rooted="$(rooted_path "$OPERATION_SUDOERS_PATH")"
   install_path_host="$(host_path "$INSTALL_PATH")"
   config_path_host="$(host_path "$CONFIG_PATH")"
   mkdir -p "$sudoers_dir_rooted"
@@ -646,9 +657,39 @@ write_upgrader_sudoers() {
 # Managed by Enoki Probe installer.
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-upgrader --property=Type=exec -- ${install_path_host} internal-upgrader --config ${config_path_host}
 ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-uninstaller --property=Type=exec -- ${install_path_host} internal-uninstaller --config ${config_path_host}
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --quiet --pipe --wait --collect --property=RuntimeMaxSec=10 --property=PrivateNetwork=yes ${install_path_host} internal-privileged-collector --collector disk-health.smartctl
 EOF
   chmod 0440 "$sudoers_path_rooted"
+}
+
+write_collector_helper_sudoers() {
+  local sudoers_dir_rooted
+  local sudoers_path_rooted
+  local temp_sudoers
+  local install_path_rooted
+
+  sudoers_dir_rooted="$(rooted_path /etc/sudoers.d)"
+  sudoers_path_rooted="$(rooted_path "$COLLECTOR_HELPER_SUDOERS_PATH")"
+  install_path_rooted="$(rooted_path "$INSTALL_PATH")"
+  mkdir -p "$sudoers_dir_rooted"
+  temp_sudoers="$(mktemp "$sudoers_dir_rooted/enoki-probe-collector-helpers.XXXXXX")"
+
+  if ! "$install_path_rooted" internal-render-collector-helper-sudoers \
+    --service-user "$SERVICE_USER" \
+    --probe-binary "$(host_path "$INSTALL_PATH")" >"$temp_sudoers"; then
+    rm -f "$temp_sudoers"
+    fail "Probe collector-helper sudoers planner failed."
+  fi
+
+  if [ -s "$temp_sudoers" ]; then
+    mv "$temp_sudoers" "$sudoers_path_rooted"
+    chmod 0440 "$sudoers_path_rooted"
+  else
+    rm -f "$temp_sudoers" "$sudoers_path_rooted"
+  fi
+}
+
+remove_legacy_sudoers_layout() {
+  rm -f "$(rooted_path "$LEGACY_UPGRADER_SUDOERS_PATH")"
 }
 
 main() {
@@ -707,7 +748,9 @@ main() {
   write_bootstrap_config
   write_install_metadata
   write_systemd_service
-  write_upgrader_sudoers
+  remove_legacy_sudoers_layout
+  write_operation_sudoers
+  write_collector_helper_sudoers
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}.service"
   systemctl restart "${SERVICE_NAME}.service"

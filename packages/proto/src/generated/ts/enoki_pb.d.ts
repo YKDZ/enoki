@@ -1346,135 +1346,11 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
-        /** Properties of a CollectorAvailability. */
-        interface ICollectorAvailability {
-
-            /** CollectorAvailability available */
-            available?: (boolean|null);
-        }
-
-        /** Represents a CollectorAvailability. */
-        class CollectorAvailability implements ICollectorAvailability {
-
-            /**
-             * Constructs a new CollectorAvailability.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.ICollectorAvailability);
-
-            /** CollectorAvailability available. */
-            public available: boolean;
-
-            /**
-             * Creates a new CollectorAvailability instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns CollectorAvailability instance
-             */
-            public static create(properties?: enoki.v1.ICollectorAvailability): enoki.v1.CollectorAvailability;
-
-            /**
-             * Encodes the specified CollectorAvailability message. Does not implicitly {@link enoki.v1.CollectorAvailability.verify|verify} messages.
-             * @param message CollectorAvailability message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.ICollectorAvailability, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified CollectorAvailability message, length delimited. Does not implicitly {@link enoki.v1.CollectorAvailability.verify|verify} messages.
-             * @param message CollectorAvailability message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.ICollectorAvailability, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a CollectorAvailability message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns CollectorAvailability
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CollectorAvailability;
-
-            /**
-             * Decodes a CollectorAvailability message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns CollectorAvailability
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CollectorAvailability;
-
-            /**
-             * Verifies a CollectorAvailability message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a CollectorAvailability message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns CollectorAvailability
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.CollectorAvailability;
-
-            /**
-             * Creates a plain object from a CollectorAvailability message. Also converts values to other types if specified.
-             * @param message CollectorAvailability
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.CollectorAvailability, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this CollectorAvailability to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for CollectorAvailability
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
         /** Properties of an OfficialCollectorCapabilities. */
         interface IOfficialCollectorCapabilities {
 
-            /** OfficialCollectorCapabilities cpu */
-            cpu?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities memory */
-            memory?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities disk */
-            disk?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities network */
-            network?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities load */
-            load?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities uptime */
-            uptime?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities temperature */
-            temperature?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities battery */
-            battery?: (enoki.v1.ICollectorAvailability|null);
-
             /** OfficialCollectorCapabilities diskHealth */
-            diskHealth?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities hostProfile */
-            hostProfile?: (enoki.v1.ICollectorAvailability|null);
+            diskHealth?: (enoki.v1.IDiskHealthCollectorCapability|null);
         }
 
         /** Represents an OfficialCollectorCapabilities. */
@@ -1486,35 +1362,8 @@ export namespace enoki {
              */
             constructor(properties?: enoki.v1.IOfficialCollectorCapabilities);
 
-            /** OfficialCollectorCapabilities cpu. */
-            public cpu?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities memory. */
-            public memory?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities disk. */
-            public disk?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities network. */
-            public network?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities load. */
-            public load?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities uptime. */
-            public uptime?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities temperature. */
-            public temperature?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities battery. */
-            public battery?: (enoki.v1.ICollectorAvailability|null);
-
             /** OfficialCollectorCapabilities diskHealth. */
-            public diskHealth?: (enoki.v1.ICollectorAvailability|null);
-
-            /** OfficialCollectorCapabilities hostProfile. */
-            public hostProfile?: (enoki.v1.ICollectorAvailability|null);
+            public diskHealth?: (enoki.v1.IDiskHealthCollectorCapability|null);
 
             /**
              * Creates a new OfficialCollectorCapabilities instance using the specified properties.
@@ -1685,6 +1534,272 @@ export namespace enoki {
 
             /**
              * Gets the default type url for CollectorCapabilities
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a DiskHealthCollectorCapability. */
+        interface IDiskHealthCollectorCapability {
+
+            /** DiskHealthCollectorCapability status */
+            status?: (enoki.v1.DiskHealthCollectorCapabilityStatus|null);
+
+            /** DiskHealthCollectorCapability diagnostic */
+            diagnostic?: (string|null);
+        }
+
+        /** Represents a DiskHealthCollectorCapability. */
+        class DiskHealthCollectorCapability implements IDiskHealthCollectorCapability {
+
+            /**
+             * Constructs a new DiskHealthCollectorCapability.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IDiskHealthCollectorCapability);
+
+            /** DiskHealthCollectorCapability status. */
+            public status: enoki.v1.DiskHealthCollectorCapabilityStatus;
+
+            /** DiskHealthCollectorCapability diagnostic. */
+            public diagnostic: string;
+
+            /**
+             * Creates a new DiskHealthCollectorCapability instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns DiskHealthCollectorCapability instance
+             */
+            public static create(properties?: enoki.v1.IDiskHealthCollectorCapability): enoki.v1.DiskHealthCollectorCapability;
+
+            /**
+             * Encodes the specified DiskHealthCollectorCapability message. Does not implicitly {@link enoki.v1.DiskHealthCollectorCapability.verify|verify} messages.
+             * @param message DiskHealthCollectorCapability message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IDiskHealthCollectorCapability, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified DiskHealthCollectorCapability message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthCollectorCapability.verify|verify} messages.
+             * @param message DiskHealthCollectorCapability message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IDiskHealthCollectorCapability, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a DiskHealthCollectorCapability message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns DiskHealthCollectorCapability
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.DiskHealthCollectorCapability;
+
+            /**
+             * Decodes a DiskHealthCollectorCapability message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns DiskHealthCollectorCapability
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.DiskHealthCollectorCapability;
+
+            /**
+             * Verifies a DiskHealthCollectorCapability message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a DiskHealthCollectorCapability message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns DiskHealthCollectorCapability
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.DiskHealthCollectorCapability;
+
+            /**
+             * Creates a plain object from a DiskHealthCollectorCapability message. Also converts values to other types if specified.
+             * @param message DiskHealthCollectorCapability
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.DiskHealthCollectorCapability, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this DiskHealthCollectorCapability to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for DiskHealthCollectorCapability
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** DiskHealthCollectorCapabilityStatus enum. */
+        enum DiskHealthCollectorCapabilityStatus {
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSPECIFIED = 0,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_AVAILABLE = 1,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MISSING_SMARTCTL = 2,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_INSUFFICIENT_LOCAL_PRIVILEGE = 3,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_HELPER_FAILED = 4,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_SCAN_FAILED = 5,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA = 6,
+            DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MALFORMED_OUTPUT = 7
+        }
+
+        /** Properties of a DiskHealthMetric. */
+        interface IDiskHealthMetric {
+
+            /** DiskHealthMetric deviceName */
+            deviceName?: (string|null);
+
+            /** DiskHealthMetric model */
+            model?: (string|null);
+
+            /** DiskHealthMetric serialNumber */
+            serialNumber?: (string|null);
+
+            /** DiskHealthMetric passed */
+            passed?: (boolean|null);
+
+            /** DiskHealthMetric temperatureCelsius */
+            temperatureCelsius?: (number|null);
+
+            /** DiskHealthMetric powerOnHours */
+            powerOnHours?: (Long|null);
+
+            /** DiskHealthMetric totalBytes */
+            totalBytes?: (Long|null);
+
+            /** DiskHealthMetric usedBytes */
+            usedBytes?: (Long|null);
+
+            /** DiskHealthMetric usageMountPoint */
+            usageMountPoint?: (string|null);
+
+            /** DiskHealthMetric role */
+            role?: (string|null);
+        }
+
+        /** Represents a DiskHealthMetric. */
+        class DiskHealthMetric implements IDiskHealthMetric {
+
+            /**
+             * Constructs a new DiskHealthMetric.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IDiskHealthMetric);
+
+            /** DiskHealthMetric deviceName. */
+            public deviceName: string;
+
+            /** DiskHealthMetric model. */
+            public model: string;
+
+            /** DiskHealthMetric serialNumber. */
+            public serialNumber: string;
+
+            /** DiskHealthMetric passed. */
+            public passed: boolean;
+
+            /** DiskHealthMetric temperatureCelsius. */
+            public temperatureCelsius?: (number|null);
+
+            /** DiskHealthMetric powerOnHours. */
+            public powerOnHours?: (Long|null);
+
+            /** DiskHealthMetric totalBytes. */
+            public totalBytes?: (Long|null);
+
+            /** DiskHealthMetric usedBytes. */
+            public usedBytes?: (Long|null);
+
+            /** DiskHealthMetric usageMountPoint. */
+            public usageMountPoint: string;
+
+            /** DiskHealthMetric role. */
+            public role: string;
+
+            /**
+             * Creates a new DiskHealthMetric instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns DiskHealthMetric instance
+             */
+            public static create(properties?: enoki.v1.IDiskHealthMetric): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Encodes the specified DiskHealthMetric message. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
+             * @param message DiskHealthMetric message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IDiskHealthMetric, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified DiskHealthMetric message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
+             * @param message DiskHealthMetric message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IDiskHealthMetric, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a DiskHealthMetric message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns DiskHealthMetric
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Decodes a DiskHealthMetric message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns DiskHealthMetric
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Verifies a DiskHealthMetric message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a DiskHealthMetric message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns DiskHealthMetric
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.DiskHealthMetric;
+
+            /**
+             * Creates a plain object from a DiskHealthMetric message. Also converts values to other types if specified.
+             * @param message DiskHealthMetric
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.DiskHealthMetric, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this DiskHealthMetric to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for DiskHealthMetric
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */
@@ -2228,157 +2343,6 @@ export namespace enoki {
 
             /**
              * Gets the default type url for DiskUsageMetric
-             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
-             * @returns The default type url
-             */
-            public static getTypeUrl(typeUrlPrefix?: string): string;
-        }
-
-        /** Properties of a DiskHealthMetric. */
-        interface IDiskHealthMetric {
-
-            /** DiskHealthMetric deviceName */
-            deviceName?: (string|null);
-
-            /** DiskHealthMetric model */
-            model?: (string|null);
-
-            /** DiskHealthMetric serialNumber */
-            serialNumber?: (string|null);
-
-            /** DiskHealthMetric passed */
-            passed?: (boolean|null);
-
-            /** DiskHealthMetric temperatureCelsius */
-            temperatureCelsius?: (number|null);
-
-            /** DiskHealthMetric powerOnHours */
-            powerOnHours?: (Long|null);
-
-            /** DiskHealthMetric totalBytes */
-            totalBytes?: (Long|null);
-
-            /** DiskHealthMetric usedBytes */
-            usedBytes?: (Long|null);
-
-            /** DiskHealthMetric usageMountPoint */
-            usageMountPoint?: (string|null);
-
-            /** DiskHealthMetric role */
-            role?: (string|null);
-        }
-
-        /** Represents a DiskHealthMetric. */
-        class DiskHealthMetric implements IDiskHealthMetric {
-
-            /**
-             * Constructs a new DiskHealthMetric.
-             * @param [properties] Properties to set
-             */
-            constructor(properties?: enoki.v1.IDiskHealthMetric);
-
-            /** DiskHealthMetric deviceName. */
-            public deviceName: string;
-
-            /** DiskHealthMetric model. */
-            public model: string;
-
-            /** DiskHealthMetric serialNumber. */
-            public serialNumber: string;
-
-            /** DiskHealthMetric passed. */
-            public passed: boolean;
-
-            /** DiskHealthMetric temperatureCelsius. */
-            public temperatureCelsius?: (number|null);
-
-            /** DiskHealthMetric powerOnHours. */
-            public powerOnHours?: (Long|null);
-
-            /** DiskHealthMetric totalBytes. */
-            public totalBytes?: (Long|null);
-
-            /** DiskHealthMetric usedBytes. */
-            public usedBytes?: (Long|null);
-
-            /** DiskHealthMetric usageMountPoint. */
-            public usageMountPoint: string;
-
-            /** DiskHealthMetric role. */
-            public role: string;
-
-            /**
-             * Creates a new DiskHealthMetric instance using the specified properties.
-             * @param [properties] Properties to set
-             * @returns DiskHealthMetric instance
-             */
-            public static create(properties?: enoki.v1.IDiskHealthMetric): enoki.v1.DiskHealthMetric;
-
-            /**
-             * Encodes the specified DiskHealthMetric message. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
-             * @param message DiskHealthMetric message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encode(message: enoki.v1.IDiskHealthMetric, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Encodes the specified DiskHealthMetric message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthMetric.verify|verify} messages.
-             * @param message DiskHealthMetric message or plain object to encode
-             * @param [writer] Writer to encode to
-             * @returns Writer
-             */
-            public static encodeDelimited(message: enoki.v1.IDiskHealthMetric, writer?: $protobuf.Writer): $protobuf.Writer;
-
-            /**
-             * Decodes a DiskHealthMetric message from the specified reader or buffer.
-             * @param reader Reader or buffer to decode from
-             * @param [length] Message length if known beforehand
-             * @returns DiskHealthMetric
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.DiskHealthMetric;
-
-            /**
-             * Decodes a DiskHealthMetric message from the specified reader or buffer, length delimited.
-             * @param reader Reader or buffer to decode from
-             * @returns DiskHealthMetric
-             * @throws {Error} If the payload is not a reader or valid buffer
-             * @throws {$protobuf.util.ProtocolError} If required fields are missing
-             */
-            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.DiskHealthMetric;
-
-            /**
-             * Verifies a DiskHealthMetric message.
-             * @param message Plain object to verify
-             * @returns `null` if valid, otherwise the reason why it is not
-             */
-            public static verify(message: { [k: string]: any }): (string|null);
-
-            /**
-             * Creates a DiskHealthMetric message from a plain object. Also converts values to their respective internal types.
-             * @param object Plain object
-             * @returns DiskHealthMetric
-             */
-            public static fromObject(object: { [k: string]: any }): enoki.v1.DiskHealthMetric;
-
-            /**
-             * Creates a plain object from a DiskHealthMetric message. Also converts values to other types if specified.
-             * @param message DiskHealthMetric
-             * @param [options] Conversion options
-             * @returns Plain object
-             */
-            public static toObject(message: enoki.v1.DiskHealthMetric, options?: $protobuf.IConversionOptions): { [k: string]: any };
-
-            /**
-             * Converts this DiskHealthMetric to JSON.
-             * @returns JSON object
-             */
-            public toJSON(): { [k: string]: any };
-
-            /**
-             * Gets the default type url for DiskHealthMetric
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

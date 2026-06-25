@@ -1,11 +1,21 @@
 use enoki_probe::protocol::enoki::v1::{
-    CollectorAvailability, CollectorCapabilities, DiskHealthMetric, HostProfileSnapshot,
-    MetricSample, OfficialCollectorCapabilities, ProbeConfigurationResponse, ProbeOperation,
-    ProbeOperationAcknowledgement, ProbeOperationFailed, ProbeOperationStatus,
-    ProbeRegistrationRequest, ProbeReportRequest, ProbeReportResponse, ProbeUpgradeOperation,
-    Snapshot, probe_operation::Operation, probe_operation_status::Status, snapshot,
+    CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
+    DiskHealthMetric, HostProfileSnapshot, MetricSample, OfficialCollectorCapabilities,
+    ProbeConfigurationResponse, ProbeOperation, ProbeOperationAcknowledgement,
+    ProbeOperationFailed, ProbeOperationStatus, ProbeRegistrationRequest, ProbeReportRequest,
+    ProbeReportResponse, ProbeUpgradeOperation, Snapshot, probe_operation::Operation,
+    probe_operation_status::Status, snapshot,
 };
 use prost::Message;
+
+fn disk_health_capability(
+    status: DiskHealthCollectorCapabilityStatus,
+) -> DiskHealthCollectorCapability {
+    DiskHealthCollectorCapability {
+        status: status as i32,
+        diagnostic: String::new(),
+    }
+}
 
 #[test]
 fn generated_rust_protocol_encodes_probe_registration() {
@@ -63,11 +73,9 @@ fn generated_rust_protocol_encodes_collector_capabilities_as_host_profile() {
     let host_profile = HostProfileSnapshot {
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
-                cpu: Some(CollectorAvailability { available: true }),
-                disk: Some(CollectorAvailability { available: false }),
-                memory: Some(CollectorAvailability { available: true }),
-                network: Some(CollectorAvailability { available: true }),
-                ..OfficialCollectorCapabilities::default()
+                disk_health: Some(disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+                )),
             }),
         }),
         hostname: "managed-host-01".to_string(),
@@ -81,8 +89,13 @@ fn generated_rust_protocol_encodes_collector_capabilities_as_host_profile() {
         .collector_capabilities
         .and_then(|capabilities| capabilities.official)
         .expect("official collector capabilities");
-    assert!(official.cpu.expect("cpu capability").available);
-    assert!(!official.disk.expect("disk capability").available);
+    assert_eq!(
+        official
+            .disk_health
+            .expect("disk health capability")
+            .status(),
+        DiskHealthCollectorCapabilityStatus::UnsupportedSmartData
+    );
 }
 
 #[test]
@@ -155,8 +168,9 @@ fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
     let host_profile = HostProfileSnapshot {
         collector_capabilities: Some(CollectorCapabilities {
             official: Some(OfficialCollectorCapabilities {
-                disk_health: Some(CollectorAvailability { available: true }),
-                ..OfficialCollectorCapabilities::default()
+                disk_health: Some(disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::Available,
+                )),
             }),
         }),
         ..HostProfileSnapshot::default()
@@ -181,7 +195,8 @@ fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
             .and_then(|capabilities| capabilities.official)
             .and_then(|official| official.disk_health)
             .expect("disk health capability")
-            .available
+            .status()
+            == DiskHealthCollectorCapabilityStatus::Available
     );
 }
 

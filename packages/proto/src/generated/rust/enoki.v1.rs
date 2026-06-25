@@ -24,35 +24,108 @@ pub struct ProbeConfigurationResponse {
     #[prost(string, repeated, tag = "10")]
     pub enabled_collector_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CollectorAvailability {
-    #[prost(bool, tag = "1")]
-    pub available: bool,
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiskHealthCollectorCapability {
+    #[prost(enumeration = "DiskHealthCollectorCapabilityStatus", tag = "1")]
+    pub status: i32,
+    #[prost(string, tag = "2")]
+    pub diagnostic: ::prost::alloc::string::String,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskHealthMetric {
+    #[prost(string, tag = "1")]
+    pub device_name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub model: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub serial_number: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub passed: bool,
+    #[prost(double, optional, tag = "5")]
+    pub temperature_celsius: ::core::option::Option<f64>,
+    #[prost(uint64, optional, tag = "6")]
+    pub power_on_hours: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "7")]
+    pub total_bytes: ::core::option::Option<u64>,
+    #[prost(uint64, optional, tag = "8")]
+    pub used_bytes: ::core::option::Option<u64>,
+    #[prost(string, tag = "9")]
+    pub usage_mount_point: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub role: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum DiskHealthCollectorCapabilityStatus {
+    Unspecified = 0,
+    Available = 1,
+    MissingSmartctl = 2,
+    InsufficientLocalPrivilege = 3,
+    HelperFailed = 4,
+    ScanFailed = 5,
+    UnsupportedSmartData = 6,
+    MalformedOutput = 7,
+}
+impl DiskHealthCollectorCapabilityStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSPECIFIED",
+            Self::Available => "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_AVAILABLE",
+            Self::MissingSmartctl => {
+                "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MISSING_SMARTCTL"
+            }
+            Self::InsufficientLocalPrivilege => {
+                "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_INSUFFICIENT_LOCAL_PRIVILEGE"
+            }
+            Self::HelperFailed => "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_HELPER_FAILED",
+            Self::ScanFailed => "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_SCAN_FAILED",
+            Self::UnsupportedSmartData => {
+                "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA"
+            }
+            Self::MalformedOutput => {
+                "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MALFORMED_OUTPUT"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_AVAILABLE" => Some(Self::Available),
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MISSING_SMARTCTL" => {
+                Some(Self::MissingSmartctl)
+            }
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_INSUFFICIENT_LOCAL_PRIVILEGE" => {
+                Some(Self::InsufficientLocalPrivilege)
+            }
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_HELPER_FAILED" => {
+                Some(Self::HelperFailed)
+            }
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_SCAN_FAILED" => {
+                Some(Self::ScanFailed)
+            }
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA" => {
+                Some(Self::UnsupportedSmartData)
+            }
+            "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MALFORMED_OUTPUT" => {
+                Some(Self::MalformedOutput)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OfficialCollectorCapabilities {
-    #[prost(message, optional, tag = "1")]
-    pub cpu: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "2")]
-    pub memory: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "3")]
-    pub disk: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "4")]
-    pub network: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "5")]
-    pub load: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "6")]
-    pub uptime: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "7")]
-    pub temperature: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "8")]
-    pub battery: ::core::option::Option<CollectorAvailability>,
     #[prost(message, optional, tag = "9")]
-    pub disk_health: ::core::option::Option<CollectorAvailability>,
-    #[prost(message, optional, tag = "10")]
-    pub host_profile: ::core::option::Option<CollectorAvailability>,
+    pub disk_health: ::core::option::Option<DiskHealthCollectorCapability>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CollectorCapabilities {
     #[prost(message, optional, tag = "1")]
     pub official: ::core::option::Option<OfficialCollectorCapabilities>,
@@ -176,29 +249,6 @@ pub struct DiskUsageMetric {
     pub write_await_ms: ::core::option::Option<f64>,
     #[prost(double, optional, tag = "11")]
     pub weighted_io_percent: ::core::option::Option<f64>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DiskHealthMetric {
-    #[prost(string, tag = "1")]
-    pub device_name: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub model: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub serial_number: ::prost::alloc::string::String,
-    #[prost(bool, tag = "4")]
-    pub passed: bool,
-    #[prost(double, optional, tag = "5")]
-    pub temperature_celsius: ::core::option::Option<f64>,
-    #[prost(uint64, optional, tag = "6")]
-    pub power_on_hours: ::core::option::Option<u64>,
-    #[prost(uint64, optional, tag = "7")]
-    pub total_bytes: ::core::option::Option<u64>,
-    #[prost(uint64, optional, tag = "8")]
-    pub used_bytes: ::core::option::Option<u64>,
-    #[prost(string, tag = "9")]
-    pub usage_mount_point: ::prost::alloc::string::String,
-    #[prost(string, tag = "10")]
-    pub role: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct NetworkInterfaceMetric {

@@ -1,6 +1,6 @@
 export type {
-  CollectorAvailability,
   CollectorCapabilities,
+  DiskHealthCollectorCapability,
   DiskHealthMetric,
   EnrollmentResponse,
   HostDetail,

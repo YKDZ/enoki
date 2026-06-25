@@ -14,6 +14,17 @@ import { createTestProbeIdentity, signedProbeHeaders } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 const openServers: Array<{ close: () => Promise<void> }> = [];
+const diskHealthCapabilityStatus =
+  root.enoki.v1.DiskHealthCollectorCapabilityStatus;
+
+function diskHealthCapability(available: boolean | undefined) {
+  return {
+    diagnostic: available ? "" : "SMART data is unsupported",
+    status: available
+      ? diskHealthCapabilityStatus.DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_AVAILABLE
+      : diskHealthCapabilityStatus.DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA,
+  };
+}
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-ws-db-"));
@@ -190,7 +201,7 @@ async function sendReport(
               architecture: "x86_64",
               collectorCapabilities: {
                 official: {
-                  disk: { available: options.diskAvailable },
+                  diskHealth: diskHealthCapability(options.diskAvailable),
                 },
               },
               cpuCount: 2,
@@ -209,7 +220,7 @@ async function sendReport(
                     architecture: "x86_64",
                     collectorCapabilities: {
                       official: {
-                        disk: { available: options.diskAvailable },
+                        diskHealth: diskHealthCapability(options.diskAvailable),
                       },
                     },
                     cpuCount: 2,
@@ -500,8 +511,9 @@ describe("WebSocket live updates", () => {
         id: 1,
         collectorCapabilities: {
           official: {
-            disk: {
-              available: false,
+            diskHealth: {
+              diagnostic: "SMART data is unsupported",
+              status: 6,
             },
           },
         },
@@ -707,7 +719,7 @@ describe("WebSocket live updates", () => {
         architecture: "x86_64",
         collectorCapabilities: {
           official: {
-            cpu: { available: true },
+            diskHealth: { diagnostic: "", status: 1 },
           },
         },
         cpuCount: 4,
