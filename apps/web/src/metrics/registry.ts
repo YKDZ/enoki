@@ -51,7 +51,7 @@ export function officialMetricCardProps(
   domain: OfficialMetricCardDomain,
   capability: OfficialMetricCardCapability,
   data: OfficialMetricCardSourceViewModel,
-): OfficialMetricCardProps | null {
+): OfficialMetricCardProps {
   switch (domain) {
     case "cpu":
       return cpuMetricCardProps({
@@ -119,7 +119,7 @@ export function officialMetricCardCapability(
 
 export function cpuMetricCardProps(
   data: CpuMetricCardViewModel,
-): CpuMetricCardProps | null {
+): CpuMetricCardProps {
   return {
     data,
   };
@@ -127,7 +127,7 @@ export function cpuMetricCardProps(
 
 export function diskMetricCardProps(
   data: DiskMetricCardViewModel,
-): DiskMetricCardProps | null {
+): DiskMetricCardProps {
   return {
     data,
   };
@@ -136,10 +136,7 @@ export function diskMetricCardProps(
 export function diskHealthMetricCardProps(
   capability: DiskHealthCollectorCapability | undefined,
   data: DiskHealthMetricCardViewModel,
-): DiskHealthMetricCardProps | null {
-  if (!capability && !data.latestDiskHealth?.length) {
-    return null;
-  }
+): DiskHealthMetricCardProps {
   return {
     capability: capability ?? { diagnostic: "", status: 0 },
     data,
@@ -148,7 +145,7 @@ export function diskHealthMetricCardProps(
 
 export function memoryMetricCardProps(
   data: MemoryMetricCardViewModel,
-): MemoryMetricCardProps | null {
+): MemoryMetricCardProps {
   return {
     data,
   };
@@ -156,7 +153,7 @@ export function memoryMetricCardProps(
 
 export function networkMetricCardProps(
   data: NetworkMetricCardViewModel,
-): NetworkMetricCardProps | null {
+): NetworkMetricCardProps {
   return {
     data,
   };

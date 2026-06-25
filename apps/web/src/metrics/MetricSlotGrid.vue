@@ -36,8 +36,8 @@ const metricsData = computed(() => ({
   xAxisMinMs: props.xAxisMinMs,
 }));
 
-const visibleMetricCards = computed(() =>
-  officialMetricsCards.flatMap((card) => {
+const metricCards = computed(() =>
+  officialMetricsCards.map((card) => {
     const cardProps = officialMetricCardProps(
       card.domain,
       officialMetricCardCapability(
@@ -47,7 +47,7 @@ const visibleMetricCards = computed(() =>
       metricsData.value,
     );
 
-    return cardProps ? [{ ...card, props: cardProps }] : [];
+    return { ...card, props: cardProps };
   }),
 );
 </script>
@@ -56,7 +56,7 @@ const visibleMetricCards = computed(() =>
   <div class="grid grid-cols-12 gap-4" data-layout-grid>
     <component
       :is="card.component"
-      v-for="card in visibleMetricCards"
+      v-for="card in metricCards"
       :key="card.domain"
       v-bind="card.props"
       data-layout-card

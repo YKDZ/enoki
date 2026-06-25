@@ -314,7 +314,7 @@ describe("Host metric slot grid", () => {
     expect(latestKnownHtml).toContain("Samsung SSD 870 EVO 1TB");
   });
 
-  it("explains missing Disk Health tool and insufficient local privilege", async () => {
+  it("hides Disk Health when smartctl is missing", async () => {
     const missingToolHtml = await renderHostMetricSlotGrid(
       {
         ...host,
@@ -326,9 +326,12 @@ describe("Host metric slot grid", () => {
       },
       {},
     );
-    expect(missingToolHtml).toContain("硬盘健康");
-    expect(missingToolHtml).toContain("未安装 smartctl");
+    expect(missingToolHtml).not.toContain("硬盘健康");
+    expect(missingToolHtml).not.toContain("未安装 smartctl");
+    expect(missingToolHtml).not.toContain("smartctl is not installed");
+  });
 
+  it("explains insufficient local privilege for Disk Health", async () => {
     const insufficientPrivilegeHtml = await renderHostMetricSlotGrid(
       {
         ...host,

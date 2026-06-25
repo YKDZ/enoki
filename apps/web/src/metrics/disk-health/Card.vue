@@ -44,6 +44,14 @@ const statusMessage = computed(() => {
   }
 });
 
+const isMissingSmartctl = computed(() => props.capability.status === 2);
+
+const shouldRender = computed(
+  () =>
+    !isMissingSmartctl.value &&
+    (disks.value.length > 0 || props.capability.status !== 0),
+);
+
 const showUnavailableState = computed(
   () => disks.value.length === 0 && props.capability.status !== 1,
 );
@@ -71,6 +79,7 @@ function usageText(usedBytes: number | null, totalBytes: number | null) {
 
 <template>
   <MetricPanel
+    v-if="shouldRender"
     title="硬盘健康"
     description="硬盘自检状态"
     size="xl"
