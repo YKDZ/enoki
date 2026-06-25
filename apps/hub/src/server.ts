@@ -1,6 +1,8 @@
 import { createHubRuntimeConfigFromEnvironment } from "./config.js";
 import { initializeHubDatabase } from "./database/index.js";
 import { createLiveUpdateBroadcaster } from "./live-updates.js";
+import { runMetricsArchiveMaintenance } from "./metrics-archive/maintenance.js";
+import { createMetricsArchiveScheduler } from "./metrics-archive/scheduler.js";
 import {
   createHubNodeServer,
   createProbeApiNodeServer,
@@ -21,6 +23,15 @@ const config = createHubRuntimeConfigFromEnvironment(process.env);
 const database = initializeHubDatabase(config.database);
 const liveUpdates = createLiveUpdateBroadcaster();
 const servers: HubNodeServer[] = [];
+const metricsArchiveScheduler = createMetricsArchiveScheduler({
+  intervalMs: 60 * 60 * 1000,
+  maintain: () => {
+    runMetricsArchiveMaintenance({
+      database,
+      metrics: config.metrics,
+    });
+  },
+});
 
 servers.push(
   await createHubNodeServer({
@@ -55,6 +66,7 @@ servers.push(
   }),
 );
 console.log(`Enoki Probe API listening on http://localhost:${probePort}`);
+metricsArchiveScheduler.start();
 
 process.once("SIGINT", () => {
   void shutdown();
@@ -64,6 +76,7 @@ process.once("SIGTERM", () => {
 });
 
 async function shutdown() {
+  await metricsArchiveScheduler.stop();
   await Promise.all(servers.map((server) => server.close()));
   database.close();
   process.exit(0);

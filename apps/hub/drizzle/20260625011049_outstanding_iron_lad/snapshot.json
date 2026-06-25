@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "bf92bc3e-a861-41bd-8d20-db553dfde317",
+  "id": "940d4f65-20aa-4d03-9573-5f96be775415",
   "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
@@ -18,6 +18,10 @@
     },
     {
       "name": "metric_samples",
+      "entityType": "tables"
+    },
+    {
+      "name": "metrics_archive_runs",
       "entityType": "tables"
     },
     {
@@ -772,6 +776,156 @@
       "generated": null,
       "name": "id",
       "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "period",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "range_start_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "range_end_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_path",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "checksum_sha256",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "row_counts_json",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cleanup_status",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cleanup_completed_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cleanup_error_message",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "error_message",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
       "table": "official_host_profiles"
     },
     {
@@ -1275,6 +1429,72 @@
       "table": "report_observations"
     },
     {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_metric_samples_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "metric_samples"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_host_profiles_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "official_host_profiles"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_probe_configuration_host_overrides_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_probe_operations_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "probe_operations"
+    },
+    {
+      "columns": ["probe_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["probe_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_probe_request_nonces_probe_id_managed_hosts_probe_id_fk",
+      "entityType": "fks",
+      "table": "probe_request_nonces"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_report_observations_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "report_observations"
+    },
+    {
       "columns": ["id"],
       "nameExplicit": false,
       "name": "audit_log_pk",
@@ -1300,6 +1520,13 @@
       "nameExplicit": false,
       "name": "metric_samples_pk",
       "table": "metric_samples",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "metrics_archive_runs_pk",
+      "table": "metrics_archive_runs",
       "entityType": "pks"
     },
     {
@@ -1407,6 +1634,50 @@
       "name": "metric_samples_probe_boot_sequence_idx",
       "entityType": "indexes",
       "table": "metric_samples"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "range_start_ms",
+          "isExpression": false
+        },
+        {
+          "value": "range_end_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metrics_archive_runs_status_range_idx",
+      "entityType": "indexes",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "columns": [
+        {
+          "value": "period",
+          "isExpression": false
+        },
+        {
+          "value": "range_start_ms",
+          "isExpression": false
+        },
+        {
+          "value": "range_end_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metrics_archive_runs_period_range_idx",
+      "entityType": "indexes",
+      "table": "metrics_archive_runs"
     },
     {
       "columns": [

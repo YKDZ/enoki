@@ -2,6 +2,7 @@ export {
   auditLog,
   enrollmentTokens,
   hosts,
+  metricsArchiveRuns,
   metricSamples,
   officialHostProfiles,
   probeConfigurationGlobalDefaults,

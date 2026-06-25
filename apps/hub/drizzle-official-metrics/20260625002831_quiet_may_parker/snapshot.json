@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "07148abf-0e93-4371-9e3d-7c67761b3d60",
+  "id": "747e5490-c69c-4bdd-b0dd-61c6ef9b8653",
   "prevIds": ["00000000-0000-0000-0000-000000000000"],
   "ddl": [
     {
@@ -846,6 +846,127 @@
       "generated": null,
       "name": "uptime_seconds",
       "entityType": "columns",
+      "table": "official_metric_uptime"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_metric_cpu_cores_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "metric_cpu_cores"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_metric_disks_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "metric_disks"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_metric_network_interfaces_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "metric_network_interfaces"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_cpu_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_cpu"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_disk_health_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_disk_health"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_disk_summary_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_disk_summary"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_load_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_load"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_memory_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_memory"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_network_summary_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_network_summary"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_thermal_power_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
+      "table": "official_metric_thermal_power"
+    },
+    {
+      "columns": ["metric_sample_id"],
+      "tableTo": "metric_samples",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_metric_uptime_metric_sample_id_metric_samples_id_fk",
+      "entityType": "fks",
       "table": "official_metric_uptime"
     },
     {

@@ -98,7 +98,9 @@ export const officialHostProfiles = sqliteTable(
   "official_host_profiles",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    hostId: integer("managed_host_id").notNull(),
+    hostId: integer("managed_host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
     snapshotHash: text().notNull(),
     payloadJson: text().notNull(),
     hostname: text().notNull(),
@@ -128,7 +130,9 @@ export const probeRequestNonces = sqliteTable(
   "probe_request_nonces",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    probeId: text().notNull(),
+    probeId: text()
+      .notNull()
+      .references(() => hosts.probeId, { onDelete: "cascade" }),
     nonce: text().notNull(),
     expiresAtMs: integer().notNull(),
   },
@@ -148,7 +152,9 @@ export const probeOperations = sqliteTable(
   "probe_operations",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    managedHostId: integer("managed_host_id").notNull(),
+    managedHostId: integer("managed_host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
     kind: text().notNull(),
     state: text().notNull(),
     currentProbeVersion: text(),
@@ -181,11 +187,49 @@ export const probeOperations = sqliteTable(
 export type ProbeOperationRow = typeof probeOperations.$inferSelect;
 export type NewProbeOperationRow = typeof probeOperations.$inferInsert;
 
+export const metricsArchiveRuns = sqliteTable(
+  "metrics_archive_runs",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    period: text().notNull(),
+    rangeStartMs: integer().notNull(),
+    rangeEndMs: integer().notNull(),
+    status: text().notNull(),
+    archivePath: text(),
+    checksumSha256: text(),
+    rowCountsJson: text(),
+    cleanupStatus: text(),
+    cleanupCompletedAtMs: integer(),
+    cleanupErrorMessage: text(),
+    startedAtMs: integer().notNull(),
+    updatedAtMs: integer().notNull(),
+    completedAtMs: integer(),
+    errorMessage: text(),
+  },
+  (table) => [
+    index("metrics_archive_runs_status_range_idx").on(
+      table.status,
+      table.rangeStartMs,
+      table.rangeEndMs,
+    ),
+    index("metrics_archive_runs_period_range_idx").on(
+      table.period,
+      table.rangeStartMs,
+      table.rangeEndMs,
+    ),
+  ],
+);
+
+export type MetricsArchiveRunRow = typeof metricsArchiveRuns.$inferSelect;
+export type NewMetricsArchiveRunRow = typeof metricsArchiveRuns.$inferInsert;
+
 export const reportObservations = sqliteTable(
   "report_observations",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    hostId: integer("managed_host_id").notNull(),
+    hostId: integer("managed_host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
     probeId: text().notNull(),
     bootId: text().notNull(),
     sequence: integer().notNull(),
@@ -207,7 +251,9 @@ export const metricSamples = sqliteTable(
   "metric_samples",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    hostId: integer("managed_host_id").notNull(),
+    hostId: integer("managed_host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
     probeId: text().notNull(),
     bootId: text().notNull(),
     sequence: integer().notNull(),
@@ -252,7 +298,9 @@ export const officialMetricCpu = sqliteTable(
   "official_metric_cpu",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     cpuPercent: real(),
     cpuUserPercent: real(),
     cpuSystemPercent: real(),
@@ -272,7 +320,9 @@ export const officialMetricMemory = sqliteTable(
   "official_metric_memory",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     memoryUsedBytes: integer(),
     memoryTotalBytes: integer(),
     memoryCacheBytes: integer(),
@@ -292,7 +342,9 @@ export const officialMetricLoad = sqliteTable(
   "official_metric_load",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     load1: real("load_1"),
     load5: real("load_5"),
     load15: real("load_15"),
@@ -309,7 +361,9 @@ export const officialMetricUptime = sqliteTable(
   "official_metric_uptime",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     uptimeSeconds: integer(),
   },
   (table) => [
@@ -325,7 +379,9 @@ export const officialMetricThermalPower = sqliteTable(
   "official_metric_thermal_power",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     temperatureCelsius: real(),
     batteryPercent: integer(),
     batteryState: text(),
@@ -346,7 +402,9 @@ export const officialMetricDiskSummary = sqliteTable(
   "official_metric_disk_summary",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     diskUsedBytes: integer(),
     diskTotalBytes: integer(),
   },
@@ -366,7 +424,9 @@ export const officialMetricNetworkSummary = sqliteTable(
   "official_metric_network_summary",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     networkRxBytesDelta: integer(),
     networkTxBytesDelta: integer(),
   },
@@ -386,7 +446,9 @@ export const metricCpuCores = sqliteTable(
   "metric_cpu_cores",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     name: text().notNull(),
     user: integer().notNull(),
     nice: integer().notNull(),
@@ -408,7 +470,9 @@ export const metricDisks = sqliteTable(
   "metric_disks",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     mountPoint: text().notNull(),
     filesystemType: text().notNull(),
     totalBytes: integer().notNull(),
@@ -431,7 +495,9 @@ export const metricNetworkInterfaces = sqliteTable(
   "metric_network_interfaces",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     name: text().notNull(),
     rxBytes: integer().notNull(),
     txBytes: integer().notNull(),
@@ -452,7 +518,9 @@ export const officialMetricDiskHealth = sqliteTable(
   "official_metric_disk_health",
   {
     id: integer().primaryKey({ autoIncrement: true }),
-    metricSampleId: integer().notNull(),
+    metricSampleId: integer()
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
     deviceName: text().notNull(),
     model: text(),
     serialNumber: text(),
@@ -493,7 +561,9 @@ export type NewProbeConfigurationGlobalDefaultRow =
 export const probeConfigurationHostOverrides = sqliteTable(
   "probe_configuration_host_overrides",
   {
-    hostId: integer("managed_host_id").primaryKey(),
+    hostId: integer("managed_host_id")
+      .primaryKey()
+      .references(() => hosts.id, { onDelete: "cascade" }),
     version: text().notNull(),
     updatedAtMs: integer().notNull(),
     metricsCollectionIntervalSeconds: integer().notNull(),

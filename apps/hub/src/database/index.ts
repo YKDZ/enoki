@@ -16,6 +16,10 @@ import {
   type SnapshotCollectorStorageRegistry,
 } from "./host-profiles.js";
 import { createHostRepository, type HostRepository } from "./hosts.js";
+import {
+  createMetricsArchiveRepository,
+  type MetricsArchiveRepository,
+} from "./metrics-archives.js";
 import { createMetricsRepository, type MetricsRepository } from "./metrics.js";
 import {
   createProbeConfigurationRepository,
@@ -32,6 +36,7 @@ export type HubDatabase = {
   close: () => void;
   enrollments: EnrollmentRepository;
   hosts: HostRepository;
+  metricsArchives: MetricsArchiveRepository;
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations: ProbeOperationRepository;
@@ -58,6 +63,7 @@ export function initializeHubDatabase(
   mkdirSync(dirname(config.sqlitePath), { recursive: true });
 
   const sqlite = new DatabaseSync(config.sqlitePath);
+  sqlite.exec("PRAGMA foreign_keys = ON");
   sqlite.exec("PRAGMA journal_mode = WAL");
   const database = drizzle({ casing: "snake_case", client: sqlite, schema });
   for (const layer of migrationLayers(options)) {
@@ -74,6 +80,7 @@ export function initializeHubDatabase(
     },
     enrollments: createEnrollmentRepository(database),
     hosts: createHostRepository(database),
+    metricsArchives: createMetricsArchiveRepository(database),
     metrics: createMetricsRepository(database),
     probeConfigurations: createProbeConfigurationRepository(database),
     probeOperations: createProbeOperationRepository(database),

@@ -121,6 +121,7 @@ describe("Hub database", () => {
       dataRoot,
       sqlitePath: path.join(dataRoot, "enoki.db"),
     });
+    createHost(database, { id: 77, probeId: "probe-sparse" });
 
     database.metrics.recordSample({
       bootId: "boot-sparse",
@@ -241,6 +242,82 @@ describe("Hub database", () => {
         "metric_network_interfaces.metric_sample_id",
       ]),
     );
+
+    database.close();
+  });
+
+  it("enforces foreign keys and cascades Metrics child rows", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 66, probeId: "probe-cascade" });
+
+    expect(database.sqlite.prepare("PRAGMA foreign_keys").get()).toEqual({
+      foreign_keys: 1,
+    });
+    expect(() =>
+      database.metrics.recordSample({
+        bootId: "boot-missing-host",
+        collectedAtMs: 1_725_000_000_000,
+        hostId: 999,
+        probeId: "probe-missing-host",
+        receivedAtMs: 1_725_000_000_500,
+        sequence: 1,
+      }),
+    ).toThrow();
+
+    database.metrics.recordSample({
+      bootId: "boot-cascade",
+      collectedAtMs: 1_725_000_001_000,
+      cpuCores: [
+        {
+          idle: 80,
+          iowait: 1,
+          irq: 0,
+          name: "cpu0",
+          nice: 0,
+          softirq: 1,
+          steal: 0,
+          system: 8,
+          usagePercent: 20,
+          user: 10,
+        },
+      ],
+      cpuPercent: 20,
+      hostId: 66,
+      memoryTotalBytes: 16_000,
+      memoryUsedBytes: 8_000,
+      probeId: "probe-cascade",
+      receivedAtMs: 1_725_000_001_500,
+      sequence: 1,
+    });
+    const sample = database.sqlite
+      .prepare("select id from metric_samples where probe_id = ?")
+      .get("probe-cascade") as { id: number };
+
+    database.sqlite
+      .prepare("delete from metric_samples where id = ?")
+      .run(sample.id);
+
+    expect(
+      database.sqlite
+        .prepare(
+          `
+          select
+            (select count(*) from official_metric_cpu) as cpu,
+            (select count(*) from official_metric_memory) as memory,
+            (select count(*) from metric_cpu_cores) as cores
+          `,
+        )
+        .get(),
+    ).toEqual({
+      cores: 0,
+      cpu: 0,
+      memory: 0,
+    });
 
     database.close();
   });
@@ -390,6 +467,7 @@ describe("Hub database", () => {
       dataRoot,
       sqlitePath: path.join(dataRoot, "enoki.db"),
     });
+    createHost(database, { id: 99, probeId: "probe-disk-health" });
 
     database.metrics.recordSample({
       bootId: "boot-disk-health",
@@ -467,6 +545,7 @@ describe("Hub database", () => {
       dataRoot,
       sqlitePath: path.join(dataRoot, "enoki.db"),
     });
+    createHost(database, { id: 7, probeId: "probe-operation" });
 
     const indexes = database.sqlite
       .prepare(
@@ -566,6 +645,24 @@ async function writeMigration(
     path.join(migrationFolder, "migration.sql"),
     statements.join(";--> statement-breakpoint\n"),
   );
+}
+
+function createHost(
+  database: ReturnType<typeof initializeHubDatabase>,
+  input: { id: number; probeId: string },
+) {
+  return database.hosts.create({
+    clockSkewDetected: false,
+    connectAddress: "10.0.0.20",
+    createdAtMs: 1_725_000_000_000,
+    displayName: `Host ${input.id}`,
+    displayNameEdited: false,
+    id: input.id,
+    lastClockSkewMs: null,
+    probeConfigurationVersion: "default-v1",
+    probeId: input.probeId,
+    probeSecretHash: `secret-hash-${input.id}`,
+  });
 }
 
 function migrationHistoryTables(sqlite: {

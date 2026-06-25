@@ -79,7 +79,26 @@ CREATE TABLE `metric_samples` (
 	`disk_used_bytes` integer,
 	`disk_total_bytes` integer,
 	`network_rx_bytes_delta` integer,
-	`network_tx_bytes_delta` integer
+	`network_tx_bytes_delta` integer,
+	CONSTRAINT `fk_metric_samples_managed_host_id_managed_hosts_id_fk` FOREIGN KEY (`managed_host_id`) REFERENCES `managed_hosts`(`id`) ON DELETE CASCADE
+);
+--> statement-breakpoint
+CREATE TABLE `metrics_archive_runs` (
+	`id` integer PRIMARY KEY AUTOINCREMENT,
+	`period` text NOT NULL,
+	`range_start_ms` integer NOT NULL,
+	`range_end_ms` integer NOT NULL,
+	`status` text NOT NULL,
+	`archive_path` text,
+	`checksum_sha256` text,
+	`row_counts_json` text,
+	`cleanup_status` text,
+	`cleanup_completed_at_ms` integer,
+	`cleanup_error_message` text,
+	`started_at_ms` integer NOT NULL,
+	`updated_at_ms` integer NOT NULL,
+	`completed_at_ms` integer,
+	`error_message` text
 );
 --> statement-breakpoint
 CREATE TABLE `official_host_profiles` (
@@ -98,7 +117,8 @@ CREATE TABLE `official_host_profiles` (
 	`collector_capabilities_json` text,
 	`filesystems_json` text NOT NULL,
 	`network_interfaces_json` text NOT NULL,
-	`updated_at_ms` integer NOT NULL
+	`updated_at_ms` integer NOT NULL,
+	CONSTRAINT `fk_official_host_profiles_managed_host_id_managed_hosts_id_fk` FOREIGN KEY (`managed_host_id`) REFERENCES `managed_hosts`(`id`) ON DELETE CASCADE
 );
 --> statement-breakpoint
 CREATE TABLE `probe_configuration_global_defaults` (
@@ -114,7 +134,8 @@ CREATE TABLE `probe_configuration_host_overrides` (
 	`version` text NOT NULL,
 	`updated_at_ms` integer NOT NULL,
 	`metrics_collection_interval_seconds` integer NOT NULL,
-	`enabled_collector_ids_json` text NOT NULL
+	`enabled_collector_ids_json` text NOT NULL,
+	CONSTRAINT `fk_probe_configuration_host_overrides_managed_host_id_managed_hosts_id_fk` FOREIGN KEY (`managed_host_id`) REFERENCES `managed_hosts`(`id`) ON DELETE CASCADE
 );
 --> statement-breakpoint
 CREATE TABLE `probe_operations` (
@@ -132,14 +153,16 @@ CREATE TABLE `probe_operations` (
 	`running_at_ms` integer,
 	`completed_at_ms` integer,
 	`superseded_at_ms` integer,
-	`canceled_at_ms` integer
+	`canceled_at_ms` integer,
+	CONSTRAINT `fk_probe_operations_managed_host_id_managed_hosts_id_fk` FOREIGN KEY (`managed_host_id`) REFERENCES `managed_hosts`(`id`) ON DELETE CASCADE
 );
 --> statement-breakpoint
 CREATE TABLE `probe_request_nonces` (
 	`id` integer PRIMARY KEY AUTOINCREMENT,
 	`probe_id` text NOT NULL,
 	`nonce` text NOT NULL,
-	`expires_at_ms` integer NOT NULL
+	`expires_at_ms` integer NOT NULL,
+	CONSTRAINT `fk_probe_request_nonces_probe_id_managed_hosts_probe_id_fk` FOREIGN KEY (`probe_id`) REFERENCES `managed_hosts`(`probe_id`) ON DELETE CASCADE
 );
 --> statement-breakpoint
 CREATE TABLE `report_observations` (
@@ -148,13 +171,16 @@ CREATE TABLE `report_observations` (
 	`probe_id` text NOT NULL,
 	`boot_id` text NOT NULL,
 	`sequence` integer NOT NULL,
-	`received_at_ms` integer NOT NULL
+	`received_at_ms` integer NOT NULL,
+	CONSTRAINT `fk_report_observations_managed_host_id_managed_hosts_id_fk` FOREIGN KEY (`managed_host_id`) REFERENCES `managed_hosts`(`id`) ON DELETE CASCADE
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `enrollment_tokens_token_hash_idx` ON `enrollment_tokens` (`token_hash`);--> statement-breakpoint
 CREATE UNIQUE INDEX `managed_hosts_probe_id_idx` ON `managed_hosts` (`probe_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `managed_hosts_probe_secret_hash_idx` ON `managed_hosts` (`probe_secret_hash`);--> statement-breakpoint
 CREATE UNIQUE INDEX `metric_samples_probe_boot_sequence_idx` ON `metric_samples` (`probe_id`,`boot_id`,`sequence`);--> statement-breakpoint
+CREATE INDEX `metrics_archive_runs_status_range_idx` ON `metrics_archive_runs` (`status`,`range_start_ms`,`range_end_ms`);--> statement-breakpoint
+CREATE INDEX `metrics_archive_runs_period_range_idx` ON `metrics_archive_runs` (`period`,`range_start_ms`,`range_end_ms`);--> statement-breakpoint
 CREATE UNIQUE INDEX `official_host_profiles_host_idx` ON `official_host_profiles` (`managed_host_id`);--> statement-breakpoint
 CREATE INDEX `official_host_profiles_snapshot_hash_idx` ON `official_host_profiles` (`snapshot_hash`);--> statement-breakpoint
 CREATE UNIQUE INDEX `probe_operations_one_active_per_host_idx` ON `probe_operations` (`managed_host_id`) WHERE state in ('pending', 'accepted', 'running');--> statement-breakpoint

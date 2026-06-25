@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -18,8 +20,17 @@ export type DatabaseConfig = {
 };
 
 export type MetricsConfig = {
+  archive: MetricsArchiveConfig;
   retentionDays: number;
 };
+
+export type MetricsArchiveConfig = {
+  directory: string;
+  enabled: boolean;
+  period: MetricsArchivePeriod;
+};
+
+export type MetricsArchivePeriod = "daily" | "monthly";
 
 export type ClockSkewConfig = {
   thresholdMs: number;
@@ -63,6 +74,7 @@ const defaultClockSkewThresholdSeconds = 300;
 const defaultHostStatusOfflineAfterSeconds = 90;
 const defaultHostStatusStaleAfterSeconds = 30;
 const defaultMetricsRetentionDays = 7;
+const defaultMetricsArchivePeriod = "monthly";
 const defaultProbeAssetDir = "/app/probe-assets";
 const defaultProbeOperationAcceptedTimeoutSeconds = 5 * 60;
 const defaultProbeOperationRunningTimeoutSeconds = 15 * 60;
@@ -94,6 +106,7 @@ export function createHubRuntimeConfigFromEnvironment(
     hostStatus,
     installation,
     metrics: {
+      archive: createMetricsArchiveConfigFromEnvironment(environment, dataRoot),
       retentionDays: readPositiveInteger(
         environment.ENOKI_METRICS_RETENTION_DAYS,
         defaultMetricsRetentionDays,
@@ -134,6 +147,29 @@ export function createHubRuntimeConfigFromEnvironment(
   };
 }
 
+function createMetricsArchiveConfigFromEnvironment(
+  environment: HubEnvironment,
+  dataRoot: string,
+): MetricsArchiveConfig {
+  const directory =
+    environment.ENOKI_METRICS_ARCHIVE_DIR ??
+    path.join(dataRoot, "metrics-archive");
+  const enabled = readMetricsArchiveEnabled(
+    environment.ENOKI_METRICS_ARCHIVE_ENABLED,
+  );
+  const config = {
+    directory,
+    enabled,
+    period: readMetricsArchivePeriod(environment.ENOKI_METRICS_ARCHIVE_PERIOD),
+  };
+
+  if (config.enabled) {
+    prepareWritableDirectory(directory, "ENOKI_METRICS_ARCHIVE_DIR");
+  }
+
+  return config;
+}
+
 function createHostStatusConfigFromEnvironment(environment: HubEnvironment) {
   const staleAfterSeconds = readPositiveInteger(
     environment.ENOKI_HOST_STATUS_STALE_AFTER_SECONDS,
@@ -168,6 +204,39 @@ function createInstallationCommandConfigFromEnvironment(
     installScriptPath: defaults.installScriptPath,
     publicHubUrl: environment.ENOKI_PUBLIC_HUB_URL,
   };
+}
+
+function readMetricsArchiveEnabled(value: string | undefined) {
+  return value !== "false";
+}
+
+function readMetricsArchivePeriod(
+  value: string | undefined,
+): MetricsArchivePeriod {
+  if (value === undefined || value === "") {
+    return defaultMetricsArchivePeriod;
+  }
+
+  if (value === "daily" || value === "monthly") {
+    return value;
+  }
+
+  throw new Error("ENOKI_METRICS_ARCHIVE_PERIOD must be daily or monthly.");
+}
+
+function prepareWritableDirectory(directory: string, name: string) {
+  try {
+    mkdirSync(directory, { recursive: true });
+    const probePath = path.join(
+      directory,
+      `.enoki-write-check-${process.pid}-${randomUUID()}`,
+    );
+    writeFileSync(probePath, "");
+    rmSync(probePath, { force: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${name} must be a writable directory: ${message}`);
+  }
 }
 
 function readPositiveInteger(
