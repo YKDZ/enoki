@@ -1,3 +1,7 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import { createHubAppFromEnvironment } from "../src/app";
@@ -43,6 +47,7 @@ describe("Hub Owner authentication configuration", () => {
 
     const app = createHubAppFromEnvironment({
       ENOKI_ALLOW_INSECURE_NO_PASSWORD: "true",
+      ENOKI_DATA_ROOT: createTempDataRoot(),
       ENOKI_DEPLOYMENT: "docker",
       ENOKI_WEB_UI_NO_PASSWORD: "true",
     });
@@ -58,6 +63,7 @@ describe("Hub Owner authentication configuration", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
     const app = createHubAppFromEnvironment({
+      ENOKI_DATA_ROOT: createTempDataRoot(),
       NODE_ENV: "development",
     });
 
@@ -79,3 +85,7 @@ describe("Hub Owner authentication configuration", () => {
     expect(config.trustProxyHeaders).toBe(true);
   });
 });
+
+function createTempDataRoot() {
+  return mkdtempSync(path.join(tmpdir(), "enoki-auth-config-"));
+}
