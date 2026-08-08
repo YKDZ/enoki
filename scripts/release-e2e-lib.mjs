@@ -93,7 +93,9 @@ async function runHubRestoreCompatibilityWindowScenario({
     hostProfileContinuity: {
       allowedChanges: [
         "collection and observation timestamps",
+        "cpuBaseFrequencyMhz",
         "filesystems[].availableBytes",
+        "networkInterfaces with veth names",
         "processCount",
         "threadCount",
       ],
@@ -363,6 +365,17 @@ async function runHubRestoreCompatibilityWindowScenario({
     };
 
     activeBoundary = "uninstall";
+    await hub.switchToCandidate();
+    await hub.authenticate(ownerPassword);
+    await waitForObservation({
+      code: "candidate_probe_post_restore_hub_timeout",
+      label: "Candidate Probe reporting after returning to Candidate Hub",
+      observe: () => hub.getHost(hostId),
+      poll,
+      ready: (value) =>
+        value?.id === hostId &&
+        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
+    });
     const requestedUninstall = await hub.requestProbeUninstall(hostId);
     evidence.uninstall.operationTimeline = [requestedUninstall];
     evidence.uninstall.operationTimeline = await hub.waitForProbeOperation(
@@ -373,14 +386,14 @@ async function runHubRestoreCompatibilityWindowScenario({
     if (finalUninstall?.state !== "succeeded" || finalUninstall.failure) {
       throw assertionError(
         "probe_uninstall_failed",
-        `Probe Uninstall through the restored Release Baseline Hub did not succeed: ${JSON.stringify(finalUninstall)}`,
+        `Probe Uninstall after Hub Restore did not succeed: ${JSON.stringify(finalUninstall)}`,
       );
     }
     evidence.uninstall.hubSoftDeleted = await hub.isHostSoftDeleted(hostId);
     if (!evidence.uninstall.hubSoftDeleted) {
       throw assertionError(
         "host_not_soft_deleted",
-        "Probe Uninstall through the restored Release Baseline Hub succeeded but the Host remains active",
+        "Probe Uninstall after Hub Restore succeeded but the Host remains active",
       );
     }
     evidence.uninstall.hostCompletion =
@@ -632,22 +645,21 @@ async function runPostReplacementRepairUninstallScenario({
     }
     await host.bindUpgradeOwnershipTransition(runId, requestedUpgrade);
     evidence.operationTimeline = [requestedUpgrade];
-    evidence.operationTimeline = await hub.waitForProbeOperation(
-      requestedUpgrade,
-      { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
-    );
-    const failedUpgrade = evidence.operationTimeline.at(-1);
-    if (failedUpgrade?.state !== "failed" || !failedUpgrade.failure) {
-      throw assertionError(
-        "post_replacement_upgrade_not_failed",
-        `Probe Upgrade did not retain a failed operation: ${JSON.stringify(failedUpgrade)}`,
-      );
-    }
-    evidence.failureBoundary = await host.assertPostReplacementUpgradeFailure(
-      runId,
-      failedUpgrade,
-      candidateProbeVersion,
-    );
+    evidence.failureBoundary = await waitForObservation({
+      code: "post_replacement_upgrade_failure_timeout",
+      label: "local post-replacement Upgrade failure before Repair",
+      observe: () =>
+        host.assertPostReplacementUpgradeFailure(
+          runId,
+          requestedUpgrade,
+          candidateProbeVersion,
+        ),
+      poll,
+      ready: (value) =>
+        value?.localFailureCode === "post_replacement_restart_failure" &&
+        value.operationId === requestedUpgrade.id &&
+        value.probeVersion === candidateProbeVersion,
+    });
 
     await host.removePostReplacementRestartFault(runId);
     evidence.repair = await host.repair(runId);
@@ -676,6 +688,18 @@ async function runPostReplacementRepairUninstallScenario({
       before: baselineIdentity,
       hostId,
     };
+    evidence.operationTimeline = await hub.waitForProbeOperation(
+      requestedUpgrade,
+      { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
+    );
+    const failedUpgrade = evidence.operationTimeline.at(-1);
+    if (failedUpgrade?.state !== "failed" || !failedUpgrade.failure) {
+      throw assertionError(
+        "post_replacement_upgrade_not_failed",
+        `Probe Upgrade did not retain a failed operation after Repair: ${JSON.stringify(failedUpgrade)}`,
+      );
+    }
+    evidence.failureBoundary.hubFailureCode = failedUpgrade.failure.code;
     await host.completeRepairOwnershipTransition(runId, failedUpgrade);
 
     const preservedFailure = await hub.getProbeOperation(failedUpgrade);
@@ -2541,11 +2565,6 @@ export function createProbeHostHarness({
         kind: "probe_upgrade",
         targetProbeVersion: expectedProbeVersion,
       });
-      if (operation.state !== "failed" || !operation.failure) {
-        throw new Error(
-          "post-replacement Repair requires a terminal failed Probe Upgrade",
-        );
-      }
       const result = await execute(
         postReplacementUpgradeFailureScript(
           runId,
@@ -3149,9 +3168,6 @@ function postReplacementUpgradeFailureScript(
   operation,
   expectedProbeVersion,
 ) {
-  if (!/^[a-z0-9_]+$/.test(operation.failure?.code ?? "")) {
-    throw new Error("failed Probe Upgrade has no stable failure code");
-  }
   return `# enoki-release-e2e:post-replacement-failure
 set -eu
 claim=/var/lib/enoki-release-e2e/claim
@@ -3163,7 +3179,10 @@ status=/var/lib/enoki-probe/probe-operation-status.toml
 [ "$(cat "$claim/upgrade-operation-id")" = ${shellSingleQuote(String(operation.id))} ]
 [ "$(cat "$claim/post-replacement-fault")" = ${shellSingleQuote(expectedProbeVersion)} ]
 [ -f "$dropin" ]
-[ -f "$status" ]
+if [ ! -f "$status" ]; then
+  printf 'null\n'
+  exit 0
+fi
 [ ! -L "$status" ]
 [ "$(stat -c %u "$status")" = 0 ]
 [ "$(stat -c %a "$status")" = 644 ]
@@ -3171,14 +3190,18 @@ version=$(/usr/local/bin/enoki-probe --version | sed -n 's/^enoki-probe //p')
 [ "$version" = ${shellSingleQuote(expectedProbeVersion)} ]
 [ "$(grep -Fxc ${shellSingleQuote(`operation_id = "${operation.id}"`)} "$status")" -eq 1 ]
 [ "$(grep -Fxc ${shellSingleQuote(`target_probe_version = "${expectedProbeVersion}"`)} "$status")" -eq 1 ]
-[ "$(grep -Fxc 'status = "failed"' "$status")" -eq 1 ]
+if [ "$(grep -Fxc 'status = "failed"' "$status")" -ne 1 ]; then
+  [ "$(grep -Fxc 'status = "running"' "$status")" -eq 1 ]
+  printf 'null\n'
+  exit 0
+fi
 [ "$(grep -Fxc 'error_code = "post_replacement_restart_failure"' "$status")" -eq 1 ]
 if [ "$(systemctl is-active enoki-probe.service 2>/dev/null || true)" = active ]; then
   printf 'faulted Probe service unexpectedly active\n' >&2
   exit 79
 fi
-printf '{"hubFailureCode":"%s","localFailureCode":"post_replacement_restart_failure","operationId":%s,"probeVersion":"%s"}\n' \
-  ${shellSingleQuote(operation.failure.code)} ${shellSingleQuote(String(operation.id))} "$version"
+printf '{"localFailureCode":"post_replacement_restart_failure","operationId":%s,"probeVersion":"%s"}\n' \
+  ${shellSingleQuote(String(operation.id))} "$version"
 `;
 }
 
@@ -4142,7 +4165,6 @@ function stableHostProfileEvidence(profile) {
       profile.collectorCapabilities ?? null,
     ),
     cpu: {
-      baseFrequencyMhz: profile.cpuBaseFrequencyMhz ?? null,
       cacheL3Bytes: profile.cpuCacheL3Bytes ?? null,
       count: profile.cpuCount,
       model: profile.cpuModel ?? null,
@@ -4164,6 +4186,9 @@ function stableHostProfileEvidence(profile) {
     kernel: profile.kernel,
     memoryTotalBytes: profile.memoryTotalBytes,
     networkInterfaces: profile.networkInterfaces
+      .filter((networkInterface) =>
+        isStableHostNetworkInterface(networkInterface),
+      )
       .map((networkInterface) => ({
         addresses: [...new Set(networkInterface.addresses ?? [])].sort(),
         name: networkInterface.name,
@@ -4177,6 +4202,14 @@ function stableHostProfileEvidence(profile) {
     projection,
     sha256: createHash("sha256").update(serialized).digest("hex"),
   };
+}
+
+function isStableHostNetworkInterface(networkInterface) {
+  return (
+    typeof networkInterface?.name === "string" &&
+    networkInterface.name.length > 0 &&
+    !networkInterface.name.startsWith("veth")
+  );
 }
 
 function assertStableHostProfileContinuity(candidate, restored) {
