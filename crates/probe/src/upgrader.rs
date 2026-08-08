@@ -942,6 +942,7 @@ pub fn run_probe_repair(
         transport,
         &mut systemd,
         0,
+        0,
         &installed_version,
     )
 }
@@ -979,12 +980,16 @@ fn run_probe_repair_with_current_version_and_systemd_runner(
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     effective_uid: u32,
+    trusted_failure_marker_owner_uid: u32,
     current_probe_version: &str,
 ) -> Result<ProbeRepairResult, ProbeRepairRunError> {
     if effective_uid != 0 {
         return Err(ProbeRepairRunError::RootRequired);
     }
-    let failed_upgrade = read_probe_repair_failure_marker(install_metadata)?;
+    let failed_upgrade = read_probe_repair_failure_marker_with_owner(
+        install_metadata,
+        trusted_failure_marker_owner_uid,
+    )?;
     validate_repair_candidate_is_installed(&failed_upgrade, current_probe_version)?;
     let identity = read_probe_repair_identity(install_metadata)?;
     let identity_hub_url = identity
@@ -1168,8 +1173,9 @@ struct FailedProbeUpgradeMarker {
     target_probe_version: String,
 }
 
-fn read_probe_repair_failure_marker(
+fn read_probe_repair_failure_marker_with_owner(
     install_metadata: &TrustedProbeInstallMetadata,
+    trusted_owner_uid: u32,
 ) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
     let metadata = match fs::symlink_metadata(&install_metadata.operation_status_path) {
         Ok(metadata) => metadata,
@@ -1178,7 +1184,7 @@ fn read_probe_repair_failure_marker(
         }
         Err(_) => return Err(ProbeRepairRunError::FailureMarkerInvalid),
     };
-    read_probe_repair_failure_marker_with_file_metadata(
+    read_probe_repair_failure_marker_with_file_metadata_and_owner(
         install_metadata,
         TrustedFileMetadata {
             is_regular_file: metadata.file_type().is_file(),
@@ -1186,16 +1192,30 @@ fn read_probe_repair_failure_marker(
             mode: metadata.mode() & 0o777,
             owner_uid: metadata.uid(),
         },
+        trusted_owner_uid,
     )
 }
 
+#[cfg(test)]
 fn read_probe_repair_failure_marker_with_file_metadata(
     install_metadata: &TrustedProbeInstallMetadata,
     file_metadata: TrustedFileMetadata,
 ) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
+    read_probe_repair_failure_marker_with_file_metadata_and_owner(
+        install_metadata,
+        file_metadata,
+        0,
+    )
+}
+
+fn read_probe_repair_failure_marker_with_file_metadata_and_owner(
+    install_metadata: &TrustedProbeInstallMetadata,
+    file_metadata: TrustedFileMetadata,
+    trusted_owner_uid: u32,
+) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
     if file_metadata.is_symlink
         || !file_metadata.is_regular_file
-        || file_metadata.owner_uid != 0
+        || file_metadata.owner_uid != trusted_owner_uid
         || file_metadata.mode != 0o644
     {
         return Err(ProbeRepairRunError::FailureMarkerInvalid);
@@ -3620,6 +3640,7 @@ mod tests {
             &mut transport,
             &mut systemd,
             1000,
+            test_process_uid(),
             "0.2.0",
         )
         .expect_err("non-root Repair fails closed");
@@ -3645,6 +3666,7 @@ mod tests {
             &mut transport,
             &mut systemd,
             0,
+            test_process_uid(),
             "0.2.0",
         )
         .expect_err("Repair without a failed Upgrade marker fails closed");
@@ -3760,6 +3782,7 @@ mod tests {
             &mut transport,
             &mut systemd,
             0,
+            test_process_uid(),
             "0.2.0",
         )
         .expect_err("cross-Hub identity fails closed");
@@ -3912,6 +3935,7 @@ mod tests {
             &mut transport,
             &mut systemd,
             0,
+            test_process_uid(),
             "0.2.0",
         )
         .expect("Repair succeeds");
@@ -6332,6 +6356,7 @@ printf '%s\n' '{}'
             &mut transport,
             &mut systemd,
             0,
+            test_process_uid(),
             current_probe_version,
         );
         (result, install_path, temp)
@@ -6357,6 +6382,11 @@ printf '%s\n' '{}'
         .expect("failed Upgrade marker");
         fs::set_permissions(path, fs::Permissions::from_mode(0o644))
             .expect("failed Upgrade marker permissions");
+    }
+
+    fn test_process_uid() -> u32 {
+        // SAFETY: `geteuid` takes no arguments and only reads the process credentials.
+        unsafe { libc::geteuid() }
     }
 
     fn run_repair_reconstruction_case(
@@ -6433,6 +6463,7 @@ printf '%s\n' '{}'
             &mut transport,
             &mut systemd,
             0,
+            test_process_uid(),
             "0.2.0",
         );
         (result, systemd.calls, temp)
