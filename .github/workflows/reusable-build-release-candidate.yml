@@ -30,12 +30,6 @@ on:
 permissions:
   contents: read
 
-# The manual caller owns the global release lock; this reusable workflow keeps
-# its internal work under the same run identity without creating a second lock.
-concurrency:
-  group: ${{ github.event_name == 'workflow_call' && format('enoki-release-delegated-{0}', github.run_id) || 'enoki-release-global' }}
-  cancel-in-progress: false
-
 jobs:
   validate-candidate-inputs:
     name: Validate candidate source identity
