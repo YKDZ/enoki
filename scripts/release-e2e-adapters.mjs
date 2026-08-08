@@ -1334,7 +1334,6 @@ export function createDockerHubController({
     if (runtime.tagCreated) return;
     await successfulExec(exec, "skopeo", [
       "copy",
-      "--preserve-digests",
       `oci-archive:${path.resolve(runtime.archivePath)}`,
       `docker-daemon:${runtime.tag}`,
     ]);
