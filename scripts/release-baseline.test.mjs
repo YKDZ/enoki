@@ -166,6 +166,18 @@ describe("Release Baseline resolution", () => {
       expect(await readdir(path.join(fixture.outputDir, "hub"))).toEqual([
         "enoki-hub-v1.7.2.oci.tar",
       ]);
+      const archivePath = path.join(
+        fixture.outputDir,
+        "hub",
+        "enoki-hub-v1.7.2.oci.tar",
+      );
+      const { stdout: archiveMembers } = await execFileAsync("tar", [
+        "--list",
+        "--file",
+        archivePath,
+      ]);
+      expect(archiveMembers.split("\n")).toContain("index.json");
+      expect(archiveMembers.split("\n")).not.toContain("./index.json");
       await expect(
         validateReleaseBaselineBundle(fixture.outputDir, {
           trustedProbePublicKeyPem: fixture.probe.publicKey,

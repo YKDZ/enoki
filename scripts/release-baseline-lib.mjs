@@ -1185,7 +1185,9 @@ async function materializeOciArchive(closure, archivePath) {
       archivePath,
       "--directory",
       layoutDir,
-      ".",
+      "blobs",
+      "index.json",
+      "oci-layout",
     ]);
   } finally {
     await rm(layoutDir, { force: true, recursive: true });
