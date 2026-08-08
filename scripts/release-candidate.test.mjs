@@ -395,6 +395,10 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     expect(dockerfile).toContain(
       "apk add --allow-untrusted --no-network /tmp/su-exec.apk",
     );
+    expect(dockerfile).toContain(
+      "rm -f /app/deploy/node_modules/.modules.yaml",
+    );
+    expect(dockerfile).toContain("rm -f /var/log/apk.log");
   });
 
   it("makes the formal candidate workflow compare two clean builds of every Probe target and the Hub image", async () => {

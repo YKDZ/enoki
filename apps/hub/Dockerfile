@@ -41,7 +41,8 @@ RUN mkdir -p /app/probe-assets && \
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true \
-  pnpm --filter @enoki/hub --prod --no-optional deploy --legacy /app/deploy
+  pnpm --filter @enoki/hub --prod --no-optional deploy --legacy /app/deploy && \
+  rm -f /app/deploy/node_modules/.modules.yaml
 
 FROM node:24-alpine@sha256:f70403e87646dc51b45295f4b8b70cdad0b63d2297c4c9899119b03f7af7a6b3 AS runtime
 
@@ -68,6 +69,7 @@ ADD --checksum=sha256:4003163f58cd4a75df79973171d25e4912df4284d8bac9850ac267b58b
 
 RUN apk add --allow-untrusted --no-network /tmp/su-exec.apk && \
   rm /tmp/su-exec.apk && \
+  rm -f /var/log/apk.log && \
   chmod +x /app/dist/src/hub-state-snapshot/cli.js && \
   ln -s /app/dist/src/hub-state-snapshot/cli.js /usr/local/bin/enoki-hub-state && \
   chmod +x /usr/local/bin/enoki-hub-entrypoint && \
