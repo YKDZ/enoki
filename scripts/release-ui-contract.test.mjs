@@ -43,6 +43,7 @@ describe("candidate-image UI Contract gate", () => {
     );
     expect(gate).toContain("needs.assemble-candidate.outputs.artifact-name");
     expect(gate).toContain("pnpm run test:e2e:candidate");
+    expect(gate).not.toMatch(/pnpm run test:e2e:candidate --(?:\s|$)/);
     expect(gate).not.toContain("matrix:");
     expect(gate).not.toContain("ssh");
     expect(playwrightConfig).toContain("retries: process.env.CI ? 1 : 0");
