@@ -315,6 +315,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         : undefined,
       observedIp,
       os: reportedHostProfile?.os || undefined,
+      probeConfigurationVersion: request.probeConfigurationVersion || undefined,
       probeConfigurationError: request.probeConfigurationError
         ? {
             errorCode: request.probeConfigurationError.errorCode ?? "",

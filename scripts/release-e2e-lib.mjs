@@ -2879,8 +2879,7 @@ probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$con
 private_key_line=$(grep -E '^probe_private_key_pem = ".+"$' "$config")
 [ "$(grep -c '^probe_id = ' "$config")" -eq 1 ]
 [ "$(grep -c '^probe_private_key_pem = ' "$config")" -eq 1 ]
-probe_id=\${probe_id_line#probe_id = \"}
-probe_id=\${probe_id%\"}
+probe_id=$(printf '%s\n' "$probe_id_line" | cut -d '"' -f 2)
 identity_sha256=$(printf '%s\n%s\n' "$probe_id_line" "$private_key_line" | sha256sum | cut -d ' ' -f 1)
 printf '{"identitySha256":"%s","probeId":"%s"}\n' "$identity_sha256" "$probe_id"
 `;

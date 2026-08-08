@@ -167,6 +167,7 @@ export type HostRepository = {
       memoryTotalBytes?: number | null;
       observedIp?: string | null;
       os?: string | null;
+      probeConfigurationVersion?: string;
       probeConfigurationError?: {
         errorCode: string;
         failedVersion: string;
@@ -358,6 +359,7 @@ export function createHostRepository(database: HostDatabase): HostRepository {
         memoryTotalBytes: input.memoryTotalBytes,
         observedIp: input.observedIp,
         os: input.os,
+        probeConfigurationVersion: input.probeConfigurationVersion,
         probeConfigurationErrorCode:
           input.probeConfigurationError === null
             ? null

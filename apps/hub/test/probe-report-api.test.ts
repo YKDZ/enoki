@@ -2037,6 +2037,14 @@ describe("Probe report API", () => {
 
     expect(response.status).toBe(200);
 
+    expect(
+      database.sqlite
+        .prepare(
+          "select probe_configuration_version from managed_hosts where probe_id = ?",
+        )
+        .get(registration.probeId),
+    ).toEqual({ probe_configuration_version: "memory-only-v1" });
+
     const storedSample = database.sqlite
       .prepare(
         "select id, cpu_percent, memory_used_bytes, memory_total_bytes, load_1, load_5, load_15, uptime_seconds, disk_used_bytes, disk_total_bytes, network_rx_bytes_delta, network_tx_bytes_delta from metric_samples",

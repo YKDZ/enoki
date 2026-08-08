@@ -534,6 +534,11 @@ describe("Probe Host Harness", () => {
       probeId: "probe_release_01",
     });
     expect(
+      commands.find((command) =>
+        command.includes("# enoki-release-e2e:probe-identity"),
+      ),
+    ).not.toContain("\\${");
+    expect(
       commands.filter((command) =>
         command.includes("# enoki-release-e2e:begin-upgrade-ownership"),
       ),
