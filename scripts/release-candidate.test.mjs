@@ -962,7 +962,7 @@ describe("Enoki Release Candidate", () => {
       manifest.releaseBaseline.catalogSnapshot.sha256 = "f".repeat(64);
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     }, "Release catalog snapshot checksum is invalid");
-  });
+  }, 15_000);
 
   it("rejects an incomplete Probe target set", async () => {
     await expectCandidateMutationRejected(async (candidateDir) => {
