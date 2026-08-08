@@ -624,7 +624,7 @@ export function createDockerHubController({
   fetch: fetch_ = globalThis.fetch,
   sleep = (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-}) {
+} = {}) {
   if (containerEngine !== "docker") {
     throw new Error("Only the docker container engine is supported");
   }

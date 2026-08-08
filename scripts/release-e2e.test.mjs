@@ -30,6 +30,10 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe("Release E2E business assertions", () => {
+  it("constructs the real Docker Hub controller with default options", () => {
+    expect(createDockerHubController()).toBeDefined();
+  });
+
   it("requires a reasonable typed Host Profile from the Candidate Probe", () => {
     expect(isCandidateHostReady(readyHost(), "1.2.3")).toBe(true);
     expect(
