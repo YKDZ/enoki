@@ -3829,8 +3829,9 @@ describe("Release E2E command", () => {
     });
 
     expect(commands).toContain(
-      "skopeo copy --preserve-digests oci-archive:/candidate/hub/candidate.oci.tar docker-daemon:enoki-release-e2e:run-runtime",
+      "skopeo copy oci-archive:/candidate/hub/candidate.oci.tar docker-daemon:enoki-release-e2e:run-runtime",
     );
+    expect(commands.join("\n")).not.toContain("--preserve-digests");
     expect(commands.some((command) => command.startsWith("docker load "))).toBe(
       false,
     );
@@ -3889,9 +3890,9 @@ describe("Release E2E command", () => {
         );
       }
       if (command === "skopeo" && arguments_[0] === "copy") {
-        const baseline = arguments_[2].includes("release-baseline");
+        const baseline = arguments_[1].includes("release-baseline");
         images.set(
-          arguments_[3].slice("docker-daemon:".length),
+          arguments_[2].slice("docker-daemon:".length),
           baseline ? baselineConfigDigest : candidateConfigDigest,
         );
         return successfulCommandText("");
@@ -4055,9 +4056,9 @@ describe("Release E2E command", () => {
         );
       }
       if (command === "skopeo" && arguments_[0] === "copy") {
-        const baseline = arguments_[2].includes("release-baseline");
+        const baseline = arguments_[1].includes("release-baseline");
         images.set(
-          arguments_[3].slice("docker-daemon:".length),
+          arguments_[2].slice("docker-daemon:".length),
           baseline ? baselineConfigDigest : candidateConfigDigest,
         );
         return successfulCommandText("");
