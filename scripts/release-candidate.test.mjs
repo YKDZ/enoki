@@ -56,6 +56,8 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     expect(releaseWorkflow).toContain(
       "uses: ./.github/workflows/reusable-build-release-candidate.yml",
     );
+    expect(releaseWorkflow).toContain("group: enoki-release-global");
+    expect(workflow).not.toMatch(/^concurrency:/m);
     expect(workflow).toContain("commit:");
     expect(workflow).toContain("version:");
     expect(workflow).toContain(
