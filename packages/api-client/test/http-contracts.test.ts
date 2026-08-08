@@ -75,6 +75,7 @@ describe("HTTP API contracts", () => {
         },
         mode: "inherit",
       },
+      reportedProbeConfigurationVersion: "default-v1",
       probeUpgradeEligibility: {
         currentProbeAssetSetVersion: null,
         currentProbeVersion: "0.1.0",
@@ -150,9 +151,12 @@ describe("HTTP API contracts", () => {
     } satisfies HostMetadataResponse;
     const probeUpgrade = {
       probeUpgradeRequest: {
+        acceptedAtMs: null,
+        completedAtMs: null,
         createdAtMs: 1_725_000_800_000,
         failure: null,
         id: 7,
+        runningAtMs: null,
         state: "pending",
         targetProbeVersion: "0.2.0",
         updatedAtMs: 1_725_000_800_000,

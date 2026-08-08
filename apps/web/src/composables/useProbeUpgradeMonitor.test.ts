@@ -24,9 +24,12 @@ describe("Probe upgrade monitor", () => {
     });
 
     monitor.track(1, {
+      acceptedAtMs: 1,
+      completedAtMs: null,
       createdAtMs: 1,
       failure: null,
       id: 9,
+      runningAtMs: 2,
       state: "running",
       targetProbeVersion: "0.1.25",
       updatedAtMs: 2,
@@ -64,9 +67,12 @@ describe("Probe upgrade monitor", () => {
     });
 
     monitor.track(1, {
+      acceptedAtMs: 1,
+      completedAtMs: null,
       createdAtMs: 1,
       failure: null,
       id: 9,
+      runningAtMs: 2,
       state: "running",
       targetProbeVersion: "0.1.25",
       updatedAtMs: 2,
@@ -86,12 +92,15 @@ describe("Probe upgrade monitor", () => {
           host: {
             ...hostWithUpgradeState("failed"),
             probeUpgradeStatus: {
+              acceptedAtMs: 1,
+              completedAtMs: 3,
               createdAtMs: 1,
               failure: {
                 code: "running_timeout",
                 message: "升级超时。",
               },
               id: 9,
+              runningAtMs: 2,
               state: "failed",
               targetProbeVersion: "0.1.25",
               updatedAtMs: 3,
@@ -105,9 +114,12 @@ describe("Probe upgrade monitor", () => {
     });
 
     monitor.track(1, {
+      acceptedAtMs: 1,
+      completedAtMs: null,
       createdAtMs: 1,
       failure: null,
       id: 9,
+      runningAtMs: 2,
       state: "running",
       targetProbeVersion: "0.1.25",
       updatedAtMs: 2,
@@ -131,9 +143,12 @@ function hostWithUpgradeState(state: "failed" | "running" | "succeeded") {
   return {
     id: 1,
     probeUpgradeStatus: {
+      acceptedAtMs: 1,
+      completedAtMs: state === "running" ? null : 3,
       createdAtMs: 1,
       failure: null,
       id: 9,
+      runningAtMs: 2,
       state,
       targetProbeVersion: "0.1.25",
       updatedAtMs: 3,

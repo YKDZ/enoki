@@ -9,7 +9,7 @@ use enoki_probe::{
     runtime::{ProbeRunInput, run_loop_control_from_environment, run_probe_with_loop_control},
     upgrader::{
         HttpProbeUpgraderValidationTransport, ProbeUninstallerRunInput, ProbeUpgraderRunInput,
-        format_probe_upgrader_result, run_probe_uninstaller, run_probe_upgrader,
+        format_probe_upgrader_result, run_probe_repair, run_probe_uninstaller, run_probe_upgrader,
     },
 };
 use std::io::Read;
@@ -99,6 +99,23 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        ProbeCommand::Repair => {
+            let mut transport = HttpProbeUpgraderValidationTransport;
+            match run_probe_repair(&mut transport) {
+                Ok(result) => println!(
+                    "Probe Repair succeeded: probe={} version={}",
+                    result.probe_id, result.repaired_version
+                ),
+                Err(error) => {
+                    eprintln!("Probe Repair failed: code={} message={error}", error.code());
+                    std::process::exit(1);
+                }
+            }
+        }
+        ProbeCommand::Rejected { code } => {
+            eprintln!("Probe command rejected: code={code}");
+            std::process::exit(2);
         }
         ProbeCommand::Register {
             bootstrap_config_path,

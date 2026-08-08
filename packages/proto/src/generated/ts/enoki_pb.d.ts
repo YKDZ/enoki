@@ -125,7 +125,7 @@ export namespace enoki {
             probeSecret?: (string|null);
 
             /** ProbeRegistrationResponse serverTimeMs */
-            serverTimeMs?: (Long|null);
+            serverTimeMs?: (number|Long|null);
 
             /** ProbeRegistrationResponse initialConfiguration */
             initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
@@ -147,7 +147,7 @@ export namespace enoki {
             public probeSecret: string;
 
             /** ProbeRegistrationResponse serverTimeMs. */
-            public serverTimeMs: Long;
+            public serverTimeMs: (number|Long);
 
             /** ProbeRegistrationResponse initialConfiguration. */
             public initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
@@ -240,10 +240,10 @@ export namespace enoki {
             bootId?: (string|null);
 
             /** ProbeReportRequest sequenceStart */
-            sequenceStart?: (Long|null);
+            sequenceStart?: (number|Long|null);
 
             /** ProbeReportRequest sequenceEnd */
-            sequenceEnd?: (Long|null);
+            sequenceEnd?: (number|Long|null);
 
             /** ProbeReportRequest probeConfigurationVersion */
             probeConfigurationVersion?: (string|null);
@@ -280,10 +280,10 @@ export namespace enoki {
             public bootId: string;
 
             /** ProbeReportRequest sequenceStart. */
-            public sequenceStart: Long;
+            public sequenceStart: (number|Long);
 
             /** ProbeReportRequest sequenceEnd. */
-            public sequenceEnd: Long;
+            public sequenceEnd: (number|Long);
 
             /** ProbeReportRequest probeConfigurationVersion. */
             public probeConfigurationVersion: string;
@@ -385,10 +385,10 @@ export namespace enoki {
         interface IProbeReportResponse {
 
             /** ProbeReportResponse acceptedSequenceEnd */
-            acceptedSequenceEnd?: (Long|null);
+            acceptedSequenceEnd?: (number|Long|null);
 
             /** ProbeReportResponse serverTimeMs */
-            serverTimeMs?: (Long|null);
+            serverTimeMs?: (number|Long|null);
 
             /** ProbeReportResponse currentProbeConfigurationVersion */
             currentProbeConfigurationVersion?: (string|null);
@@ -410,10 +410,10 @@ export namespace enoki {
             constructor(properties?: enoki.v1.IProbeReportResponse);
 
             /** ProbeReportResponse acceptedSequenceEnd. */
-            public acceptedSequenceEnd: Long;
+            public acceptedSequenceEnd: (number|Long);
 
             /** ProbeReportResponse serverTimeMs. */
-            public serverTimeMs: Long;
+            public serverTimeMs: (number|Long);
 
             /** ProbeReportResponse currentProbeConfigurationVersion. */
             public currentProbeConfigurationVersion: string;
@@ -842,7 +842,7 @@ export namespace enoki {
             cpuCount?: (number|null);
 
             /** HostProfileSnapshot memoryTotalBytes */
-            memoryTotalBytes?: (Long|null);
+            memoryTotalBytes?: (number|Long|null);
 
             /** HostProfileSnapshot filesystems */
             filesystems?: (enoki.v1.IFilesystemProfile[]|null);
@@ -863,7 +863,7 @@ export namespace enoki {
             threadCount?: (number|null);
 
             /** HostProfileSnapshot cpuCacheL3Bytes */
-            cpuCacheL3Bytes?: (Long|null);
+            cpuCacheL3Bytes?: (number|Long|null);
 
             /** HostProfileSnapshot cpuBaseFrequencyMhz */
             cpuBaseFrequencyMhz?: (number|null);
@@ -903,7 +903,7 @@ export namespace enoki {
             public cpuCount: number;
 
             /** HostProfileSnapshot memoryTotalBytes. */
-            public memoryTotalBytes: Long;
+            public memoryTotalBytes: (number|Long);
 
             /** HostProfileSnapshot filesystems. */
             public filesystems: enoki.v1.IFilesystemProfile[];
@@ -924,7 +924,7 @@ export namespace enoki {
             public threadCount: number;
 
             /** HostProfileSnapshot cpuCacheL3Bytes. */
-            public cpuCacheL3Bytes: Long;
+            public cpuCacheL3Bytes: (number|Long);
 
             /** HostProfileSnapshot cpuBaseFrequencyMhz. */
             public cpuBaseFrequencyMhz: number;
@@ -1138,10 +1138,10 @@ export namespace enoki {
             filesystemType?: (string|null);
 
             /** FilesystemProfile totalBytes */
-            totalBytes?: (Long|null);
+            totalBytes?: (number|Long|null);
 
             /** FilesystemProfile availableBytes */
-            availableBytes?: (Long|null);
+            availableBytes?: (number|Long|null);
         }
 
         /** Represents a FilesystemProfile. */
@@ -1160,10 +1160,10 @@ export namespace enoki {
             public filesystemType: string;
 
             /** FilesystemProfile totalBytes. */
-            public totalBytes: Long;
+            public totalBytes: (number|Long);
 
             /** FilesystemProfile availableBytes. */
-            public availableBytes: Long;
+            public availableBytes: (number|Long);
 
             /**
              * Creates a new FilesystemProfile instance using the specified properties.
@@ -1674,13 +1674,13 @@ export namespace enoki {
             temperatureCelsius?: (number|null);
 
             /** DiskHealthMetric powerOnHours */
-            powerOnHours?: (Long|null);
+            powerOnHours?: (number|Long|null);
 
             /** DiskHealthMetric totalBytes */
-            totalBytes?: (Long|null);
+            totalBytes?: (number|Long|null);
 
             /** DiskHealthMetric usedBytes */
-            usedBytes?: (Long|null);
+            usedBytes?: (number|Long|null);
 
             /** DiskHealthMetric usageMountPoint */
             usageMountPoint?: (string|null);
@@ -1714,13 +1714,13 @@ export namespace enoki {
             public temperatureCelsius?: (number|null);
 
             /** DiskHealthMetric powerOnHours. */
-            public powerOnHours?: (Long|null);
+            public powerOnHours?: (number|Long|null);
 
             /** DiskHealthMetric totalBytes. */
-            public totalBytes?: (Long|null);
+            public totalBytes?: (number|Long|null);
 
             /** DiskHealthMetric usedBytes. */
-            public usedBytes?: (Long|null);
+            public usedBytes?: (number|Long|null);
 
             /** DiskHealthMetric usageMountPoint. */
             public usageMountPoint: string;
@@ -1810,16 +1810,16 @@ export namespace enoki {
         interface IMetricSample {
 
             /** MetricSample sequence */
-            sequence?: (Long|null);
+            sequence?: (number|Long|null);
 
             /** MetricSample collectedAtMs */
-            collectedAtMs?: (Long|null);
+            collectedAtMs?: (number|Long|null);
 
             /** MetricSample cpuPercent */
             cpuPercent?: (number|null);
 
             /** MetricSample memoryUsedBytes */
-            memoryUsedBytes?: (Long|null);
+            memoryUsedBytes?: (number|Long|null);
 
             /** MetricSample load_1 */
             load_1?: (number|null);
@@ -1831,7 +1831,7 @@ export namespace enoki {
             load_15?: (number|null);
 
             /** MetricSample uptimeSeconds */
-            uptimeSeconds?: (Long|null);
+            uptimeSeconds?: (number|Long|null);
 
             /** MetricSample disks */
             disks?: (enoki.v1.IDiskUsageMetric[]|null);
@@ -1843,7 +1843,7 @@ export namespace enoki {
             cpuCores?: (enoki.v1.ICpuCoreMetric[]|null);
 
             /** MetricSample memoryTotalBytes */
-            memoryTotalBytes?: (Long|null);
+            memoryTotalBytes?: (number|Long|null);
 
             /** MetricSample cpuUserPercent */
             cpuUserPercent?: (number|null);
@@ -1861,13 +1861,13 @@ export namespace enoki {
             cpuIdlePercent?: (number|null);
 
             /** MetricSample memoryCacheBytes */
-            memoryCacheBytes?: (Long|null);
+            memoryCacheBytes?: (number|Long|null);
 
             /** MetricSample swapTotalBytes */
-            swapTotalBytes?: (Long|null);
+            swapTotalBytes?: (number|Long|null);
 
             /** MetricSample swapUsedBytes */
-            swapUsedBytes?: (Long|null);
+            swapUsedBytes?: (number|Long|null);
 
             /** MetricSample temperatureCelsius */
             temperatureCelsius?: (number|null);
@@ -1892,16 +1892,16 @@ export namespace enoki {
             constructor(properties?: enoki.v1.IMetricSample);
 
             /** MetricSample sequence. */
-            public sequence: Long;
+            public sequence: (number|Long);
 
             /** MetricSample collectedAtMs. */
-            public collectedAtMs: Long;
+            public collectedAtMs: (number|Long);
 
             /** MetricSample cpuPercent. */
             public cpuPercent?: (number|null);
 
             /** MetricSample memoryUsedBytes. */
-            public memoryUsedBytes?: (Long|null);
+            public memoryUsedBytes?: (number|Long|null);
 
             /** MetricSample load_1. */
             public load_1?: (number|null);
@@ -1913,7 +1913,7 @@ export namespace enoki {
             public load_15?: (number|null);
 
             /** MetricSample uptimeSeconds. */
-            public uptimeSeconds?: (Long|null);
+            public uptimeSeconds?: (number|Long|null);
 
             /** MetricSample disks. */
             public disks: enoki.v1.IDiskUsageMetric[];
@@ -1925,7 +1925,7 @@ export namespace enoki {
             public cpuCores: enoki.v1.ICpuCoreMetric[];
 
             /** MetricSample memoryTotalBytes. */
-            public memoryTotalBytes?: (Long|null);
+            public memoryTotalBytes?: (number|Long|null);
 
             /** MetricSample cpuUserPercent. */
             public cpuUserPercent?: (number|null);
@@ -1943,13 +1943,13 @@ export namespace enoki {
             public cpuIdlePercent?: (number|null);
 
             /** MetricSample memoryCacheBytes. */
-            public memoryCacheBytes?: (Long|null);
+            public memoryCacheBytes?: (number|Long|null);
 
             /** MetricSample swapTotalBytes. */
-            public swapTotalBytes?: (Long|null);
+            public swapTotalBytes?: (number|Long|null);
 
             /** MetricSample swapUsedBytes. */
-            public swapUsedBytes?: (Long|null);
+            public swapUsedBytes?: (number|Long|null);
 
             /** MetricSample temperatureCelsius. */
             public temperatureCelsius?: (number|null);
@@ -2048,28 +2048,28 @@ export namespace enoki {
             name?: (string|null);
 
             /** CpuCoreMetric user */
-            user?: (Long|null);
+            user?: (number|Long|null);
 
             /** CpuCoreMetric nice */
-            nice?: (Long|null);
+            nice?: (number|Long|null);
 
             /** CpuCoreMetric system */
-            system?: (Long|null);
+            system?: (number|Long|null);
 
             /** CpuCoreMetric idle */
-            idle?: (Long|null);
+            idle?: (number|Long|null);
 
             /** CpuCoreMetric iowait */
-            iowait?: (Long|null);
+            iowait?: (number|Long|null);
 
             /** CpuCoreMetric irq */
-            irq?: (Long|null);
+            irq?: (number|Long|null);
 
             /** CpuCoreMetric softirq */
-            softirq?: (Long|null);
+            softirq?: (number|Long|null);
 
             /** CpuCoreMetric steal */
-            steal?: (Long|null);
+            steal?: (number|Long|null);
 
             /** CpuCoreMetric usagePercent */
             usagePercent?: (number|null);
@@ -2088,28 +2088,28 @@ export namespace enoki {
             public name: string;
 
             /** CpuCoreMetric user. */
-            public user: Long;
+            public user: (number|Long);
 
             /** CpuCoreMetric nice. */
-            public nice: Long;
+            public nice: (number|Long);
 
             /** CpuCoreMetric system. */
-            public system: Long;
+            public system: (number|Long);
 
             /** CpuCoreMetric idle. */
-            public idle: Long;
+            public idle: (number|Long);
 
             /** CpuCoreMetric iowait. */
-            public iowait: Long;
+            public iowait: (number|Long);
 
             /** CpuCoreMetric irq. */
-            public irq: Long;
+            public irq: (number|Long);
 
             /** CpuCoreMetric softirq. */
-            public softirq: Long;
+            public softirq: (number|Long);
 
             /** CpuCoreMetric steal. */
-            public steal: Long;
+            public steal: (number|Long);
 
             /** CpuCoreMetric usagePercent. */
             public usagePercent: number;
@@ -2202,19 +2202,19 @@ export namespace enoki {
             filesystemType?: (string|null);
 
             /** DiskUsageMetric totalBytes */
-            totalBytes?: (Long|null);
+            totalBytes?: (number|Long|null);
 
             /** DiskUsageMetric usedBytes */
-            usedBytes?: (Long|null);
+            usedBytes?: (number|Long|null);
 
             /** DiskUsageMetric availableBytes */
-            availableBytes?: (Long|null);
+            availableBytes?: (number|Long|null);
 
             /** DiskUsageMetric readBytesDelta */
-            readBytesDelta?: (Long|null);
+            readBytesDelta?: (number|Long|null);
 
             /** DiskUsageMetric writeBytesDelta */
-            writeBytesDelta?: (Long|null);
+            writeBytesDelta?: (number|Long|null);
 
             /** DiskUsageMetric ioUtilizationPercent */
             ioUtilizationPercent?: (number|null);
@@ -2245,19 +2245,19 @@ export namespace enoki {
             public filesystemType: string;
 
             /** DiskUsageMetric totalBytes. */
-            public totalBytes: Long;
+            public totalBytes: (number|Long);
 
             /** DiskUsageMetric usedBytes. */
-            public usedBytes: Long;
+            public usedBytes: (number|Long);
 
             /** DiskUsageMetric availableBytes. */
-            public availableBytes: Long;
+            public availableBytes: (number|Long);
 
             /** DiskUsageMetric readBytesDelta. */
-            public readBytesDelta: Long;
+            public readBytesDelta: (number|Long);
 
             /** DiskUsageMetric writeBytesDelta. */
-            public writeBytesDelta: Long;
+            public writeBytesDelta: (number|Long);
 
             /** DiskUsageMetric ioUtilizationPercent. */
             public ioUtilizationPercent?: (number|null);
@@ -2356,16 +2356,16 @@ export namespace enoki {
             name?: (string|null);
 
             /** NetworkInterfaceMetric rxBytes */
-            rxBytes?: (Long|null);
+            rxBytes?: (number|Long|null);
 
             /** NetworkInterfaceMetric txBytes */
-            txBytes?: (Long|null);
+            txBytes?: (number|Long|null);
 
             /** NetworkInterfaceMetric rxBytesDelta */
-            rxBytesDelta?: (Long|null);
+            rxBytesDelta?: (number|Long|null);
 
             /** NetworkInterfaceMetric txBytesDelta */
-            txBytesDelta?: (Long|null);
+            txBytesDelta?: (number|Long|null);
         }
 
         /** Represents a NetworkInterfaceMetric. */
@@ -2381,16 +2381,16 @@ export namespace enoki {
             public name: string;
 
             /** NetworkInterfaceMetric rxBytes. */
-            public rxBytes: Long;
+            public rxBytes: (number|Long);
 
             /** NetworkInterfaceMetric txBytes. */
-            public txBytes: Long;
+            public txBytes: (number|Long);
 
             /** NetworkInterfaceMetric rxBytesDelta. */
-            public rxBytesDelta: Long;
+            public rxBytesDelta: (number|Long);
 
             /** NetworkInterfaceMetric txBytesDelta. */
-            public txBytesDelta: Long;
+            public txBytesDelta: (number|Long);
 
             /**
              * Creates a new NetworkInterfaceMetric instance using the specified properties.

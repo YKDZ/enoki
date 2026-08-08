@@ -81,6 +81,7 @@ const host: HostDetail = {
   },
   probeUpgradeStatus: null,
   probeVersion: "0.1.0",
+  reportedProbeConfigurationVersion: "default-v1",
   status: "online",
   system: "linux 6.8.0 x86_64",
   warnings: [],

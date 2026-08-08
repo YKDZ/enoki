@@ -2,6 +2,7 @@ import type { HostsResponse } from "@enoki/api-client";
 import { Hono } from "hono";
 import type { UpgradeWebSocket } from "hono/ws";
 
+import { createAuditLogRoutes } from "./audit/routes.js";
 import { type AuthConfig, type AuthEnvironment } from "./auth/config.js";
 import { createOwnerAuth } from "./auth/routes.js";
 import {
@@ -13,7 +14,10 @@ import type { HubDatabase } from "./database/index.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createEnrollmentRoutes } from "./enrollment/routes.js";
 import { hostSummaryResponse } from "./hosts/api-response.js";
-import { createHostRoutes } from "./hosts/routes.js";
+import {
+  createHostRoutes,
+  createProbeOperationRoutes,
+} from "./hosts/routes.js";
 import {
   createLiveUpdateBroadcaster,
   type LiveUpdateBroadcaster,
@@ -122,6 +126,10 @@ export function createHubApp(options: HubAppOptions = {}) {
     }
     if (options.database) {
       app.route(
+        "/api/web/audit-log",
+        createAuditLogRoutes({ audit: options.database.audit }),
+      );
+      app.route(
         "/api/web/enrollments",
         createEnrollmentRoutes({
           audit: options.database.audit,
@@ -143,6 +151,12 @@ export function createHubApp(options: HubAppOptions = {}) {
           probeConfigurations: options.database.probeConfigurations,
           probeOperations: options.database.probeOperations,
           snapshotCollectors: options.database.snapshotCollectors,
+        }),
+      );
+      app.route(
+        "/api/web/probe-operations",
+        createProbeOperationRoutes({
+          probeOperations: options.database.probeOperations,
         }),
       );
       app.route(

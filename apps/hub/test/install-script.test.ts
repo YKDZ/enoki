@@ -82,12 +82,16 @@ describe("Probe systemd installer", () => {
       readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
     ).resolves.toBe(
       [
+        "schema_version = 1",
         'hub_url = "https://hub.example"',
         'install_path = "/usr/local/bin/enoki-probe"',
+        'identity_path = "/etc/enoki/probe-bootstrap.toml"',
         'state_dir = "/var/lib/enoki-probe"',
         'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
         'service_name = "enoki-probe"',
         'service_user = "enoki-probe"',
+        'service_group = "enoki-probe"',
+        'service_unit_path = "/etc/systemd/system/enoki-probe.service"',
         'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
         'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
         `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
@@ -98,16 +102,16 @@ describe("Probe systemd installer", () => {
       stat(path.join(root, "etc/enoki/probe-install.toml")).then(
         (metadata) => metadata.mode & 0o777,
       ),
-    ).resolves.toBe(0o644);
+    ).resolves.toBe(0o600);
     const serviceFile = await readFile(
       path.join(root, "etc/systemd/system/enoki-probe.service"),
       "utf8",
     );
     expect(serviceFile).toContain("User=enoki-probe");
     expect(serviceFile).toContain("Group=enoki-probe");
-    expect(serviceFile).toContain("ProtectKernelTunables=true");
     expect(serviceFile).toContain("ProtectControlGroups=true");
-    expect(serviceFile).toContain("LockPersonality=true");
+    expect(serviceFile).not.toContain("ProtectKernelTunables=true");
+    expect(serviceFile).not.toContain("LockPersonality=true");
     expect(serviceFile).not.toContain("NoNewPrivileges=true");
     expect(serviceFile).not.toContain("RestrictSUIDSGID=true");
     expect(serviceFile).not.toContain("CapabilityBoundingSet=");

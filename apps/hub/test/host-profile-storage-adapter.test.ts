@@ -2,9 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import type { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { enoki } from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { initializeHubDatabase } from "../src/database/index";
 
 const tempRoots: string[] = [];

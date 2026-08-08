@@ -79,6 +79,7 @@ export function createLayoutLabFixture(kind: "dense" | "sparse" = "dense") {
     },
     probeUpgradeStatus: null,
     probeVersion: "0.1.33",
+    reportedProbeConfigurationVersion: "fixture-v1",
     status: "online",
     system: "Debian GNU/Linux 12",
     warnings: [],

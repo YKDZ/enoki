@@ -96,6 +96,60 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
 }
 
 #[test]
+fn parses_root_authorized_probe_repair_without_redirectable_arguments() {
+    assert_eq!(
+        parse_probe_command(["enoki-probe".to_string(), "repair".to_string(),]),
+        ProbeCommand::Repair,
+    );
+
+    for forbidden in [
+        "--enrollment-token",
+        "--hub-url",
+        "--identity",
+        "--offline-asset",
+        "--target-version",
+        "--trust",
+    ] {
+        assert_eq!(
+            parse_probe_command([
+                "enoki-probe".to_string(),
+                "repair".to_string(),
+                forbidden.to_string(),
+                "caller-controlled".to_string(),
+            ]),
+            ProbeCommand::Rejected {
+                code: "probe_repair_arguments_forbidden",
+            },
+        );
+    }
+}
+
+#[test]
+fn probe_repair_forbidden_arguments_exit_nonzero_with_a_stable_code() {
+    for forbidden in [
+        "--enrollment-token",
+        "--hub-url",
+        "--identity",
+        "--offline-asset",
+        "--target-version",
+        "--trust",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_enoki-probe"))
+            .args(["repair", forbidden, "caller-controlled"])
+            .output()
+            .expect("run Probe Repair command");
+
+        assert!(!output.status.success(), "{forbidden} must be rejected");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("code=probe_repair_arguments_forbidden"),
+            "{forbidden} must return the stable rejection code",
+        );
+    }
+}
+
+#[test]
 fn parses_internal_privileged_collector_helper_command_for_compiled_helper_id_only() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),

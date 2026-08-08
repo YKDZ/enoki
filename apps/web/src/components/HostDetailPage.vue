@@ -34,6 +34,7 @@ import type { DeleteHostMode } from "./DeleteHostAlertDialog.vue";
 import HostDetailDashboard from "./HostDetailDashboard.vue";
 import HostDetailSkeleton from "./HostDetailSkeleton.vue";
 import HostSettingsDialog from "./HostSettingsDialog.vue";
+import ProbeUpgradeStatusAlert from "./ProbeUpgradeStatusAlert.vue";
 import StateHero from "./StateHero.vue";
 
 const props = defineProps<{
@@ -132,6 +133,9 @@ const isProbeUpgradeActive = computed(() =>
     probeUpgradeStatus.value?.state ?? "",
   ),
 );
+const isProbeUpgradeFailed = computed(
+  () => probeUpgradeStatus.value?.state === "failed",
+);
 const probeUpgradeTargetVersion = computed(
   () =>
     (isProbeUpgradeActive.value
@@ -144,13 +148,15 @@ const canCreateProbeUpgradeRequest = computed(
   () =>
     Boolean(probeUpgradeEligibility.value?.isUpgradeable) &&
     !isProbeUpgradeActive.value &&
+    !isProbeUpgradeFailed.value &&
     !props.detail.isCreatingProbeUpgradeRequest.value,
 );
 const showProbeUpgradeButton = computed(
   () =>
-    Boolean(probeUpgradeEligibility.value?.isUpgradeable) ||
-    isProbeUpgradeActive.value ||
-    props.detail.isCreatingProbeUpgradeRequest.value,
+    !isProbeUpgradeFailed.value &&
+    (Boolean(probeUpgradeEligibility.value?.isUpgradeable) ||
+      isProbeUpgradeActive.value ||
+      props.detail.isCreatingProbeUpgradeRequest.value),
 );
 const lastClockSkewToastHostId = ref<number | null>(null);
 
@@ -261,6 +267,11 @@ function openHostSettings(currentHost: HostDetail) {
     </StateHero>
 
     <div v-else-if="host" class="grid gap-4">
+      <ProbeUpgradeStatusAlert
+        v-if="probeUpgradeStatus"
+        :status="probeUpgradeStatus"
+      />
+
       <Alert
         v-for="warning in visibleWarnings"
         :key="`${warning.code}-${warning.occurredAtMs ?? 0}`"

@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-FROM node:24-slim AS prepare
+FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS prepare
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME/bin:$PNPM_HOME:$PATH
@@ -13,9 +13,9 @@ RUN mkdir -p probe-assets
 
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm config set store-dir /pnpm/store && \
-  pnpm dlx turbo@2.9.18 prune @enoki/hub @enoki/web --docker
+  pnpm dlx turbo@2.10.2 prune @enoki/hub @enoki/web --docker
 
-FROM node:24-slim AS installer
+FROM node:24-slim@sha256:235600a8101ab264e117b1768e925532262668dc9b581ef1dd7d96ced463b8e7 AS installer
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME/bin:$PNPM_HOME:$PATH
@@ -24,6 +24,7 @@ WORKDIR /app
 RUN corepack enable
 
 COPY --from=prepare /repo/out/json/ ./
+COPY --from=prepare /repo/out/full/ ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm config set store-dir /pnpm/store && \
   pnpm install --frozen-lockfile --dangerously-allow-all-builds
@@ -40,9 +41,9 @@ RUN mkdir -p /app/probe-assets && \
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   PNPM_CONFIG_DANGEROUSLY_ALLOW_ALL_BUILDS=true \
-  pnpm --filter @enoki/hub --prod --no-optional deploy --legacy --offline /app/deploy
+  pnpm --filter @enoki/hub --prod --no-optional deploy --legacy /app/deploy
 
-FROM node:24-alpine AS runtime
+FROM node:24-alpine@sha256:f70403e87646dc51b45295f4b8b70cdad0b63d2297c4c9899119b03f7af7a6b3 AS runtime
 
 ENV ENOKI_WEB_DIST=/app/web-dist
 ENV ENOKI_DATA_ROOT=/data
@@ -61,7 +62,14 @@ COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
 COPY apps/hub/docker-entrypoint.sh /usr/local/bin/enoki-hub-entrypoint
 
-RUN apk add --no-cache su-exec && \
+ADD --checksum=sha256:4003163f58cd4a75df79973171d25e4912df4284d8bac9850ac267b58b969be5 \
+  https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/su-exec-0.3-r0.apk \
+  /tmp/su-exec.apk
+
+RUN apk add --allow-untrusted --no-network /tmp/su-exec.apk && \
+  rm /tmp/su-exec.apk && \
+  chmod +x /app/dist/src/hub-state-snapshot/cli.js && \
+  ln -s /app/dist/src/hub-state-snapshot/cli.js /usr/local/bin/enoki-hub-state && \
   chmod +x /usr/local/bin/enoki-hub-entrypoint && \
   install -d -o node -g node /data
 

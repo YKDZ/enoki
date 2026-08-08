@@ -10,6 +10,7 @@
   "include": [
     "oxfmt.config.ts",
     "oxlint.config.ts",
+    "playwright.candidate.config.ts",
     "playwright.config.ts",
     "tests/e2e/**/*.ts"
   ]

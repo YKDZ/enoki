@@ -2,9 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import * as root from "@enoki/proto/generated/ts/enoki_pb.js";
 import { afterEach, describe, expect, it } from "vitest";
 
-import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
@@ -645,9 +645,12 @@ describe("Host Metadata API", () => {
       probeUninstallRequest: { id: number; state: string };
     };
     expect(deleteBody.probeUninstallRequest).toEqual({
+      acceptedAtMs: null,
+      completedAtMs: null,
       createdAtMs: 1_725_000_060_000,
       failure: null,
       id: expect.any(Number),
+      runningAtMs: null,
       state: "pending",
       updatedAtMs: 1_725_000_060_000,
     });
@@ -722,6 +725,106 @@ describe("Host Metadata API", () => {
         subjectType: "host",
       }),
     );
+
+    database.close();
+  });
+
+  it("keeps a succeeded Probe Uninstall observable to the Owner after Host soft deletion", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_065_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+
+    const deleteResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+      method: "DELETE",
+    });
+    const uninstall = (await deleteResponse.json()) as {
+      probeUninstallRequest: { id: number };
+    };
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const reportBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-observe-uninstall",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
+    const reportResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", reportBody),
+    );
+    const pending = ReportResponse.decode(
+      new Uint8Array(await reportResponse.arrayBuffer()),
+    ).pendingOperation;
+    const runningBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-observe-uninstall",
+        operationAcknowledgements: [
+          { operationId: String(uninstall.probeUninstallRequest.id) },
+        ],
+        operationStatuses: [
+          {
+            operationId: String(uninstall.probeUninstallRequest.id),
+            running: {},
+          },
+        ],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+    const runningResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", runningBody),
+    );
+    expect(runningResponse.status).toBe(200);
+    const statusPath = `/api/probe/operations/${uninstall.probeUninstallRequest.id}/status`;
+    const statusBody = Buffer.from(
+      JSON.stringify({
+        status: "succeeded",
+        token: pending?.probeUninstall?.operationToken,
+      }),
+    );
+    const statusResponse = await app.request(
+      statusPath,
+      signedProbeRequest(registration, statusPath, statusBody),
+    );
+    expect(statusResponse.status).toBe(200);
+
+    const operationResponse = await app.request(
+      `/api/web/probe-operations/${uninstall.probeUninstallRequest.id}`,
+      { headers: { cookie: ownerSession } },
+    );
+
+    expect(operationResponse.status).toBe(200);
+    await expect(operationResponse.json()).resolves.toEqual({
+      probeOperation: expect.objectContaining({
+        failure: null,
+        hostId,
+        id: uninstall.probeUninstallRequest.id,
+        kind: "probe_uninstall",
+        state: "succeeded",
+      }),
+    });
+    const hostResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(hostResponse.status).toBe(404);
 
     database.close();
   });

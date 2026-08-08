@@ -2,9 +2,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import * as root from "@enoki/proto/generated/ts/enoki_pb.js";
 import { afterEach, describe, expect, it } from "vitest";
 
-import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { defaultEnabledCollectorIds } from "../src/probe-configuration/model";

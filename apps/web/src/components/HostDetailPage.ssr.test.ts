@@ -177,9 +177,12 @@ describe("Host detail page", () => {
         nonUpgradeableReason: "probe_version_current",
       },
       probeUpgradeStatus: {
+        acceptedAtMs: null,
+        completedAtMs: null,
         createdAtMs: 1_725_000_100_000,
         failure: null,
         id: 9,
+        runningAtMs: null,
         state: "pending",
         targetProbeVersion: "0.2.0",
         updatedAtMs: 1_725_000_100_000,
@@ -280,7 +283,7 @@ describe("Host detail page", () => {
     expect(html).not.toContain("探针升级");
   });
 
-  it("uses the current probe asset version when the last probe upgrade failed", async () => {
+  it("offers only Probe Repair when the last Probe Upgrade failed", async () => {
     const detail = {
       appendLiveSample: vi.fn(),
       applyLiveSummary: vi.fn(),
@@ -369,7 +372,9 @@ describe("Host detail page", () => {
       }),
     );
 
-    expect(html).toContain("探针可升级到 0.1.16");
+    expect(html).toContain("探针升级失败");
+    expect(html).toContain("Probe Repair");
+    expect(html).not.toContain("探针可升级到 0.1.16");
     expect(html).not.toContain("探针可升级到 0.1.15");
   });
 });

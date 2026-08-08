@@ -159,12 +159,15 @@ export type ProbeUpgradeEligibility = {
 };
 
 export type ProbeUpgradeStatus = {
+  acceptedAtMs: number | null;
+  completedAtMs: number | null;
   createdAtMs: number;
   failure: {
     code: string;
     message: string;
   } | null;
   id: number;
+  runningAtMs: number | null;
   state:
     | "pending"
     | "accepted"
@@ -179,6 +182,13 @@ export type ProbeUpgradeStatus = {
 
 export type ProbeUpgradeRequestResponse = {
   probeUpgradeRequest: ProbeUpgradeStatus;
+};
+
+export type ProbeOperationResponse = {
+  probeOperation: ProbeUpgradeStatus & {
+    hostId: number;
+    kind: "probe_upgrade" | "probe_uninstall";
+  };
 };
 
 export type HostWarning = {
@@ -197,6 +207,7 @@ export type HostDetail = Omit<HostSummary, "probeConfiguration"> & {
   };
   hostProfile: HostProfileSnapshot | null;
   probeConfiguration: HostProbeConfigurationResponse;
+  reportedProbeConfigurationVersion: string;
   probeUpgradeEligibility: ProbeUpgradeEligibility;
   probeUpgradeStatus: ProbeUpgradeStatus | null;
   warnings: HostWarning[];

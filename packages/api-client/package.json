@@ -31,11 +31,16 @@
   },
   "dependencies": {
     "@enoki/proto": "workspace:*",
-    "valibot": "^1.4.1"
+    "valibot": "catalog:"
   },
   "devDependencies": {
     "@tsconfig/node24": "^24.0.4",
-    "typescript": "^6.0.3",
-    "vitest": "^3.2.4"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "turbo": {
+    "tags": [
+      "library"
+    ]
   }
 }

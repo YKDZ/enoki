@@ -1,15 +1,42 @@
 {
-  "$schema": "https://turbo.build/schema.json",
+  "$schema": "https://turborepo.com/schema.json",
+  "boundaries": {
+    "tags": {
+      "app": { "dependencies": { "allow": ["app", "library"] } },
+      "library": { "dependencies": { "allow": ["library"] } }
+    }
+  },
   "tasks": {
+    "//#boundaries": { "cache": false },
+    "//#check:generated": { "outputs": [] },
+    "//#format:check": { "outputs": [] },
+    "//#format:write": { "dependsOn": ["//#lint:fix"], "cache": false },
+    "//#lint": { "outputs": [] },
+    "//#lint:fix": { "cache": false },
+    "//#rust:check": { "cache": false, "outputs": [] },
+    "//#test": { "outputs": [] },
+    "//#test:e2e": { "dependsOn": ["^build"], "cache": false },
+    "//#typecheck": { "outputs": [] },
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    "check:generated": { "outputs": [] },
+    "format:check": { "outputs": [] },
+    "format:write": { "dependsOn": ["lint:fix"], "cache": false },
+    "lint": { "outputs": [] },
+    "lint:fix": { "cache": false },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["build"],
+      "outputs": []
+    },
+    "test:e2e": {
+      "dependsOn": ["build"],
+      "cache": false
     },
     "typecheck": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build", "^typecheck"],
+      "outputs": []
     }
   }
 }

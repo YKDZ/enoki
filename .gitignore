@@ -10,6 +10,7 @@ blob-report
 .agents
 AGENTS.md
 CONTEXT.md
+CONTEXT-MAP.md
 .scratch
 .mcp.json
 /docs
