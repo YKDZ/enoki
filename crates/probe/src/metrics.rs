@@ -380,10 +380,15 @@ impl MetricsCollector {
         elapsed_since_last_collection: Duration,
         schedule: CollectorCadenceSchedule,
         config: &MetricsCollectionConfig,
-    ) -> Option<MetricSample> {
+    ) -> MetricSample {
         self.elapsed += elapsed_since_last_collection;
         self.registry
             .collect_due(sequence, self.elapsed, schedule, config)
+            .unwrap_or_else(|| MetricSample {
+                collected_at_ms: unix_time_millis(),
+                sequence,
+                ..MetricSample::default()
+            })
     }
 
     pub fn advance_time(&mut self, elapsed: Duration) {

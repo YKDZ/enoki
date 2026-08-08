@@ -780,7 +780,16 @@ async function runPostReplacementRepairUninstallScenario({
   } catch (error) {
     primaryError = error;
     if (Array.isArray(error?.timeline)) {
-      evidence.operationTimeline = error.timeline;
+      if (
+        error.timeline.some(
+          (operation) => operation?.kind === "probe_uninstall",
+        )
+      ) {
+        evidence.uninstallOperationTimeline = error.timeline;
+        evidence.uninstall.operationTimeline = error.timeline;
+      } else {
+        evidence.operationTimeline = error.timeline;
+      }
     }
     evidence.result = { error: serializedError(error), status: "failed" };
     evidence.phase = "failed";
