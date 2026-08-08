@@ -606,9 +606,6 @@ async function runPostReplacementRepairUninstallScenario({
         "Repair scenario has no pre-Upgrade portable Metrics checkpoint",
       );
     }
-    evidence.probeConfiguration.beforeUpgrade =
-      await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
-
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
     await waitForObservation({
@@ -620,6 +617,8 @@ async function runPostReplacementRepairUninstallScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
+    evidence.probeConfiguration.beforeUpgrade =
+      await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
 
     const candidateProbeVersion = candidateManifest.probeAssetSet.version;
     await host.beginUpgradeOwnershipTransition(runId, candidateProbeVersion);
@@ -1332,6 +1331,7 @@ async function runBaselineUpgradeUninstallScenario({
     identityContinuity: null,
     infrastructure: null,
     metrics: { afterUpgrade: null, beforeUpgrade: null },
+    manualRecovery: null,
     operationTimeline: [],
     phase: "scenario-running",
     probeConfiguration: { afterUpgrade: null, beforeUpgrade: null },
@@ -1472,7 +1472,29 @@ async function runBaselineUpgradeUninstallScenario({
       requestedUpgrade,
       { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
     );
-    validateSuccessfulProbeUpgradeTimeline(evidence.upgradeOperationTimeline);
+    const finalUpgrade = evidence.upgradeOperationTimeline.at(-1);
+    if (
+      finalUpgrade?.state === "failed" &&
+      finalUpgrade.failure?.code === "insufficient_privilege"
+    ) {
+      validateInsufficientPrivilegeProbeUpgradeTimeline(
+        evidence.upgradeOperationTimeline,
+      );
+      const recoveryEnrollment = await hub.createEnrollment();
+      if (!recoveryEnrollment?.installCommand) {
+        throw assertionError(
+          "recovery_enrollment_command_missing",
+          "Candidate Hub did not return an official Probe installer recovery command",
+        );
+      }
+      evidence.manualRecovery = await host.recoverUpgradeWithInstaller(
+        recoveryEnrollment.installCommand,
+        runId,
+        finalUpgrade,
+      );
+    } else {
+      validateSuccessfulProbeUpgradeTimeline(evidence.upgradeOperationTimeline);
+    }
 
     const candidateHost = await waitForObservation({
       code: "candidate_probe_reporting_timeout",
@@ -1503,10 +1525,9 @@ async function runBaselineUpgradeUninstallScenario({
       before: baselineIdentity,
       hostId,
     };
-    await host.completeUpgradeOwnershipTransition(
-      runId,
-      evidence.upgradeOperationTimeline.at(-1),
-    );
+    if (evidence.manualRecovery === null) {
+      await host.completeUpgradeOwnershipTransition(runId, finalUpgrade);
+    }
 
     const candidateMetricCheckpoint = latestPortableMetric(
       await hub.getHostMetrics(hostId),
@@ -2459,6 +2480,53 @@ export function createProbeHostHarness({
       return { operationId: operation.id, owned: true };
     },
 
+    async recoverUpgradeWithInstaller(installCommand, runId, operation) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      assertInstallCommand(installCommand);
+      assertProbeOperation(operation, {
+        kind: "probe_upgrade",
+        targetProbeVersion: operation?.targetProbeVersion,
+      });
+      if (
+        operation.state !== "failed" ||
+        operation.failure?.code !== "insufficient_privilege" ||
+        operation.acceptedAtMs === null ||
+        operation.completedAtMs === null
+      ) {
+        throw new Error(
+          "Installer recovery requires a terminal insufficient-privilege Probe Upgrade",
+        );
+      }
+      const result = await execute(`${installCommand}\n`, {
+        root: true,
+        sensitive: true,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          `Manual Probe installer recovery failed (${result.code}): ${result.stderr}`,
+        );
+      }
+      const completed = await execute(
+        completeInstallerRecoveryOwnershipScript(
+          runId,
+          ownershipToken,
+          operation,
+        ),
+        { root: true },
+      );
+      if (completed.code !== 0 || completed.stdout.trim() !== "owned") {
+        throw new Error(
+          `Could not commit run-owned Probe resources after Installer Recovery: ${completed.stderr}`,
+        );
+      }
+      return {
+        failedOperationId: operation.id,
+        mode: "installer",
+        status: "succeeded",
+        targetProbeVersion: operation.targetProbeVersion,
+      };
+    },
+
     async assertPostReplacementUpgradeFailure(
       runId,
       operation,
@@ -3156,6 +3224,30 @@ printf 'owned\n'
 `;
 }
 
+function completeInstallerRecoveryOwnershipScript(runId, token, operation) {
+  return `# enoki-release-e2e:complete-installer-recovery-ownership
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+[ -d "$claim" ]
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
+[ "$(cat "$claim/upgrade-target")" = ${shellSingleQuote(operation.targetProbeVersion)} ]
+[ "$(cat "$claim/upgrade-operation-id")" = ${shellSingleQuote(String(operation.id))} ]
+[ -f "$claim/upgrade-before-resources" ]
+cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
+${knownProbeInstallMetadataScript()}
+[ "$metadata_schema" = current ]
+${resourceFingerprintFunction()}
+temporary=$(mktemp "$claim/resources.recovery.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+fingerprint > "$temporary"
+mv -- "$temporary" "$claim/resources"
+trap - EXIT HUP INT TERM
+rm -- "$claim/upgrade-before-resources" "$claim/upgrade-target" "$claim/upgrade-operation-id"
+printf 'owned\n'
+`;
+}
+
 function completeRepairOwnershipScript(runId, token, operation) {
   return `# enoki-release-e2e:complete-repair-ownership
 set -eu
@@ -3169,6 +3261,7 @@ claim=/var/lib/enoki-release-e2e/claim
 [ ! -e "$claim/post-replacement-fault" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
+[ "$metadata_schema" = current ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.repair.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -3227,17 +3320,34 @@ function knownProbeInstallMetadataScript() {
 [ "$(stat -c %u "$metadata")" = 0 ]
 [ -z "$(find "$metadata" -prune -perm /022 -print)" ]
 require_metadata_line() { [ "$(grep -Fxc "$1" "$metadata")" -eq 1 ]; }
-require_metadata_line 'schema_version = 1'
 require_metadata_line 'install_path = "/usr/local/bin/enoki-probe"'
-require_metadata_line 'identity_path = "/etc/enoki/probe-bootstrap.toml"'
 require_metadata_line 'state_dir = "/var/lib/enoki-probe"'
 require_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"'
 require_metadata_line 'service_name = "enoki-probe"'
 require_metadata_line 'service_user = "enoki-probe"'
-require_metadata_line 'service_group = "enoki-probe"'
-require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
 require_metadata_line 'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"'
-require_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"'`;
+require_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"'
+if grep -Fxq 'schema_version = 1' "$metadata"; then
+  metadata_schema=current
+else
+  metadata_schema=legacy
+fi
+case "$metadata_schema" in
+  current)
+    [ "$(stat -c %a "$metadata")" = 600 ]
+    require_metadata_line 'schema_version = 1'
+    require_metadata_line 'identity_path = "/etc/enoki/probe-bootstrap.toml"'
+    require_metadata_line 'service_group = "enoki-probe"'
+    require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
+    ;;
+  legacy)
+    [ "$(stat -c %a "$metadata")" = 644 ]
+    [ "$(grep -c '^schema_version = ' "$metadata")" -eq 0 ]
+    [ "$(grep -c '^identity_path = ' "$metadata")" -eq 0 ]
+    [ "$(grep -c '^service_group = ' "$metadata")" -eq 0 ]
+    [ "$(grep -c '^service_unit_path = ' "$metadata")" -eq 0 ]
+    ;;
+esac`;
 }
 
 function removeClaimScript(runId, token) {
@@ -3836,6 +3946,45 @@ export function validateSuccessfulProbeUpgradeTimeline(timeline) {
       `Probe Upgrade did not preserve accepted, running, and succeeded transition evidence: ${JSON.stringify(timeline)}`,
     );
   }
+}
+
+function validateInsufficientPrivilegeProbeUpgradeTimeline(timeline) {
+  if (!Array.isArray(timeline) || timeline.length < 3) {
+    throw assertionError(
+      "probe_upgrade_timeline_incomplete",
+      "Probe Upgrade permission failure did not retain bounded terminal evidence",
+    );
+  }
+  const requested = timeline[0];
+  let previous = null;
+  for (const operation of timeline) {
+    assertProbeOperation(operation, {
+      hostId: requested?.hostId,
+      id: requested?.id,
+      kind: "probe_upgrade",
+      targetProbeVersion: requested?.targetProbeVersion,
+    });
+    if (previous) assertProbeOperationProgress(previous, operation);
+    previous = operation;
+  }
+  const finalOperation = timeline.at(-1);
+  const confirmedOperation = timeline.at(-2);
+  if (
+    requested?.state !== "pending" ||
+    requested.acceptedAtMs !== null ||
+    requested.runningAtMs !== null ||
+    requested.completedAtMs !== null ||
+    finalOperation?.state !== "failed" ||
+    finalOperation.failure?.code !== "insufficient_privilege" ||
+    !Number.isSafeInteger(finalOperation.acceptedAtMs) ||
+    !Number.isSafeInteger(finalOperation.completedAtMs)
+  ) {
+    throw assertionError(
+      "probe_upgrade_permission_failure_invalid",
+      `Probe Upgrade did not preserve a terminal insufficient-privilege failure: ${JSON.stringify(timeline)}`,
+    );
+  }
+  assertStableTerminalOperation(confirmedOperation, finalOperation);
 }
 
 function isNullableTimestamp(value) {

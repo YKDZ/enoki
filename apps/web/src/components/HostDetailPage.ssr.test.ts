@@ -283,7 +283,7 @@ describe("Host detail page", () => {
     expect(html).not.toContain("探针升级");
   });
 
-  it("offers only Probe Repair when the last Probe Upgrade failed", async () => {
+  it("offers Installer Recovery when Probe Upgrade lacks privilege", async () => {
     const detail = {
       appendLiveSample: vi.fn(),
       applyLiveSummary: vi.fn(),
@@ -373,7 +373,8 @@ describe("Host detail page", () => {
     );
 
     expect(html).toContain("探针升级失败");
-    expect(html).toContain("Probe Repair");
+    expect(html).toContain("生成新的一次性安装命令");
+    expect(html).not.toContain("Probe Repair");
     expect(html).not.toContain("探针可升级到 0.1.16");
     expect(html).not.toContain("探针可升级到 0.1.15");
   });

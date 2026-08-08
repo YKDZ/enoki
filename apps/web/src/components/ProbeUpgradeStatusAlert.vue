@@ -9,6 +9,12 @@ const props = defineProps<{
   status: NonNullable<HostDetail["probeUpgradeStatus"]>;
 }>();
 
+const requiresInstallerRecovery = computed(
+  () =>
+    props.status.state === "failed" &&
+    props.status.failure?.code === "insufficient_privilege",
+);
+
 const presentation = computed(() => {
   switch (props.status.state) {
     case "pending":
@@ -81,7 +87,11 @@ const presentation = computed(() => {
         {{ status.failure.message || status.failure.code }}
         <span v-if="status.failure.message">（{{ status.failure.code }}）</span>
       </p>
-      <p v-if="status.state === 'failed'">
+      <p v-if="requiresInstallerRecovery">
+        请在 Hub 生成新的一次性安装命令，并在受影响主机上以 root
+        权限运行；安装器会保留现有探针身份并完成恢复。
+      </p>
+      <p v-else-if="status.state === 'failed'">
         请在受影响主机上以 root 权限运行 Probe
         Repair，然后返回此页确认探针恢复上报。
       </p>

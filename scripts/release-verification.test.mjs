@@ -242,7 +242,7 @@ describe("verify-only release workflow", () => {
       standardCi: standardCiEvidence(candidateManifest.candidate),
       verified: true,
     });
-    expect(summary.gates.hostScenarios).toHaveLength(7);
+    expect(summary.gates.hostScenarios).toHaveLength(6);
     expect(
       summary.gates.hostScenarios.filter(
         (gate) => gate.scenarioId === "hub-restore-compatibility-window",
@@ -367,7 +367,7 @@ describe("verify-only release workflow", () => {
         "Candidate Manifest identity is missing",
       ]),
     );
-    expect(summary.gates.hostScenarios).toHaveLength(7);
+    expect(summary.gates.hostScenarios).toHaveLength(6);
     expect(
       summary.gates.hostScenarios.every((gate) => gate.outcome === "missing"),
     ).toBe(true);
@@ -725,6 +725,40 @@ describe("verify-only release workflow", () => {
       candidate,
       cellId: `ubuntu-24.04-x86_64--${scenario}`,
       evidence: successfulHostEvidence(scenario, candidate),
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.evidenceValidationErrors).toEqual([]);
+    expect(gate.outcome).toBe("succeeded");
+  });
+
+  it("accepts a confirmed insufficient-privilege Upgrade followed by Installer Recovery", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "baseline-upgrade-uninstall",
+      candidate,
+    );
+    evidence.upgradeOperationTimeline = evidenceOperationTimeline({
+      failureCode: "insufficient_privilege",
+      id: 81,
+      kind: "probe_upgrade",
+      state: "failed",
+      targetProbeVersion: "1.2.3",
+    });
+    evidence.manualRecovery = {
+      failedOperationId: 81,
+      mode: "installer",
+      status: "succeeded",
+      targetProbeVersion: "1.2.3",
+    };
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      evidence,
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
     });

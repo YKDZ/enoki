@@ -3071,34 +3071,20 @@ describe("Probe report API", () => {
       new Uint8Array(await delivery.arrayBuffer()),
     ).pendingOperation?.probeUninstall?.operationToken;
 
-    const runningReport = await app.request(
-      "/api/probe/report",
-      signedProbeRequest(
+    const validated = await app.request(
+      `/api/probe/operations/${operation.id}/token/validate`,
+      signedJsonProbeRequest(
         registration,
-        "/api/probe/report",
-        ReportRequest.encode(
-          ReportRequest.create({
-            bootId: "boot-01",
-            operationAcknowledgements: [
-              {
-                operationId: String(operation.id),
-              },
-            ],
-            operationStatuses: [
-              {
-                operationId: String(operation.id),
-                running: {},
-              },
-            ],
-            probeConfigurationVersion: "default-v1",
-            probeId: registration.probeId,
-            sequenceEnd: 2,
-            sequenceStart: 2,
-          }),
-        ).finish(),
+        `/api/probe/operations/${operation.id}/token/validate`,
+        JSON.stringify({ token }),
       ),
     );
-    expect(runningReport.status).toBe(200);
+    expect(validated.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toMatchObject({
+      acceptedAtMs: 1_725_000_010_000,
+      runningAtMs: 1_725_000_010_000,
+      state: "running",
+    });
 
     const legacyBearerStatus = await app.request(
       `/api/probe/operations/${operation.id}/status`,
