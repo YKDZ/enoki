@@ -708,9 +708,14 @@ describe("Probe Host Harness", () => {
       command.includes("# enoki-release-e2e:post-replacement-failure"),
     );
     expect(boundary.command).toContain("/usr/local/bin/enoki-probe --version");
-    expect(boundary.command).toContain('[ ! -L "$status" ]');
-    expect(boundary.command).toContain('[ "$(stat -c %u "$status")" = 0 ]');
-    expect(boundary.command).toContain('[ "$(stat -c %a "$status")" = 644 ]');
+    expect(boundary.command).toContain(
+      'version=${version_output#"enoki-probe "}',
+    );
+    expect(boundary.command).toContain("unexpected post-replacement status");
+    expect(boundary.command).toContain(
+      "candidate Probe service is still active",
+    );
+    expect(boundary.command).not.toContain("stat -c");
     expect(boundary.command).toContain(
       'error_code = "post_replacement_restart_failure"',
     );
