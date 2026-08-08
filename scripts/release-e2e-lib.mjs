@@ -2156,7 +2156,7 @@ export function createProbeHostHarness({
   let sharedDependenciesBefore = null;
 
   async function inventory() {
-    const result = await execute(hostInventoryScript());
+    const result = await execute(hostInventoryScript(), { root: true });
     if (result.code !== 0) {
       throw new Error(
         `Release Test Host inspection failed (${result.code}): ${result.stderr}`,
