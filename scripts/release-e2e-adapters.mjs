@@ -999,29 +999,34 @@ export function createDockerHubController({
       if (!owned?.containerCreated || !owned.identityVerified) {
         throw new Error("Hub runtime identity is not available");
       }
-      const [containerInspect, imageInspect, logs] = await Promise.all([
-        successfulExec(exec, containerEngine, [
-          "container",
-          "inspect",
-          "--format",
-          '{{json (dict "Id" .Id "Image" .Image "ImageName" .Config.Image "Labels" .Config.Labels "State" .State "Mounts" .Mounts "Ports" .NetworkSettings.Ports)}}',
-          owned.container,
-        ]),
-        successfulExec(exec, containerEngine, [
-          "image",
-          "inspect",
-          "--format",
-          '{{json (dict "Id" .Id "RepoDigests" .RepoDigests)}}',
-          owned.tag,
-        ]),
-        successfulExec(exec, containerEngine, [
-          "logs",
-          "--timestamps",
-          "--tail",
-          "500",
-          owned.container,
-        ]),
-      ]);
+      const [containerInspectResult, imageInspectResult, logs] =
+        await Promise.all([
+          successfulExec(exec, containerEngine, [
+            "container",
+            "inspect",
+            owned.container,
+          ]),
+          successfulExec(exec, containerEngine, [
+            "image",
+            "inspect",
+            owned.tag,
+          ]),
+          successfulExec(exec, containerEngine, [
+            "logs",
+            "--timestamps",
+            "--tail",
+            "500",
+            owned.container,
+          ]),
+        ]);
+      const containerInspect = parseDockerInspectObject(
+        containerInspectResult.stdout,
+        "Docker container inspect",
+      );
+      const imageInspect = parseDockerInspectObject(
+        imageInspectResult.stdout,
+        "Docker image inspect",
+      );
       return {
         activeHub: owned.activeHub ?? "candidate",
         activeManifestDigest: owned.manifestDigest,
@@ -1030,10 +1035,24 @@ export function createDockerHubController({
           owned.candidate?.manifestDigest ?? owned.manifestDigest,
         containerConfigDigest: owned.configDigest,
         containerInspect: redactText(
-          containerInspect.stdout,
+          JSON.stringify({
+            Id: containerInspect.Id,
+            Image: containerInspect.Image,
+            ImageName: containerInspect.Config?.Image,
+            Labels: containerInspect.Config?.Labels,
+            Mounts: containerInspect.Mounts,
+            Ports: containerInspect.NetworkSettings?.Ports,
+            State: containerInspect.State,
+          }),
           owned.redactionSecrets,
         ),
-        imageInspect: redactText(imageInspect.stdout, owned.redactionSecrets),
+        imageInspect: redactText(
+          JSON.stringify({
+            Id: imageInspect.Id,
+            RepoDigests: imageInspect.RepoDigests,
+          }),
+          owned.redactionSecrets,
+        ),
         identityVerified: true,
         logs: redactText(
           `${logs.stdout}${logs.stderr}`,
@@ -1619,6 +1638,20 @@ function parseCommandJson(value, label) {
   } catch (error) {
     throw new Error(`${label} did not return JSON`, { cause: error });
   }
+}
+
+function parseDockerInspectObject(value, label) {
+  const parsed = parseCommandJson(value, label);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length !== 1 ||
+    !parsed[0] ||
+    typeof parsed[0] !== "object" ||
+    Array.isArray(parsed[0])
+  ) {
+    throw new Error(`${label} did not return exactly one object`);
+  }
+  return parsed[0];
 }
 
 function redactText(value, secrets = []) {

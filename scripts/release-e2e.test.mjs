@@ -386,10 +386,10 @@ describe("Probe Host Harness", () => {
   });
 
   it("refuses a Release Test Host with a pre-existing Enoki installation before mutation", async () => {
-    const commands = [];
+    const executions = [];
     const harness = createProbeHostHarness({
-      execute: async (command) => {
-        commands.push(command);
+      execute: async (command, options) => {
+        executions.push({ command, options });
         return {
           code: 0,
           stderr: "",
@@ -406,11 +406,12 @@ describe("Probe Host Harness", () => {
       /pre-existing Enoki installation.*probe-install\.toml.*enoki-probe\.service/s,
     );
     expect(
-      commands.filter((command) =>
+      executions.filter(({ command }) =>
         command.includes("# enoki-release-e2e:inventory"),
       ),
     ).toHaveLength(1);
-    expect(commands[0]).toContain("probe-install.toml");
+    expect(executions[0].command).toContain("probe-install.toml");
+    expect(executions[0].options).toEqual({ root: true });
   });
 
   it("installs the Hub command once and proves the non-root local privilege boundary", async () => {
@@ -3786,6 +3787,37 @@ describe("Release E2E command", () => {
           ? successfulCommandText("run-runtime\n")
           : { code: 1, stderr: "No such volume", stdout: "" };
       }
+      if (
+        arguments_[0] === "container" &&
+        arguments_[1] === "inspect" &&
+        arguments_.length === 3
+      ) {
+        return state.container
+          ? successfulCommand([
+              {
+                Config: {
+                  Env: ["OWNER_PASSWORD=owner-secret"],
+                  Image: "enoki-release-e2e:run-runtime",
+                  Labels: { "enoki.release-e2e.run": "run-runtime" },
+                },
+                Id: "container-id",
+                Image: configDigest,
+                Mounts: [],
+                NetworkSettings: { Ports: {} },
+                State: { Running: true },
+              },
+            ])
+          : { code: 1, stderr: "No such container", stdout: "" };
+      }
+      if (
+        arguments_[0] === "image" &&
+        arguments_[1] === "inspect" &&
+        arguments_.length === 3
+      ) {
+        return state.image
+          ? successfulCommand([{ Id: configDigest, RepoDigests: [] }])
+          : { code: 1, stderr: "No such image", stdout: "" };
+      }
       if (arguments_[0] === "image" && arguments_.includes("inspect")) {
         if (!state.image) {
           return { code: 1, stderr: "No such image", stdout: "" };
@@ -3845,6 +3877,7 @@ describe("Release E2E command", () => {
     expect(JSON.stringify(evidence)).not.toContain("owner-secret");
     expect(JSON.stringify(evidence)).not.toContain("enk_enroll_leaked");
     expect(JSON.stringify(evidence)).not.toContain("probe-secret");
+    expect(commands.join("\n")).not.toContain("(dict ");
 
     await expect(
       controller.cleanup({ resources, runId: "run-runtime" }),
@@ -3923,6 +3956,37 @@ describe("Release E2E command", () => {
         return volume
           ? successfulCommandText("run-switch\n")
           : { code: 1, stderr: "No such volume", stdout: "" };
+      }
+      if (
+        arguments_[0] === "container" &&
+        arguments_[1] === "inspect" &&
+        arguments_.length === 3
+      ) {
+        return container
+          ? successfulCommand([
+              {
+                Config: {
+                  Image: `enoki-release-e2e:${activeImage}`,
+                  Labels: { "enoki.release-e2e.run": "run-switch" },
+                },
+                Id: "container-id",
+                Image: activeImage,
+                Mounts: [],
+                NetworkSettings: { Ports: {} },
+                State: { Running: true },
+              },
+            ])
+          : { code: 1, stderr: "No such container", stdout: "" };
+      }
+      if (
+        arguments_[0] === "image" &&
+        arguments_[1] === "inspect" &&
+        arguments_.length === 3
+      ) {
+        const digest = images.get(arguments_[2]);
+        return digest
+          ? successfulCommand([{ Id: digest, RepoDigests: [] }])
+          : { code: 1, stderr: "No such image", stdout: "" };
       }
       if (arguments_[0] === "image" && arguments_[1] === "inspect") {
         const digest = images.get(arguments_.at(-1));
