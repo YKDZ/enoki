@@ -14,7 +14,6 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -36,7 +35,6 @@ import {
 } from "./release-candidate-lib.mjs";
 
 const execFileAsync = promisify(execFile);
-const baselineCli = "scripts/release-baseline.mjs";
 const indexMediaType = "application/vnd.oci.image.index.v1+json";
 const manifestMediaType = "application/vnd.oci.image.manifest.v1+json";
 const configMediaType = "application/vnd.oci.image.config.v1+json";
@@ -93,21 +91,30 @@ describe("Release Baseline resolution", () => {
     expect(selected.tagName).toBe("v1.4.0");
   });
 
-  it("allows first-formal-release only with an empty stable catalog", () => {
-    expect(
-      selectReleaseBaseline({
-        candidateVersion: "v0.1.0",
-        firstFormalRelease: true,
-        releases: [release("v0.1.0-rc.1", { prerelease: true })],
-      }),
-    ).toEqual({ kind: "first-formal-release" });
+  it("requires a published Release Baseline", () => {
     expect(() =>
       selectReleaseBaseline({
-        candidateVersion: "v1.0.1",
-        firstFormalRelease: true,
-        releases: [release("v1.0.0")],
+        candidateVersion: "v0.1.0",
+        releases: [release("v0.1.0-rc.1", { prerelease: true })],
       }),
-    ).toThrow("first-formal-release cannot be selected");
+    ).toThrow("no published Release Baseline exists");
+  });
+
+  it("hard-deletes the historical empty-baseline branch", async () => {
+    const files = await Promise.all(
+      [
+        ".github/workflows/release.yml",
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "scripts/release-baseline.mjs",
+        "scripts/release-baseline-lib.mjs",
+        "scripts/release-candidate-lib.mjs",
+        "scripts/release-e2e-lib.mjs",
+        "scripts/release-verification-lib.mjs",
+      ].map((file) => readFile(file, "utf8")),
+    );
+    expect(files.join("\n")).not.toContain(
+      ["first", "formal", "release"].join("-"),
+    );
   });
 
   it("rejects a self-signed baseline outside the canonical production trust root", async () => {
@@ -379,37 +386,6 @@ describe("Release Baseline resolution", () => {
     }
   });
 
-  it("materializes an explicit first-release marker with an empty catalog snapshot", async () => {
-    const workDir = await mkdtemp(path.join(tmpdir(), "enoki-first-release-"));
-    const { publicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const outputDir = path.join(workDir, "release-baseline");
-    try {
-      const marker = await resolveReleaseBaseline({
-        assetDownloader: {},
-        candidateVersion: "v0.1.0",
-        firstFormalRelease: true,
-        githubRepository: "YKDZ/enoki",
-        hubImage: "ghcr.io/ykdz/enoki-hub",
-        outputDir,
-        registry: {},
-        releaseCatalog: { listReleases: async () => [] },
-        trustedProbePublicKeyPem: publicKey,
-      });
-      expect(marker).toMatchObject({
-        catalogSnapshot: { entries: [] },
-        kind: "first-formal-release",
-      });
-      await expect(validateResolvedReleaseBaseline(outputDir)).resolves.toEqual(
-        marker,
-      );
-    } finally {
-      await rm(workDir, { force: true, recursive: true });
-    }
-  });
-
   it("exposes resolve, validate, and final recheck through the shared CLI path", async () => {
     const workflow = await readFile(
       ".github/workflows/reusable-build-release-candidate.yml",
@@ -425,54 +401,6 @@ describe("Release Baseline resolution", () => {
     expect(workflow).toContain("release-baseline.mjs recheck");
     expect(workflow).toContain("--trusted-probe-public-key-env");
     expect(releaseWorkflow).toContain("group: enoki-release-global");
-  });
-
-  it("keeps the first-release CLI usable locally with the same trusted-key input", async () => {
-    const workDir = await mkdtemp(path.join(tmpdir(), "enoki-baseline-cli-"));
-    const outputDir = path.join(workDir, "release-baseline");
-    const { publicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
-    const server = createServer((_request, response) => {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end("[]");
-    });
-    try {
-      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address();
-      await execFileAsync(
-        "node",
-        [
-          baselineCli,
-          "resolve",
-          "--candidate-version",
-          "v0.1.0",
-          "--first-formal-release",
-          "true",
-          "--github-repository",
-          "YKDZ/enoki",
-          "--github-api-base-url",
-          `http://127.0.0.1:${address.port}`,
-          "--hub-image",
-          "ghcr.io/ykdz/enoki-hub",
-          "--output",
-          outputDir,
-          "--trusted-probe-public-key-env",
-          "TEST_PROBE_PUBLIC_KEY",
-        ],
-        { env: { ...process.env, TEST_PROBE_PUBLIC_KEY: publicKey } },
-      );
-      const validated = await execFileAsync("node", [
-        baselineCli,
-        "validate",
-        outputDir,
-      ]);
-      expect(validated.stdout).toContain("first-formal-release");
-    } finally {
-      server.close();
-      await rm(workDir, { force: true, recursive: true });
-    }
   });
 });
 

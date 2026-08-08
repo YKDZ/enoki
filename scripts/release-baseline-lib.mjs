@@ -289,7 +289,6 @@ export function createGhcrRegistryClient({
 export async function resolveReleaseBaseline({
   assetDownloader,
   candidateVersion,
-  firstFormalRelease = false,
   githubRepository,
   hubImage,
   outputDir,
@@ -304,26 +303,8 @@ export async function resolveReleaseBaseline({
   const catalogSnapshot = createReleaseCatalogSnapshot(releases);
   const selected = selectReleaseBaseline({
     candidateVersion,
-    firstFormalRelease,
     releases,
   });
-  if (selected.kind === "first-formal-release") {
-    const marker = { catalogSnapshot, kind: "first-formal-release" };
-    const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
-    try {
-      await mkdir(stagingDir, { recursive: false });
-      await writeFile(
-        path.join(stagingDir, baselineDescriptorFile),
-        `${JSON.stringify(marker, null, 2)}\n`,
-      );
-      await validateResolvedReleaseBaseline(stagingDir);
-      await rename(stagingDir, outputDir);
-    } catch (error) {
-      await rm(stagingDir, { force: true, recursive: true });
-      throw error;
-    }
-    return marker;
-  }
 
   assertImmutableRepository(githubRepository);
   assertImmutableImageName(hubImage);
@@ -463,12 +444,8 @@ export async function recheckReleaseBaseline({
   }
   const selected = selectReleaseBaseline({
     candidateVersion,
-    firstFormalRelease: descriptor.kind === "first-formal-release",
     releases,
   });
-  if (descriptor.kind === "first-formal-release") {
-    return descriptor;
-  }
   if (selected.tagName !== descriptor.tag) {
     throw new Error("Release Baseline selection changed after resolution");
   }
@@ -500,26 +477,6 @@ export async function recheckReleaseBaseline({
 }
 
 export async function validateResolvedReleaseBaseline(bundleDir, options = {}) {
-  const descriptor = await readJson(
-    path.join(bundleDir, baselineDescriptorFile),
-    "Release Baseline descriptor",
-  );
-  if (descriptor?.kind === "first-formal-release") {
-    assertPlainObject(descriptor, "first-formal-release marker");
-    assertExactKeys(descriptor, ["catalogSnapshot", "kind"]);
-    validateReleaseCatalogSnapshot(descriptor.catalogSnapshot);
-    if (descriptor.catalogSnapshot.entries.length !== 0) {
-      throw new Error(
-        "first-formal-release catalog snapshot must contain no stable release",
-      );
-    }
-    assertSameFileNames(
-      (await readdir(bundleDir)).sort(),
-      [baselineDescriptorFile],
-      "first-formal-release bundle",
-    );
-    return descriptor;
-  }
   return validateReleaseBaselineBundle(bundleDir, options);
 }
 
@@ -742,11 +699,7 @@ export async function validateReleaseBaselineBundle(
   return descriptor;
 }
 
-export function selectReleaseBaseline({
-  candidateVersion,
-  firstFormalRelease = false,
-  releases,
-}) {
+export function selectReleaseBaseline({ candidateVersion, releases }) {
   const candidate = parseStableSemVer(candidateVersion, "candidate version");
   const publishedStableReleases = releases
     .filter(isPublishedStableRelease)
@@ -761,21 +714,11 @@ export function selectReleaseBaseline({
       `candidate ${candidateVersion} must be newer than published stable release ${newest.release.tagName}`,
     );
   }
-  if (firstFormalRelease) {
-    if (newest) {
-      throw new Error(
-        `first-formal-release cannot be selected after published stable release ${newest.release.tagName}`,
-      );
-    }
-    return { kind: "first-formal-release" };
-  }
   const baseline = publishedStableReleases.find(
     ({ version }) => compareSemVer(version, candidate) < 0,
   );
   if (!baseline) {
-    throw new Error(
-      "no published Release Baseline exists; the first formal release must be explicit",
-    );
+    throw new Error("no published Release Baseline exists");
   }
   return baseline.release;
 }

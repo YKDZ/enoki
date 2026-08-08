@@ -2,18 +2,13 @@ name: Build Enoki Release Candidate
 
 on:
   workflow_call:
+    secrets:
+      probe_asset_signing_key_pem:
+        description: Production private key for the signed Probe Asset Set.
+        required: true
     inputs:
       commit:
         description: Full source commit for this candidate.
-        required: true
-        type: string
-      first-formal-release:
-        description: Explicitly assert that no published stable release exists.
-        required: false
-        type: boolean
-        default: false
-      mode:
-        description: Verification mode for this fresh candidate attempt.
         required: true
         type: string
       version:
@@ -28,6 +23,7 @@ on:
         description: Authoritative evidence for this fresh candidate attempt.
         value: ${{ jobs.finalize-verification.outputs.artifact-name }}
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -64,49 +60,92 @@ jobs:
       - name: Checkout exact candidate commit
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           path: candidate-source
           persist-credentials: false
           ref: ${{ inputs.commit }}
 
-      - name: Checkout protected source-policy tooling
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: candidate-source/package.json
+
+      - name: Bind candidate source and release policy to one revision
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          TRUSTED_WORKFLOW_SHA: ${{ steps.trusted-workflow.outputs.sha }}
+        run: >-
+          test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"
+          && node candidate-source/scripts/release-candidate.mjs validate-inputs
+          --commit "$CANDIDATE_COMMIT"
+          --version "$CANDIDATE_VERSION"
+          --source-dir candidate-source
+
+  validate-release-configuration:
+    name: Validate production release configuration
+    needs: validate-candidate-inputs
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout immutable release preflight
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
           path: trusted-tool
           persist-credentials: false
-          repository: ${{ steps.trusted-workflow.outputs.repository }}
-          ref: ${{ steps.trusted-workflow.outputs.sha }}
-
-      - name: Fetch the current canonical protected main
-        working-directory: candidate-source
-        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
+          ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version-file: trusted-tool/package.json
 
-      - name: Validate explicit commit and SemVer
+      - name: Validate the production Probe signing identity
+        env:
+          PRODUCTION_PROBE_PRIVATE_KEY: ${{ secrets.probe_asset_signing_key_pem }}
+          PRODUCTION_PROBE_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
+        run: >-
+          node trusted-tool/scripts/release-candidate.mjs validate-signing-identity
+          --private-key-env PRODUCTION_PROBE_PRIVATE_KEY
+          --public-key-env PRODUCTION_PROBE_PUBLIC_KEY
+
+      - name: Resolve the successful standard CI run for this candidate
         env:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
-          CANDIDATE_VERSION: ${{ inputs.version }}
-          RELEASE_MODE: ${{ inputs.mode }}
-        run: >-
-          { test "$RELEASE_MODE" = verify-only || test "$RELEASE_MODE" = publish; }
-          && node trusted-tool/scripts/release-candidate.mjs validate-source-policy
-          --commit "$CANDIDATE_COMMIT"
-          --remote origin
-          --source-dir candidate-source
-          --trusted-main-ref refs/remotes/origin/main
-          && node trusted-tool/scripts/release-candidate.mjs validate-inputs
-          --commit "$CANDIDATE_COMMIT"
-          --version "$CANDIDATE_VERSION"
-          --source-dir candidate-source
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh api \
+            "repos/$REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=100" \
+            > standard-ci-runs.json
+          ci_run_id="$(jq -r --arg commit "$CANDIDATE_COMMIT" \
+            '[.workflow_runs[] | select(.event == "push" and .head_branch == "main" and .head_sha == $commit)] | sort_by(.id) | last | .id // empty' \
+            standard-ci-runs.json)"
+          if [ -z "$ci_run_id" ]; then
+            echo "::error::No standard CI push run exists for candidate commit $CANDIDATE_COMMIT."
+            exit 1
+          fi
+          gh api "repos/$REPOSITORY/actions/runs/$ci_run_id/jobs?per_page=100" \
+            > standard-ci-jobs.json
+          node trusted-tool/scripts/release-ci.mjs verify \
+            --commit "$CANDIDATE_COMMIT" \
+            --workflow-runs standard-ci-runs.json \
+            --jobs standard-ci-jobs.json \
+            --output standard-ci-evidence.json
+
+      - name: Upload exact standard CI evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-standard-ci-${{ github.run_id }}
+          path: standard-ci-evidence.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
 
   resolve-release-baseline:
     name: Resolve and pin Release Baseline
-    needs: validate-candidate-inputs
+    needs: [validate-candidate-inputs, validate-release-configuration]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout immutable baseline resolver
@@ -126,13 +165,11 @@ jobs:
       - name: Resolve and fully verify published baseline inputs
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
-          FIRST_FORMAL_RELEASE: ${{ inputs.first-formal-release }}
           GH_TOKEN: ${{ github.token }}
           PRODUCTION_PROBE_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
         run: >-
           node trusted-tool/scripts/release-baseline.mjs resolve
           --candidate-version "$CANDIDATE_VERSION"
-          --first-formal-release "$FIRST_FORMAL_RELEASE"
           --github-repository YKDZ/enoki
           --github-token-env GH_TOKEN
           --hub-image ghcr.io/ykdz/enoki-hub
@@ -150,7 +187,12 @@ jobs:
 
   build-probe:
     name: Build all Probe targets
-    needs: [validate-candidate-inputs, resolve-release-baseline]
+    needs:
+      [
+        validate-candidate-inputs,
+        validate-release-configuration,
+        resolve-release-baseline,
+      ]
     uses: ./.github/workflows/reusable-build-probe.yml
     with:
       commit: ${{ inputs.commit }}
@@ -208,11 +250,8 @@ jobs:
     name: Sign complete Probe Asset Set at the trusted boundary
     needs: [validate-candidate-inputs, prepare-unsigned-probe-assets]
     runs-on: ubuntu-24.04
-    environment: release-signing
     steps:
-      # The release-signing Environment must allow only the protected main
-      # branch and own the signing key as an Environment secret. Candidate
-      # source is data; no candidate-controlled script runs in this job.
+      # Candidate source is data; no candidate-controlled script runs here.
       - name: Checkout protected trusted signer
         uses: actions/checkout@v7
         with:
@@ -241,7 +280,7 @@ jobs:
 
       - name: Sign only allowlisted, deeply validated content
         env:
-          ENOKI_PROBE_ASSET_SIGNING_KEY_PEM: ${{ secrets.ENOKI_PROBE_ASSET_SIGNING_KEY_PEM }}
+          ENOKI_PROBE_ASSET_SIGNING_KEY_PEM: ${{ secrets.probe_asset_signing_key_pem }}
         run: >-
           node trusted-signer/scripts/release-candidate.mjs sign-probe-assets
           --input unsigned-probe-assets
@@ -265,98 +304,20 @@ jobs:
   build-hub-oci:
     name: Build content-addressed Hub OCI archive
     needs: [validate-candidate-inputs, sign-probe-assets]
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout exact candidate commit
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          path: candidate-source
-          persist-credentials: false
-          ref: ${{ inputs.commit }}
-
-      - name: Checkout immutable trusted Hub verifier
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          path: trusted-tool
-          persist-credentials: false
-          repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}
-          ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: trusted-tool/package.json
-
-      - name: Reconfirm source identity
-        env:
-          CANDIDATE_COMMIT: ${{ inputs.commit }}
-          CANDIDATE_VERSION: ${{ inputs.version }}
-        run: >-
-          node trusted-tool/scripts/release-candidate.mjs validate-inputs
-          --commit "$CANDIDATE_COMMIT"
-          --version "$CANDIDATE_VERSION"
-          --source-dir candidate-source
-
-      - name: Download signed Probe Asset Set
-        uses: actions/download-artifact@v8
-        with:
-          name: candidate-probe-assets-${{ github.run_id }}
-          path: candidate-source/probe-assets
-
-      - name: Verify signed Probe Asset Set
-        run: >-
-          node trusted-tool/scripts/release-candidate.mjs
-          validate-probe-assets candidate-source/probe-assets
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build Hub OCI archive twice from clean build state
-        env:
-          CANDIDATE_VERSION: ${{ inputs.version }}
-          SOURCE_DATE_EPOCH: "0"
-        run: |
-          mkdir -p hub-reproducibility-first hub-reproducibility-second
-          docker buildx build \
-            --file candidate-source/apps/hub/Dockerfile \
-            --no-cache \
-            --platform linux/amd64 \
-            --provenance=false \
-            --output type=oci,dest="hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar",compression=gzip,force-compression=true,rewrite-timestamp=true \
-            candidate-source
-          docker buildx build \
-            --file candidate-source/apps/hub/Dockerfile \
-            --no-cache \
-            --platform linux/amd64 \
-            --provenance=false \
-            --output type=oci,dest="hub-reproducibility-second/enoki-hub-${CANDIDATE_VERSION}.oci.tar",compression=gzip,force-compression=true,rewrite-timestamp=true \
-            candidate-source
-
-      - name: Compare independently built Hub image digests
-        env:
-          CANDIDATE_VERSION: ${{ inputs.version }}
-        run: >-
-          node trusted-tool/scripts/release-candidate.mjs compare-hub-builds
-          --first "hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
-          --second "hub-reproducibility-second/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
-          --probe-assets candidate-source/probe-assets
-
-      - name: Upload Hub OCI archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: candidate-hub-oci-${{ github.run_id }}
-          path: hub-reproducibility-first/*.oci.tar
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 7
+    uses: ./.github/workflows/reusable-hub-image.yml
+    with:
+      commit: ${{ inputs.commit }}
+      package-artifact: true
+      probe-assets-artifact-name: candidate-probe-assets-${{ github.run_id }}
+      verify-reproducible: true
+      version: ${{ inputs.version }}
 
   assemble-candidate:
     name: Assemble immutable Enoki Release Candidate
     needs:
       [
         validate-candidate-inputs,
+        validate-release-configuration,
         resolve-release-baseline,
         sign-probe-assets,
         build-hub-oci,
@@ -756,6 +717,7 @@ jobs:
     needs:
       [
         validate-candidate-inputs,
+        validate-release-configuration,
         resolve-release-baseline,
         build-probe,
         prepare-unsigned-probe-assets,
@@ -808,6 +770,13 @@ jobs:
           name: candidate-release-baseline-${{ github.run_id }}
           path: attempt-inputs/release-baseline
 
+      - name: Download the exact standard CI evidence
+        if: ${{ always() && needs.validate-release-configuration.result == 'success' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: candidate-standard-ci-${{ github.run_id }}
+          path: attempt-inputs/standard-ci
+
       - name: Download the available signed Probe Asset Set identity
         if: ${{ always() && needs.sign-probe-assets.result == 'success' }}
         uses: actions/download-artifact@v8
@@ -848,6 +817,7 @@ jobs:
           PROBE_BUILD_RESULT: ${{ needs.build-probe.result }}
           PROBE_PREPARATION_RESULT: ${{ needs.prepare-unsigned-probe-assets.result }}
           PROBE_SIGNING_RESULT: ${{ needs.sign-probe-assets.result }}
+          STANDARD_CI_RESULT: ${{ needs.validate-release-configuration.result }}
           UI_RESULT: ${{ needs.candidate-ui-contract.result }}
         run: |
           jq --null-input \
@@ -861,7 +831,8 @@ jobs:
             --arg probePreparation "$PROBE_PREPARATION_RESULT" \
             --arg probeSigning "$PROBE_SIGNING_RESULT" \
             --arg releaseBaseline "$BASELINE_RESULT" \
-            '{candidateAssembly: $candidateAssembly, candidateUiContract: $candidateUiContract, hubOciBuild: $hubOciBuild, hostMatrix: $hostMatrix, inputValidation: $inputValidation, matrixExpansion: $matrixExpansion, probeBuild: $probeBuild, probePreparation: $probePreparation, probeSigning: $probeSigning, releaseBaseline: $releaseBaseline}' \
+            --arg standardCi "$STANDARD_CI_RESULT" \
+            '{candidateAssembly: $candidateAssembly, candidateUiContract: $candidateUiContract, hubOciBuild: $hubOciBuild, hostMatrix: $hostMatrix, inputValidation: $inputValidation, matrixExpansion: $matrixExpansion, probeBuild: $probeBuild, probePreparation: $probePreparation, probeSigning: $probeSigning, releaseBaseline: $releaseBaseline, standardCi: $standardCi}' \
             > component-results.json
 
       - name: Resolve direct links to this attempt's private evidence artifacts
@@ -884,7 +855,6 @@ jobs:
         if: ${{ always() }}
         env:
           REQUESTED_COMMIT: ${{ inputs.commit }}
-          REQUESTED_MODE: ${{ inputs.mode }}
           REQUESTED_VERSION: ${{ inputs.version }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_ID: ${{ github.run_id }}
@@ -900,9 +870,9 @@ jobs:
           --ui-gate release-ui-contract-gate/gate-result.json
           --artifact-index artifact-index.json
           --component-results component-results.json
+          --standard-ci attempt-inputs/standard-ci/standard-ci-evidence.json
           --requested-commit "$REQUESTED_COMMIT"
           --requested-version "$REQUESTED_VERSION"
-          --requested-mode "$REQUESTED_MODE"
           --run-id "$RUN_ID"
           --run-attempt "$RUN_ATTEMPT"
           --run-url "$RUN_URL"

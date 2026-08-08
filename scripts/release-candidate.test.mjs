@@ -24,7 +24,8 @@ import { gzipSync } from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
-import { assertCandidateOnTrustedMain } from "./release-candidate-lib.mjs";
+import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
+import { inspectProbeAssetSet } from "./release-candidate-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const candidateCli = "scripts/release-candidate.mjs";
@@ -40,15 +41,116 @@ const probeTargets = [
 ];
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
+  it("validates the configured production signing identity before candidate construction", async () => {
+    const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+
+    const result = await execFileAsync(
+      "node",
+      [
+        candidateCli,
+        "validate-signing-identity",
+        "--private-key-env",
+        "TEST_PROBE_PRIVATE_KEY",
+        "--public-key-env",
+        "TEST_PROBE_PUBLIC_KEY",
+      ],
+      {
+        env: {
+          ...process.env,
+          TEST_PROBE_PRIVATE_KEY: privateKey,
+          TEST_PROBE_PUBLIC_KEY: publicKey,
+        },
+      },
+    );
+
+    expect(result.stdout).toMatch(
+      /^Probe asset signing identity is valid: [0-9a-f]{64}\n$/,
+    );
+  });
+
+  it("rejects a production public key that does not match the private key", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const { publicKey: unrelatedPublicKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+
+    await expect(
+      execFileAsync(
+        "node",
+        [
+          candidateCli,
+          "validate-signing-identity",
+          "--private-key-env",
+          "TEST_PROBE_PRIVATE_KEY",
+          "--public-key-env",
+          "TEST_PROBE_PUBLIC_KEY",
+        ],
+        {
+          env: {
+            ...process.env,
+            TEST_PROBE_PRIVATE_KEY: privateKey,
+            TEST_PROBE_PUBLIC_KEY: unrelatedPublicKey,
+          },
+        },
+      ),
+    ).rejects.toThrow("public key does not match private key");
+  });
+
+  it("passes one named signing secret and fails closed in a trusted preflight", async () => {
+    const [entrypoint, workflow] = await Promise.all([
+      readFile(".github/workflows/release.yml", "utf8"),
+      readFile(
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "utf8",
+      ),
+    ]);
+
+    expect(entrypoint).toContain(
+      "probe_asset_signing_key_pem: ${{ secrets.ENOKI_PROBE_ASSET_SIGNING_KEY_PEM }}",
+    );
+    expect(entrypoint).not.toContain("secrets: inherit");
+    expect(workflow).toMatch(
+      /workflow_call:[\s\S]*?secrets:[\s\S]*?probe_asset_signing_key_pem:[\s\S]*?required: true/,
+    );
+    expect(workflow).toContain("  validate-release-configuration:");
+    const preflight = workflow.slice(
+      workflow.indexOf("  validate-release-configuration:"),
+      workflow.indexOf("  resolve-release-baseline:"),
+    );
+    expect(preflight).toContain("validate-signing-identity");
+    expect(preflight).toContain("${{ secrets.probe_asset_signing_key_pem }}");
+    expect(preflight).toContain(
+      "${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}",
+    );
+    expect(workflow).not.toContain("environment: release-signing");
+    expect(workflow).not.toContain("secrets: inherit");
+
+    const buildProbe = workflow.slice(
+      workflow.indexOf("  build-probe:"),
+      workflow.indexOf("  prepare-unsigned-probe-assets:"),
+    );
+    expect(buildProbe).toContain("validate-release-configuration");
+  });
+
   it("keeps candidate construction private and confines the production key to a trusted signer checkout", async () => {
-    const workflow = await readFile(
-      ".github/workflows/reusable-build-release-candidate.yml",
-      "utf8",
-    );
-    const releaseWorkflow = await readFile(
-      ".github/workflows/release.yml",
-      "utf8",
-    );
+    const [workflow, releaseWorkflow, hubWorkflow] = await Promise.all([
+      readFile(
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "utf8",
+      ),
+      readFile(".github/workflows/release.yml", "utf8"),
+      readFile(".github/workflows/reusable-hub-image.yml", "utf8"),
+    ]);
 
     expect(workflow).toContain("workflow_call:");
     expect(workflow).not.toContain("workflow_dispatch:");
@@ -63,7 +165,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     expect(workflow).toContain(
       "node trusted-tool/scripts/release-candidate.mjs assemble",
     );
-    expect(workflow).toContain("--output type=oci");
+    expect(hubWorkflow).toContain("--output type=oci");
     expect(workflow).toContain("actions/upload-artifact@");
     expect(workflow).not.toMatch(/gh release|docker push|--push|git tag/);
 
@@ -94,7 +196,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     const downstreamJobs = workflow.slice(workflow.indexOf("  build-hub-oci:"));
     expect(prepareJob).toContain("prepare-unsigned-probe-assets");
     expect(prepareJob).not.toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
-    expect(signJob).toContain("environment: release-signing");
+    expect(signJob).not.toContain("environment: release-signing");
     expect(signJob).not.toContain("if: github.ref == 'refs/heads/main'");
     expect(signJob).toContain(
       "repository: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-repository }}",
@@ -128,7 +230,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     expect(assemblyJob).toContain("--source-dir candidate-source");
   });
 
-  it("gates every candidate mode on a pushed commit that is an ancestor of the current protected main", async () => {
+  it("binds candidate source, release tooling, and workflow policy to one protected main revision", async () => {
     const workflow = await readFile(
       ".github/workflows/reusable-build-release-candidate.yml",
       "utf8",
@@ -137,96 +239,16 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       workflow.indexOf("  validate-candidate-inputs:"),
       workflow.indexOf("  resolve-release-baseline:"),
     );
-    expect(validationJob).toContain("fetch-depth: 0");
+    expect(validationJob).toContain("TRUSTED_WORKFLOW_SHA:");
     expect(validationJob).toContain(
-      "+refs/heads/main:refs/remotes/origin/main",
+      'test "$CANDIDATE_COMMIT" = "$TRUSTED_WORKFLOW_SHA"',
     );
     expect(validationJob).toContain(
-      "release-candidate.mjs validate-source-policy",
+      "node candidate-source/scripts/release-candidate.mjs validate-inputs",
     );
-    expect(validationJob).toContain(
-      "--trusted-main-ref refs/remotes/origin/main",
-    );
+    expect(validationJob).not.toContain("validate-source-policy");
+    expect(validationJob).not.toContain("refs/remotes/origin/main");
     expect(validationJob).not.toMatch(/^    if:/m);
-
-    const trustedMain = "1".repeat(40);
-    const calls = [];
-    const runCommand = async (command, arguments_, options) => {
-      calls.push({ arguments_, command, options });
-      if (arguments_[0] === "ls-remote") {
-        return { stdout: `${trustedMain}\trefs/heads/main\n` };
-      }
-      if (arguments_[0] === "rev-parse") return { stdout: `${trustedMain}\n` };
-      return { stdout: "" };
-    };
-
-    await expect(
-      assertCandidateOnTrustedMain({
-        candidateCommit: commit,
-        remote: "origin",
-        runCommand,
-        sourceDir: ".",
-        trustedMainRef: "refs/remotes/origin/main",
-      }),
-    ).resolves.toEqual({
-      candidateCommit: commit,
-      trustedMainCommit: trustedMain,
-    });
-    expect(calls.map(({ arguments_ }) => arguments_)).toEqual([
-      ["ls-remote", "--exit-code", "origin", "refs/heads/main"],
-      ["rev-parse", "refs/remotes/origin/main^{commit}"],
-      ["cat-file", "-e", `${commit}^{commit}`],
-      ["merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"],
-    ]);
-  });
-
-  it.each([
-    {
-      failCommand: "rev-parse",
-      name: "stale local protected-main ref",
-      remoteMain: "1".repeat(40),
-      trustedMain: "2".repeat(40),
-      expected: "trusted main ref is stale",
-    },
-    {
-      failCommand: "cat-file",
-      name: "candidate object absent from the canonical checkout",
-      remoteMain: "1".repeat(40),
-      trustedMain: "1".repeat(40),
-      expected: "not present in the canonical repository checkout",
-    },
-    {
-      failCommand: "merge-base",
-      name: "pushed commit outside protected main history",
-      remoteMain: "1".repeat(40),
-      trustedMain: "1".repeat(40),
-      expected: "is not an ancestor of protected main",
-    },
-  ])("rejects a $name", async (scenario) => {
-    const runCommand = async (_command, arguments_) => {
-      if (arguments_[0] === "ls-remote") {
-        return {
-          stdout: `${scenario.remoteMain}\trefs/heads/main\n`,
-        };
-      }
-      if (arguments_[0] === "rev-parse") {
-        return { stdout: `${scenario.trustedMain}\n` };
-      }
-      if (arguments_[0] === scenario.failCommand) {
-        throw new Error("git rejected the source policy check");
-      }
-      return { stdout: "" };
-    };
-
-    await expect(
-      assertCandidateOnTrustedMain({
-        candidateCommit: commit,
-        remote: "origin",
-        runCommand,
-        sourceDir: ".",
-        trustedMainRef: "refs/remotes/origin/main",
-      }),
-    ).rejects.toThrow(scenario.expected);
   });
 
   it("requires an explicit full commit and strict stable SemVer", async () => {
@@ -330,16 +352,22 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
   });
 
   it("pins release toolchain and base inputs while normalizing build metadata", async () => {
-    const [toolchain, dockerfile, probeWorkflow, candidateWorkflow] =
-      await Promise.all([
-        readFile("rust-toolchain.toml", "utf8"),
-        readFile("apps/hub/Dockerfile", "utf8"),
-        readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
-        readFile(
-          ".github/workflows/reusable-build-release-candidate.yml",
-          "utf8",
-        ),
-      ]);
+    const [
+      toolchain,
+      dockerfile,
+      probeWorkflow,
+      candidateWorkflow,
+      hubWorkflow,
+    ] = await Promise.all([
+      readFile("rust-toolchain.toml", "utf8"),
+      readFile("apps/hub/Dockerfile", "utf8"),
+      readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
+      readFile(
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "utf8",
+      ),
+      readFile(".github/workflows/reusable-hub-image.yml", "utf8"),
+    ]);
 
     expect(toolchain).toContain('channel = "1.97.1"');
     expect(toolchain).not.toContain('channel = "stable"');
@@ -360,7 +388,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     expect(probeWorkflow).toContain("--remap-path-prefix=");
     expect(probeWorkflow).toContain("--build-id=none");
     expect(probeWorkflow).toContain("package-probe");
-    expect(candidateWorkflow).toContain("rewrite-timestamp=true");
+    expect(hubWorkflow).toContain("rewrite-timestamp=true");
     expect(candidateWorkflow).toContain("package-candidate");
     expect(dockerfile).toContain("su-exec-0.3-r0.apk");
     expect(dockerfile).toContain("ADD --checksum=sha256:");
@@ -370,12 +398,13 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
   });
 
   it("makes the formal candidate workflow compare two clean builds of every Probe target and the Hub image", async () => {
-    const [probeWorkflow, candidateWorkflow] = await Promise.all([
+    const [probeWorkflow, candidateWorkflow, hubWorkflow] = await Promise.all([
       readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
       readFile(
         ".github/workflows/reusable-build-release-candidate.yml",
         "utf8",
       ),
+      readFile(".github/workflows/reusable-hub-image.yml", "utf8"),
     ]);
 
     expect(candidateWorkflow).toContain("verify-reproducible: true");
@@ -383,11 +412,16 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     expect(probeWorkflow).toContain("rm -rf target/reproducible");
     expect(probeWorkflow).toContain("dist-reproducibility-second");
     expect(probeWorkflow).toContain("cmp --silent");
-    expect(candidateWorkflow).toContain("hub-reproducibility-first");
-    expect(candidateWorkflow).toContain("hub-reproducibility-second");
-    expect(candidateWorkflow).toContain("--no-cache");
-    expect(candidateWorkflow).toContain("compare-hub-builds");
-    expect(candidateWorkflow).not.toMatch(
+    expect(candidateWorkflow).toContain(
+      "uses: ./.github/workflows/reusable-hub-image.yml",
+    );
+    expect(candidateWorkflow).toContain("verify-reproducible: true");
+    expect(candidateWorkflow).not.toContain("docker buildx build");
+    expect(hubWorkflow).toContain("hub-reproducibility-first");
+    expect(hubWorkflow).toContain("hub-reproducibility-second");
+    expect(hubWorkflow).toContain("--no-cache");
+    expect(hubWorkflow).toContain("compare-hub-builds");
+    expect(hubWorkflow).not.toMatch(
       /name: candidate-hub-oci-reproducibility-second/,
     );
   });
@@ -457,8 +491,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       const { outputDir: probeAssetSetDir } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir);
-      const releaseBaselineDir =
-        await createFirstReleaseBaselineFixture(workDir);
+      const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
 
       await expect(
         runCandidateCli([
@@ -838,11 +871,8 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
           version: "1.2.3",
         },
         releaseBaseline: {
-          catalogSnapshot: {
-            entries: [],
-            sha256: sha256(Buffer.from("[]")),
-          },
-          kind: "first-formal-release",
+          kind: "enoki-release-baseline",
+          tag: "v1.2.2",
         },
         schemaVersion: 2,
       });
@@ -943,7 +973,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     }, "Candidate Manifest Hub and Probe versions disagree");
   });
 
-  it("requires exactly one valid Release Baseline descriptor or first-formal-release marker", async () => {
+  it("requires exactly one valid Release Baseline descriptor", async () => {
     await expectCandidateMutationRejected(async (candidateDir) => {
       const manifestPath = path.join(candidateDir, "candidate-manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -954,16 +984,16 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     await expectCandidateMutationRejected(async (candidateDir) => {
       const manifestPath = path.join(candidateDir, "candidate-manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-      manifest.releaseBaseline.unexpected = "second-path";
+      manifest.releaseBaseline.kind = "unsupported-release-baseline";
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    }, "manifest fields must be exactly: catalogSnapshot, kind");
+    }, "requires one Release Baseline descriptor");
 
     await expectCandidateMutationRejected(async (candidateDir) => {
       const manifestPath = path.join(candidateDir, "candidate-manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       manifest.releaseBaseline.catalogSnapshot.sha256 = "f".repeat(64);
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-    }, "Release catalog snapshot checksum is invalid");
+    }, "Candidate Manifest Release Baseline descriptor does not match content");
   });
 
   it("rejects an incomplete Probe target set", async () => {
@@ -1132,8 +1162,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
           },
         ],
       });
-      const releaseBaselineDir =
-        await createFirstReleaseBaselineFixture(workDir);
+      const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
 
       await expect(
         runCandidateCli([
@@ -1225,11 +1254,16 @@ function sha256(contents) {
 
 async function createProbeAssetSetFixture(
   workDir,
-  { mutateArchives, targets = probeTargets, version = "v1.2.3" } = {},
+  {
+    name = "",
+    mutateArchives,
+    targets = probeTargets,
+    version = "v1.2.3",
+  } = {},
 ) {
-  const archivesDir = path.join(workDir, "archives");
-  const outputDir = path.join(workDir, "probe-assets");
-  const installerPath = path.join(workDir, "install-probe.sh");
+  const archivesDir = path.join(workDir, `${name}archives`);
+  const outputDir = path.join(workDir, `${name}probe-assets`);
+  const installerPath = path.join(workDir, `${name}install-probe.sh`);
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
     privateKeyEncoding: { format: "pem", type: "pkcs8" },
@@ -1432,6 +1466,7 @@ async function createOciFixture(
   await execFileAsync("tar", ["-cf", archivePath, "-C", layoutDir, "."]);
   return {
     archivePath,
+    manifestBytes: imageManifestBytes,
     manifestDigest: imageManifestDescriptor.digest,
   };
 }
@@ -1444,7 +1479,7 @@ async function createCandidateFixture(workDir, { version = "v1.2.3" } = {}) {
   } = await createProbeAssetSetFixture(workDir, { version });
   const oci = await createOciFixture(workDir, probeAssetSetDir);
   const candidateDir = path.join(workDir, "candidate");
-  const releaseBaselineDir = await createFirstReleaseBaselineFixture(workDir);
+  const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
 
   await runCandidateCli([
     "assemble",
@@ -1485,7 +1520,7 @@ async function writeOciBlob(blobsDir, contents, descriptor) {
 }
 
 async function assembleFixtureCandidate(workDir, probeAssetSetDir, hubOciPath) {
-  const releaseBaselineDir = await createFirstReleaseBaselineFixture(workDir);
+  const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
   return runCandidateCli([
     "assemble",
     "--commit",
@@ -1505,22 +1540,75 @@ async function assembleFixtureCandidate(workDir, probeAssetSetDir, hubOciPath) {
   ]);
 }
 
-async function createFirstReleaseBaselineFixture(workDir) {
+async function createReleaseBaselineFixture(workDir) {
   const releaseBaselineDir = path.join(workDir, "release-baseline-input");
-  await mkdir(releaseBaselineDir, { recursive: true });
+  const { outputDir: probeAssetSetDir } = await createProbeAssetSetFixture(
+    workDir,
+    { name: "baseline-", version: "v1.2.2" },
+  );
+  const oci = await createOciFixture(workDir, probeAssetSetDir, {
+    name: "baseline",
+  });
+  const inspectedProbe = await inspectProbeAssetSet(probeAssetSetDir);
+  const archive = "hub/enoki-hub-v1.2.2.oci.tar";
+  const archiveBytes = await readFile(oci.archivePath);
+  const sourceManifest = "hub-source-manifest.json";
+  const release = {
+    assets: [],
+    draft: false,
+    id: 122,
+    prerelease: false,
+    tagName: "v1.2.2",
+    targetCommitish: "main",
+  };
+  const descriptor = {
+    catalogSnapshot: createReleaseCatalogSnapshot([release]),
+    githubRelease: {
+      id: release.id,
+      peeledCommitSha: "e".repeat(40),
+      repository: "YKDZ/enoki",
+      tagRefSha: "f".repeat(40),
+      targetCommitish: release.targetCommitish,
+    },
+    hub: {
+      archive,
+      archiveSha256: sha256(archiveBytes),
+      digest: oci.manifestDigest,
+      image: "ghcr.io/ykdz/enoki-hub",
+      imageDigest: oci.manifestDigest,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      platform: { architecture: "amd64", os: "linux" },
+      size: archiveBytes.length,
+      sourceManifest,
+      sourceManifestSha256: sha256(oci.manifestBytes),
+      sourceManifestSize: oci.manifestBytes.length,
+    },
+    installer: inspectedProbe.files.find(
+      ({ file }) => file === "install-probe.sh",
+    ),
+    kind: "enoki-release-baseline",
+    probeAssetSet: {
+      ...inspectedProbe,
+      directory: "probe-assets",
+      trustRoot: {
+        publicKeySha256: inspectedProbe.signingIdentity.publicKeySha256,
+      },
+    },
+    schemaVersion: 2,
+    tag: "v1.2.2",
+  };
+  await mkdir(path.join(releaseBaselineDir, "hub"), { recursive: true });
+  await cp(probeAssetSetDir, path.join(releaseBaselineDir, "probe-assets"), {
+    recursive: true,
+  });
+  await writeFile(path.join(releaseBaselineDir, archive), archiveBytes);
+  await writeFile(
+    path.join(releaseBaselineDir, sourceManifest),
+    oci.manifestBytes,
+  );
   await writeFile(
     path.join(releaseBaselineDir, "release-baseline.json"),
-    `${JSON.stringify(
-      {
-        catalogSnapshot: {
-          entries: [],
-          sha256: sha256(Buffer.from("[]")),
-        },
-        kind: "first-formal-release",
-      },
-      null,
-      2,
-    )}\n`,
+    `${JSON.stringify(descriptor, null, 2)}\n`,
   );
   return releaseBaselineDir;
 }

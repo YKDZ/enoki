@@ -34,7 +34,7 @@ describe("Publication Reconciler", () => {
     expect(entrypoint).toContain("workflow_dispatch:");
     expect(entrypoint).not.toMatch(/^  push:/m);
     expect(entrypoint).toMatch(/options:\n\s+- verify-only\n\s+- publish/);
-    expect(entrypoint).toContain("mode: ${{ inputs.mode }}");
+    expect(entrypoint).not.toContain("mode: ${{ inputs.mode }}");
     expect(entrypoint).toContain("if: ${{ inputs.mode == 'publish' }}");
     expect(entrypoint).toContain(
       "uses: ./.github/workflows/reusable-publish-release-candidate.yml",
@@ -42,9 +42,7 @@ describe("Publication Reconciler", () => {
     expect(entrypoint).toContain("candidate-artifact-name:");
     expect(entrypoint).toContain("verification-artifact-name:");
 
-    expect(candidateWorkflow).toContain(
-      '{ test "$RELEASE_MODE" = verify-only || test "$RELEASE_MODE" = publish; }',
-    );
+    expect(candidateWorkflow).not.toContain("RELEASE_MODE");
     expect(candidateWorkflow).toContain("verification-artifact-name:");
     expect(candidateWorkflow).not.toMatch(
       /contents: write|packages: write|gh release|docker push|--push/,
@@ -417,7 +415,7 @@ describe("Publication Reconciler", () => {
     },
   );
 
-  it("rejects verification from another run and verify-only promotion", async () => {
+  it("rejects verification from another run and obsolete mode-specific evidence", async () => {
     const fixture = await createPublicationFixture();
     try {
       for (const verificationSummary of [
@@ -428,7 +426,6 @@ describe("Publication Reconciler", () => {
         {
           ...fixture.verificationSummary,
           kind: "enoki-verify-only-summary",
-          mode: "verify-only",
         },
         {
           ...fixture.verificationSummary,
@@ -1059,7 +1056,13 @@ async function createPublicationFixture() {
       },
       version: "1.2.3",
     },
-    releaseBaseline: { kind: "first-formal-release" },
+    releaseBaseline: {
+      githubRelease: { id: 122, peeledCommitSha: "c".repeat(40) },
+      hub: { imageDigest: `sha256:${"d".repeat(64)}` },
+      kind: "enoki-release-baseline",
+      probeAssetSet: { version: "1.2.2" },
+      tag: "v1.2.2",
+    },
     schemaVersion: 2,
   };
   const workflowRun = { attempt: 1, id: "123", url: "https://example/run/123" };
@@ -1067,13 +1070,12 @@ async function createPublicationFixture() {
     candidate: candidateManifest.candidate,
     freshCandidateRequiredForPublish: true,
     hub: candidateManifest.hub,
-    kind: "enoki-publish-verification-summary",
-    mode: "publish",
+    kind: "enoki-release-verification-evidence",
     probeAssetSet: candidateManifest.probeAssetSet,
     promotable: false,
     releaseBaseline: candidateManifest.releaseBaseline,
     run: workflowRun,
-    schemaVersion: 2,
+    schemaVersion: 3,
     verified: true,
   };
   return {

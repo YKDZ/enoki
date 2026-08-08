@@ -1,7 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { validateReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
-
 const managedHostPaths = Object.freeze([
   "/usr/local/bin/enoki-probe",
   "/etc/enoki/probe-bootstrap.toml",
@@ -84,16 +82,6 @@ async function runHubRestoreCompatibilityWindowScenario({
     throw new Error("Release E2E environment and evidence sink are required");
   }
   const baseline = candidateManifest.releaseBaseline;
-  if (baseline.kind === "first-formal-release") {
-    return writeSkippedBaselineScenario({
-      candidateManifest,
-      environment,
-      evidenceSink,
-      ownerPassword,
-      runId,
-      scenario,
-    });
-  }
 
   const poll = normalizedPollTiming(timing);
   const evidence = {
@@ -506,45 +494,6 @@ async function runPostReplacementRepairUninstallScenario({
     throw new Error("Release E2E environment and evidence sink are required");
   }
   const baseline = candidateManifest.releaseBaseline;
-  if (baseline.kind === "first-formal-release") {
-    const evidence = {
-      candidate: candidateManifest.candidate,
-      cleanup: null,
-      phase: "skipped",
-      releaseBaseline: { kind: "first-formal-release" },
-      result: { reason: "first-formal-release", status: "skipped" },
-      runId,
-      scenario,
-      schemaVersion: 2,
-    };
-    let cleanupError = null;
-    try {
-      evidence.cleanup = {
-        environment: await environment.cleanup({ resources: null, runId }),
-      };
-      if (cleanupDidNotSucceed(evidence.cleanup)) {
-        cleanupError = assertionError(
-          "release_e2e_cleanup_failed",
-          "Release E2E cleanup did not remove all run-owned state",
-        );
-      }
-    } catch (error) {
-      cleanupError = error;
-      evidence.cleanup = { environment: { error: serializedError(error) } };
-    }
-    if (cleanupError) {
-      evidence.phase = "failed";
-      evidence.result = {
-        error: serializedError(cleanupError),
-        status: "failed",
-      };
-    }
-    await evidenceSink.write(
-      redactSensitiveEvidence(evidence, [ownerPassword]),
-    );
-    if (cleanupError) throw cleanupError;
-    return evidence.result;
-  }
 
   const poll = normalizedPollTiming(timing);
   const evidence = {
@@ -1369,45 +1318,6 @@ async function runBaselineUpgradeUninstallScenario({
   }
 
   const baseline = candidateManifest.releaseBaseline;
-  if (baseline.kind === "first-formal-release") {
-    const evidence = {
-      candidate: candidateManifest.candidate,
-      cleanup: null,
-      phase: "skipped",
-      releaseBaseline: { kind: "first-formal-release" },
-      result: { reason: "first-formal-release", status: "skipped" },
-      runId,
-      scenario,
-      schemaVersion: 2,
-    };
-    let cleanupError = null;
-    try {
-      evidence.cleanup = {
-        environment: await environment.cleanup({ resources: null, runId }),
-      };
-      if (cleanupDidNotSucceed(evidence.cleanup)) {
-        cleanupError = assertionError(
-          "release_e2e_cleanup_failed",
-          "Release E2E cleanup did not remove all run-owned state",
-        );
-      }
-    } catch (error) {
-      cleanupError = error;
-      evidence.cleanup = { environment: { error: serializedError(error) } };
-    }
-    if (cleanupError) {
-      evidence.phase = "failed";
-      evidence.result = {
-        error: serializedError(cleanupError),
-        status: "failed",
-      };
-    }
-    await evidenceSink.write(
-      redactSensitiveEvidence(evidence, [ownerPassword]),
-    );
-    if (cleanupError) throw cleanupError;
-    return evidence.result;
-  }
 
   const poll = normalizedPollTiming(timing);
   const evidence = {
@@ -3591,33 +3501,14 @@ function defaultSleep(milliseconds) {
 
 function assertCandidateManifest(manifest) {
   const releaseBaseline = manifest?.releaseBaseline;
-  if (releaseBaseline?.kind === "first-formal-release") {
-    if (
-      Object.keys(releaseBaseline).sort().join(",") !== "catalogSnapshot,kind"
-    ) {
-      throw new Error(
-        "Candidate Manifest is invalid or internally inconsistent",
-      );
-    }
-    validateReleaseCatalogSnapshot(releaseBaseline.catalogSnapshot);
-    if (releaseBaseline.catalogSnapshot.entries.length !== 0) {
-      throw new Error(
-        "first-formal-release catalog snapshot must contain no stable release",
-      );
-    }
-  }
   const validReleaseBaseline =
-    (releaseBaseline?.kind === "first-formal-release" &&
-      Array.isArray(releaseBaseline.catalogSnapshot?.entries) &&
-      releaseBaseline.catalogSnapshot.entries.length === 0 &&
-      /^[0-9a-f]{64}$/.test(releaseBaseline.catalogSnapshot.sha256 ?? "")) ||
-    (releaseBaseline?.kind === "enoki-release-baseline" &&
-      /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
-        releaseBaseline.tag ?? "",
-      ) &&
-      /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.digest ?? "") &&
-      /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.imageDigest ?? "") &&
-      releaseBaseline.probeAssetSet?.version === releaseBaseline.tag.slice(1));
+    releaseBaseline?.kind === "enoki-release-baseline" &&
+    /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+      releaseBaseline.tag ?? "",
+    ) &&
+    /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.digest ?? "") &&
+    /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.imageDigest ?? "") &&
+    releaseBaseline.probeAssetSet?.version === releaseBaseline.tag.slice(1);
   if (
     manifest?.schemaVersion !== 2 ||
     manifest.kind !== "enoki-release-candidate" ||
@@ -3782,51 +3673,6 @@ function assertSameProbeIdentity(before, after, boundary) {
       `${boundary} changed the Probe Identity`,
     );
   }
-}
-
-async function writeSkippedBaselineScenario({
-  candidateManifest,
-  environment,
-  evidenceSink,
-  ownerPassword,
-  runId,
-  scenario,
-}) {
-  const evidence = {
-    candidate: candidateManifest.candidate,
-    cleanup: null,
-    phase: "skipped",
-    releaseBaseline: { kind: "first-formal-release" },
-    result: { reason: "first-formal-release", status: "skipped" },
-    runId,
-    scenario,
-    schemaVersion: 2,
-  };
-  let cleanupError = null;
-  try {
-    evidence.cleanup = {
-      environment: await environment.cleanup({ resources: null, runId }),
-    };
-    if (cleanupDidNotSucceed(evidence.cleanup)) {
-      cleanupError = assertionError(
-        "release_e2e_cleanup_failed",
-        "Release E2E cleanup did not remove all run-owned state",
-      );
-    }
-  } catch (error) {
-    cleanupError = error;
-    evidence.cleanup = { environment: { error: serializedError(error) } };
-  }
-  if (cleanupError) {
-    evidence.phase = "failed";
-    evidence.result = {
-      error: serializedError(cleanupError),
-      status: "failed",
-    };
-  }
-  await evidenceSink.write(redactSensitiveEvidence(evidence, [ownerPassword]));
-  if (cleanupError) throw cleanupError;
-  return evidence.result;
 }
 
 function assertRepairScenarioParticipants(host, hub) {

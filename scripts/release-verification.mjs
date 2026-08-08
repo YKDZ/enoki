@@ -22,13 +22,13 @@ import {
   createMatrixGateResult,
   createReleaseVerificationSummary,
   createUiGateResult,
-  renderVerifyOnlyReleaseSummaryMarkdown,
+  renderReleaseVerificationEvidenceMarkdown,
 } from "./release-verification-lib.mjs";
 
 const usage = `Usage:
   node scripts/release-verification.mjs record-matrix-gate --candidate-manifest <path> --evidence <path> --cell-id <id> --scenario-outcome <outcome> --verify-clean-outcome <outcome> --artifact-name <name> --output <path>
   node scripts/release-verification.mjs record-ui-gate --candidate-manifest <path> --candidate-commit <commit> --candidate-version <version> --playwright-outcome <outcome> --artifact-name <name> --output <path>
-  node scripts/release-verification.mjs summarize --candidate-dir <path> --release-baseline-dir <path> --probe-assets-dir <path> --hub-oci-dir <path> --matrix <path> --matrix-evidence-root <path> --ui-gate <path> --artifact-index <path> --component-results <path> --requested-commit <commit> --requested-version <version> --requested-mode <verify-only|publish> --run-id <id> --run-attempt <number> --run-url <url> --output <path> --markdown <path>
+  node scripts/release-verification.mjs summarize --candidate-dir <path> --release-baseline-dir <path> --probe-assets-dir <path> --hub-oci-dir <path> --matrix <path> --matrix-evidence-root <path> --ui-gate <path> --artifact-index <path> --component-results <path> --standard-ci <path> --requested-commit <commit> --requested-version <version> --run-id <id> --run-attempt <number> --run-url <url> --output <path> --markdown <path>
   node scripts/release-verification.mjs assert-verified --summary <path>`;
 
 const matrixGateOptions = new Set([
@@ -60,11 +60,11 @@ const summaryOptions = new Set([
   "--probe-assets-dir",
   "--release-baseline-dir",
   "--requested-commit",
-  "--requested-mode",
   "--requested-version",
   "--run-attempt",
   "--run-id",
   "--run-url",
+  "--standard-ci",
   "--ui-gate",
 ]);
 
@@ -140,6 +140,10 @@ async function summarize(options) {
     options["--artifact-index"],
     "workflow artifact index",
   );
+  const standardCiEvidence = await readOptionalJson(
+    options["--standard-ci"],
+    "standard CI evidence",
+  );
   const attempt = Number(options["--run-attempt"]);
   if (!Number.isSafeInteger(attempt) || attempt < 1) {
     throw new Error("run attempt must be a positive integer");
@@ -154,13 +158,13 @@ async function summarize(options) {
       ...uiEvidence.errors,
       ...componentEvidence.errors,
       ...artifactEvidence.errors,
+      ...standardCiEvidence.errors,
     ],
     hostGates: hostEvidence.gates,
     identities,
     matrix,
     requested: {
       commit: options["--requested-commit"],
-      mode: options["--requested-mode"],
       version: options["--requested-version"],
     },
     run: {
@@ -168,13 +172,14 @@ async function summarize(options) {
       id: options["--run-id"],
       url: options["--run-url"],
     },
+    standardCi: standardCiEvidence.value,
     uiGate: uiEvidence.gate,
   });
   await Promise.all([
     writeJsonAtomically(options["--output"], summary),
     writeTextAtomically(
       options["--markdown"],
-      renderVerifyOnlyReleaseSummaryMarkdown(summary),
+      renderReleaseVerificationEvidenceMarkdown(summary),
     ),
   ]);
 }
@@ -182,25 +187,15 @@ async function summarize(options) {
 async function assertVerified(options) {
   const summary = await readJson(options["--summary"], "verification summary");
   if (
-    summary?.kind !==
-      (summary?.mode === "publish"
-        ? "enoki-publish-verification-summary"
-        : "enoki-verify-only-summary") ||
-    summary?.schemaVersion !== 2 ||
-    (summary.mode !== "verify-only" && summary.mode !== "publish") ||
+    summary?.kind !== "enoki-release-verification-evidence" ||
+    summary?.schemaVersion !== 3 ||
     summary.promotable !== false ||
     summary.freshCandidateRequiredForPublish !== true ||
     summary.verified !== true
   ) {
-    throw new Error(
-      `${summary?.mode ?? "unknown"} Release E2E did not satisfy every required gate`,
-    );
+    throw new Error("Release verification did not satisfy every required gate");
   }
-  process.stdout.write(
-    summary.mode === "publish"
-      ? "publish Release E2E is complete for this workflow attempt\n"
-      : "verify-only Release E2E is complete and non-promotable\n",
-  );
+  process.stdout.write("Release Verification Evidence is complete\n");
 }
 
 function parseOptions(arguments_, allowed) {
