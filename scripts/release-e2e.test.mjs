@@ -551,6 +551,8 @@ describe("Probe Host Harness", () => {
     expect(completedOwnership).toContain(
       'mv -- "$temporary" "$claim/resources"',
     );
+    expect(completedOwnership).toContain("metadata_schema=legacy");
+    expect(completedOwnership).toContain("metadata_schema=current");
     expect(
       commands.filter((command) => command.includes("enk_enroll_secret")),
     ).toHaveLength(1);
@@ -1822,6 +1824,7 @@ describe("Release E2E Orchestrator", () => {
         activeHub = "candidate";
       },
       async updateHostProbeConfiguration(_hostId, input) {
+        calls.push(`hub.updateHostProbeConfiguration:${activeHub}`);
         configurationVersion =
           configurationVersion === "default-v1" ? "host-7-1" : "host-7-2";
         calls.push(`hub.updateHostProbeConfiguration:${configurationVersion}`);
@@ -1926,6 +1929,9 @@ describe("Release E2E Orchestrator", () => {
           probeId: "probe_release_01",
         };
       },
+      async recoverUpgradeWithInstaller() {
+        throw new Error("automatic Upgrade must not use Installer Recovery");
+      },
       async verifyUninstallCompletion() {
         calls.push("host.verifyUninstallCompletion");
         return {
@@ -1991,6 +1997,213 @@ describe("Release E2E Orchestrator", () => {
           completedAtMs: 4,
           runningAtMs: 2,
           state: "succeeded",
+        }),
+      ]),
+    });
+  });
+
+  it("recovers a terminal insufficient-privilege Upgrade with the Candidate installer", async () => {
+    let activeHub = "baseline";
+    let configurationVersion = "default-v1";
+    let installed = false;
+    let recovered = false;
+    let metricsEpoch = 0;
+    const failedUpgrade = {
+      acceptedAtMs: 2,
+      completedAtMs: 3,
+      createdAtMs: 1,
+      failure: {
+        code: "insufficient_privilege",
+        message: "sudo denied",
+      },
+      hostId: 7,
+      id: 41,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "failed",
+      targetProbeVersion: "1.2.3",
+      updatedAtMs: 3,
+    };
+    const hub = {
+      async authenticate() {},
+      async createEnrollment() {
+        return { installCommand: officialInstallCommand };
+      },
+      async getAuditLog() {
+        return baselineUpgradeAuditLog();
+      },
+      async getHost() {
+        return readyHost({
+          hostProfile: {
+            ...readyHost().hostProfile,
+            probeVersion: recovered ? "1.2.3" : "1.2.2",
+          },
+          reportedProbeConfigurationVersion: configurationVersion,
+        });
+      },
+      async getHostMetrics() {
+        metricsEpoch += 1;
+        return [
+          portableMetric({
+            collectedAtMs: metricsEpoch * 10,
+            sequence: metricsEpoch * 2 - 1,
+          }),
+          portableMetric({
+            collectedAtMs: metricsEpoch * 10 + 5,
+            sequence: metricsEpoch * 2,
+          }),
+        ];
+      },
+      async getHostProbeConfiguration() {
+        return {
+          configuration: {
+            enabledCollectorIds: ["official.cpu", "official.memory"],
+            metricsCollectionIntervalSeconds: 5,
+            version: configurationVersion,
+          },
+          mode: configurationVersion === "default-v1" ? "inherit" : "override",
+        };
+      },
+      async isHostSoftDeleted() {
+        return true;
+      },
+      async listHosts() {
+        return installed ? [{ id: 7 }] : [];
+      },
+      async requestProbeUpgrade() {
+        return {
+          ...failedUpgrade,
+          acceptedAtMs: null,
+          completedAtMs: null,
+          failure: null,
+          runningAtMs: null,
+          state: "pending",
+          updatedAtMs: 1,
+        };
+      },
+      async requestProbeUninstall() {
+        return {
+          acceptedAtMs: null,
+          completedAtMs: null,
+          createdAtMs: 5,
+          failure: null,
+          hostId: 7,
+          id: 42,
+          kind: "probe_uninstall",
+          runningAtMs: null,
+          state: "pending",
+          targetProbeVersion: "",
+          updatedAtMs: 5,
+        };
+      },
+      async switchToCandidate() {
+        activeHub = "candidate";
+      },
+      async updateHostProbeConfiguration(_hostId, input) {
+        configurationVersion =
+          configurationVersion === "default-v1" ? "host-7-1" : "host-7-2";
+        return {
+          configuration: {
+            ...input.configuration,
+            version: configurationVersion,
+          },
+          mode: "override",
+        };
+      },
+      async waitForProbeOperation(operation) {
+        if (operation.kind === "probe_upgrade") {
+          return [operation, failedUpgrade, failedUpgrade];
+        }
+        const succeeded = {
+          ...operation,
+          acceptedAtMs: 6,
+          completedAtMs: 7,
+          runningAtMs: 6,
+          state: "succeeded",
+          updatedAtMs: 7,
+        };
+        return [operation, succeeded, succeeded];
+      },
+    };
+    const host = {
+      async assertDisposable() {},
+      async assertInstalled(_runId, version) {
+        return { probeVersion: version };
+      },
+      async beginUpgradeOwnershipTransition() {},
+      async bindUpgradeOwnershipTransition() {},
+      async cleanup() {
+        return { clean: true };
+      },
+      async collectEvidence() {
+        return { journaldRetained: true };
+      },
+      async completeUpgradeOwnershipTransition() {
+        throw new Error("failed Upgrade must not commit automatic ownership");
+      },
+      async install() {
+        installed = true;
+      },
+      async readProbeIdentity() {
+        return {
+          identitySha256: "f".repeat(64),
+          probeId: "probe_release_01",
+        };
+      },
+      async recoverUpgradeWithInstaller(command, _runId, operation) {
+        expect(activeHub).toBe("candidate");
+        expect(command).toBe(officialInstallCommand);
+        expect(operation).toEqual(failedUpgrade);
+        recovered = true;
+        return {
+          failedOperationId: operation.id,
+          mode: "installer",
+          status: "succeeded",
+          targetProbeVersion: operation.targetProbeVersion,
+        };
+      },
+      async verifyUninstallCompletion() {
+        return {
+          clean: true,
+          journaldRetained: true,
+          sharedDependenciesRetained: true,
+        };
+      },
+    };
+    const written = [];
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          async cleanup() {
+            return { clean: true };
+          },
+          async start() {
+            return { host, hub };
+          },
+        },
+        evidenceSink: { write: async (value) => written.push(value) },
+        ownerPassword: "owner-password",
+        runId: "run-permission-recovery",
+        scenario: "baseline-upgrade-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).resolves.toEqual({ status: "succeeded" });
+    expect(written.at(-1)).toMatchObject({
+      candidateHost: { hostProfile: { probeVersion: "1.2.3" } },
+      manualRecovery: {
+        failedOperationId: 41,
+        mode: "installer",
+        status: "succeeded",
+        targetProbeVersion: "1.2.3",
+      },
+      result: { status: "succeeded" },
+      upgradeOperationTimeline: expect.arrayContaining([
+        expect.objectContaining({ state: "pending" }),
+        expect.objectContaining({
+          failure: expect.objectContaining({ code: "insufficient_privilege" }),
+          state: "failed",
         }),
       ]),
     });
@@ -2672,6 +2885,7 @@ describe("Release E2E Orchestrator", () => {
         calls.push("hub.switchToCandidate");
       },
       async updateHostProbeConfiguration(_hostId, input) {
+        calls.push(`hub.updateHostProbeConfiguration:${activeHub}`);
         configurationVersion =
           configurationVersion === "default-v1" ? "host-7-1" : "host-7-2";
         return {
@@ -2811,6 +3025,12 @@ describe("Release E2E Orchestrator", () => {
     expect(calls).toContain("hub.getProbeOperation:failed");
     expect(calls).toContain("host.assertInstalled:1.2.3");
     expect(calls).toContain("hub.requestProbeUninstall");
+    expect(
+      calls.filter(
+        (call) => call === "hub.updateHostProbeConfiguration:candidate",
+      ),
+    ).toHaveLength(2);
+    expect(calls).not.toContain("hub.updateHostProbeConfiguration:baseline");
     expect(written.at(-1)).toMatchObject({
       boundaryEvidence: {
         cleanup: {
@@ -4103,7 +4323,8 @@ describe("Release E2E command", () => {
     const baselineConfigDigest = `sha256:${"c".repeat(64)}`;
     const candidateManifestDigest = `sha256:${"d".repeat(64)}`;
     const candidateConfigDigest = `sha256:${"e".repeat(64)}`;
-    const snapshotDigest = `sha256:${"f".repeat(64)}`;
+    const snapshotDigestHex = "f".repeat(64);
+    const snapshotDigest = `sha256:${snapshotDigestHex}`;
     const recoveryTime = "2026-08-02T12:00:00.000Z";
     const commands = [];
     const images = new Map();
@@ -4125,7 +4346,7 @@ describe("Release E2E command", () => {
           version: "v1.2.2",
         },
       },
-      manifestDigest: snapshotDigest,
+      manifestDigest: snapshotDigestHex,
       operation,
       version: "v1",
     });
@@ -4308,6 +4529,9 @@ describe("Release E2E command", () => {
     );
     expect(commands.indexOf(verifyCommand)).toBeLessThan(
       commands.indexOf(restoreCommand),
+    );
+    expect(verifyCommand).toContain(
+      `--expected-manifest-digest ${snapshotDigestHex}`,
     );
     expect(commands.indexOf(restoreCommand)).toBeLessThan(
       commands.findLastIndex(

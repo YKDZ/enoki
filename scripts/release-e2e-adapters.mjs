@@ -940,7 +940,7 @@ export function createDockerHubController({
           baselineImageDigest,
           "--confirm-hub-stopped",
           "--expected-manifest-digest",
-          expectedManifestDigest,
+          snapshotManifestDigestForCli(expectedManifestDigest),
         ],
         operation: "verify",
       });
@@ -960,7 +960,7 @@ export function createDockerHubController({
           baselineImageDigest,
           "--confirm-hub-stopped",
           "--expected-manifest-digest",
-          expectedManifestDigest,
+          snapshotManifestDigestForCli(expectedManifestDigest),
           "--confirm-data-loss-after",
           recoveryTime,
         ],
@@ -1290,21 +1290,24 @@ export function createDockerHubController({
         result.stdout,
         `Hub State Snapshot ${operation}`,
       );
+      const manifestDigest = canonicalSnapshotManifestDigest(
+        parsed?.manifestDigest,
+      );
       if (
         parsed?.operation !== operation ||
         parsed.version !== "v1" ||
-        !/^sha256:[0-9a-f]{64}$/.test(parsed.manifestDigest ?? "")
+        manifestDigest === null
       ) {
         throw new Error(
           `Hub State Snapshot ${operation} returned invalid evidence`,
         );
       }
       owned.snapshotOperations.push({
-        manifestDigest: parsed.manifestDigest,
+        manifestDigest,
         operation,
         status: "succeeded",
       });
-      return parsed;
+      return { ...parsed, manifestDigest };
     } catch (error) {
       owned.snapshotOperations.push({
         error: error.message,
@@ -1651,6 +1654,20 @@ function parseCommandJson(value, label) {
   } catch (error) {
     throw new Error(`${label} did not return JSON`, { cause: error });
   }
+}
+
+function canonicalSnapshotManifestDigest(value) {
+  if (/^[0-9a-f]{64}$/.test(value ?? "")) return `sha256:${value}`;
+  if (/^sha256:[0-9a-f]{64}$/.test(value ?? "")) return value;
+  return null;
+}
+
+function snapshotManifestDigestForCli(value) {
+  const canonical = canonicalSnapshotManifestDigest(value);
+  if (canonical === null) {
+    throw new Error("Hub State Snapshot manifest digest is invalid");
+  }
+  return canonical.slice("sha256:".length);
 }
 
 function parseDockerInspectObject(value, label) {

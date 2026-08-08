@@ -141,13 +141,36 @@ function validateFreshEvidence(evidence, errors) {
 
 function validateBaselineEvidence(evidence, errors) {
   const version = candidateProbeVersion(evidence);
-  validateTerminalOperation(
-    evidence?.upgradeOperationTimeline,
-    "probe_upgrade",
-    "succeeded",
-    "baseline Upgrade",
-    errors,
-  );
+  if (
+    evidence?.manualRecovery === null ||
+    evidence?.manualRecovery === undefined
+  ) {
+    validateTerminalOperation(
+      evidence?.upgradeOperationTimeline,
+      "probe_upgrade",
+      "succeeded",
+      "baseline Upgrade",
+      errors,
+    );
+  } else {
+    validateTerminalOperation(
+      evidence?.upgradeOperationTimeline,
+      "probe_upgrade",
+      "failed",
+      "baseline Upgrade permission failure",
+      errors,
+    );
+    const failed = evidence?.upgradeOperationTimeline?.at(-1);
+    if (
+      failed?.failure?.code !== "insufficient_privilege" ||
+      evidence.manualRecovery.mode !== "installer" ||
+      evidence.manualRecovery.status !== "succeeded" ||
+      evidence.manualRecovery.failedOperationId !== failed?.id ||
+      evidence.manualRecovery.targetProbeVersion !== version
+    ) {
+      errors.push("Installer Recovery evidence is invalid");
+    }
+  }
   if (
     evidence?.compatibility?.status !== "succeeded" ||
     !isCandidateHostReady(

@@ -74,6 +74,23 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     ).toHaveCount(0);
   });
 
+  test("权限不足的 Probe Upgrade 指向一次性的 Installer Recovery", async ({
+    page,
+  }) => {
+    await openHostDetail(
+      page,
+      probeUpgrade("failed", {
+        code: "insufficient_privilege",
+        message: "sudo denied",
+      }),
+    );
+
+    const status = page.getByTestId("probe-upgrade-status");
+    await expect(status).toContainText("生成新的一次性安装命令");
+    await expect(status).toContainText("root 权限运行");
+    await expect(status).not.toContainText("Probe Repair");
+  });
+
   test("Owner 确认后发送一次带会话认证的 Probe Upgrade 请求", async ({
     page,
   }) => {

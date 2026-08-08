@@ -575,8 +575,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("malformed_probe_operation_token_validation", 400);
     }
 
+    const operationNowMs = now();
     const result = validateProbeOperationToken({
-      nowMs: now(),
+      nowMs: operationNowMs,
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
@@ -587,6 +588,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     if (result.error) {
       return probeJsonError(result.error, 403);
     }
+
+    const acknowledged = acknowledgeProbeUpgradeRequest({
+      nowMs: operationNowMs,
+      operation,
+    });
+    const started = startProbeUpgradeRequest({
+      nowMs: operationNowMs,
+      operation: acknowledged.acknowledged,
+    });
+    if (acknowledged.error || started.error) {
+      return probeJsonError("probe_operation_status_invalid", 400);
+    }
+    services.probeOperations?.updateProbeUpgradeRequest(started.operation);
 
     return context.json({ valid: true }, 200, {
       "cache-control": "no-store",

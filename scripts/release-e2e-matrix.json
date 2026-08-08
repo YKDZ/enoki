@@ -46,7 +46,8 @@
       "designatedEnvironmentId": "ubuntu-24.04-x86_64"
     },
     {
-      "id": "post-replacement-repair-uninstall"
+      "id": "post-replacement-repair-uninstall",
+      "designatedEnvironmentId": "ubuntu-24.04-x86_64"
     }
   ]
 }
