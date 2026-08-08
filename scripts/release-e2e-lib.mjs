@@ -177,7 +177,6 @@ async function runHubRestoreCompatibilityWindowScenario({
     }
     await host.install(enrollment.installCommand, runId);
     await host.assertInstalled(runId, baseline.probeAssetSet.version);
-    const baselineIdentity = await host.readProbeIdentity(runId);
     const hostSummary = await waitForObservation({
       code: "restore_probe_enrollment_timeout",
       label: "Release Baseline Probe enrollment before Hub State Snapshot",
@@ -189,6 +188,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
+    const baselineIdentity = await host.readProbeIdentity(runId);
     evidence.identity = {
       afterRestore: null,
       afterUpgrade: null,
@@ -567,7 +567,6 @@ async function runPostReplacementRepairUninstallScenario({
     }
     await host.install(enrollment.installCommand, runId);
     await host.assertInstalled(runId, baseline.probeAssetSet.version);
-    const baselineIdentity = await host.readProbeIdentity(runId);
     const hostSummary = await waitForObservation({
       code: "repair_probe_enrollment_timeout",
       label: "Release Baseline Probe enrollment for Repair",
@@ -579,6 +578,7 @@ async function runPostReplacementRepairUninstallScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
+    const baselineIdentity = await host.readProbeIdentity(runId);
     await waitForObservation({
       code: "repair_baseline_reporting_timeout",
       label: "Release Baseline Probe reporting before Repair scenario Upgrade",
@@ -1387,7 +1387,6 @@ async function runBaselineUpgradeUninstallScenario({
     }
     await host.install(enrollment.installCommand, runId);
     await host.assertInstalled(runId, baseline.probeAssetSet.version);
-    const baselineIdentity = await host.readProbeIdentity(runId);
 
     const hostSummary = await waitForObservation({
       code: "probe_enrollment_timeout",
@@ -1400,6 +1399,7 @@ async function runBaselineUpgradeUninstallScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
+    const baselineIdentity = await host.readProbeIdentity(runId);
     await waitForObservation({
       code: "baseline_host_core_reporting_timeout",
       label: "Release Baseline Probe reporting to the Release Baseline Hub",
@@ -3966,6 +3966,8 @@ export function isCandidateHostReady(value, expectedProbeVersion) {
   const profile = value?.hostProfile;
   const nonEmptyString = (candidate) =>
     typeof candidate === "string" && candidate.trim().length > 0;
+  const normalizedProbeVersion = (candidate) =>
+    typeof candidate === "string" ? candidate.trim().replace(/^v/, "") : "";
   return (
     value?.status === "online" &&
     profile &&
@@ -3978,7 +3980,8 @@ export function isCandidateHostReady(value, expectedProbeVersion) {
     Number.isSafeInteger(profile.memoryTotalBytes) &&
     profile.memoryTotalBytes >= 1_048_576 &&
     nonEmptyString(profile.os) &&
-    profile.probeVersion === expectedProbeVersion &&
+    normalizedProbeVersion(profile.probeVersion) ===
+      normalizedProbeVersion(expectedProbeVersion) &&
     Array.isArray(profile.filesystems) &&
     Array.isArray(profile.networkInterfaces)
   );
