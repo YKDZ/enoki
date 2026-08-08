@@ -2330,7 +2330,7 @@ export function createProbeHostHarness({
         binaryVersionResult.code === 0
           ? binaryVersionResult.stdout
               .trim()
-              .match(/(?:^|\s)(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
+              .match(/(?:^|\s)v?(\d+\.\d+\.\d+)(?:\s|$)/)?.[1]
           : null;
       if (probeVersion !== expectedProbeVersion) {
         throw new Error(

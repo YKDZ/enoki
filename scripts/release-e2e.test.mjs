@@ -460,7 +460,7 @@ describe("Probe Host Harness", () => {
           );
         }
         if (command.includes("# enoki-release-e2e:binary-version")) {
-          return successfulCommandText("enoki-probe 1.2.3\n");
+          return successfulCommandText("enoki-probe v1.2.3\n");
         }
         if (command.includes("# enoki-release-e2e:probe-identity")) {
           return successfulCommand({
@@ -3754,8 +3754,11 @@ describe("Release E2E command", () => {
         );
       }
       if (command === "skopeo" && arguments_[0] === "copy") {
-        state.image = true;
         return successfulCommandText("");
+      }
+      if (arguments_[0] === "load") {
+        state.image = true;
+        return successfulCommandText("Loaded image\n");
       }
       if (arguments_[0] === "run") {
         state.container = true;
@@ -3860,13 +3863,18 @@ describe("Release E2E command", () => {
       runId: "run-runtime",
     });
 
-    expect(commands).toContain(
-      "skopeo copy oci-archive:/candidate/hub/candidate.oci.tar docker-daemon:enoki-release-e2e:run-runtime",
+    expect(commands).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^skopeo copy oci-archive:\/candidate\/hub\/candidate\.oci\.tar docker-archive:\/tmp\/enoki-release-e2e-docker-archive-.+\/hub\.docker\.tar:enoki-release-e2e:run-runtime$/,
+        ),
+        expect.stringMatching(
+          /^docker load --input \/tmp\/enoki-release-e2e-docker-archive-.+\/hub\.docker\.tar$/,
+        ),
+      ]),
     );
     expect(commands.join("\n")).not.toContain("--preserve-digests");
-    expect(commands.some((command) => command.startsWith("docker load "))).toBe(
-      false,
-    );
+    expect(commands.join("\n")).not.toContain("docker-daemon:");
 
     const evidence = await controller.collectEvidence({ resources });
     expect(evidence).toMatchObject({
@@ -3893,6 +3901,8 @@ describe("Release E2E command", () => {
     const commands = [];
     const runMounts = [];
     const images = new Map();
+    let stagedImage = null;
+    let stagedTag = null;
     let activeImage = null;
     let container = false;
     let volume = false;
@@ -3924,11 +3934,15 @@ describe("Release E2E command", () => {
       }
       if (command === "skopeo" && arguments_[0] === "copy") {
         const baseline = arguments_[1].includes("release-baseline");
-        images.set(
-          arguments_[2].slice("docker-daemon:".length),
-          baseline ? baselineConfigDigest : candidateConfigDigest,
-        );
+        stagedImage = baseline ? baselineConfigDigest : candidateConfigDigest;
+        stagedTag = arguments_[2].split("/hub.docker.tar:")[1];
         return successfulCommandText("");
+      }
+      if (arguments_[0] === "load") {
+        images.set(stagedTag, stagedImage);
+        stagedImage = null;
+        stagedTag = null;
+        return successfulCommandText("Loaded image\n");
       }
       if (arguments_[0] === "volume" && arguments_[1] === "create") {
         volume = true;
@@ -4074,6 +4088,8 @@ describe("Release E2E command", () => {
     const commands = [];
     const images = new Map();
     const volumes = new Set();
+    let stagedImage = null;
+    let stagedTag = null;
     let activeImage = null;
     let container = false;
     const snapshotResult = (operation) => ({
@@ -4121,11 +4137,15 @@ describe("Release E2E command", () => {
       }
       if (command === "skopeo" && arguments_[0] === "copy") {
         const baseline = arguments_[1].includes("release-baseline");
-        images.set(
-          arguments_[2].slice("docker-daemon:".length),
-          baseline ? baselineConfigDigest : candidateConfigDigest,
-        );
+        stagedImage = baseline ? baselineConfigDigest : candidateConfigDigest;
+        stagedTag = arguments_[2].split("/hub.docker.tar:")[1];
         return successfulCommandText("");
+      }
+      if (arguments_[0] === "load") {
+        images.set(stagedTag, stagedImage);
+        stagedImage = null;
+        stagedTag = null;
+        return successfulCommandText("Loaded image\n");
       }
       if (arguments_[0] === "volume" && arguments_[1] === "create") {
         volumes.add(arguments_.at(-1));
@@ -4403,8 +4423,11 @@ describe("Release E2E command", () => {
         return { code: 1, stderr: "port already allocated", stdout: "" };
       }
       if (command === "skopeo" && arguments_[0] === "copy") {
-        imageCreated = true;
         return successfulCommandText("");
+      }
+      if (arguments_[0] === "load") {
+        imageCreated = true;
+        return successfulCommandText("Loaded image\n");
       }
       if (arguments_[0] === "volume" && arguments_[1] === "create") {
         volumeCreated = true;

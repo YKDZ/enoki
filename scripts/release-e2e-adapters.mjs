@@ -1351,12 +1351,25 @@ export function createDockerHubController({
 
   async function ensureHubRuntimeLoaded(runtime) {
     if (runtime.tagCreated) return;
-    await successfulExec(exec, "skopeo", [
-      "copy",
-      `oci-archive:${path.resolve(runtime.archivePath)}`,
-      `docker-daemon:${runtime.tag}`,
-    ]);
-    runtime.tagCreated = true;
+    const conversionDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-release-e2e-docker-archive-"),
+    );
+    const dockerArchivePath = path.join(conversionDir, "hub.docker.tar");
+    try {
+      await successfulExec(exec, "skopeo", [
+        "copy",
+        `oci-archive:${path.resolve(runtime.archivePath)}`,
+        `docker-archive:${dockerArchivePath}:${runtime.tag}`,
+      ]);
+      await successfulExec(exec, containerEngine, [
+        "load",
+        "--input",
+        dockerArchivePath,
+      ]);
+      runtime.tagCreated = true;
+    } finally {
+      await rm(conversionDir, { force: true, recursive: true });
+    }
   }
 
   async function runHubRuntime(owned, runtime) {
