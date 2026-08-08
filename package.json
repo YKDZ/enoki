@@ -4,33 +4,46 @@
   "description": "Self-hosted Host monitoring with a Hono Hub, Vue Web UI, and Rust Probe.",
   "type": "module",
   "scripts": {
-    "build": "turbo run build",
-    "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run build && pnpm run test && pnpm run e2e && pnpm run proto:check && pnpm run rust:check",
+    "boundaries": "node scripts/check-boundaries.ts",
+    "build": "turbo run build --output-logs=errors-only --log-order=grouped",
+    "check": "pnpm run check:node && pnpm run rust:check",
+    "check:node": "turbo run boundaries format:check lint typecheck build test test:e2e check:generated --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
     "db:reset-migrations": "pnpm --filter @enoki/hub run db:reset-migrations",
     "dev": "pnpm --filter @enoki/web dev",
     "dev:hub": "pnpm --filter @enoki/hub build && NODE_ENV=development pnpm --filter @enoki/hub start",
     "dev:probe": "node scripts/dev-probe.mjs",
-    "e2e": "playwright test",
-    "format:check": "oxfmt --check .",
-    "lint": "oxlint --format=agent --fix --type-aware . ",
-    "proto:check": "pnpm --filter @enoki/proto check",
+    "fix": "turbo run lint:fix format:write --continue=dependencies-successful --output-logs=full --log-order=grouped --log-prefix=task",
+    "format:check": "node scripts/run-root-owned-task.ts format:check",
+    "format:write": "node scripts/run-root-owned-task.ts format:write",
+    "lint": "node scripts/run-root-owned-task.ts lint",
+    "lint:fix": "node scripts/run-root-owned-task.ts lint:fix",
+    "proto:check": "pnpm run check:generated",
+    "check:generated": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
-    "test": "vitest run scripts/*.test.mjs && turbo run test",
-    "typecheck": "tsc -p tsconfig.json --noEmit && turbo run typecheck"
+    "test": "vitest run scripts/*.test.mjs --reporter=agent --silent=passed-only",
+    "test:e2e": "playwright test",
+    "test:e2e:candidate": "node scripts/release-ui-contract.mjs",
+    "e2e": "pnpm run test:e2e",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.0",
-    "@types/node": "^24.0.10",
-    "eslint-plugin-better-tailwindcss": "^4.6.0",
-    "oxfmt": "^0.55.0",
-    "oxlint": "^1.70.0",
-    "oxlint-tsgolint": "^0.23.0",
-    "turbo": "^2.5.4",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "@playwright/test": "catalog:",
+    "@types/node": "catalog:",
+    "eslint-plugin-better-tailwindcss": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "turbo": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "engines": {
     "node": "24"
   },
-  "packageManager": "pnpm@11.8.0"
+  "packageManager": "pnpm@11.11.0",
+  "turbo": {
+    "tags": [
+      "app"
+    ]
+  }
 }

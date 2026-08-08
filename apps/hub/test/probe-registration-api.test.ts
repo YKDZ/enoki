@@ -5,10 +5,10 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
+import * as root from "@enoki/proto/generated/ts/enoki_pb.js";
 import { serve } from "@hono/node-server";
 import { afterEach, describe, expect, it } from "vitest";
 
-import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { hashSecret } from "../src/enrollment/routes";

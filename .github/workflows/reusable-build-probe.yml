@@ -3,8 +3,18 @@ name: Reusable Build Probe
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Exact source commit to build. Defaults to the calling workflow commit.
+        required: false
+        type: string
+        default: ""
       package-artifacts:
         description: Package and upload release artifacts after building.
+        required: false
+        type: boolean
+        default: false
+      verify-reproducible:
+        description: Build and package twice from clean target directories, then compare bytes.
         required: false
         type: boolean
         default: false
@@ -26,8 +36,10 @@ jobs:
         include:
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-musl
+            musl_tools_version: 1.2.2-4
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            musl_tools_version: 1.2.4-2
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
@@ -35,43 +47,117 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.commit || github.sha }}
 
-      - name: Install Rust toolchain
+      - name: Bind build to the exact source checkout
+        if: inputs.commit != ''
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+
+      - name: Reject reproducibility verification without artifacts
+        if: inputs.verify-reproducible && !inputs.package-artifacts
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup target add ${{ matrix.target }}
+          echo "::error::verify-reproducible requires package-artifacts."
+          exit 1
+
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.97.1 --profile minimal
+          --target ${{ matrix.target }}
+
+      - name: Set up Node.js for deterministic packaging
+        if: inputs.package-artifacts
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+
+      - name: Cache Rust build
+        if: ${{ !inputs.verify-reproducible }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y --no-install-recommends
+          musl-tools="${{ matrix.musl_tools_version }}"
 
       - name: Build Probe
+        if: ${{ !inputs.verify-reproducible }}
         env:
+          CARGO_INCREMENTAL: "0"
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
           CC_x86_64_unknown_linux_musl: musl-gcc
           ENOKI_PROBE_VERSION: ${{ inputs.version }}
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace -C link-arg=-Wl,--build-id=none
+          SOURCE_DATE_EPOCH: "0"
         run: cargo build -p enoki-probe --release --target ${{ matrix.target }}
 
-      - name: Package Probe
-        if: inputs.package-artifacts
+      - name: Build and package Probe twice from clean target state
+        if: inputs.verify-reproducible && inputs.package-artifacts
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          ENOKI_PROBE_VERSION: ${{ inputs.version }}
+          PROBE_TARGET: ${{ matrix.target }}
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace -C link-arg=-Wl,--build-id=none
+          SOURCE_DATE_EPOCH: "0"
         run: |
-          mkdir -p "dist/enoki-probe-${{ matrix.target }}"
-          cp "target/${{ matrix.target }}/release/enoki-probe" "dist/enoki-probe-${{ matrix.target }}/enoki-probe"
-          tar -C "dist/enoki-probe-${{ matrix.target }}" -czf "dist/enoki-probe-${{ matrix.target }}.tar.gz" enoki-probe
-          cd dist
-          sha256sum "enoki-probe-${{ matrix.target }}.tar.gz" > "enoki-probe-${{ matrix.target }}.tar.gz.sha256"
+          rm -rf target/reproducible dist dist-reproducibility-second
+          CARGO_TARGET_DIR=target/reproducible cargo build -p enoki-probe --release --target "$PROBE_TARGET"
+          node scripts/release-candidate.mjs package-probe \
+            --binary "target/reproducible/${PROBE_TARGET}/release/enoki-probe" \
+            --output-dir dist \
+            --source-date-epoch 0 \
+            --target "$PROBE_TARGET" \
+            --version "$CANDIDATE_VERSION"
+
+          rm -rf target/reproducible
+          CARGO_TARGET_DIR=target/reproducible cargo build -p enoki-probe --release --target "$PROBE_TARGET"
+          node scripts/release-candidate.mjs package-probe \
+            --binary "target/reproducible/${PROBE_TARGET}/release/enoki-probe" \
+            --output-dir dist-reproducibility-second \
+            --source-date-epoch 0 \
+            --target "$PROBE_TARGET" \
+            --version "$CANDIDATE_VERSION"
+
+          archive="enoki-probe-${PROBE_TARGET}.tar.gz"
+          cmp --silent "dist/${archive}" "dist-reproducibility-second/${archive}"
+          cmp --silent "dist/${archive}.sha256" "dist-reproducibility-second/${archive}.sha256"
+
+      - name: Package Probe
+        if: inputs.package-artifacts && !inputs.verify-reproducible
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          PROBE_TARGET: ${{ matrix.target }}
+        run: >-
+          node scripts/release-candidate.mjs package-probe
+          --binary "target/${PROBE_TARGET}/release/enoki-probe"
+          --output-dir dist
+          --source-date-epoch 0
+          --target "$PROBE_TARGET"
+          --version "$CANDIDATE_VERSION"
 
       - name: Upload Probe artifact
         if: inputs.package-artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: enoki-probe-${{ matrix.target }}
+          name: enoki-probe-${{ matrix.target }}-${{ github.run_id }}
           path: |
             dist/enoki-probe-${{ matrix.target }}.tar.gz
             dist/enoki-probe-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
+          overwrite: true

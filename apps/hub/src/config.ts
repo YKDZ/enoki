@@ -19,6 +19,12 @@ export type DatabaseConfig = {
   sqlitePath: string;
 };
 
+export type HubPersistentStateConfig = {
+  archiveDirectory: string;
+  dataRoot: string;
+  sqlitePath: string;
+};
+
 export type MetricsConfig = {
   archive: MetricsArchiveConfig;
   retentionDays: number;
@@ -82,7 +88,9 @@ const defaultProbeOperationRunningTimeoutSeconds = 15 * 60;
 export function createHubRuntimeConfigFromEnvironment(
   environment: HubEnvironment,
 ): HubRuntimeConfig {
-  const dataRoot = environment.ENOKI_DATA_ROOT || defaultDataRoot;
+  const persistentState =
+    createHubPersistentStateConfigFromEnvironment(environment);
+  const dataRoot = persistentState.dataRoot;
   const installation =
     createInstallationCommandConfigFromEnvironment(environment);
   const hostStatus = createHostStatusConfigFromEnvironment(environment);
@@ -99,14 +107,15 @@ export function createHubRuntimeConfigFromEnvironment(
     },
     database: {
       dataRoot,
-      sqlitePath:
-        environment.ENOKI_SQLITE_PATH ??
-        path.join(dataRoot, defaultDatabaseFileName),
+      sqlitePath: persistentState.sqlitePath,
     },
     hostStatus,
     installation,
     metrics: {
-      archive: createMetricsArchiveConfigFromEnvironment(environment, dataRoot),
+      archive: createMetricsArchiveConfigFromEnvironment(
+        environment,
+        persistentState.archiveDirectory,
+      ),
       retentionDays: readPositiveInteger(
         environment.ENOKI_METRICS_RETENTION_DAYS,
         defaultMetricsRetentionDays,
@@ -147,13 +156,25 @@ export function createHubRuntimeConfigFromEnvironment(
   };
 }
 
+export function createHubPersistentStateConfigFromEnvironment(
+  environment: HubEnvironment,
+): HubPersistentStateConfig {
+  const dataRoot = environment.ENOKI_DATA_ROOT || defaultDataRoot;
+  return {
+    archiveDirectory:
+      environment.ENOKI_METRICS_ARCHIVE_DIR ??
+      path.join(dataRoot, "metrics-archive"),
+    dataRoot,
+    sqlitePath:
+      environment.ENOKI_SQLITE_PATH ??
+      path.join(dataRoot, defaultDatabaseFileName),
+  };
+}
+
 function createMetricsArchiveConfigFromEnvironment(
   environment: HubEnvironment,
-  dataRoot: string,
+  directory: string,
 ): MetricsArchiveConfig {
-  const directory =
-    environment.ENOKI_METRICS_ARCHIVE_DIR ??
-    path.join(dataRoot, "metrics-archive");
   const enabled = readMetricsArchiveEnabled(
     environment.ENOKI_METRICS_ARCHIVE_ENABLED,
   );

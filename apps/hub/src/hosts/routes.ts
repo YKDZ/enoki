@@ -147,6 +147,7 @@ export function createHostRoutes(services: HostRouteServices) {
           configuration: defaultProbeConfiguration,
           mode: "inherit",
         },
+        reportedProbeConfigurationVersion: host.probeConfigurationVersion,
         probeUpgradeEligibility: evaluateProbeUpgradeEligibility({
           probeAssetSetVersion: currentProbeAssetSetVersion.version,
           probeAssetSetVersionNonUpgradeableReason:
@@ -562,6 +563,8 @@ export function createHostRoutes(services: HostRouteServices) {
     return context.json(
       {
         probeUninstallRequest: {
+          acceptedAtMs: operation.acceptedAtMs,
+          completedAtMs: operation.completedAtMs,
           createdAtMs: operation.createdAtMs,
           failure: operation.failureCode
             ? {
@@ -570,12 +573,39 @@ export function createHostRoutes(services: HostRouteServices) {
               }
             : null,
           id: operation.id,
+          runningAtMs: operation.runningAtMs,
           state: operation.state,
           updatedAtMs: operation.updatedAtMs,
         },
       },
       isDuplicate ? 200 : 202,
     );
+  });
+
+  return routes;
+}
+
+export function createProbeOperationRoutes(
+  services: Pick<HostRouteServices, "probeOperations">,
+) {
+  const routes = new Hono();
+
+  routes.get("/:operationId", (context) => {
+    const operationId = numericHostId(context.req.param("operationId"));
+    const operation = operationId
+      ? services.probeOperations?.findById(operationId)
+      : null;
+    if (!operation) {
+      return hostMetadataError("probe_operation_not_found", 404);
+    }
+
+    return context.json({
+      probeOperation: {
+        ...probeUpgradeStatus(operation),
+        hostId: operation.hostId,
+        kind: operation.kind,
+      },
+    });
   });
 
   return routes;
@@ -732,6 +762,8 @@ function probeUpgradeStatus(
   }
 
   return {
+    acceptedAtMs: operation.acceptedAtMs,
+    completedAtMs: operation.completedAtMs,
     createdAtMs: operation.createdAtMs,
     failure: operation.failureCode
       ? {
@@ -740,6 +772,7 @@ function probeUpgradeStatus(
         }
       : null,
     id: requiredOperationId(operation),
+    runningAtMs: operation.runningAtMs,
     state: operation.state,
     targetProbeVersion: operation.targetProbeVersion,
     updatedAtMs: operation.updatedAtMs,

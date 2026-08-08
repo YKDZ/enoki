@@ -2,9 +2,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import * as root from "@enoki/proto/generated/ts/enoki_pb.js";
 import { afterEach, describe, expect, it } from "vitest";
 
-import * as root from "../../../packages/proto/src/generated/ts/enoki_pb.js";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import {
@@ -471,6 +471,7 @@ describe("Host detail API", () => {
           }),
           mode: "inherit",
         }),
+        reportedProbeConfigurationVersion: "default-v1",
         status: "online",
         warnings: [],
       }),
@@ -1079,9 +1080,12 @@ describe("Host detail API", () => {
     expect(createResponse.status).toBe(201);
     const createdBody = (await createResponse.json()) as {
       probeUpgradeRequest: {
+        acceptedAtMs: number | null;
+        completedAtMs: number | null;
         createdAtMs: number;
         failure: null;
         id: number;
+        runningAtMs: number | null;
         state: string;
         targetProbeVersion: string;
         updatedAtMs: number;
@@ -1089,9 +1093,12 @@ describe("Host detail API", () => {
     };
     expect(createdBody).toEqual({
       probeUpgradeRequest: {
+        acceptedAtMs: null,
+        completedAtMs: null,
         createdAtMs: 1_725_000_000_000,
         failure: null,
         id: expect.any(Number),
+        runningAtMs: null,
         state: "pending",
         targetProbeVersion: "0.2.0",
         updatedAtMs: 1_725_000_000_000,
@@ -1110,9 +1117,12 @@ describe("Host detail API", () => {
     expect(duplicateResponse.status).toBe(200);
     await expect(duplicateResponse.json()).resolves.toEqual({
       probeUpgradeRequest: {
+        acceptedAtMs: null,
+        completedAtMs: null,
         createdAtMs: 1_725_000_000_000,
         failure: null,
         id: createdBody.probeUpgradeRequest.id,
+        runningAtMs: null,
         state: "pending",
         targetProbeVersion: "0.2.0",
         updatedAtMs: 1_725_000_000_000,
@@ -1129,9 +1139,12 @@ describe("Host detail API", () => {
     await expect(detailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         probeUpgradeStatus: {
+          acceptedAtMs: null,
+          completedAtMs: null,
           createdAtMs: 1_725_000_000_000,
           failure: null,
           id: expect.any(Number),
+          runningAtMs: null,
           state: "pending",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_000_000,
@@ -1160,12 +1173,15 @@ describe("Host detail API", () => {
     await expect(failedDetailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         probeUpgradeStatus: {
+          acceptedAtMs: null,
+          completedAtMs: 1_725_000_001_000,
           createdAtMs: 1_725_000_000_000,
           failure: {
             code: "unsupported_installation",
             message: "当前安装方式不支持 Probe 升级。",
           },
           id: expect.any(Number),
+          runningAtMs: null,
           state: "failed",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_001_000,
@@ -1351,9 +1367,12 @@ describe("Host detail API", () => {
     await expect(detailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         probeUpgradeStatus: {
+          acceptedAtMs: null,
+          completedAtMs: 1_725_000_001_000,
           createdAtMs: 1_725_000_001_000,
           failure: null,
           id: created.probeUpgradeRequest.id,
+          runningAtMs: 1_725_000_000_500,
           state: "succeeded",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_001_000,
@@ -1520,6 +1539,8 @@ describe("Host detail API", () => {
     await expect(detailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
         probeUpgradeStatus: {
+          acceptedAtMs: 1_725_000_000_000,
+          completedAtMs: 1_725_000_001_001,
           createdAtMs: 1_725_000_000_000,
           failure: {
             code: "accepted_timeout",
@@ -1527,6 +1548,7 @@ describe("Host detail API", () => {
               "Probe accepted the upgrade request but did not start it in time.",
           },
           id: created.probeUpgradeRequest.id,
+          runningAtMs: null,
           state: "failed",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_001_001,
@@ -1706,9 +1728,12 @@ describe("Host detail API", () => {
     expect(cancelResponse.status).toBe(200);
     await expect(cancelResponse.json()).resolves.toEqual({
       probeUpgradeRequest: {
+        acceptedAtMs: null,
+        completedAtMs: null,
         createdAtMs: 1_725_000_000_000,
         failure: null,
         id: created.probeUpgradeRequest.id,
+        runningAtMs: null,
         state: "canceled",
         targetProbeVersion: "0.2.0",
         updatedAtMs: 1_725_000_000_000,

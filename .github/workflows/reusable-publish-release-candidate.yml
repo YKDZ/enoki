@@ -1,0 +1,157 @@
+name: Publish Verified Enoki Release Candidate
+
+on:
+  workflow_call:
+    inputs:
+      candidate-artifact-name:
+        description: Current-run private artifact containing the immutable candidate.
+        required: true
+        type: string
+      commit:
+        description: Exact candidate commit authorized by the manual release request.
+        required: true
+        type: string
+      verification-artifact-name:
+        description: Current-run authoritative candidate gate evidence.
+        required: true
+        type: string
+      version:
+        description: Stable candidate SemVer tag, for example v0.1.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate-publication-invocation:
+    name: Validate protected publication invocation
+    runs-on: ubuntu-24.04
+    outputs:
+      trusted-workflow-repository: ${{ steps.trusted-workflow.outputs.repository }}
+      trusted-workflow-sha: ${{ steps.trusted-workflow.outputs.sha }}
+    steps:
+      - name: Reject an untrusted publication caller
+        id: trusted-workflow
+        env:
+          CALLER_REF: ${{ github.ref }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          JOB_CONTEXT: ${{ toJSON(job) }}
+          TRUSTED_WORKFLOW_REF: YKDZ/enoki/.github/workflows/reusable-publish-release-candidate.yml@refs/heads/main
+        run: |
+          workflow_ref="$(jq -r '.workflow_ref // ""' <<<"$JOB_CONTEXT")"
+          workflow_repository="$(jq -r '.workflow_repository // ""' <<<"$JOB_CONTEXT")"
+          workflow_sha="$(jq -r '.workflow_sha // ""' <<<"$JOB_CONTEXT")"
+          if [ "$CALLER_REF" != "refs/heads/main" ] || \
+             [ "$CALLER_REPOSITORY" != "YKDZ/enoki" ] || \
+             [ "$workflow_ref" != "$TRUSTED_WORKFLOW_REF" ] || \
+             [ "$workflow_repository" != "YKDZ/enoki" ] || \
+             ! [[ "$workflow_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Publication must run from the canonical protected main workflow."
+            echo "::error::caller: $CALLER_REPOSITORY@$CALLER_REF; workflow: $workflow_ref"
+            exit 1
+          fi
+          echo "repository=$workflow_repository" >> "$GITHUB_OUTPUT"
+          echo "sha=$workflow_sha" >> "$GITHUB_OUTPUT"
+
+  publish-candidate:
+    name: Reconcile immutable publication and public smoke
+    needs: validate-publication-invocation
+    runs-on: ubuntu-24.04
+    # The release-publishing Environment must allow only protected main and may
+    # require reviewers. No artifact download or publication runs before the
+    # canonical invocation above has succeeded.
+    environment: release-publishing
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout immutable publication tooling
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          path: trusted-tool
+          persist-credentials: false
+          repository: ${{ needs.validate-publication-invocation.outputs.trusted-workflow-repository }}
+          ref: ${{ needs.validate-publication-invocation.outputs.trusted-workflow-sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: trusted-tool/package.json
+
+      - name: Install the content-preserving registry transport
+        run: sudo apt-get update && sudo apt-get install --yes skopeo
+
+      - name: Download this attempt's immutable candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: candidate-transfer
+
+      - name: Download this attempt's complete gate evidence
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.verification-artifact-name }}
+          path: verification
+
+      - name: Extract and revalidate exact private candidate bytes
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          mkdir candidate
+          tar --extract --gzip --file candidate-transfer/candidate.tar.gz --directory candidate
+          node trusted-tool/scripts/release-candidate.mjs validate candidate
+          jq --exit-status \
+            --arg commit "$CANDIDATE_COMMIT" \
+            --arg version "$CANDIDATE_VERSION" \
+            '.candidate.commit == $commit and .candidate.version == $version' \
+            candidate/candidate-manifest.json >/dev/null
+          node trusted-tool/scripts/release-verification.mjs assert-verified \
+            --summary verification/release-verification-summary.json
+
+      - name: Login to GHCR for versioned publication
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | skopeo login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Reconcile exact version outputs, public visibility, latest, and smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/ykdz/enoki-hub
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: >-
+          node trusted-tool/scripts/release-publication.mjs reconcile
+          --candidate-dir candidate
+          --verification-summary verification/release-verification-summary.json
+          --repository "${{ github.repository }}"
+          --image "$IMAGE"
+          --run-id "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+          --run-url "$RUN_URL"
+          --output release-publication-summary.json
+          --markdown release-publication-summary.md
+
+      - name: Publish the full release audit summary
+        if: ${{ always() && hashFiles('release-publication-summary.md') != '' }}
+        run: cat release-publication-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload publication and smoke evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-publication-summary-${{ github.run_id }}
+          path: |
+            release-publication-summary.json
+            release-publication-summary.md
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - name: Require publication and every public smoke check
+        if: ${{ always() }}
+        run: >-
+          node trusted-tool/scripts/release-publication.mjs assert-published
+          --summary release-publication-summary.json

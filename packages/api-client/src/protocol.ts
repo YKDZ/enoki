@@ -1,7 +1,10 @@
 import type { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 
-type JsonScalar<T> =
-  NonNullable<T> extends { toNumber(): number } ? number : NonNullable<T>;
+type JsonScalar<T> = T extends null | undefined
+  ? never
+  : T extends { toNumber(): number }
+    ? number
+    : T;
 
 type RequiredJsonFields<T, Key extends keyof T> = {
   [Field in Key]-?: JsonScalar<T[Field]>;

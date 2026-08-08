@@ -1,87 +1,91 @@
-name: Release
+name: Release Enoki Candidate
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
-      version:
-        description: Release version, for example v0.1.0
+      commit:
+        description: Full lowercase 40-character candidate commit.
         required: true
         type: string
+      version:
+        description: Stable candidate SemVer tag, for example v0.1.0.
+        required: true
+        type: string
+      mode:
+        description: Verify a fresh candidate, then optionally publish those exact bytes.
+        required: true
+        type: choice
+        default: verify-only
+        options:
+          - verify-only
+          - publish
+      first-formal-release:
+        description: Assert explicitly that no published stable release exists.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref_name || inputs.version }}
+  group: enoki-release-global
   cancel-in-progress: false
 
 jobs:
-  release-version:
-    name: Resolve release version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
+  validate-release-request:
+    name: Validate explicit release request
+    runs-on: ubuntu-24.04
     steps:
-      - name: Resolve version
-        id: version
+      - name: Reject ambiguous or untrusted release requests
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          RELEASE_MODE: ${{ inputs.mode }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            version="${{ inputs.version }}"
-          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            version="${GITHUB_REF_NAME}"
-          else
-            echo "::error::Release version is required for manual runs."
+          if [ "$GITHUB_REPOSITORY" != "YKDZ/enoki" ] || [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Release verification must run from the canonical protected main branch."
+            exit 1
+          fi
+          if [ "$RELEASE_MODE" != "verify-only" ] && [ "$RELEASE_MODE" != "publish" ]; then
+            echo "::error::Mode must be verify-only or publish."
+            exit 1
+          fi
+          if ! printf '%s' "$CANDIDATE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Candidate commit must be a full lowercase 40-character object ID."
+            exit 1
+          fi
+          if ! printf '%s' "$CANDIDATE_VERSION" | grep -Eq '^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$'; then
+            echo "::error::Candidate version must be a strict stable SemVer tag like v0.1.0."
             exit 1
           fi
 
-          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+[.][0-9]+[.][0-9]+'; then
-            echo "::error::Release version must start with a semantic tag like v0.1.0."
-            exit 1
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-  node-checks:
-    name: Node checks
-    needs: release-version
-    uses: ./.github/workflows/reusable-node-checks.yml
-    with:
-      run-build: true
-
-  rust-checks:
-    name: Rust checks
-    needs: release-version
-    uses: ./.github/workflows/reusable-rust-checks.yml
-
-  build-probe:
-    name: Build Probe
-    needs: [release-version, rust-checks]
-    uses: ./.github/workflows/reusable-build-probe.yml
-    with:
-      package-artifacts: true
-      version: ${{ needs.release-version.outputs.version }}
-
-  publish-probe-release:
-    name: Publish Probe release assets
-    needs: [release-version, build-probe]
+  verify-candidate:
+    name: Build and completely verify a fresh candidate
+    needs: validate-release-request
     permissions:
-      contents: write
-    secrets: inherit
-    uses: ./.github/workflows/reusable-publish-probe-release.yml
-    with:
-      version: ${{ needs.release-version.outputs.version }}
-
-  publish-hub-image:
-    name: Publish Hub image
-    needs: [release-version, node-checks, publish-probe-release]
-    permissions:
+      actions: read
+      attestations: write
       contents: read
-      packages: write
-    uses: ./.github/workflows/reusable-hub-image.yml
+      id-token: write
+    uses: ./.github/workflows/reusable-build-release-candidate.yml
     with:
-      include-probe-assets: true
-      push-image: true
-      version: ${{ needs.release-version.outputs.version }}
+      commit: ${{ inputs.commit }}
+      first-formal-release: ${{ inputs.first-formal-release }}
+      mode: ${{ inputs.mode }}
+      version: ${{ inputs.version }}
+
+  publish-candidate:
+    name: Publish the verified candidate idempotently
+    if: ${{ inputs.mode == 'publish' }}
+    needs: [validate-release-request, verify-candidate]
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    uses: ./.github/workflows/reusable-publish-release-candidate.yml
+    with:
+      candidate-artifact-name: ${{ needs.verify-candidate.outputs.candidate-artifact-name }}
+      commit: ${{ inputs.commit }}
+      verification-artifact-name: ${{ needs.verify-candidate.outputs.verification-artifact-name }}
+      version: ${{ inputs.version }}

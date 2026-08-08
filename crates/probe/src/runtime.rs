@@ -815,6 +815,62 @@ mod operation_report_tests {
     use super::*;
 
     #[test]
+    fn successful_operation_launch_acknowledges_and_reports_running_in_one_request() {
+        struct RunningRunner;
+
+        impl ProbeOperationRunner for RunningRunner {
+            fn run_probe_upgrade(
+                &mut self,
+                _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                ProbeUpgradeRunnerOutcome::Running
+            }
+
+            fn run_probe_uninstall(
+                &mut self,
+                _input: ProbeUninstallRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                ProbeUpgradeRunnerOutcome::Running
+            }
+        }
+
+        let mut queue = ProbeOperationReportQueue::default();
+        let mut runner = RunningRunner;
+        queue.observe_response(
+            &ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                    id: "operation-01".to_string(),
+                    operation: Some(Operation::ProbeUpgrade(
+                        crate::protocol::enoki::v1::ProbeUpgradeOperation {
+                            current_probe_version: "0.1.0".to_string(),
+                            operation_token: "operation-token".to_string(),
+                            target_probe_version: "0.2.0".to_string(),
+                        },
+                    )),
+                }),
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1,
+            },
+            &mut runner,
+        );
+
+        let request = queue.with_operation_reports(ProbeReportRequest::default());
+
+        assert_eq!(request.operation_acknowledgements.len(), 1);
+        assert_eq!(request.operation_statuses.len(), 1);
+        assert_eq!(
+            request.operation_acknowledgements[0].operation_id,
+            "operation-01"
+        );
+        assert!(matches!(
+            request.operation_statuses[0].status,
+            Some(Status::Running(_))
+        ));
+    }
+
+    #[test]
     fn successful_upgrader_launch_reports_running() {
         let outcome = probe_upgrade_outcome_from_launch_result(Ok(ProbeUpgraderCommandOutput {
             stdout: "Probe Upgrader result: operation=operation-01 status=running\n".to_string(),

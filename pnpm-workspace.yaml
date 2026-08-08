@@ -1,9 +1,51 @@
 packages:
-  - "apps/*"
-  - "packages/*"
+  - apps/*
+  - packages/*
+
+nodeLinker: isolated
+
+autoInstallPeers: false
+
+injectWorkspacePackages: true
+
+dedupeInjectedDeps: false
+
+syncInjectedDepsAfterScripts:
+  - build
+
+minimumReleaseAge: 1440
+
+minimumReleaseAgeStrict: true
+
+overrides:
+  "pinia>typescript": "-"
+  "vue>typescript": "-"
 
 allowBuilds:
   better-sqlite3: true
   esbuild: true
   protobufjs: true
   vue-demi: true
+
+catalog:
+  "@hono/node-server": ^2.0.6
+  "@playwright/test": ^1.61.1
+  "@tailwindcss/vite": ^4.3.2
+  "@types/node": ^24.13.3
+  "@vitejs/plugin-vue": ^6.0.7
+  "@vue/server-renderer": 3.5.39
+  "@vue/tsconfig": ^0.9.1
+  eslint-plugin-better-tailwindcss: ^4.6.0
+  hono: ^4.12.27
+  oxfmt: ^0.58.0
+  oxlint: ^1.73.0
+  oxlint-tsgolint: ^0.24.0
+  pinia: ^3.0.4
+  tailwindcss: ^4.3.2
+  turbo: 2.10.2
+  typescript: ^6.0.3
+  valibot: ^1.4.2
+  vite: ^8.1.4
+  vitest: ^4.1.10
+  vue: ^3.5.39
+  vue-tsc: ^3.3.6

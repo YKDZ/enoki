@@ -40,7 +40,6 @@ run("pnpm", [
   protoRoot,
   "--wrap",
   "default",
-  "--force-long",
   "--out",
   generatedTsTypesInputFile,
   protoFile,

@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "providers": [
+    {
+      "id": "github-actions-host-systemd",
+      "provider": "github-actions",
+      "hostAdapter": "ci",
+      "systemd": "host",
+      "capabilities": [
+        {
+          "id": "ubuntu-22.04-x86_64",
+          "operatingSystem": "ubuntu",
+          "operatingSystemVersion": "22.04",
+          "architecture": "x86_64",
+          "runner": "ubuntu-22.04"
+        },
+        {
+          "id": "ubuntu-24.04-x86_64",
+          "operatingSystem": "ubuntu",
+          "operatingSystemVersion": "24.04",
+          "architecture": "x86_64",
+          "runner": "ubuntu-24.04"
+        }
+      ]
+    }
+  ],
+  "environments": [
+    {
+      "providerId": "github-actions-host-systemd",
+      "capabilityId": "ubuntu-22.04-x86_64"
+    },
+    {
+      "providerId": "github-actions-host-systemd",
+      "capabilityId": "ubuntu-24.04-x86_64"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "baseline-upgrade-uninstall"
+    },
+    {
+      "id": "fresh-install-uninstall"
+    },
+    {
+      "id": "hub-restore-compatibility-window",
+      "designatedEnvironmentId": "ubuntu-24.04-x86_64"
+    },
+    {
+      "id": "post-replacement-repair-uninstall"
+    }
+  ]
+}

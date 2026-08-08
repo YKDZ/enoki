@@ -14,6 +14,8 @@ describe("Probe upgrade failure toast", () => {
     expect(
       shouldToastProbeUpgradeFailure(
         {
+          acceptedAtMs: 1_725_000_050_000,
+          completedAtMs: 1_725_000_900_000,
           createdAtMs: 1_725_000_000_000,
           failure: {
             code: "running_timeout",
@@ -21,14 +23,18 @@ describe("Probe upgrade failure toast", () => {
               "Probe started the upgrade but did not report the target version in time.",
           },
           id: 9,
+          runningAtMs: 1_725_000_100_000,
           state: "failed",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_900_000,
         },
         {
+          acceptedAtMs: 1_725_000_050_000,
+          completedAtMs: null,
           createdAtMs: 1_725_000_000_000,
           failure: null,
           id: 9,
+          runningAtMs: 1_725_000_100_000,
           state: "running",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_100_000,
@@ -39,6 +45,8 @@ describe("Probe upgrade failure toast", () => {
 
   it("does not toast repeatedly when the same failed operation refreshes", () => {
     const failedStatus = {
+      acceptedAtMs: 1_725_000_050_000,
+      completedAtMs: 1_725_000_900_000,
       createdAtMs: 1_725_000_000_000,
       failure: {
         code: "running_timeout",
@@ -46,6 +54,7 @@ describe("Probe upgrade failure toast", () => {
           "Probe started the upgrade but did not report the target version in time.",
       },
       id: 9,
+      runningAtMs: 1_725_000_100_000,
       state: "failed" as const,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_900_000,
@@ -60,12 +69,15 @@ describe("Probe upgrade failure toast", () => {
     expect(
       shouldToastProbeUpgradeFailure(
         {
+          acceptedAtMs: 1_725_000_050_000,
+          completedAtMs: 1_725_000_900_000,
           createdAtMs: 1_725_000_000_000,
           failure: {
             code: "running_timeout",
             message: "升级超时。",
           },
           id: 9,
+          runningAtMs: 1_725_000_100_000,
           state: "failed",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_900_000,
@@ -79,17 +91,23 @@ describe("Probe upgrade failure toast", () => {
     expect(
       shouldToastProbeUpgradeSuccess(
         {
+          acceptedAtMs: 1,
+          completedAtMs: 3,
           createdAtMs: 1,
           failure: null,
           id: 9,
+          runningAtMs: 2,
           state: "succeeded",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 3,
         },
         {
+          acceptedAtMs: 1,
+          completedAtMs: null,
           createdAtMs: 1,
           failure: null,
           id: 9,
+          runningAtMs: 2,
           state: "running",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 2,
@@ -102,9 +120,12 @@ describe("Probe upgrade failure toast", () => {
     expect(
       shouldToastProbeUpgradeSuccess(
         {
+          acceptedAtMs: 1,
+          completedAtMs: 3,
           createdAtMs: 1,
           failure: null,
           id: 9,
+          runningAtMs: 2,
           state: "succeeded",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 3,
@@ -187,6 +208,7 @@ function hostDetail(overrides: Partial<HostDetail>) {
     },
     probeUpgradeStatus: null,
     probeVersion: "0.1.45",
+    reportedProbeConfigurationVersion: "default",
     status: "online",
     system: "Linux",
     warnings: [],

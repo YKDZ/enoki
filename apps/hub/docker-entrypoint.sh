@@ -47,6 +47,12 @@ reject_symlink_components() {
 
 reject_symlink_components
 
+restore_journal="$data_root/.enoki-hub-state-restore-v1.json"
+if [ -e "$restore_journal" ]; then
+  echo "Hub Restore transaction is incomplete; keep the Hub stopped and run enoki-hub-state snapshot, verify, or restore to recover it." >&2
+  exit 1
+fi
+
 if [ "$(id -u)" = "0" ]; then
   install -d -o node -g node "$data_root"
   chown -R node:node "$data_root"

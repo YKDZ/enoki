@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERVICE_NAME="enoki-probe"
+SERVICE_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 DEFAULT_SERVICE_USER="enoki-probe"
 DEFAULT_SERVICE_GROUP="enoki-probe"
 SERVICE_USER="${ENOKI_SERVICE_USER-$DEFAULT_SERVICE_USER}"
@@ -492,11 +493,15 @@ write_install_metadata() {
   mkdir -p "$(dirname "$metadata_path_rooted")"
 
   {
+    printf 'schema_version = 1\n'
     printf 'hub_url = '
     toml_string "$(normalized_url "$ENOKI_HUB_URL")"
     printf '\n'
     printf 'install_path = '
     toml_string "$INSTALL_PATH"
+    printf '\n'
+    printf 'identity_path = '
+    toml_string "$CONFIG_PATH"
     printf '\n'
     printf 'state_dir = '
     toml_string "$STATE_DIR"
@@ -510,6 +515,12 @@ write_install_metadata() {
     printf 'service_user = '
     toml_string "$SERVICE_USER"
     printf '\n'
+    printf 'service_group = '
+    toml_string "$SERVICE_GROUP"
+    printf '\n'
+    printf 'service_unit_path = '
+    toml_string "$SERVICE_UNIT_PATH"
+    printf '\n'
     printf 'operation_sudoers_path = '
     toml_string "$OPERATION_SUDOERS_PATH"
     printf '\n'
@@ -520,7 +531,7 @@ write_install_metadata() {
     toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
     printf '\n'
   } >"$metadata_path_rooted"
-  chmod 0644 "$metadata_path_rooted"
+  chmod 0600 "$metadata_path_rooted"
 }
 
 toml_string() {
@@ -611,7 +622,7 @@ write_systemd_service() {
   local service_path_rooted
 
   service_dir_rooted="$(rooted_path /etc/systemd/system)"
-  service_path_rooted="$service_dir_rooted/${SERVICE_NAME}.service"
+  service_path_rooted="$(rooted_path "$SERVICE_UNIT_PATH")"
   mkdir -p "$service_dir_rooted"
 
   cat >"$service_path_rooted" <<EOF
@@ -630,9 +641,10 @@ RestartSec=5s
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ProtectKernelTunables=true
 ProtectControlGroups=true
-LockPersonality=true
+# Keep the Probe process eligible for its constrained sudoers entry points.
+# On systemd 249, some seccomp hardening options implicitly set NoNewPrivileges
+# for non-root services, which prevents sudo from launching the operation units.
 ReadWritePaths=$(host_path "$STATE_DIR") $(dirname "$(host_path "$CONFIG_PATH")")
 
 [Install]
