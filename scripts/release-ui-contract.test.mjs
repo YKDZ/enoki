@@ -29,12 +29,13 @@ describe("candidate-image UI Contract gate", () => {
   });
 
   it("is one candidate-level CI gate outside the Host matrix with one retry", async () => {
-    const [workflow, playwrightConfig] = await Promise.all([
+    const [workflow, playwrightConfig, runtimeSetup] = await Promise.all([
       readFile(
         ".github/workflows/reusable-build-release-candidate.yml",
         "utf8",
       ),
       readFile("playwright.candidate.config.ts", "utf8"),
+      readFile(".github/actions/setup-release-runtime/action.yml", "utf8"),
     ]);
     const gate = workflow.slice(workflow.indexOf("  candidate-ui-contract:"));
 
@@ -46,6 +47,13 @@ describe("candidate-image UI Contract gate", () => {
     expect(gate).not.toMatch(/pnpm run test:e2e:candidate --(?:\s|$)/);
     expect(gate).not.toContain("matrix:");
     expect(gate).not.toContain("ssh");
+    expect(
+      workflow.match(
+        /uses: \.\/trusted-tool\/\.github\/actions\/setup-release-runtime/g,
+      ),
+    ).toHaveLength(2);
+    expect(runtimeSetup).toContain("sudo apt-get install");
+    expect(runtimeSetup).toContain("skopeo");
     expect(playwrightConfig).toContain("retries: process.env.CI ? 1 : 0");
     expect(playwrightConfig).toContain(
       'testMatch: "probe-lifecycle-ui-contract.spec.ts"',

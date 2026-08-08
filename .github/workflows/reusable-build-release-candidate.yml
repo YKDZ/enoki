@@ -488,6 +488,9 @@ jobs:
         with:
           node-version-file: trusted-tool/package.json
 
+      - name: Set up the shared Release runtime
+        uses: ./trusted-tool/.github/actions/setup-release-runtime
+
       - name: Download the immutable candidate
         uses: actions/download-artifact@v8
         with:
@@ -604,6 +607,9 @@ jobs:
           node-version-file: trusted-tool/package.json
           cache: pnpm
           cache-dependency-path: trusted-tool/pnpm-lock.yaml
+
+      - name: Set up the shared Release runtime
+        uses: ./trusted-tool/.github/actions/setup-release-runtime
 
       - name: Install UI Contract dependencies
         id: install-dependencies

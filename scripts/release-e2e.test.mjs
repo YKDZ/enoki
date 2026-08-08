@@ -3738,8 +3738,10 @@ describe("Release E2E command", () => {
   it("binds Hub runtime evidence to the Candidate and verifies clean removal", async () => {
     const manifestDigest = `sha256:${"d".repeat(64)}`;
     const configDigest = `sha256:${"e".repeat(64)}`;
+    const commands = [];
     const state = { container: false, image: false, volume: false };
     const exec = async (command, arguments_) => {
+      commands.push([command, ...arguments_].join(" "));
       if (command === "tar" && arguments_.at(-1) === "index.json") {
         return successfulCommandText(
           JSON.stringify({ manifests: [{ digest: manifestDigest }] }),
@@ -3750,8 +3752,7 @@ describe("Release E2E command", () => {
           JSON.stringify({ config: { digest: configDigest } }),
         );
       }
-      if (arguments_[0] === "load") return successfulCommandText("");
-      if (arguments_[0] === "tag") {
+      if (command === "skopeo" && arguments_[0] === "copy") {
         state.image = true;
         return successfulCommandText("");
       }
@@ -3827,6 +3828,13 @@ describe("Release E2E command", () => {
       runId: "run-runtime",
     });
 
+    expect(commands).toContain(
+      "skopeo copy --preserve-digests oci-archive:/candidate/hub/candidate.oci.tar docker-daemon:enoki-release-e2e:run-runtime",
+    );
+    expect(commands.some((command) => command.startsWith("docker load "))).toBe(
+      false,
+    );
+
     const evidence = await controller.collectEvidence({ resources });
     expect(evidence).toMatchObject({
       candidateManifestDigest: manifestDigest,
@@ -3880,9 +3888,12 @@ describe("Release E2E command", () => {
           }),
         );
       }
-      if (arguments_[0] === "load") return successfulCommandText("");
-      if (arguments_[0] === "tag") {
-        images.set(arguments_[2], arguments_[1]);
+      if (command === "skopeo" && arguments_[0] === "copy") {
+        const baseline = arguments_[2].includes("release-baseline");
+        images.set(
+          arguments_[3].slice("docker-daemon:".length),
+          baseline ? baselineConfigDigest : candidateConfigDigest,
+        );
         return successfulCommandText("");
       }
       if (arguments_[0] === "volume" && arguments_[1] === "create") {
@@ -4043,9 +4054,12 @@ describe("Release E2E command", () => {
               }),
         );
       }
-      if (arguments_[0] === "load") return successfulCommandText("");
-      if (arguments_[0] === "tag") {
-        images.set(arguments_[2], arguments_[1]);
+      if (command === "skopeo" && arguments_[0] === "copy") {
+        const baseline = arguments_[2].includes("release-baseline");
+        images.set(
+          arguments_[3].slice("docker-daemon:".length),
+          baseline ? baselineConfigDigest : candidateConfigDigest,
+        );
         return successfulCommandText("");
       }
       if (arguments_[0] === "volume" && arguments_[1] === "create") {
@@ -4323,7 +4337,7 @@ describe("Release E2E command", () => {
       if (arguments_[0] === "run") {
         return { code: 1, stderr: "port already allocated", stdout: "" };
       }
-      if (arguments_[0] === "tag") {
+      if (command === "skopeo" && arguments_[0] === "copy") {
         imageCreated = true;
         return successfulCommandText("");
       }
