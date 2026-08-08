@@ -39,7 +39,7 @@ const probeTargets = [
   "x86_64-unknown-linux-musl",
 ];
 
-describe("Enoki Release Candidate", () => {
+describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
   it("keeps candidate construction private and confines the production key to a trusted signer checkout", async () => {
     const workflow = await readFile(
       ".github/workflows/reusable-build-release-candidate.yml",
@@ -962,7 +962,7 @@ describe("Enoki Release Candidate", () => {
       manifest.releaseBaseline.catalogSnapshot.sha256 = "f".repeat(64);
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     }, "Release catalog snapshot checksum is invalid");
-  }, 15_000);
+  });
 
   it("rejects an incomplete Probe target set", async () => {
     await expectCandidateMutationRejected(async (candidateDir) => {
@@ -987,7 +987,7 @@ describe("Enoki Release Candidate", () => {
       manifest.hub.digest = `sha256:${"0".repeat(64)}`;
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     }, "Candidate Hub OCI digest does not match");
-  }, 15_000);
+  });
 
   it("rejects a Hub OCI image whose config descriptor is not the OCI image config media type", async () => {
     const workDir = await mkdtemp(
