@@ -1332,15 +1332,11 @@ export function createDockerHubController({
 
   async function ensureHubRuntimeLoaded(runtime) {
     if (runtime.tagCreated) return;
-    await successfulExec(exec, containerEngine, [
-      "load",
-      "--input",
-      runtime.archivePath,
-    ]);
-    await successfulExec(exec, containerEngine, [
-      "tag",
-      runtime.configDigest,
-      runtime.tag,
+    await successfulExec(exec, "skopeo", [
+      "copy",
+      "--preserve-digests",
+      `oci-archive:${path.resolve(runtime.archivePath)}`,
+      `docker-daemon:${runtime.tag}`,
     ]);
     runtime.tagCreated = true;
   }

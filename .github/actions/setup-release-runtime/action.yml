@@ -1,0 +1,10 @@
+name: Set up Enoki Release runtime
+description: Install the shared OCI runtime dependency used by Release E2E and UI Contract jobs.
+runs:
+  using: composite
+  steps:
+    - name: Install the OCI image importer
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends skopeo
