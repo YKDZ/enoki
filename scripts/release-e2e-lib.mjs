@@ -3170,35 +3170,39 @@ function postReplacementUpgradeFailureScript(
 ) {
   return `# enoki-release-e2e:post-replacement-failure
 set -eu
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 79
+}
 claim=/var/lib/enoki-release-e2e/claim
 dropin=/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf
 status=/var/lib/enoki-probe/probe-operation-status.toml
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-[ "$(cat "$claim/upgrade-operation-id")" = ${shellSingleQuote(String(operation.id))} ]
-[ "$(cat "$claim/post-replacement-fault")" = ${shellSingleQuote(expectedProbeVersion)} ]
-[ -f "$dropin" ]
+[ -d "$claim" ] || fail 'release E2E ownership claim is missing'
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ] || fail 'release E2E run claim changed'
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ] || fail 'release E2E ownership token changed'
+[ "$(cat "$claim/upgrade-operation-id")" = ${shellSingleQuote(String(operation.id))} ] || fail 'post-replacement operation binding changed'
+[ "$(cat "$claim/post-replacement-fault")" = ${shellSingleQuote(expectedProbeVersion)} ] || fail 'post-replacement target binding changed'
+[ -f "$dropin" ] || fail 'post-replacement restart fault is missing'
 if [ ! -f "$status" ]; then
   printf 'null\n'
   exit 0
 fi
-[ ! -L "$status" ]
-[ "$(stat -c %u "$status")" = 0 ]
-[ "$(stat -c %a "$status")" = 644 ]
-version=$(/usr/local/bin/enoki-probe --version | sed -n 's/^enoki-probe //p')
-[ "$version" = ${shellSingleQuote(expectedProbeVersion)} ]
-[ "$(grep -Fxc ${shellSingleQuote(`operation_id = "${operation.id}"`)} "$status")" -eq 1 ]
-[ "$(grep -Fxc ${shellSingleQuote(`target_probe_version = "${expectedProbeVersion}"`)} "$status")" -eq 1 ]
-if [ "$(grep -Fxc 'status = "failed"' "$status")" -ne 1 ]; then
-  [ "$(grep -Fxc 'status = "running"' "$status")" -eq 1 ]
+version_output=$(/usr/local/bin/enoki-probe --version) || fail 'candidate Probe version command failed'
+version=\${version_output#"enoki-probe "}
+version=\${version#v}
+[ "$version" = ${shellSingleQuote(expectedProbeVersion)} ] || fail "candidate Probe version mismatch: $version_output"
+grep -Fxq ${shellSingleQuote(`operation_id = "${operation.id}"`)} "$status" || fail 'post-replacement status operation changed'
+grep -Fxq ${shellSingleQuote(`target_probe_version = "${expectedProbeVersion}"`)} "$status" || fail 'post-replacement status target changed'
+if ! grep -Fxq 'status = "failed"' "$status"; then
+  if ! grep -Fxq 'status = "running"' "$status"; then
+    fail 'unexpected post-replacement status'
+  fi
   printf 'null\n'
   exit 0
 fi
-[ "$(grep -Fxc 'error_code = "post_replacement_restart_failure"' "$status")" -eq 1 ]
+grep -Fxq 'error_code = "post_replacement_restart_failure"' "$status" || fail 'unexpected post-replacement failure code'
 if [ "$(systemctl is-active enoki-probe.service 2>/dev/null || true)" = active ]; then
-  printf 'faulted Probe service unexpectedly active\n' >&2
-  exit 79
+  fail 'candidate Probe service is still active after injected restart failure'
 fi
 printf '{"localFailureCode":"post_replacement_restart_failure","operationId":%s,"probeVersion":"%s"}\n' \
   ${shellSingleQuote(String(operation.id))} "$version"
