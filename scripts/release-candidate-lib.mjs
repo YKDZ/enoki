@@ -56,77 +56,21 @@ export function validateCandidateIdentity({ commit, version }) {
   return { commit, version };
 }
 
-export async function assertCandidateOnTrustedMain({
-  candidateCommit,
-  remote,
-  runCommand = execFileAsync,
-  sourceDir,
-  trustedMainRef,
-}) {
-  validateCandidateIdentity({ commit: candidateCommit, version: "v0.0.0" });
-  if (!remote || !sourceDir || !trustedMainRef) {
-    throw new Error(
-      "candidate source policy requires a repository, remote, and trusted main ref",
-    );
+export function validateProbeSigningIdentity({ privateKeyPem, publicKeyPem }) {
+  if (!privateKeyPem) {
+    throw new Error("Probe asset signing private key is required");
+  }
+  if (!publicKeyPem) {
+    throw new Error("Probe asset signing public key is required");
   }
 
-  let remoteMain;
-  let localTrustedMain;
-  try {
-    const { stdout } = await runCommand(
-      "git",
-      ["ls-remote", "--exit-code", remote, "refs/heads/main"],
-      { cwd: sourceDir },
-    );
-    const matches = stdout
-      .trim()
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => line.split(/\s+/))
-      .filter(([, reference]) => reference === "refs/heads/main");
-    if (matches.length !== 1 || !commitPattern.test(matches[0][0])) {
-      throw new Error("remote protected main did not resolve to one commit");
-    }
-    remoteMain = matches[0][0];
+  assertSigningKeyPair(privateKeyPem, publicKeyPem);
+  const publicKeyText = Buffer.from(publicKeyPem).toString("utf8");
+  const normalizedPublicKey = Buffer.from(
+    publicKeyText.endsWith("\n") ? publicKeyText : `${publicKeyText}\n`,
+  );
 
-    const result = await runCommand(
-      "git",
-      ["rev-parse", `${trustedMainRef}^{commit}`],
-      { cwd: sourceDir },
-    );
-    localTrustedMain = result.stdout.trim();
-  } catch (error) {
-    throw new Error(`could not verify protected main: ${error.message}`);
-  }
-
-  if (localTrustedMain !== remoteMain) {
-    throw new Error(
-      `trusted main ref is stale: ${localTrustedMain || "missing"}, expected ${remoteMain}`,
-    );
-  }
-
-  try {
-    await runCommand("git", ["cat-file", "-e", `${candidateCommit}^{commit}`], {
-      cwd: sourceDir,
-    });
-  } catch {
-    throw new Error(
-      `candidate commit ${candidateCommit} is not present in the canonical repository checkout`,
-    );
-  }
-  try {
-    await runCommand(
-      "git",
-      ["merge-base", "--is-ancestor", candidateCommit, trustedMainRef],
-      { cwd: sourceDir },
-    );
-  } catch {
-    throw new Error(
-      `candidate commit ${candidateCommit} is not an ancestor of protected main ${remoteMain}`,
-    );
-  }
-
-  return { candidateCommit, trustedMainCommit: remoteMain };
+  return { publicKeySha256: sha256(normalizedPublicKey) };
 }
 
 export function parseCommandLine(arguments_) {
@@ -560,19 +504,9 @@ export async function validateReleaseCandidate(candidateDir) {
     "candidate-manifest.json",
     "hub",
     "probe-assets",
+    "release-baseline",
   ];
-  if (releaseBaseline.kind === "first-formal-release") {
-    assertExactKeys(releaseBaseline, ["catalogSnapshot", "kind"]);
-    const { validateReleaseCatalogSnapshot } =
-      await import("./release-baseline-lib.mjs");
-    validateReleaseCatalogSnapshot(releaseBaseline.catalogSnapshot);
-    if (releaseBaseline.catalogSnapshot.entries.length !== 0) {
-      throw new Error(
-        "first-formal-release catalog snapshot must contain no stable release",
-      );
-    }
-  } else if (releaseBaseline.kind === "enoki-release-baseline") {
-    expectedCandidateFiles.push("release-baseline");
+  if (releaseBaseline.kind === "enoki-release-baseline") {
     const {
       assertReleaseBaselinePrecedesCandidate,
       validateReleaseBaselineBundle,
@@ -591,7 +525,7 @@ export async function validateReleaseCandidate(candidateDir) {
     }
   } else {
     throw new Error(
-      "Candidate Manifest requires one Release Baseline descriptor or first-formal-release marker",
+      "Candidate Manifest requires one Release Baseline descriptor",
     );
   }
   assertSameFileNames(

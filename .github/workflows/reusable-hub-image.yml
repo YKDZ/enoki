@@ -1,23 +1,131 @@
-name: Reusable CI Hub Image
+name: Reusable Hub Image Build
 
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Exact source commit to build. Defaults to the calling workflow commit.
+        required: false
+        type: string
+        default: ""
+      package-artifact:
+        description: Export and upload a content-addressed OCI archive.
+        required: false
+        type: boolean
+        default: false
+      probe-assets-artifact-name:
+        description: Signed Probe Asset Set artifact to embed in the Hub image.
+        required: false
+        type: string
+        default: ""
+      verify-reproducible:
+        description: Build twice from clean state and compare image digests.
+        required: false
+        type: boolean
+        default: false
       version:
-        description: Local CI image label, for example ci.
+        description: Hub version or local CI image label.
         required: true
         type: string
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
   hub-image:
     name: Hub Docker image
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
+      - name: Checkout exact source
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
+          path: source
           persist-credentials: false
+          ref: ${{ inputs.commit || github.sha }}
 
-      - name: Build Hub image
-        run: DOCKER_BUILDKIT=1 docker build -f apps/hub/Dockerfile -t "enoki-hub:${{ inputs.version }}" .
+      - name: Bind release build to the exact source checkout
+        if: inputs.commit != ''
+        env:
+          SOURCE_COMMIT: ${{ inputs.commit }}
+        run: test "$(git -C source rev-parse HEAD)" = "$SOURCE_COMMIT"
+
+      - name: Reject incomplete release-strength options
+        if: inputs.package-artifact && (inputs.probe-assets-artifact-name == '' || !inputs.verify-reproducible)
+        run: |
+          echo "::error::A packaged Hub artifact requires signed Probe assets and reproducibility verification."
+          exit 1
+
+      - name: Set up Node.js for release verification
+        if: inputs.package-artifact
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: source/package.json
+
+      - name: Download signed Probe Asset Set
+        if: inputs.probe-assets-artifact-name != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.probe-assets-artifact-name }}
+          path: source/probe-assets
+
+      - name: Verify signed Probe Asset Set
+        if: inputs.probe-assets-artifact-name != ''
+        run: >-
+          node source/scripts/release-candidate.mjs
+          validate-probe-assets source/probe-assets
+
+      - name: Build the standard CI Hub image
+        if: ${{ !inputs.package-artifact }}
+        run: >-
+          DOCKER_BUILDKIT=1 docker build
+          --file source/apps/hub/Dockerfile
+          --tag "enoki-hub:${{ inputs.version }}"
+          source
+
+      - name: Set up Docker Buildx
+        if: inputs.package-artifact
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build the Hub OCI archive twice from clean state
+        if: inputs.package-artifact
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          SOURCE_DATE_EPOCH: "0"
+        run: |
+          mkdir -p hub-reproducibility-first hub-reproducibility-second
+          docker buildx build \
+            --file source/apps/hub/Dockerfile \
+            --no-cache \
+            --platform linux/amd64 \
+            --provenance=false \
+            --output type=oci,dest="hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar",compression=gzip,force-compression=true,rewrite-timestamp=true \
+            source
+          docker buildx build \
+            --file source/apps/hub/Dockerfile \
+            --no-cache \
+            --platform linux/amd64 \
+            --provenance=false \
+            --output type=oci,dest="hub-reproducibility-second/enoki-hub-${CANDIDATE_VERSION}.oci.tar",compression=gzip,force-compression=true,rewrite-timestamp=true \
+            source
+
+      - name: Compare independently built Hub image digests
+        if: inputs.package-artifact && inputs.verify-reproducible
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: >-
+          node source/scripts/release-candidate.mjs compare-hub-builds
+          --first "hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
+          --second "hub-reproducibility-second/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
+          --probe-assets source/probe-assets
+
+      - name: Upload Hub OCI archive
+        if: inputs.package-artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-hub-oci-${{ github.run_id }}
+          path: hub-reproducibility-first/*.oci.tar
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7

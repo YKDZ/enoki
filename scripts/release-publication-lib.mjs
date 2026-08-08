@@ -279,9 +279,8 @@ function assertPublishAuthorization({
   if (
     candidateManifest?.kind !== "enoki-release-candidate" ||
     candidateManifest?.schemaVersion !== 2 ||
-    verificationSummary?.kind !== "enoki-publish-verification-summary" ||
-    verificationSummary?.schemaVersion !== 2 ||
-    verificationSummary.mode !== "publish" ||
+    verificationSummary?.kind !== "enoki-release-verification-evidence" ||
+    verificationSummary?.schemaVersion !== 3 ||
     verificationSummary.verified !== true ||
     verificationSummary.promotable !== false ||
     verificationSummary.freshCandidateRequiredForPublish !== true ||

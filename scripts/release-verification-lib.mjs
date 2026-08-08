@@ -4,13 +4,9 @@ import {
 } from "./release-e2e-lib.mjs";
 import { createGitHubActionsMatrix } from "./release-e2e-matrix.mjs";
 
-const baselineDependentScenarios = new Set([
-  "baseline-upgrade-uninstall",
-  "hub-restore-compatibility-window",
-  "post-replacement-repair-uninstall",
-]);
 const requiredComponentNames = Object.freeze([
   "inputValidation",
+  "standardCi",
   "releaseBaseline",
   "probeBuild",
   "probePreparation",
@@ -38,10 +34,7 @@ export function createMatrixGateResult({
     typeof scenarioId === "string" &&
     cellId === `${cellIdEnvironment(cellId)}--${scenarioId}` &&
     sameCandidate(evidence?.candidate, candidate);
-  const acceptableEvidence =
-    evidenceOutcome === "succeeded" ||
-    (evidenceOutcome === "skipped" &&
-      evidence?.result?.reason === "first-formal-release");
+  const acceptableEvidence = evidenceOutcome === "succeeded";
   const evidenceValidationErrors = validateHostScenarioEvidence(
     evidence,
     evidenceOutcome,
@@ -69,13 +62,6 @@ export function createMatrixGateResult({
 }
 
 function validateHostScenarioEvidence(evidence, outcome) {
-  if (outcome === "skipped") {
-    return evidence?.phase === "skipped" &&
-      evidence?.releaseBaseline?.kind === "first-formal-release" &&
-      evidence?.cleanup?.environment?.clean === true
-      ? []
-      : ["first-formal-release skip evidence is incomplete"];
-  }
   if (outcome !== "succeeded") return [];
 
   const errors = [];
@@ -624,13 +610,13 @@ export function createReleaseVerificationSummary({
   matrix,
   requested,
   run,
+  standardCi,
   uiGate,
 }) {
   assertAttemptSummaryInputs({ componentResults, gateResults, requested, run });
   const candidateIsAvailable = isCandidateManifest(candidateManifest);
   const request = requested ?? {
     commit: candidateManifest?.candidate?.commit ?? null,
-    mode: "verify-only",
     version: candidateManifest?.candidate?.version ?? null,
   };
   const components = componentResults
@@ -658,11 +644,7 @@ export function createReleaseVerificationSummary({
   );
   const hostScenarios = expectedCells.map((cell) => {
     const gate = gatesByCell.get(cell.cellId);
-    const expectedOutcome =
-      candidateManifest?.releaseBaseline?.kind === "first-formal-release" &&
-      baselineDependentScenarios.has(cell.scenarioId)
-        ? "skipped"
-        : "succeeded";
+    const expectedOutcome = "succeeded";
     return {
       artifactName: gate?.artifactName ?? null,
       cellId: cell.cellId,
@@ -678,10 +660,23 @@ export function createReleaseVerificationSummary({
     };
   });
   const uiOutcome = uiGate?.outcome ?? "missing";
+  const standardCiIsValid =
+    standardCi?.kind === "enoki-standard-ci-evidence" &&
+    standardCi?.schemaVersion === 1 &&
+    standardCi?.candidateCommit === request.commit &&
+    Number.isSafeInteger(standardCi?.runId) &&
+    standardCi.runId > 0 &&
+    typeof standardCi?.runUrl === "string" &&
+    standardCi.runUrl.length > 0 &&
+    Array.isArray(standardCi?.jobs) &&
+    standardCi.jobs.length > 0 &&
+    standardCi.jobs.every(
+      (job) => job?.conclusion === "success" && typeof job?.name === "string",
+    );
   const verified =
     candidateIsAvailable &&
-    (request.mode === "verify-only" || request.mode === "publish") &&
     sameCandidate(request, candidateManifest.candidate) &&
+    standardCiIsValid &&
     (!componentResults ||
       requiredComponentNames.every((name) => components[name] === "success")) &&
     normalizedGates.candidateBuild === "success" &&
@@ -717,6 +712,7 @@ export function createReleaseVerificationSummary({
     !hub && "hub-oci",
     !probeAssetSet && "probe-asset-set",
     !releaseBaseline && "release-baseline",
+    !standardCiIsValid && "standard-ci-evidence",
   ].filter(Boolean);
   const failureReasons = [
     ...Object.entries(components)
@@ -757,46 +753,36 @@ export function createReleaseVerificationSummary({
       hostMatrix: { outcome: normalizedGates.matrixJob },
       hostScenarios,
       matrixExpansion: { outcome: normalizedGates.matrixExpansion },
+      standardCi: {
+        outcome: standardCiIsValid ? "success" : "missing",
+        runUrl: standardCi?.runUrl ?? null,
+      },
     },
     hub,
-    kind:
-      request.mode === "publish"
-        ? "enoki-publish-verification-summary"
-        : "enoki-verify-only-summary",
-    mode: request.mode,
+    kind: "enoki-release-verification-evidence",
     missingIdentities,
     probeAssetSet,
     promotable: false,
     releaseBaseline,
     requested: request,
     run,
-    schemaVersion: 2,
+    schemaVersion: 3,
+    standardCi: standardCiIsValid ? standardCi : null,
     verified,
   };
 }
 
-export function createVerifyOnlyReleaseSummary(options) {
-  return createReleaseVerificationSummary(options);
-}
-
-export function renderVerifyOnlyReleaseSummaryMarkdown(summary) {
-  const baseline =
-    summary.releaseBaseline?.kind === "first-formal-release"
-      ? "first-formal-release (validated empty stable catalog)"
-      : summary.releaseBaseline
-        ? `${summary.releaseBaseline.tag} @ ${summary.releaseBaseline.githubRelease?.peeledCommitSha ?? "unknown commit"}`
-        : "missing";
+export function renderReleaseVerificationEvidenceMarkdown(summary) {
+  const baseline = summary.releaseBaseline
+    ? `${summary.releaseBaseline.tag} @ ${summary.releaseBaseline.githubRelease?.peeledCommitSha ?? "unknown commit"}`
+    : "missing";
   const candidate = summary.candidate ?? summary.requested;
   const lines = [
-    summary.mode === "publish"
-      ? "# Enoki publish Release E2E verification"
-      : "# Enoki verify-only Release E2E",
+    "# Enoki Release Verification Evidence",
     "",
     `- Verified: **${summary.verified ? "yes" : "no"}**`,
-    summary.mode === "publish"
-      ? "- Publication authorization: **Current workflow attempt only** — this evidence cannot authorize another run."
-      : "- Promotion: **Non-promotable** — publication requires a fresh candidate build and verification run.",
-    `- Requested: \`${summary.requested.version}\` @ \`${summary.requested.commit}\` (\`${summary.requested.mode}\`)`,
+    "- Scope: **Current workflow run only** — this evidence cannot authorize another run.",
+    `- Requested: \`${summary.requested.version}\` @ \`${summary.requested.commit}\``,
     `- Candidate Manifest: ${summary.candidate ? `\`${candidate.version}\` @ \`${candidate.commit}\`` : "missing"}`,
     `- Release Baseline: \`${baseline}\``,
     `- Hub OCI digest: \`${summary.hub?.digest ?? "missing"}\``,
@@ -816,6 +802,7 @@ export function renderVerifyOnlyReleaseSummaryMarkdown(summary) {
     "| Gate | Outcome | Evidence |",
     "| --- | --- | --- |",
     `| Candidate build | ${summary.gates.candidateBuild.outcome} | Candidate Manifest |`,
+    `| Standard CI | ${summary.gates.standardCi.outcome} | ${summary.gates.standardCi.runUrl ?? "missing"} |`,
     `| Matrix expansion | ${summary.gates.matrixExpansion.outcome} | central matrix |`,
     `| Candidate-image UI Contract | ${summary.gates.candidateUiContract.outcome} | ${evidenceLink(summary.gates.candidateUiContract)} |`,
     ...summary.gates.hostScenarios.map(
@@ -842,12 +829,7 @@ function assertAttemptSummaryInputs({
   if ((!componentResults && !gateResults) || !run?.url) {
     throw new Error("Component results and workflow run identity are required");
   }
-  if (
-    requested &&
-    (!requested.commit ||
-      !requested.version ||
-      (requested.mode !== "verify-only" && requested.mode !== "publish"))
-  ) {
+  if (requested && (!requested.commit || !requested.version)) {
     throw new Error("Requested candidate identity is invalid");
   }
 }
@@ -869,6 +851,7 @@ function displayIdentity(identity) {
     "hub-oci": "Hub OCI",
     "probe-asset-set": "Probe Asset Set",
     "release-baseline": "Release Baseline",
+    "standard-ci-evidence": "standard CI",
   }[identity];
 }
 

@@ -34,7 +34,6 @@ try {
   }
   assertAllowedOptions(command, options, [
     "--candidate-version",
-    "--first-formal-release",
     "--github-api-base-url",
     "--github-repository",
     "--github-token-env",
@@ -74,10 +73,6 @@ try {
   const descriptor = await resolveReleaseBaseline({
     assetDownloader: githubClient,
     candidateVersion: requiredOption(options, "--candidate-version"),
-    firstFormalRelease: parseBoolean(
-      options.get("--first-formal-release") ?? "false",
-      "--first-formal-release",
-    ),
     githubRepository,
     hubImage: requiredOption(options, "--hub-image"),
     outputDir: requiredOption(options, "--output"),
@@ -107,14 +102,4 @@ function requiredEnvironmentOption(options, option) {
     );
   }
   return value;
-}
-
-function parseBoolean(value, option) {
-  if (value === "true") {
-    return true;
-  }
-  if (value === "false") {
-    return false;
-  }
-  throw new Error(`${option} must be true or false`);
 }

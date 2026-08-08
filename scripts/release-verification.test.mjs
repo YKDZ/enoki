@@ -10,14 +10,13 @@ import {
   createMatrixGateResult,
   createReleaseVerificationSummary,
   createUiGateResult,
-  createVerifyOnlyReleaseSummary,
-  renderVerifyOnlyReleaseSummaryMarkdown,
+  renderReleaseVerificationEvidenceMarkdown,
 } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 
 describe("verify-only release workflow", () => {
-  it("keeps the fresh candidate gate non-publishing for both manual modes", async () => {
+  it("qualifies the captured protected main revision without receiving a publication mode", async () => {
     const [entrypoint, candidateWorkflow] = await Promise.all([
       readFile(".github/workflows/release.yml", "utf8"),
       readFile(
@@ -28,7 +27,10 @@ describe("verify-only release workflow", () => {
 
     expect(entrypoint).toContain("workflow_dispatch:");
     expect(entrypoint).not.toMatch(/^  push:/m);
-    expect(entrypoint).toMatch(/\n      commit:\n/);
+    expect(entrypoint).not.toMatch(/\n      commit:\n/);
+    expect(entrypoint).not.toContain(
+      `${["first", "formal", "release"].join("-")}:`,
+    );
     expect(entrypoint).toMatch(/\n      version:\n/);
     expect(entrypoint).toMatch(
       /\n      mode:\n[\s\S]*?type: choice[\s\S]*?options:\n\s+- verify-only\n\s+- publish/,
@@ -36,7 +38,7 @@ describe("verify-only release workflow", () => {
     expect(entrypoint).toContain(
       "uses: ./.github/workflows/reusable-build-release-candidate.yml",
     );
-    expect(entrypoint).toContain("mode: ${{ inputs.mode }}");
+    expect(entrypoint).toContain("commit: ${{ github.sha }}");
     expect(entrypoint).toContain("group: enoki-release-global");
     const verificationJob = entrypoint.slice(
       entrypoint.indexOf("  verify-candidate:"),
@@ -46,7 +48,10 @@ describe("verify-only release workflow", () => {
 
     expect(candidateWorkflow).toContain("workflow_call:");
     expect(candidateWorkflow).not.toContain("workflow_dispatch:");
-    expect(candidateWorkflow).toMatch(/\n      mode:\n/);
+    expect(candidateWorkflow).not.toMatch(/\n      mode:\n/);
+    expect(candidateWorkflow).not.toContain("inputs.mode");
+    expect(candidateWorkflow).not.toContain("RELEASE_MODE");
+    expect(candidateWorkflow).not.toContain("--requested-mode");
     expect(candidateWorkflow).not.toMatch(
       /contents: write|packages: write|gh release|git tag|docker push|--push|latest/,
     );
@@ -171,7 +176,7 @@ describe("verify-only release workflow", () => {
     expect(finalizer).toContain("component-results.json");
     expect(finalizer).toContain("--requested-commit");
     expect(finalizer).toContain("--requested-version");
-    expect(finalizer).toContain("--requested-mode");
+    expect(finalizer).not.toContain("--requested-mode");
     expect(finalizer).toMatch(
       /name: Generate the authoritative candidate verification summary\n\s+if: \$\{\{ always\(\) \}\}/,
     );
@@ -186,7 +191,9 @@ describe("verify-only release workflow", () => {
 
     expect(signingJob).toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
     expect(downstream).not.toContain("ENOKI_PROBE_ASSET_SIGNING_KEY_PEM");
-    expect(workflow).toContain("permissions:\n  contents: read");
+    expect(workflow).toContain(
+      "permissions:\n  actions: read\n  contents: read",
+    );
     expect(workflow).toContain("attestations: write");
     expect(workflow).toContain("id-token: write");
   });
@@ -203,7 +210,7 @@ describe("verify-only release workflow", () => {
       outcome: "succeeded",
     };
 
-    const summary = createVerifyOnlyReleaseSummary({
+    const summary = createReleaseVerificationSummary({
       artifactIndex: releaseArtifactIndex(hostGates, uiGate),
       candidateManifest,
       gateResults: {
@@ -219,6 +226,7 @@ describe("verify-only release workflow", () => {
         id: "12345",
         url: "https://github.com/YKDZ/enoki/actions/runs/12345",
       },
+      standardCi: standardCiEvidence(candidateManifest.candidate),
       uiGate,
     });
 
@@ -226,12 +234,12 @@ describe("verify-only release workflow", () => {
       candidate: candidateManifest.candidate,
       freshCandidateRequiredForPublish: true,
       hub: candidateManifest.hub,
-      kind: "enoki-verify-only-summary",
-      mode: "verify-only",
+      kind: "enoki-release-verification-evidence",
       probeAssetSet: candidateManifest.probeAssetSet,
       promotable: false,
       releaseBaseline: candidateManifest.releaseBaseline,
-      schemaVersion: 2,
+      schemaVersion: 3,
+      standardCi: standardCiEvidence(candidateManifest.candidate),
       verified: true,
     });
     expect(summary.gates.hostScenarios).toHaveLength(7);
@@ -253,7 +261,7 @@ describe("verify-only release workflow", () => {
     );
   });
 
-  it("binds publish verification to the fresh candidate in the current run", async () => {
+  it("binds generic verification evidence to the fresh candidate and current run", async () => {
     const matrix = JSON.parse(
       await readFile("scripts/release-e2e-matrix.json", "utf8"),
     );
@@ -274,8 +282,9 @@ describe("verify-only release workflow", () => {
       },
       hostGates,
       matrix,
-      requested: { ...candidateManifest.candidate, mode: "publish" },
+      requested: candidateManifest.candidate,
       run,
+      standardCi: standardCiEvidence(candidateManifest.candidate),
       uiGate: {
         artifactName: "release-ui-contract-98765-4",
         candidate: candidateManifest.candidate,
@@ -286,10 +295,10 @@ describe("verify-only release workflow", () => {
     expect(summary).toMatchObject({
       candidate: candidateManifest.candidate,
       freshCandidateRequiredForPublish: true,
-      kind: "enoki-publish-verification-summary",
-      mode: "publish",
+      kind: "enoki-release-verification-evidence",
       promotable: false,
       run,
+      schemaVersion: 3,
       verified: true,
     });
   });
@@ -300,7 +309,6 @@ describe("verify-only release workflow", () => {
     );
     const requested = {
       commit: "0123456789abcdef0123456789abcdef01234567",
-      mode: "verify-only",
       version: "v1.2.3",
     };
     const componentResults = {
@@ -314,9 +322,10 @@ describe("verify-only release workflow", () => {
       probePreparation: "skipped",
       probeSigning: "skipped",
       releaseBaseline: "failure",
+      standardCi: "failure",
     };
 
-    const summary = createVerifyOnlyReleaseSummary({
+    const summary = createReleaseVerificationSummary({
       candidateManifest: null,
       componentResults,
       hostGates: [],
@@ -335,13 +344,12 @@ describe("verify-only release workflow", () => {
       componentResults,
       freshCandidateRequiredForPublish: true,
       hub: null,
-      kind: "enoki-verify-only-summary",
-      mode: "verify-only",
+      kind: "enoki-release-verification-evidence",
       probeAssetSet: null,
       promotable: false,
       releaseBaseline: null,
       requested,
-      schemaVersion: 2,
+      schemaVersion: 3,
       verified: false,
     });
     expect(summary.missingIdentities).toEqual([
@@ -349,10 +357,12 @@ describe("verify-only release workflow", () => {
       "hub-oci",
       "probe-asset-set",
       "release-baseline",
+      "standard-ci-evidence",
     ]);
     expect(summary.failureReasons).toEqual(
       expect.arrayContaining([
         "releaseBaseline: failure",
+        "standardCi: failure",
         "probeBuild: cancelled",
         "Candidate Manifest identity is missing",
       ]),
@@ -383,6 +393,7 @@ describe("verify-only release workflow", () => {
         probePreparation: "skipped",
         probeSigning: "skipped",
         releaseBaseline: "skipped",
+        standardCi: "failure",
       })}\n`,
     );
 
@@ -412,8 +423,8 @@ describe("verify-only release workflow", () => {
         "not-a-valid-commit",
         "--requested-version",
         "v1.invalid",
-        "--requested-mode",
-        "verify-only",
+        "--standard-ci",
+        path.join(workDir, "missing-standard-ci.json"),
         "--run-id",
         "321",
         "--run-attempt",
@@ -430,10 +441,9 @@ describe("verify-only release workflow", () => {
       expect(summary).toMatchObject({
         requested: {
           commit: "not-a-valid-commit",
-          mode: "verify-only",
           version: "v1.invalid",
         },
-        schemaVersion: 2,
+        schemaVersion: 3,
         verified: false,
       });
       expect(summary.failureReasons.join("\n")).toContain("Candidate Manifest");
@@ -482,26 +492,26 @@ describe("verify-only release workflow", () => {
 
     for (const jobOutcome of ["failure", "cancelled", "skipped"]) {
       expect(
-        createVerifyOnlyReleaseSummary({
+        createReleaseVerificationSummary({
           ...valid,
           gateResults: { ...valid.gateResults, uiJob: jobOutcome },
         }).verified,
       ).toBe(false);
     }
     expect(
-      createVerifyOnlyReleaseSummary({
+      createReleaseVerificationSummary({
         ...valid,
         hostGates: valid.hostGates.slice(1),
       }).verified,
     ).toBe(false);
     expect(
-      createVerifyOnlyReleaseSummary({
+      createReleaseVerificationSummary({
         ...valid,
         hostGates: [...valid.hostGates, valid.hostGates[0]],
       }).verified,
     ).toBe(false);
     expect(
-      createVerifyOnlyReleaseSummary({
+      createReleaseVerificationSummary({
         ...valid,
         uiGate: {
           ...valid.uiGate,
@@ -510,84 +520,18 @@ describe("verify-only release workflow", () => {
       }).verified,
     ).toBe(false);
     expect(
-      createVerifyOnlyReleaseSummary({
+      createReleaseVerificationSummary({
         ...valid,
         uiGate: { ...valid.uiGate, artifactName: null },
       }).verified,
     ).toBe(false);
     expect(
-      createVerifyOnlyReleaseSummary({
+      createReleaseVerificationSummary({
         ...valid,
         hostGates: [
           { ...valid.hostGates[0], artifactName: null },
           ...valid.hostGates.slice(1),
         ],
-      }).verified,
-    ).toBe(false);
-  });
-
-  it("accepts skipped baseline-dependent gates only for a validated first formal release", async () => {
-    const matrix = JSON.parse(
-      await readFile("scripts/release-e2e-matrix.json", "utf8"),
-    );
-    const candidateManifest = releaseCandidateManifest({
-      firstFormalRelease: true,
-    });
-    const hostGates = expectedHostGateResults(matrix, candidateManifest).map(
-      (gate) =>
-        gate.scenarioId === "fresh-install-uninstall"
-          ? gate
-          : {
-              ...gate,
-              evidenceOutcome: "skipped",
-              outcome: "skipped",
-            },
-    );
-    const summary = createVerifyOnlyReleaseSummary({
-      candidateManifest,
-      gateResults: {
-        candidateBuild: "success",
-        matrixExpansion: "success",
-        matrixJob: "success",
-        uiJob: "success",
-      },
-      hostGates,
-      matrix,
-      run: {
-        attempt: 1,
-        id: "12345",
-        url: "https://github.com/YKDZ/enoki/actions/runs/12345",
-      },
-      uiGate: {
-        artifactName: "release-ui-contract-12345-1",
-        candidate: candidateManifest.candidate,
-        outcome: "succeeded",
-      },
-    });
-
-    expect(summary.verified).toBe(true);
-    expect(
-      summary.gates.hostScenarios.filter(
-        (gate) => gate.expectedOutcome === "skipped",
-      ),
-    ).toHaveLength(5);
-    expect(
-      createVerifyOnlyReleaseSummary({
-        candidateManifest: releaseCandidateManifest(),
-        gateResults: {
-          candidateBuild: "success",
-          matrixExpansion: "success",
-          matrixJob: "success",
-          uiJob: "success",
-        },
-        hostGates,
-        matrix,
-        run: summary.run,
-        uiGate: {
-          artifactName: "release-ui-contract-12345-1",
-          candidate: releaseCandidateManifest().candidate,
-          outcome: "succeeded",
-        },
       }).verified,
     ).toBe(false);
   });
@@ -856,7 +800,7 @@ describe("verify-only release workflow", () => {
       candidate: candidateManifest.candidate,
       outcome: "succeeded",
     };
-    const summary = createVerifyOnlyReleaseSummary({
+    const summary = createReleaseVerificationSummary({
       artifactIndex: releaseArtifactIndex(hostGates, uiGate),
       candidateManifest,
       gateResults: {
@@ -872,22 +816,23 @@ describe("verify-only release workflow", () => {
         id: "12345",
         url: "https://github.com/YKDZ/enoki/actions/runs/12345",
       },
+      standardCi: standardCiEvidence(candidateManifest.candidate),
       uiGate,
     });
 
-    const markdown = renderVerifyOnlyReleaseSummaryMarkdown(summary);
+    const markdown = renderReleaseVerificationEvidenceMarkdown(summary);
     expect(markdown).toContain(candidateManifest.candidate.commit);
     expect(markdown).toContain("v1.2.2");
     expect(markdown).toContain(candidateManifest.hub.digest);
     expect(markdown).toContain(candidateManifest.hub.archiveSha256);
     expect(markdown).toContain(candidateManifest.probeAssetSet.files[0].sha256);
-    expect(markdown).toContain("Non-promotable");
+    expect(markdown).toContain("Current workflow run only");
     expect(markdown).toContain("release-e2e-ubuntu-24.04-x86_64--");
     expect(markdown).toContain("actions/runs/12345/artifacts/9000");
   });
 });
 
-function releaseCandidateManifest({ firstFormalRelease = false } = {}) {
+function releaseCandidateManifest() {
   return {
     candidate: {
       commit: "0123456789abcdef0123456789abcdef01234567",
@@ -916,23 +861,29 @@ function releaseCandidateManifest({ firstFormalRelease = false } = {}) {
       },
       version: "1.2.3",
     },
-    releaseBaseline: firstFormalRelease
-      ? {
-          catalogSnapshot: { entries: [], sha256: "e".repeat(64) },
-          kind: "first-formal-release",
-        }
-      : {
-          githubRelease: {
-            id: 122,
-            peeledCommitSha: "f".repeat(40),
-            tagRefSha: "1".repeat(40),
-          },
-          hub: { imageDigest: `sha256:${"2".repeat(64)}` },
-          kind: "enoki-release-baseline",
-          probeAssetSet: { version: "1.2.2" },
-          tag: "v1.2.2",
-        },
+    releaseBaseline: {
+      githubRelease: {
+        id: 122,
+        peeledCommitSha: "f".repeat(40),
+        tagRefSha: "1".repeat(40),
+      },
+      hub: { imageDigest: `sha256:${"2".repeat(64)}` },
+      kind: "enoki-release-baseline",
+      probeAssetSet: { version: "1.2.2" },
+      tag: "v1.2.2",
+    },
     schemaVersion: 2,
+  };
+}
+
+function standardCiEvidence(candidate) {
+  return {
+    candidateCommit: candidate.commit,
+    jobs: [{ conclusion: "success", name: "Node checks / Node checks" }],
+    kind: "enoki-standard-ci-evidence",
+    runId: 42,
+    runUrl: "https://github.com/YKDZ/enoki/actions/runs/42",
+    schemaVersion: 1,
   };
 }
 

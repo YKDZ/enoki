@@ -2908,91 +2908,6 @@ describe("Release E2E Orchestrator", () => {
     expect(calls).toContain("environment.cleanup:failed");
   });
 
-  it("skips baseline upgrade only for the validated first-formal-release marker", async () => {
-    const written = [];
-    let cleanupCalls = 0;
-    const result = await runReleaseE2EScenario({
-      candidateManifest: candidateManifest(),
-      environment: {
-        async cleanup({ resources }) {
-          cleanupCalls += 1;
-          expect(resources).toBeNull();
-          return { clean: true };
-        },
-        async start() {
-          throw new Error(
-            "first release must not start a Hub or mutate a Host",
-          );
-        },
-      },
-      evidenceSink: { write: async (value) => written.push(value) },
-      ownerPassword: "owner-password",
-      runId: "run-first-release",
-      scenario: "baseline-upgrade-uninstall",
-    });
-
-    expect(result).toEqual({
-      reason: "first-formal-release",
-      status: "skipped",
-    });
-    expect(cleanupCalls).toBe(1);
-    expect(written).toEqual([
-      expect.objectContaining({
-        phase: "skipped",
-        releaseBaseline: { kind: "first-formal-release" },
-        result: {
-          reason: "first-formal-release",
-          status: "skipped",
-        },
-      }),
-    ]);
-
-    const invalid = candidateManifest();
-    invalid.releaseBaseline = { kind: "first-formal-release" };
-    await expect(
-      runReleaseE2EScenario({
-        candidateManifest: invalid,
-        environment: {
-          cleanup: async () => ({ clean: true }),
-          start: async () => {
-            throw new Error("must not start");
-          },
-        },
-        evidenceSink: { write: async () => {} },
-        ownerPassword: "owner-password",
-        runId: "run-invalid-first-release",
-        scenario: "baseline-upgrade-uninstall",
-      }),
-    ).rejects.toThrow(/Candidate Manifest is invalid/i);
-  });
-
-  it("rejects a forged first-formal-release catalog checksum before directly skipping Hub Restore", async () => {
-    const invalid = candidateManifest();
-    invalid.releaseBaseline.catalogSnapshot.sha256 = "f".repeat(64);
-    let environmentCalls = 0;
-
-    await expect(
-      runReleaseE2EScenario({
-        candidateManifest: invalid,
-        environment: {
-          async cleanup() {
-            environmentCalls += 1;
-            return { clean: true };
-          },
-          async start() {
-            environmentCalls += 1;
-            throw new Error("invalid marker must not touch the environment");
-          },
-        },
-        evidenceSink: { write: async () => {} },
-        ownerPassword: "owner-password",
-        runId: "run-invalid-restore-skip",
-        scenario: "hub-restore-compatibility-window",
-      }),
-    ).rejects.toThrow(/catalog snapshot checksum|Candidate Manifest/i);
-    expect(environmentCalls).toBe(0);
-  });
-
   it("keeps the Repair primary failure while retaining evidence and cleanup failures", async () => {
     const calls = [];
     const primary = Object.assign(new Error("Repair Host preflight failed"), {
@@ -4632,12 +4547,14 @@ function candidateManifest() {
     kind: "enoki-release-candidate",
     probeAssetSet: { version: "1.2.3" },
     releaseBaseline: {
-      catalogSnapshot: {
-        entries: [],
-        sha256:
-          "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      hub: {
+        archive: "hub/enoki-hub-v1.2.2.oci.tar",
+        digest: `sha256:${"b".repeat(64)}`,
+        imageDigest: `sha256:${"b".repeat(64)}`,
       },
-      kind: "first-formal-release",
+      kind: "enoki-release-baseline",
+      probeAssetSet: { version: "1.2.2" },
+      tag: "v1.2.2",
     },
     schemaVersion: 2,
   };

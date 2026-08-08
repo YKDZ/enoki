@@ -3,7 +3,6 @@
 import {
   assembleReleaseCandidate,
   assertAllowedOptions,
-  assertCandidateOnTrustedMain,
   assertCheckedOutCommit,
   compareHubOciBuilds,
   parseCommandLine,
@@ -15,6 +14,7 @@ import {
   requiredOption,
   signProbeAssetSet,
   validateCandidateIdentity,
+  validateProbeSigningIdentity,
   validateReleaseCandidate,
 } from "./release-candidate-lib.mjs";
 
@@ -47,21 +47,19 @@ try {
 
   const { command, options } = parseCommandLine(arguments_);
 
-  if (command === "validate-source-policy") {
+  if (command === "validate-signing-identity") {
     assertAllowedOptions(command, options, [
-      "--commit",
-      "--remote",
-      "--source-dir",
-      "--trusted-main-ref",
+      "--private-key-env",
+      "--public-key-env",
     ]);
-    const policy = await assertCandidateOnTrustedMain({
-      candidateCommit: requiredOption(options, "--commit"),
-      remote: requiredOption(options, "--remote"),
-      sourceDir: requiredOption(options, "--source-dir"),
-      trustedMainRef: requiredOption(options, "--trusted-main-ref"),
+    const privateKeyEnvironment = requiredOption(options, "--private-key-env");
+    const publicKeyEnvironment = requiredOption(options, "--public-key-env");
+    const identity = validateProbeSigningIdentity({
+      privateKeyPem: process.env[privateKeyEnvironment],
+      publicKeyPem: process.env[publicKeyEnvironment],
     });
     process.stdout.write(
-      `candidate source is trusted: ${policy.candidateCommit} <= ${policy.trustedMainCommit}\n`,
+      `Probe asset signing identity is valid: ${identity.publicKeySha256}\n`,
     );
   } else if (command === "validate-inputs") {
     assertAllowedOptions(command, options, [
