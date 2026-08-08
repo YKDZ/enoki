@@ -1177,6 +1177,95 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
 }
 
 #[test]
+fn probe_run_keeps_metric_sequences_dense_when_collection_interval_changes() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 2",
+            &format!(
+                "enabled_collector_ids = [{}]",
+                all_collector_ids()
+                    .iter()
+                    .map(|collector_id| format!("\"{collector_id}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1_725_000_000_000,
+            }
+            .encode_to_vec(),
+            ProbeReportResponse {
+                accepted_sequence_end: 4,
+                current_probe_configuration_version: "global-2".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1_725_000_000_001,
+            }
+            .encode_to_vec(),
+            ProbeConfigurationResponse {
+                enabled_collector_ids: all_collector_ids(),
+                metrics_collection_interval_seconds: 3,
+                version: "global-2".to_string(),
+            }
+            .encode_to_vec(),
+            ProbeReportResponse {
+                accepted_sequence_end: 7,
+                current_probe_configuration_version: "global-2".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1_725_000_000_002,
+            }
+            .encode_to_vec(),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(3),
+        },
+    )
+    .expect("run loop reports densely after changing collection cadence");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    let report = &reports[2];
+    assert_eq!((report.sequence_start, report.sequence_end), (5, 7));
+    assert_eq!(
+        report
+            .metrics
+            .iter()
+            .map(|sample| sample.sequence)
+            .collect::<Vec<_>>(),
+        vec![5, 6, 7],
+    );
+}
+
+#[test]
 fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");

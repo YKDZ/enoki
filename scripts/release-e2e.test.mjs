@@ -3113,6 +3113,55 @@ describe("Release E2E Orchestrator", () => {
       result: { status: "succeeded" },
     });
 
+    const waitForSuccessfulProbeOperation = hub.waitForProbeOperation;
+    hub.waitForProbeOperation = async (operation) => {
+      const timeline = await waitForSuccessfulProbeOperation(operation);
+      if (operation.kind === "probe_uninstall") {
+        throw Object.assign(new Error("Probe Uninstall timed out"), {
+          code: "probe_operation_timeout",
+          timeline,
+        });
+      }
+      return timeline;
+    };
+    activeHub = "baseline";
+    configurationVersion = "default-v1";
+    installed = false;
+    metricsEpoch = 0;
+    repaired = false;
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          async cleanup() {
+            return { clean: true };
+          },
+          async start() {
+            return { host, hub };
+          },
+        },
+        evidenceSink: { write: async (value) => written.push(value) },
+        ownerPassword: "owner-password",
+        runId: "run-repair-uninstall-timeout",
+        scenario: "post-replacement-repair-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).rejects.toMatchObject({ code: "probe_operation_timeout" });
+    expect(written.at(-1)).toMatchObject({
+      operationTimeline: expect.arrayContaining([
+        expect.objectContaining({ kind: "probe_upgrade", state: "failed" }),
+      ]),
+      uninstall: {
+        operationTimeline: expect.arrayContaining([
+          expect.objectContaining({ kind: "probe_uninstall" }),
+        ]),
+      },
+      uninstallOperationTimeline: expect.arrayContaining([
+        expect.objectContaining({ kind: "probe_uninstall" }),
+      ]),
+    });
+    hub.waitForProbeOperation = waitForSuccessfulProbeOperation;
+
     activeHub = "baseline";
     configurationVersion = "default-v1";
     installed = false;

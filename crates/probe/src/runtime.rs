@@ -1009,14 +1009,12 @@ fn collect_observation_batch(
     for _ in 0..REPORTING_WINDOW_TICKS {
         sleeper.sleep(active_configuration.metrics_collection_interval);
         *sequence += 1;
-        if let Some(sample) = metrics_collector.collect_after(
+        metrics.push(metrics_collector.collect_after(
             *sequence,
             active_configuration.metrics_collection_interval,
             schedule,
             &active_configuration.metrics_config,
-        ) {
-            metrics.push(sample);
-        }
+        ));
     }
 
     (sequence_start, *sequence, metrics)
@@ -1513,15 +1511,32 @@ mod tests {
             &mut metrics_collector,
         );
 
-        assert!(first_metrics.is_empty());
-        assert!(second_metrics.is_empty());
-        assert!(third_metrics.is_empty());
+        assert_eq!(
+            [
+                first_metrics.as_slice(),
+                second_metrics.as_slice(),
+                third_metrics.as_slice(),
+                fourth_metrics.as_slice(),
+            ]
+            .concat()
+            .iter()
+            .map(|sample| sample.sequence)
+            .collect::<Vec<_>>(),
+            (1..=12).collect::<Vec<_>>(),
+        );
+        assert!(
+            first_metrics
+                .iter()
+                .chain(&second_metrics)
+                .chain(&third_metrics)
+                .all(|sample| sample.load_1.is_none())
+        );
         assert_eq!(
             fourth_metrics
                 .iter()
-                .map(|sample| sample.sequence)
+                .filter_map(|sample| sample.load_1)
                 .collect::<Vec<_>>(),
-            vec![12],
+            vec![1.0],
         );
     }
 
