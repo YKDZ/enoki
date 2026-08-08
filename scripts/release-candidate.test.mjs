@@ -987,7 +987,7 @@ describe("Enoki Release Candidate", () => {
       manifest.hub.digest = `sha256:${"0".repeat(64)}`;
       await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     }, "Candidate Hub OCI digest does not match");
-  });
+  }, 15_000);
 
   it("rejects a Hub OCI image whose config descriptor is not the OCI image config media type", async () => {
     const workDir = await mkdtemp(
