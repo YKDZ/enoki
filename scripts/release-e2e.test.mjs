@@ -1204,6 +1204,11 @@ describe("Hub Lifecycle Client", () => {
     });
     await client.authenticate("owner-password");
     const requested = await client.requestProbeUninstall(7);
+    expect(requested).toMatchObject({
+      hostId: 7,
+      kind: "probe_uninstall",
+      targetProbeVersion: "",
+    });
 
     await expect(
       client.waitForProbeOperation(requested, {
