@@ -635,7 +635,6 @@ describe("Probe Host Harness", () => {
         }
         if (command.includes("# enoki-release-e2e:post-replacement-failure")) {
           return successfulCommand({
-            hubFailureCode: "running_timeout",
             localFailureCode: "post_replacement_restart_failure",
             operationId: 41,
             probeVersion: "1.2.3",
@@ -689,7 +688,7 @@ describe("Probe Host Harness", () => {
     await expect(
       harness.assertPostReplacementUpgradeFailure(
         "run-repair-host",
-        failed,
+        pending,
         "1.2.3",
       ),
     ).resolves.toMatchObject({
@@ -2288,7 +2287,7 @@ describe("Release E2E Orchestrator", () => {
                 diskHealth: { diagnostic: "available", status: 1 },
               },
             },
-            cpuBaseFrequencyMhz: 2_400,
+            cpuBaseFrequencyMhz: afterRestore ? 2_444 : 2_400,
             cpuCacheL3Bytes: 8_388_608,
             cpuModel: "Release Test CPU",
             cpuPhysicalCount: 2,
@@ -2300,6 +2299,10 @@ describe("Release E2E Orchestrator", () => {
                   ? ["fe80::1", "192.0.2.10"]
                   : ["192.0.2.10", "fe80::1"],
                 name: "eth0",
+              },
+              {
+                addresses: [afterRestore ? "fe80::2" : "fe80::1"],
+                name: afterRestore ? "veth-restored" : "veth-candidate",
               },
             ],
             processCount: afterRestore ? 120 : 110,
@@ -2462,12 +2465,15 @@ describe("Release E2E Orchestrator", () => {
     );
     expect(
       calls.filter((call) =>
-        call.startsWith("hub.requestProbeUninstall:7:baseline"),
+        call.startsWith("hub.requestProbeUninstall:7:candidate"),
       ),
-    ).toEqual(["hub.requestProbeUninstall:7:baseline"]);
+    ).toEqual(["hub.requestProbeUninstall:7:candidate"]);
     expect(calls.indexOf("hub.restoreBaselineStateSnapshot")).toBeLessThan(
-      calls.indexOf("hub.requestProbeUninstall:7:baseline"),
+      calls.indexOf("hub.requestProbeUninstall:7:candidate"),
     );
+    expect(
+      calls.filter((call) => call === "hub.switchToCandidate"),
+    ).toHaveLength(2);
     expect(calls).toContain("hub.waitForProbeOperation:probe_uninstall");
     expect(calls).toContain("hub.isHostSoftDeleted:7");
     expect(calls).toContain("host.verifyUninstallCompletion");
@@ -2493,7 +2499,6 @@ describe("Release E2E Orchestrator", () => {
               },
             },
             cpu: {
-              baseFrequencyMhz: 2_400,
               cacheL3Bytes: 8_388_608,
               count: 2,
               model: "Release Test CPU",
@@ -2782,8 +2787,8 @@ describe("Release E2E Orchestrator", () => {
       completedAtMs: 20,
       createdAtMs: 1,
       failure: {
-        code: "running_timeout",
-        message: "Probe did not report the target version in time.",
+        code: "post_replacement_restart_failure",
+        message: "Probe binary was replaced, but restart failed.",
       },
       hostId: 7,
       id: 41,
@@ -2898,6 +2903,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async waitForProbeOperation(operation) {
         if (operation.kind === "probe_upgrade") {
+          expect(repaired).toBe(true);
           return [
             operation,
             {
@@ -2935,9 +2941,8 @@ describe("Release E2E Orchestrator", () => {
       },
       async assertPostReplacementUpgradeFailure(_runId, operation, version) {
         calls.push("host.assertPostReplacementUpgradeFailure");
-        expect(operation).toMatchObject({ state: "failed" });
+        expect(operation).toMatchObject({ state: "pending" });
         return {
-          hubFailureCode: operation.failure.code,
           localFailureCode: "post_replacement_restart_failure",
           operationId: operation.id,
           probeVersion: version,
@@ -3088,7 +3093,7 @@ describe("Release E2E Orchestrator", () => {
       },
       boundaryEvidenceValidation: { status: "succeeded" },
       failureBoundary: {
-        hubFailureCode: "running_timeout",
+        hubFailureCode: "post_replacement_restart_failure",
         localFailureCode: "post_replacement_restart_failure",
         probeVersion: "1.2.3",
       },

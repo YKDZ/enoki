@@ -1399,6 +1399,10 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     ) {
         let failed = failed_probe_upgrader_result(&operation, &error);
         let _ = write_failed_local_operation_status(&operation, install_metadata, &failed);
+        if let Ok(status_url) = operation_status_url(hub_url, &operation.operation_id) {
+            let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
+            let _ = transport.post_operation_status(&status_url, &request_auth, &body);
+        }
         return Ok(failed);
     }
 
@@ -5961,6 +5965,16 @@ echo replacement probe
                 .expect("message")
                 .contains("Probe binary was replaced")
         );
+        assert_eq!(
+            transport.status_url,
+            "https://hub.example/api/probe/operations/42/status",
+        );
+        assert!(
+            transport
+                .status_body
+                .contains("\"errorCode\":\"post_replacement_restart_failure\"")
+        );
+        assert!(transport.status_body.contains("\"status\":\"failed\""));
         assert_eq!(
             fs::read_to_string(status_path).expect("status"),
             [
