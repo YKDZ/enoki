@@ -41,6 +41,17 @@ describe("Release E2E business assertions", () => {
         readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
+            probeVersion: "v1.2.3",
+          },
+        }),
+        "1.2.3",
+      ),
+    ).toBe(true);
+    expect(
+      isCandidateHostReady(
+        readyHost({
+          hostProfile: {
+            ...readyHost().hostProfile,
             probeVersion: "9.9.9",
           },
         }),
@@ -1941,6 +1952,10 @@ describe("Release E2E Orchestrator", () => {
     });
 
     expect(result).toEqual({ status: "succeeded" });
+    const baselineInstallIndex = calls.indexOf("host.install:baseline");
+    expect(
+      calls.indexOf("hub.listHosts:baseline", baselineInstallIndex),
+    ).toBeLessThan(calls.indexOf("host.readProbeIdentity:false"));
     expect(
       calls.filter((call) => call.startsWith("hub.requestProbeUpgrade:")),
     ).toEqual(["hub.requestProbeUpgrade:7"]);
