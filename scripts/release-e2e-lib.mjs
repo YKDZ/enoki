@@ -2090,7 +2090,7 @@ export function createHubLifecycleClient({
       });
       const operation = body?.probeUninstallRequest;
       const boundOperation = {
-        ...operation,
+        ...normalizeProbeUninstallOperation(operation),
         hostId,
         kind: "probe_uninstall",
       };
@@ -2157,7 +2157,10 @@ export function createHubLifecycleClient({
           const { body } = await request(
             `/api/web/probe-operations/${operationId}`,
           );
-          const operation = body?.probeOperation;
+          const operation =
+            expectedOperation.kind === "probe_uninstall"
+              ? normalizeProbeUninstallOperation(body?.probeOperation)
+              : body?.probeOperation;
           assertProbeOperation(operation, {
             hostId: expectedOperation.hostId,
             id: operationId,
@@ -3559,6 +3562,13 @@ function assertProbeOperation(operation, expected = {}) {
       `Probe Operation state ${operation.state} unexpectedly carries a failure`,
     );
   }
+}
+
+function normalizeProbeUninstallOperation(operation) {
+  return {
+    ...operation,
+    targetProbeVersion: operation?.targetProbeVersion ?? "",
+  };
 }
 
 function assertProbeOperationProgress(previous, operation) {
