@@ -426,6 +426,20 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     );
   });
 
+  it("grants callers the read permission requested by the shared Hub workflow", async () => {
+    const [ciWorkflow, hubWorkflow] = await Promise.all([
+      readFile(".github/workflows/ci.yml", "utf8"),
+      readFile(".github/workflows/reusable-hub-image.yml", "utf8"),
+    ]);
+
+    expect(hubWorkflow).toContain(
+      "permissions:\n  actions: read\n  contents: read",
+    );
+    expect(ciWorkflow).toContain(
+      "permissions:\n  actions: read\n  contents: read",
+    );
+  });
+
   it("rejects two individually valid Hub OCI builds when their image digests differ", async () => {
     const workDir = await mkdtemp(
       path.join(tmpdir(), "enoki-candidate-hub-reproducibility-"),
