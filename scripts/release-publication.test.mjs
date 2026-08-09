@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -138,6 +145,29 @@ describe("Publication Reconciler", () => {
         [fixture.candidateManifest.candidate.version]:
           fixture.candidateManifest.hub.digest,
       });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("uses the created draft response while the release list is eventually consistent", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote({
+        hideEmptyCreatedReleaseReads: 1,
+      });
+      const result = await reconcilePublication({
+        candidateDir: fixture.candidateDir,
+        candidateManifest: fixture.candidateManifest,
+        remote,
+        verificationSummary: fixture.verificationSummary,
+        workflowRun: fixture.workflowRun,
+      });
+
+      expect(result.status).toBe("published");
+      expect(
+        remote.events.filter((event) => event === "release:create-draft"),
+      ).toHaveLength(1);
     } finally {
       await fixture.cleanup();
     }
@@ -583,6 +613,22 @@ describe("GitHub and GHCR publication adapter", () => {
           ]),
         };
       }
+      if (
+        command === "gh" &&
+        arguments_.includes("POST") &&
+        arguments_.includes("repos/acme/enoki/releases")
+      ) {
+        return {
+          stdout: JSON.stringify({
+            assets: [],
+            draft: true,
+            html_url: "https://example/release/v1.2.3",
+            id: 17,
+            tag_name: "v1.2.3",
+            target_commitish: expectedCommit,
+          }),
+        };
+      }
       if (command === "skopeo" && arguments_[0] === "inspect") {
         return { stdout: `${expectedDigest}\n` };
       }
@@ -618,9 +664,16 @@ describe("GitHub and GHCR publication adapter", () => {
       url: "https://example/release/v1.2.3",
     });
     await remote.createTag({ commit: expectedCommit, version: "v1.2.3" });
-    await remote.createDraftRelease({
-      commit: expectedCommit,
-      version: "v1.2.3",
+    await expect(
+      remote.createDraftRelease({
+        commit: expectedCommit,
+        version: "v1.2.3",
+      }),
+    ).resolves.toMatchObject({
+      assets: {},
+      draft: true,
+      id: 17,
+      targetCommit: expectedCommit,
     });
     await remote.uploadAsset({
       filePath: "/candidate/manifest.json",
@@ -660,6 +713,7 @@ describe("GitHub and GHCR publication adapter", () => {
     try {
       const commands = [];
       const fetches = [];
+      let inspectedProbeAssetEntries = [];
       let failImageCleanup = false;
       const publicFiles = new Map();
       for (const expected of fixture.candidateManifest.probeAssetSet.files) {
@@ -714,10 +768,13 @@ describe("GitHub and GHCR publication adapter", () => {
       const service = createPublicationSmokeService({
         createId: () => "unique-smoke-id",
         fetchImpl,
-        inspectProbeAssets: async () => ({
-          signingIdentity:
-            fixture.candidateManifest.probeAssetSet.signingIdentity,
-        }),
+        inspectProbeAssets: async (assetDirectory) => {
+          inspectedProbeAssetEntries = (await readdir(assetDirectory)).sort();
+          return {
+            signingIdentity:
+              fixture.candidateManifest.probeAssetSet.signingIdentity,
+          };
+        },
         runCommand,
         sleep: async () => {},
       });
@@ -759,16 +816,26 @@ describe("GitHub and GHCR publication adapter", () => {
           command === "skopeo" && arguments_[0] === "inspect",
       );
       expect(inspect.arguments_).toContain("--no-creds");
-      const copy = commands.find(
-        ({ arguments_, command }) =>
-          command === "skopeo" && arguments_[0] === "copy",
+      expect(inspectedProbeAssetEntries).toEqual(
+        fixture.candidateManifest.probeAssetSet.files
+          .map(({ file }) => file)
+          .sort(),
       );
-      expect(copy.arguments_).toEqual(
+      expect(
+        commands.some(
+          ({ arguments_, command }) =>
+            command === "skopeo" && arguments_[0] === "copy",
+        ),
+      ).toBe(false);
+      const pull = commands.find(
+        ({ arguments_, command }) =>
+          command === "docker" && arguments_.includes("pull"),
+      );
+      expect(pull.arguments_).toEqual(
         expect.arrayContaining([
-          "--src-no-creds",
-          "--preserve-digests",
-          `docker://ghcr.io/acme/enoki-hub@${fixture.candidateManifest.hub.digest}`,
-          "docker-daemon:enoki-release-smoke-local:unique-smoke-id",
+          "--config",
+          "pull",
+          `ghcr.io/acme/enoki-hub@${fixture.candidateManifest.hub.digest}`,
         ]),
       );
       const run = commands.find(
@@ -792,6 +859,7 @@ describe("GitHub and GHCR publication adapter", () => {
             "rm",
             "--force",
             "enoki-release-smoke-local:unique-smoke-id",
+            `ghcr.io/acme/enoki-hub@${fixture.candidateManifest.hub.digest}`,
           ],
           command: "docker",
         }),
@@ -948,8 +1016,9 @@ class FakePublicationRemote {
   release = null;
   tag = null;
 
-  constructor({ failAfter = null } = {}) {
+  constructor({ failAfter = null, hideEmptyCreatedReleaseReads = 0 } = {}) {
     this.failAfter = failAfter;
+    this.hideEmptyCreatedReleaseReads = hideEmptyCreatedReleaseReads;
   }
 
   async getTag() {
@@ -962,12 +1031,21 @@ class FakePublicationRemote {
   }
 
   async getRelease() {
+    if (
+      this.release &&
+      Object.keys(this.release.assets).length === 0 &&
+      this.hideEmptyCreatedReleaseReads > 0
+    ) {
+      this.hideEmptyCreatedReleaseReads -= 1;
+      return null;
+    }
     return this.release;
   }
 
   async createDraftRelease({ commit }) {
     this.release = { assets: {}, draft: true, targetCommit: commit };
     this.#record("release:create-draft");
+    return this.release;
   }
 
   async uploadAsset({ file, sha256, size }) {
