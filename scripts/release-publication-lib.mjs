@@ -49,14 +49,17 @@ export async function reconcilePublication({
   }
 
   if (!release) {
-    await remote.createDraftRelease({ commit, version });
+    release = await remote.createDraftRelease({ commit, version });
     actions.push({ action: "created", stage: "private-release-draft" });
-    release = await remote.getRelease({ version });
+    release ??= await remote.getRelease({ version });
   } else {
     actions.push({
       action: "skipped-existing",
       stage: "private-release-draft",
     });
+  }
+  if (!release) {
+    throw new Error(`draft Release ${version} was not visible after creation`);
   }
   if (release.targetCommit !== commit) {
     throw new Error(

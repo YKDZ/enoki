@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -70,27 +70,11 @@ export function createGitHubGhcrPublicationRemote({
       const releases = pages.flat();
       const release = releases.find((item) => item.tag_name === version);
       if (!release) return null;
-      return {
-        assets: Object.fromEntries(
-          release.assets.map((asset) => [
-            asset.name,
-            {
-              downloadUrl: asset.browser_download_url,
-              id: asset.id,
-              sha256: parseGitHubAssetDigest(asset.digest),
-              size: asset.size,
-            },
-          ]),
-        ),
-        draft: release.draft,
-        id: release.id,
-        targetCommit: release.target_commitish,
-        url: release.html_url,
-      };
+      return normalizeGitHubRelease(release);
     },
 
     async createDraftRelease({ commit, version }) {
-      await command("gh", [
+      const response = await command("gh", [
         "api",
         "--method",
         "POST",
@@ -106,6 +90,7 @@ export function createGitHubGhcrPublicationRemote({
         "-F",
         "draft=true",
       ]);
+      return normalizeGitHubRelease(JSON.parse(response.stdout));
     },
 
     async uploadAsset({ filePath, version }) {
@@ -202,11 +187,20 @@ async function verifyPublicCandidate({
   const checks = {};
   const failureReasons = [];
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-release-smoke-"));
+  const probeAssetDir = path.join(workDir, "probe-assets");
   const anonymousAuthFile = path.join(workDir, "anonymous-auth.json");
+  const anonymousDockerConfigDir = path.join(workDir, "anonymous-docker");
   let publicAssetsReady = false;
 
   try {
-    await writeFile(anonymousAuthFile, '{"auths":{}}\n');
+    await Promise.all([mkdir(probeAssetDir), mkdir(anonymousDockerConfigDir)]);
+    await Promise.all([
+      writeFile(anonymousAuthFile, '{"auths":{}}\n'),
+      writeFile(
+        path.join(anonymousDockerConfigDir, "config.json"),
+        '{"auths":{}}\n',
+      ),
+    ]);
     await smokeCheck("probeChecksums", checks, failureReasons, async () => {
       const release = await getRelease({ version });
       if (!release || release.draft) {
@@ -235,7 +229,7 @@ async function verifyPublicCandidate({
             `public Probe asset does not match candidate: ${expected.file}`,
           );
         }
-        await writeFile(path.join(workDir, expected.file), bytes);
+        await writeFile(path.join(probeAssetDir, expected.file), bytes);
       }
       publicAssetsReady = true;
     });
@@ -246,7 +240,7 @@ async function verifyPublicCandidate({
           "public Probe assets were not available for signature verification",
         );
       }
-      const inspected = await inspectProbeAssets(workDir);
+      const inspected = await inspectProbeAssets(probeAssetDir);
       if (
         inspected.signingIdentity.publicKeySha256 !==
         candidateManifest.probeAssetSet.signingIdentity.publicKeySha256
@@ -273,7 +267,7 @@ async function verifyPublicCandidate({
     let runtimeEvidence = null;
     await smokeCheck("hubHealth", checks, failureReasons, async () => {
       runtimeEvidence = await verifyHubRuntime({
-        anonymousAuthFile,
+        anonymousDockerConfigDir,
         createId,
         digest: candidateManifest.hub.digest,
         fetchImpl,
@@ -315,7 +309,7 @@ async function verifyPublicCandidate({
 }
 
 async function verifyHubRuntime({
-  anonymousAuthFile,
+  anonymousDockerConfigDir,
   createId,
   digest,
   fetchImpl,
@@ -326,20 +320,19 @@ async function verifyHubRuntime({
   const smokeId = createId();
   const container = `enoki-release-smoke-${smokeId}`;
   const localImage = `enoki-release-smoke-local:${smokeId}`;
-  let localImageCopied = false;
+  const publicImage = `${image}@${digest}`;
+  let localImageTagged = false;
+  let publicImagePulled = false;
   try {
-    await runCommand(
-      "skopeo",
-      [
-        "copy",
-        "--src-no-creds",
-        "--preserve-digests",
-        `docker://${image}@${digest}`,
-        `docker-daemon:${localImage}`,
-      ],
-      { env: { REGISTRY_AUTH_FILE: anonymousAuthFile } },
-    );
-    localImageCopied = true;
+    await runCommand("docker", [
+      "--config",
+      anonymousDockerConfigDir,
+      "pull",
+      publicImage,
+    ]);
+    publicImagePulled = true;
+    await runCommand("docker", ["tag", publicImage, localImage]);
+    localImageTagged = true;
     await runCommand("docker", [
       "run",
       "--detach",
@@ -390,8 +383,14 @@ async function verifyHubRuntime({
       // A failed or already-exited smoke container still leaves immutable
       // publication state untouched; the caller records the primary failure.
     }
-    if (localImageCopied) {
-      await runCommand("docker", ["image", "rm", "--force", localImage]);
+    if (publicImagePulled) {
+      await runCommand("docker", [
+        "image",
+        "rm",
+        "--force",
+        ...(localImageTagged ? [localImage] : []),
+        publicImage,
+      ]);
     }
   }
 }
@@ -465,6 +464,26 @@ function parseGitHubAssetDigest(digest) {
   return typeof digest === "string" && /^sha256:[0-9a-f]{64}$/.test(digest)
     ? digest.slice("sha256:".length)
     : null;
+}
+
+function normalizeGitHubRelease(release) {
+  return {
+    assets: Object.fromEntries(
+      release.assets.map((asset) => [
+        asset.name,
+        {
+          downloadUrl: asset.browser_download_url,
+          id: asset.id,
+          sha256: parseGitHubAssetDigest(asset.digest),
+          size: asset.size,
+        },
+      ]),
+    ),
+    draft: release.draft,
+    id: release.id,
+    targetCommit: release.target_commitish,
+    url: release.html_url,
+  };
 }
 
 function isNotFound(error) {
