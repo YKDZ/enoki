@@ -1,38 +1,48 @@
-FROM node:24-bookworm
+ARG NODE_VERSION=24
+FROM node:${NODE_VERSION}-bookworm-slim
 
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-ENV SHELL=/bin/bash
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG PACKAGE_MANAGER_PIN=pnpm@11.11.0
+ARG PLAYWRIGHT_CLI_PACKAGE=@playwright/test@1.61.1
+ARG RUST_TOOLCHAIN=stable
+
+ENV COREPACK_HOME="/corepack"
 ENV PNPM_HOME="/pnpm"
-ENV CARGO_HOME="/usr/local/cargo"
 ENV RUSTUP_HOME="/usr/local/rustup"
-ENV RUST_BACKTRACE=1
-ENV PATH="$PNPM_HOME/bin:$PNPM_HOME:$CARGO_HOME/bin:$PATH"
+ENV CARGO_HOME="/usr/local/cargo"
+ENV PATH="/usr/local/cargo/bin:${PNPM_HOME}:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-    bash-completion \
-    build-essential \
-    ca-certificates \
-    cmake \
-    curl \
-    fd-find \
-    git \
-    jq \
-    less \
-    libssl-dev \
-    pkg-config \
-    procps \
-    python3 \
-    ripgrep \
-    screen \
-    shellcheck \
-    tmux \
-    unzip \
-    xz-utils \
+      build-essential \
+      ca-certificates \
+      curl \
+      gh \
+      git \
+      git-lfs \
+      jq \
+      less \
+      libc6-dev \
+      openssh-client \
+      pkg-config \
+      procps \
+      python3 \
+      ripgrep \
+      shellcheck \
+      unzip \
+      xz-utils \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
-    && corepack enable \
-    && corepack prepare pnpm --activate \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
-    && rustup component add rustfmt clippy \
-    && pnpm install -g --allow-build=@openai/codex @openai/codex turbo
+    && install -d -m 0755 "${COREPACK_HOME}" "${PNPM_HOME}" \
+    && corepack enable --install-directory "${PNPM_HOME}" \
+    && corepack prepare "${PACKAGE_MANAGER_PIN}" --activate \
+    && chmod -R a+rX "${COREPACK_HOME}" "${PNPM_HOME}" \
+    && printf '%s\n' 'export PATH="/usr/local/cargo/bin:/pnpm:${PATH}"' > /etc/profile.d/enoki-toolchain.sh
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none \
+    && rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal --component rustfmt --component clippy \
+    && rustup default "${RUST_TOOLCHAIN}" \
+    && chmod -R a+w "${RUSTUP_HOME}" "${CARGO_HOME}"
+
+RUN npx --yes --package "${PLAYWRIGHT_CLI_PACKAGE}" playwright install-deps chromium

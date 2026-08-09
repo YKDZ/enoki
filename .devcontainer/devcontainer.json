@@ -1,7 +1,13 @@
 {
   "name": "Enoki",
   "build": {
-    "dockerfile": "Dockerfile"
+    "dockerfile": "Dockerfile",
+    "args": {
+      "NODE_VERSION": "24",
+      "PACKAGE_MANAGER_PIN": "pnpm@11.11.0",
+      "PLAYWRIGHT_CLI_PACKAGE": "@playwright/test@1.61.1",
+      "RUST_TOOLCHAIN": "stable"
+    }
   },
   "runArgs": [
     "--security-opt=seccomp=unconfined",
@@ -9,30 +15,12 @@
     "--cap-add=SYS_ADMIN"
   ],
   "features": {
-    "ghcr.io/devcontainers/features/common-utils:2.5.9": {
-      "installZsh": false,
-      "installOhMyZsh": false,
-      "installOhMyZshConfig": false,
-      "upgradePackages": true,
-      "installSsl": true,
-      "username": "automatic",
-      "userUid": "automatic",
-      "userGid": "automatic"
-    },
-    "ghcr.io/devcontainers/features/git-lfs:1": {
-      "autoPull": true,
-      "version": "latest"
-    },
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1.10.0": {
       "moby": true,
       "installDockerBuildx": true,
       "installDockerComposeSwitch": true,
       "version": "latest",
       "dockerDashComposeVersion": "v2"
-    },
-    "ghcr.io/devcontainers/features/github-cli:1": {
-      "installDirectlyFromGitHubRelease": true,
-      "version": "latest"
     }
   },
   "customizations": {
@@ -68,12 +56,13 @@
   },
   "postCreateCommand": {
     "installNodeDependencies": "pnpm install",
-    "prefetchRustDependencies": "cargo fetch"
+    "prefetchRustDependencies": "cargo fetch",
+    "installPlaywrightBrowser": "pnpm exec playwright install chromium"
   },
   "remoteUser": "root",
   "mounts": [
-    "source=agen-cargo-registry,target=/usr/local/cargo/registry,type=volume",
-    "source=agen-cargo-git,target=/usr/local/cargo/git,type=volume",
-    "source=agen-target,target=${containerWorkspaceFolder}/target,type=volume"
+    "source=${localWorkspaceFolderBasename}-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=${localWorkspaceFolderBasename}-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=${localWorkspaceFolderBasename}-target,target=${containerWorkspaceFolder}/target,type=volume"
   ]
 }
