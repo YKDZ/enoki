@@ -12,6 +12,15 @@ updates:
       node-dependencies:
         patterns:
           - "*"
+    ignore:
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: pnpm
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+          - version-update:semver-patch
 
   - package-ecosystem: cargo
     directory: /
@@ -39,6 +48,15 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: docker
+    directory: /.devcontainer
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -51,3 +69,12 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
