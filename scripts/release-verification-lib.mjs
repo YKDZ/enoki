@@ -152,10 +152,20 @@ function validateFreshEvidence(evidence, errors) {
   validateFreshLifecycleAuditLog(evidence, errors);
   validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
   validateInstallerEvidence(
-    evidence?.initialInstall,
+    evidence?.initialInstall?.installer,
     "initial Probe installer",
     errors,
   );
+  validateCommandCompletionReadiness({
+    commandCompletion: evidence?.initialInstall?.commandCompletion,
+    expectedHostId: evidence?.host?.id,
+    expectedProbeVersion: version,
+    expectedTarget: { kind: "new_host" },
+    label: "initial install",
+    readiness: evidence?.initialInstall?.readiness,
+    sourceEnrollment: evidence?.initialInstall?.enrollment,
+    errors,
+  });
   validateRepeatedAddEvidence(evidence?.repeatedAdd, errors);
   validateLocalUninstallEvidence(
     evidence?.localUninstall,
@@ -262,6 +272,63 @@ function validateReEnrollmentEvidence(evidence, errors) {
     reEnrollment?.installer,
     "Host Re-enrollment installer",
     errors,
+  );
+  validateCommandCompletionReadiness({
+    commandCompletion: reEnrollment?.commandCompletion,
+    expectedHostId: evidence?.host?.id,
+    expectedProbeVersion: candidateProbeVersion(evidence),
+    expectedTarget: { hostId: evidence?.host?.id, kind: "existing_host" },
+    label: "Host Re-enrollment",
+    readiness: reEnrollment?.readiness,
+    sourceEnrollment: reEnrollment?.enrollment,
+    errors,
+  });
+}
+
+function validateCommandCompletionReadiness({
+  commandCompletion,
+  errors,
+  expectedHostId,
+  expectedProbeVersion,
+  expectedTarget,
+  label,
+  readiness,
+  sourceEnrollment,
+}) {
+  const hostId = commandCompletion?.hostId;
+  const sourceTarget = sourceEnrollment?.target;
+  if (
+    !validEnrollmentSource(sourceEnrollment) ||
+    !sameEnrollmentTarget(sourceTarget, expectedTarget) ||
+    commandCompletion?.status !== "ready" ||
+    commandCompletion?.enrollmentId !== sourceEnrollment.enrollmentId ||
+    !sameEnrollmentTarget(commandCompletion?.target, expectedTarget) ||
+    !Number.isSafeInteger(hostId) ||
+    hostId <= 0 ||
+    hostId !== expectedHostId ||
+    readiness?.id !== hostId ||
+    !isCandidateHostReady(readiness, expectedProbeVersion)
+  ) {
+    errors.push(`${label} command completion readiness is invalid`);
+  }
+}
+
+function validEnrollmentSource(enrollment) {
+  return (
+    typeof enrollment?.enrollmentId === "string" &&
+    enrollment.enrollmentId.length > 0 &&
+    enrollment?.status === "pending" &&
+    !containsUnredactedSecret(enrollment)
+  );
+}
+
+function sameEnrollmentTarget(actual, expected) {
+  if (actual?.kind !== expected?.kind) return false;
+  if (actual.kind === "new_host") return actual.hostId == null;
+  return (
+    actual.kind === "existing_host" &&
+    Number.isSafeInteger(actual.hostId) &&
+    actual.hostId === expected.hostId
   );
 }
 

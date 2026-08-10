@@ -1998,31 +1998,25 @@ async function runFreshInstallUninstallScenario({
     const enrollment = await hub.createEnrollment(newHostTarget);
     assertCreatedEnrollment(enrollment, newHostTarget);
     const initialInstall = await host.install(enrollment.installCommand, runId);
-    evidence.initialInstall = initialInstall;
+    const initialReadiness = await readImmediateInstallCommandReadiness({
+      code: "initial_install_command_returned_before_readiness",
+      enrollment,
+      expectedProbeVersion: candidateManifest.probeAssetSet.version,
+      expectedTarget: newHostTarget,
+      hub,
+      label: "initial install command",
+    });
+    evidence.initialInstall = {
+      commandCompletion: initialReadiness.commandCompletionEvidence,
+      enrollment: compactEnrollmentEvidence(enrollment),
+      installer: initialInstall,
+      readiness: initialReadiness.readinessEvidence,
+    };
     evidence.hostBoundary = await host.assertInstalled(
       runId,
       candidateManifest.probeAssetSet.version,
     );
-
-    const hostSummary = await waitForObservation({
-      code: "probe_enrollment_timeout",
-      label: "newly enrolled Host",
-      observe: async () => {
-        const hosts = await hub.listHosts();
-        return Array.isArray(hosts) && hosts.length === 1 ? hosts[0] : null;
-      },
-      poll,
-      ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
-    });
-    const hostId = hostSummary.id;
-    const ready = await waitForObservation({
-      code: "host_core_reporting_timeout",
-      label: "online Host with a typed Host Profile",
-      observe: () => hub.getHost(hostId),
-      poll,
-      ready: (value) =>
-        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
-    });
+    const { host: ready, hostId } = initialReadiness;
     evidence.host = compactHostEvidence(ready);
     const initialIdentity = await host.readProbeIdentity(runId);
 
@@ -2126,19 +2120,19 @@ async function runFreshInstallUninstallScenario({
       reEnrollment.installCommand,
       runId,
     );
+    const reEnrollmentReadiness = await readImmediateInstallCommandReadiness({
+      code: "reenrollment_command_returned_before_readiness",
+      enrollment: reEnrollment,
+      expectedProbeVersion: candidateManifest.probeAssetSet.version,
+      expectedTarget: existingHostTarget,
+      hub,
+      label: "Host Re-enrollment command",
+    });
     const reEnrollmentBoundary = await host.assertInstalled(
       runId,
       candidateManifest.probeAssetSet.version,
     );
-    const renewed = await waitForObservation({
-      code: "host_reenrollment_timeout",
-      label: "re-enrolled Host with renewed readiness",
-      observe: () => hub.getHost(hostId),
-      poll,
-      ready: (value) =>
-        value?.id === hostId &&
-        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
-    });
+    const renewed = reEnrollmentReadiness.host;
     const reEnrollmentIdentity = await host.readProbeIdentity(runId);
     if (
       reEnrollmentIdentity.probeId === initialIdentity.probeId ||
@@ -2174,6 +2168,7 @@ async function runFreshInstallUninstallScenario({
       );
     }
     evidence.reEnrollment = {
+      commandCompletion: reEnrollmentReadiness.commandCompletionEvidence,
       enrollment: compactEnrollmentEvidence(reEnrollment),
       host: compactHostEvidence(renewed),
       hostBoundary: reEnrollmentBoundary,
@@ -2185,6 +2180,7 @@ async function runFreshInstallUninstallScenario({
         retain: evidence.metricsHistory.anchors,
       }),
       probeConfiguration: reEnrollmentConfiguration,
+      readiness: reEnrollmentReadiness.readinessEvidence,
     };
 
     const deletedHost = await hub.deleteHostHubOnly(hostId);
@@ -4628,7 +4624,7 @@ function assertCreatedEnrollment(enrollment, expectedTarget) {
   if (
     !enrollment?.installCommand ||
     enrollment?.status !== "pending" ||
-    JSON.stringify(enrollment.target) !== JSON.stringify(expectedTarget)
+    !sameEnrollmentTarget(enrollment.target, expectedTarget)
   ) {
     throw assertionError(
       "enrollment_command_missing",
@@ -4637,6 +4633,89 @@ function assertCreatedEnrollment(enrollment, expectedTarget) {
   }
   assertEnrollmentId(enrollment.enrollmentId);
   assertInstallCommand(enrollment.installCommand);
+}
+
+async function readImmediateInstallCommandReadiness({
+  code,
+  enrollment,
+  expectedProbeVersion,
+  expectedTarget,
+  hub,
+  label,
+}) {
+  const commandCompletion = await hub.getEnrollment(enrollment.enrollmentId);
+  const completion = assertInstallCommandCompletion({
+    code,
+    commandCompletion,
+    expectedEnrollmentId: enrollment.enrollmentId,
+    expectedTarget,
+    label,
+  });
+  const host = await hub.getHost(completion.hostId);
+  const readinessEvidence = assertInstallCommandHostReadiness({
+    code,
+    expectedProbeVersion,
+    host,
+    hostId: completion.hostId,
+    label,
+  });
+  return { ...completion, host, readinessEvidence };
+}
+
+function assertInstallCommandCompletion({
+  code,
+  commandCompletion,
+  expectedEnrollmentId,
+  expectedTarget,
+  label,
+}) {
+  const hostId = commandCompletion?.hostId;
+  if (
+    commandCompletion?.status !== "ready" ||
+    commandCompletion?.enrollmentId !== expectedEnrollmentId ||
+    !sameEnrollmentTarget(commandCompletion?.target, expectedTarget) ||
+    !Number.isSafeInteger(hostId) ||
+    hostId <= 0
+  ) {
+    throw assertionError(
+      code,
+      `${label} returned before its Enrollment completed with a ready Host`,
+    );
+  }
+  return {
+    commandCompletionEvidence:
+      compactEnrollmentStatusEvidence(commandCompletion),
+    hostId,
+  };
+}
+
+function assertInstallCommandHostReadiness({
+  code,
+  expectedProbeVersion,
+  host,
+  hostId,
+  label,
+}) {
+  if (
+    host?.id !== hostId ||
+    !isCandidateHostReady(host, expectedProbeVersion)
+  ) {
+    throw assertionError(
+      code,
+      `${label} returned before its Host was online with a typed Candidate Host Profile`,
+    );
+  }
+  return compactHostEvidence(host);
+}
+
+function sameEnrollmentTarget(actual, expected) {
+  if (actual?.kind !== expected?.kind) return false;
+  if (actual.kind === "new_host") return actual.hostId == null;
+  return (
+    actual.kind === "existing_host" &&
+    Number.isSafeInteger(actual.hostId) &&
+    actual.hostId === expected.hostId
+  );
 }
 
 function compactEnrollmentEvidence(enrollment) {
