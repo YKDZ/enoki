@@ -1,9 +1,22 @@
 export const sourceReleaseUiCandidateVersion = "0.2.0";
+const sourceE2eHubUrl = "http://127.0.0.1:38200";
+const sourceE2eOwnerPassword = "correct horse battery staple";
+
+type ReleaseUiEnvironment = Readonly<Record<string, string | undefined>>;
+
+export function releaseUiBrowserRuntime(
+  environment: ReleaseUiEnvironment = process.env,
+) {
+  const hubUrl = environment.ENOKI_RELEASE_UI_BASE_URL ?? sourceE2eHubUrl;
+  return {
+    hubUrl: hubUrl.replace(/\/+$/, ""),
+    ownerPassword:
+      environment.ENOKI_RELEASE_UI_OWNER_PASSWORD ?? sourceE2eOwnerPassword,
+  };
+}
 
 export function releaseUiLifecycleVersions(
-  environment: Readonly<{
-    ENOKI_RELEASE_UI_CANDIDATE_VERSION?: string;
-  }> = process.env,
+  environment: ReleaseUiEnvironment = process.env,
 ) {
   const candidateVersion =
     environment.ENOKI_RELEASE_UI_CANDIDATE_VERSION ??

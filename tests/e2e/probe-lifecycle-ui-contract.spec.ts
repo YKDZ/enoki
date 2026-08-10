@@ -1,12 +1,14 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 import type { HostDetail } from "../../apps/web/src/types";
-import { releaseUiLifecycleVersions } from "./release-ui-contract-fixture";
+import {
+  releaseUiBrowserRuntime,
+  releaseUiLifecycleVersions,
+} from "./release-ui-contract-fixture";
 
 type ProbeUpgradeStatus = NonNullable<HostDetail["probeUpgradeStatus"]>;
 
-const ownerPassword =
-  process.env.ENOKI_RELEASE_UI_OWNER_PASSWORD ?? "correct horse battery staple";
+const { ownerPassword } = releaseUiBrowserRuntime();
 const isCandidateImageGate = Boolean(process.env.ENOKI_RELEASE_UI_BASE_URL);
 const { candidateVersion, currentProbeVersion, targetProbeVersion } =
   releaseUiLifecycleVersions();

@@ -42,7 +42,11 @@ export default defineConfig({
       ],
   retries: process.env.CI ? 1 : 0,
   testDir: "./tests/e2e",
-  testMatch: "probe-lifecycle-ui-contract.spec.ts",
+  testMatch: [
+    "hub-install-command.spec.ts",
+    "host-removal-live-update.spec.ts",
+    "probe-lifecycle-ui-contract.spec.ts",
+  ],
   outputDir: path.join(evidenceDir, "test-results"),
   timeout: 60_000,
   use: {
