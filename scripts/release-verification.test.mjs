@@ -737,6 +737,81 @@ describe("verify-only release workflow", () => {
       "Host Re-enrollment Metrics history is invalid",
     ],
     [
+      "missing initial command completion readiness",
+      (evidence) => {
+        delete evidence.initialInstall.commandCompletion;
+      },
+      "initial install command completion readiness is invalid",
+    ],
+    [
+      "pending initial command completion",
+      (evidence) => {
+        evidence.initialInstall.commandCompletion.status = "pending";
+      },
+      "initial install command completion readiness is invalid",
+    ],
+    [
+      "initial command completion enrollment mismatch",
+      (evidence) => {
+        evidence.initialInstall.commandCompletion.enrollmentId =
+          "enr_release_other";
+      },
+      "initial install command completion readiness is invalid",
+    ],
+    [
+      "initial source and completion target changed to an existing Host",
+      (evidence) => {
+        const target = { hostId: 7, kind: "existing_host" };
+        evidence.initialInstall.enrollment.target = target;
+        evidence.initialInstall.commandCompletion.target = target;
+      },
+      "initial install command completion readiness is invalid",
+    ],
+    [
+      "initial source Enrollment secret",
+      (evidence) => {
+        evidence.initialInstall.enrollment.enrollmentToken =
+          "enk_enroll_release_e2e_test_token";
+      },
+      "initial install command completion readiness is invalid",
+    ],
+    [
+      "re-enrollment command target mismatch",
+      (evidence) => {
+        evidence.reEnrollment.commandCompletion.target.hostId = 8;
+      },
+      "Host Re-enrollment command completion readiness is invalid",
+    ],
+    [
+      "re-enrollment command host identity mismatch",
+      (evidence) => {
+        evidence.reEnrollment.commandCompletion.hostId = 8;
+      },
+      "Host Re-enrollment command completion readiness is invalid",
+    ],
+    [
+      "re-enrollment command completion enrollment mismatch",
+      (evidence) => {
+        evidence.reEnrollment.commandCompletion.enrollmentId =
+          "enr_release_other";
+      },
+      "Host Re-enrollment command completion readiness is invalid",
+    ],
+    [
+      "re-enrollment source target mismatch",
+      (evidence) => {
+        evidence.reEnrollment.enrollment.target.hostId = 8;
+      },
+      "Host Re-enrollment command completion readiness is invalid",
+    ],
+    [
+      "nonready initial command Host evidence",
+      (evidence) => {
+        evidence.initialInstall.readiness.status = "offline";
+      },
+      "initial install command completion readiness is invalid",
+    ],
+    [
       "immediate local-uninstall Host status",
       (evidence) => {
         evidence.localUninstall.activeHost.status = "offline";
@@ -1240,7 +1315,21 @@ function successfulHostEvidence(scenario, candidate) {
           },
         },
       },
-      initialInstall: installerEvidence(),
+      initialInstall: {
+        commandCompletion: {
+          enrollmentId: "enr_release_initial",
+          hostId: 7,
+          status: "ready",
+          target: { kind: "new_host" },
+        },
+        enrollment: {
+          enrollmentId: "enr_release_initial",
+          status: "pending",
+          target: { kind: "new_host" },
+        },
+        installer: installerEvidence(),
+        readiness: evidenceHost("1.2.3"),
+      },
       localUninstall: {
         activeHost: evidenceHost("1.2.3"),
         completion: common.uninstall.hostCompletion,
@@ -1250,6 +1339,12 @@ function successfulHostEvidence(scenario, candidate) {
       metricsHistory: metricsHistoryEvidence(evidenceMetrics(1)),
       probeConfiguration: probeConfigurationEvidence("host-7-1"),
       reEnrollment: {
+        commandCompletion: {
+          enrollmentId: "enr_release_reenrollment",
+          hostId: 7,
+          status: "ready",
+          target: { hostId: 7, kind: "existing_host" },
+        },
         enrollment: {
           enrollmentId: "enr_release_reenrollment",
           status: "pending",
@@ -1271,6 +1366,7 @@ function successfulHostEvidence(scenario, candidate) {
           configuration: probeConfigurationValues("host-7-1"),
           mode: "override",
         },
+        readiness: evidenceHost("1.2.3"),
       },
       repeatedAdd: {
         enrollment: {

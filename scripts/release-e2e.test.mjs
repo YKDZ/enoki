@@ -3030,7 +3030,12 @@ describe("Release E2E Orchestrator", () => {
     expect(written.at(-1)).toMatchObject({ result: { status: "failed" } });
   });
 
-  it("proves the expanded fresh installation lifecycle without resubmitting mutations", async () => {
+  async function runExpandedFreshLifecycle({
+    enrollmentFault = null,
+    enrollmentIdMismatch = null,
+    enrollmentTargetMismatch = null,
+    hostFault = null,
+  } = {}) {
     const calls = [];
     const completion = {
       clean: true,
@@ -3063,6 +3068,8 @@ describe("Release E2E Orchestrator", () => {
     let lifecycle = "empty";
     let newEnrollmentCalls = 0;
     let offlineObservations = 0;
+    const commandCompletionReads = new Map();
+    const readinessObservations = new Map();
     let probeConfiguration = {
       enabledCollectorIds: ["official.cpu", "official.memory"],
       metricsCollectionIntervalSeconds: 5,
@@ -3077,6 +3084,36 @@ describe("Release E2E Orchestrator", () => {
     const initialEnrollment = enrollment({ kind: "new_host" });
     const rejectedEnrollment = enrollment({ kind: "new_host" });
     const reenrollment = enrollment({ hostId: 7, kind: "existing_host" });
+    const readyEnrollment = (value) => ({
+      ...value,
+      hostId: 7,
+      status: "ready",
+    });
+    const commandCompletion = (value, boundary) => {
+      if (enrollmentFault === boundary) {
+        const reads = (commandCompletionReads.get(boundary) ?? 0) + 1;
+        commandCompletionReads.set(boundary, reads);
+        return reads === 1
+          ? { ...value, hostId: null, status: "pending" }
+          : readyEnrollment(value);
+      }
+      if (enrollmentIdMismatch === boundary) {
+        return {
+          ...readyEnrollment(value),
+          enrollmentId: `enr_release_lifecycle_other_${boundary}`,
+        };
+      }
+      if (enrollmentTargetMismatch === boundary) {
+        return {
+          ...readyEnrollment(value),
+          target:
+            boundary === "initial"
+              ? { hostId: 7, kind: "existing_host" }
+              : { kind: "new_host" },
+        };
+      }
+      return readyEnrollment(value);
+    };
     const hub = {
       async authenticate() {
         calls.push("hub.authenticate");
@@ -3104,6 +3141,12 @@ describe("Release E2E Orchestrator", () => {
       },
       async getEnrollment(enrollmentId) {
         calls.push(`hub.getEnrollment:${enrollmentId}`);
+        if (enrollmentId === initialEnrollment.enrollmentId) {
+          return commandCompletion(initialEnrollment, "initial");
+        }
+        if (enrollmentId === reenrollment.enrollmentId) {
+          return commandCompletion(reenrollment, "reenrollment");
+        }
         return {
           enrollmentId,
           hostId: null,
@@ -3132,6 +3175,12 @@ describe("Release E2E Orchestrator", () => {
           // minted by this particular install.  In particular, the previous
           // identity must not make a re-enrollment identity readable.
           formalIdentityGeneration = identityGeneration;
+        }
+        const boundary = lifecycle === "online" ? "initial" : "reenrollment";
+        const observations = (readinessObservations.get(boundary) ?? 0) + 1;
+        readinessObservations.set(boundary, observations);
+        if (hostFault === boundary && observations === 1) {
+          return { ...readyHost(), status: "stale" };
         }
         return readyHost({
           reportedProbeConfigurationVersion: "host-2-1",
@@ -3298,34 +3347,47 @@ describe("Release E2E Orchestrator", () => {
     };
     const written = [];
 
-    await expect(
-      runReleaseE2EScenario({
-        candidateManifest: candidateManifest(),
-        environment: {
-          async cleanup() {
-            calls.push("environment.cleanup");
-            return { clean: true };
-          },
-          async start() {
-            calls.push("environment.start");
-            return { host, hub };
-          },
+    const scenarioRun = runReleaseE2EScenario({
+      candidateManifest: candidateManifest(),
+      environment: {
+        async cleanup() {
+          calls.push("environment.cleanup");
+          return { clean: true };
         },
-        evidenceSink: {
-          async write(value) {
-            written.push(value);
-          },
+        async start() {
+          calls.push("environment.start");
+          return { host, hub };
         },
-        ownerPassword: "owner-password",
-        runId: "run-expanded-fresh",
-        scenario: "fresh-install-uninstall",
-        timing: {
-          intervalMs: 1,
-          sleep: async () => {},
-          timeoutMs: 10,
+      },
+      evidenceSink: {
+        async write(value) {
+          written.push(value);
         },
-      }),
-    ).resolves.toEqual({ status: "succeeded" });
+      },
+      ownerPassword: "owner-password",
+      runId: "run-expanded-fresh",
+      scenario: "fresh-install-uninstall",
+      timing: {
+        intervalMs: 1,
+        sleep: async () => {},
+        timeoutMs: 10,
+      },
+    });
+    const faultBoundary =
+      enrollmentFault ??
+      enrollmentIdMismatch ??
+      enrollmentTargetMismatch ??
+      hostFault;
+    if (faultBoundary) {
+      await expect(scenarioRun).rejects.toMatchObject({
+        code:
+          faultBoundary === "initial"
+            ? "initial_install_command_returned_before_readiness"
+            : "reenrollment_command_returned_before_readiness",
+      });
+      return { calls, written, faultBoundary };
+    }
+    await expect(scenarioRun).resolves.toEqual({ status: "succeeded" });
 
     expect(calls).toEqual(
       expect.arrayContaining([
@@ -3359,8 +3421,31 @@ describe("Release E2E Orchestrator", () => {
     expect(calls.filter((call) => call === "host.localUninstall")).toHaveLength(
       2,
     );
+    for (const [install, enrollmentId, host] of [
+      [
+        "host.install:1",
+        `hub.getEnrollment:${initialEnrollment.enrollmentId}`,
+        "hub.getHost:online",
+      ],
+      [
+        "host.install:2",
+        `hub.getEnrollment:${reenrollment.enrollmentId}`,
+        "hub.getHost:reenrolled",
+      ],
+    ]) {
+      expect(calls.filter((call) => call === enrollmentId)).toHaveLength(1);
+      expect(calls.indexOf(install)).toBeLessThan(calls.indexOf(enrollmentId));
+      expect(calls.indexOf(enrollmentId)).toBeLessThan(calls.indexOf(host));
+    }
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
+      initialInstall: {
+        enrollment: {
+          enrollmentId: initialEnrollment.enrollmentId,
+          status: "pending",
+          target: { kind: "new_host" },
+        },
+      },
       finalLocalUninstall: { completion: { clean: true } },
       hubOnlyDeletion: {
         deletedHost: { id: 7 },
@@ -3390,6 +3475,138 @@ describe("Release E2E Orchestrator", () => {
         ],
       },
       repeatedAdd: { rejection: { code: "existing_probe_installation" } },
+    });
+    expect(
+      JSON.stringify(written.at(-1).initialInstall.enrollment),
+    ).not.toMatch(
+      /enrollmentToken|installCommand|enk_enroll_release_e2e_test_token/,
+    );
+    expect(JSON.stringify(written.at(-1).reEnrollment.enrollment)).not.toMatch(
+      /enrollmentToken|installCommand|enk_enroll_release_e2e_test_token/,
+    );
+    return { calls, written };
+  }
+
+  it("proves the expanded fresh installation lifecycle without resubmitting mutations", async () => {
+    await runExpandedFreshLifecycle();
+  });
+
+  function assertImmediateReadinessRead({
+    calls,
+    enrollmentId,
+    fault,
+    hostCall,
+    installCall,
+  }) {
+    expect(calls.filter((call) => call === enrollmentId)).toHaveLength(1);
+    expect(calls.filter((call) => call === hostCall)).toHaveLength(
+      fault === "host" ? 1 : 0,
+    );
+    const installIndex = calls.indexOf(installCall);
+    expect(
+      calls.slice(installIndex + 1, installIndex + (fault === "host" ? 3 : 2)),
+    ).toEqual(fault === "host" ? [enrollmentId, hostCall] : [enrollmentId]);
+  }
+
+  it("rejects an initial install command whose Enrollment has not completed", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      enrollmentFault: "initial",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
+      fault: "enrollment",
+      hostCall: "hub.getHost:online",
+      installCall: "host.install:1",
+    });
+  });
+
+  it("rejects an initial install command whose Host is stale", async () => {
+    const { calls } = await runExpandedFreshLifecycle({ hostFault: "initial" });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
+      fault: "host",
+      hostCall: "hub.getHost:online",
+      installCall: "host.install:1",
+    });
+  });
+
+  it("rejects a Host Re-enrollment command whose Enrollment has not completed", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      enrollmentFault: "reenrollment",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
+      fault: "enrollment",
+      hostCall: "hub.getHost:reenrolled",
+      installCall: "host.install:2",
+    });
+  });
+
+  it("rejects a Host Re-enrollment command whose Host is stale", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      hostFault: "reenrollment",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
+      fault: "host",
+      hostCall: "hub.getHost:reenrolled",
+      installCall: "host.install:2",
+    });
+  });
+
+  it("rejects an initial install command completed by another Enrollment", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      enrollmentIdMismatch: "initial",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
+      fault: "enrollment",
+      hostCall: "hub.getHost:online",
+      installCall: "host.install:1",
+    });
+  });
+
+  it("rejects a Host Re-enrollment command completed by another Enrollment", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      enrollmentIdMismatch: "reenrollment",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
+      fault: "enrollment",
+      hostCall: "hub.getHost:reenrolled",
+      installCall: "host.install:2",
+    });
+  });
+
+  it("rejects an initial install command completed for a different target before reading its Host", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      enrollmentTargetMismatch: "initial",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_1",
+      fault: "enrollment",
+      hostCall: "hub.getHost:online",
+      installCall: "host.install:1",
+    });
+  });
+
+  it("rejects a Host Re-enrollment command completed for a different target before reading its Host", async () => {
+    const { calls } = await runExpandedFreshLifecycle({
+      enrollmentTargetMismatch: "reenrollment",
+    });
+    assertImmediateReadinessRead({
+      calls,
+      enrollmentId: "hub.getEnrollment:enr_release_lifecycle_3",
+      fault: "enrollment",
+      hostCall: "hub.getHost:reenrolled",
+      installCall: "host.install:2",
     });
   });
 
