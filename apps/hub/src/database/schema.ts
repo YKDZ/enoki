@@ -167,6 +167,11 @@ export type OfficialHostProfileRow = typeof officialHostProfiles.$inferSelect;
 export type NewOfficialHostProfileRow =
   typeof officialHostProfiles.$inferInsert;
 
+export const snapshotReplayReceiptWireShapes = [
+  "current_sequence",
+  "legacy_successor",
+] as const;
+
 export const snapshotReplayRequests = sqliteTable(
   "snapshot_replay_requests",
   {
@@ -180,6 +185,13 @@ export const snapshotReplayRequests = sqliteTable(
     snapshotHash: text("snapshot_hash").notNull().default(""),
     requestedAtMs: integer().notNull(),
     fulfilledAtMs: integer("fulfilled_at_ms"),
+    // A fulfilled replay is also a durable receipt for exactly one wire
+    // contract. This keeps a v0.1.72 successor retry distinguishable from a
+    // current-Probe same-sequence retry after an ordinary Observation arrives.
+    fulfilledSequence: integer("fulfilled_sequence"),
+    fulfilledWireShape: text("fulfilled_wire_shape", {
+      enum: snapshotReplayReceiptWireShapes,
+    }),
   },
   (table) => [
     uniqueIndex("snapshot_replay_requests_host_collector_idx").on(

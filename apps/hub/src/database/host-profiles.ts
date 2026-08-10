@@ -4,12 +4,13 @@ import type {
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
   hosts,
   officialHostProfiles,
+  snapshotReplayReceiptWireShapes,
   snapshotReplayRequests,
   type NewOfficialHostProfileRow,
 } from "./schema.js";
@@ -64,6 +65,16 @@ export type SnapshotReplayRequestKey = {
   snapshotHash: string;
 };
 
+export type SnapshotReplayRequestState = "fulfilled" | "pending";
+
+export type SnapshotReplayReceiptWireShape =
+  (typeof snapshotReplayReceiptWireShapes)[number];
+
+export type SnapshotReplayReceipt = {
+  key: SnapshotReplayRequestKey;
+  wireShape: SnapshotReplayReceiptWireShape;
+};
+
 export type SnapshotCollectorStorageRegistry = {
   hostProfile: SnapshotCollectorStorageAdapter<
     ProtoHostProfileSnapshot,
@@ -79,10 +90,18 @@ export type SnapshotCollectorStorageRegistry = {
   ) => void;
   snapshotReplayRequestStatus: (
     input: SnapshotReplayRequestKey,
-  ) => "fulfilled" | "pending" | null;
+  ) => SnapshotReplayRequestState | null;
+  pendingLegacySnapshotReplayRequest: (
+    input: SnapshotReplayRequestKey,
+  ) => SnapshotReplayRequestKey | null;
+  snapshotReplayReceipt: (
+    input: SnapshotReplayRequestKey,
+  ) => SnapshotReplayReceipt | null;
   fulfillSnapshotReplay: (
     input: SnapshotReplayRequestKey & {
+      acceptedSequence: number;
       fulfilledAtMs: number;
+      wireShape: SnapshotReplayReceiptWireShape;
     },
   ) => boolean;
   write: (
@@ -114,6 +133,8 @@ export function createSnapshotCollectorStorageRegistry(
           set: {
             bootId: input.bootId,
             fulfilledAtMs: null,
+            fulfilledSequence: null,
+            fulfilledWireShape: null,
             requestedAtMs: input.requestedAtMs,
             sequence: input.sequence,
             snapshotHash: input.snapshotHash,
@@ -134,11 +155,81 @@ export function createSnapshotCollectorStorageRegistry(
           : "fulfilled"
         : null;
     },
+    pendingLegacySnapshotReplayRequest(input) {
+      if (input.sequence < 2) {
+        return null;
+      }
+
+      const predecessor = database
+        .select({
+          sequence: snapshotReplayRequests.sequence,
+        })
+        .from(snapshotReplayRequests)
+        .where(
+          and(
+            eq(snapshotReplayRequests.hostId, input.hostId),
+            eq(snapshotReplayRequests.collectorId, input.collectorId),
+            eq(snapshotReplayRequests.bootId, input.bootId),
+            eq(snapshotReplayRequests.sequence, input.sequence - 1),
+            eq(snapshotReplayRequests.snapshotHash, input.snapshotHash),
+            isNull(snapshotReplayRequests.fulfilledAtMs),
+          ),
+        )
+        .get();
+
+      if (!predecessor) {
+        return null;
+      }
+
+      return {
+        ...input,
+        sequence: predecessor.sequence,
+      };
+    },
+    snapshotReplayReceipt(input) {
+      const receipt = database
+        .select({
+          sequence: snapshotReplayRequests.sequence,
+          wireShape: snapshotReplayRequests.fulfilledWireShape,
+        })
+        .from(snapshotReplayRequests)
+        .where(
+          and(
+            eq(snapshotReplayRequests.hostId, input.hostId),
+            eq(snapshotReplayRequests.collectorId, input.collectorId),
+            eq(snapshotReplayRequests.bootId, input.bootId),
+            eq(snapshotReplayRequests.snapshotHash, input.snapshotHash),
+            isNotNull(snapshotReplayRequests.fulfilledAtMs),
+            eq(snapshotReplayRequests.fulfilledSequence, input.sequence),
+          ),
+        )
+        .get();
+
+      if (
+        !receipt ||
+        (receipt.wireShape !== "current_sequence" &&
+          receipt.wireShape !== "legacy_successor")
+      ) {
+        return null;
+      }
+
+      return {
+        key: {
+          ...input,
+          sequence: receipt.sequence,
+        },
+        wireShape: receipt.wireShape,
+      };
+    },
     fulfillSnapshotReplay(input) {
       return Boolean(
         database
           .update(snapshotReplayRequests)
-          .set({ fulfilledAtMs: input.fulfilledAtMs })
+          .set({
+            fulfilledAtMs: input.fulfilledAtMs,
+            fulfilledSequence: input.acceptedSequence,
+            fulfilledWireShape: input.wireShape,
+          })
           .where(
             and(
               snapshotReplayRequestWhere(input),

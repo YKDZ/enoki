@@ -8,6 +8,7 @@ import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 
 const tempRoots: string[] = [];
+const snapshotReplayReceiptMigration = "20260810161024_misty_paper_doll";
 
 describe("Hub database", () => {
   afterEach(async () => {
@@ -346,15 +347,34 @@ describe("Hub database", () => {
     expect(
       database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
     ).toBe("pending");
+    database.sqlite
+      .prepare(
+        "update snapshot_replay_requests set fulfilled_sequence = ?, fulfilled_wire_shape = ? where managed_host_id = ?",
+      )
+      .run(3, "legacy_successor", originalRequest.hostId);
+    expect(
+      database.snapshotCollectors.snapshotReplayReceipt({
+        ...originalRequest,
+        sequence: 3,
+      }),
+    ).toBeNull();
     expect(
       database.snapshotCollectors.fulfillSnapshotReplay({
         ...originalRequest,
+        acceptedSequence: originalRequest.sequence,
         fulfilledAtMs: 1_725_000_000_100,
+        wireShape: "current_sequence",
       }),
     ).toBe(true);
     expect(
       database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
     ).toBe("fulfilled");
+    expect(
+      database.snapshotCollectors.snapshotReplayReceipt(originalRequest),
+    ).toEqual({
+      key: originalRequest,
+      wireShape: "current_sequence",
+    });
 
     const replacementRequest = {
       bootId: "boot-after-replacement",
@@ -377,14 +397,19 @@ describe("Hub database", () => {
       ),
     ).toBe("pending");
     expect(
+      database.snapshotCollectors.snapshotReplayReceipt(replacementRequest),
+    ).toBeNull();
+    expect(
       database.sqlite
         .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
         )
         .get(),
     ).toEqual({
       boot_id: "boot-after-replacement",
       fulfilled_at_ms: null,
+      fulfilled_sequence: null,
+      fulfilled_wire_shape: null,
       sequence: 4,
       snapshot_hash: "snapshot-after-replacement",
     });
@@ -392,15 +417,15 @@ describe("Hub database", () => {
     database.close();
   });
 
-  it("migrates unbound legacy Snapshot Replay requests into non-matchable receipts", async () => {
+  it("preserves pending and fulfilled legacy Snapshot Replay requests without inventing receipts", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
     const legacyMigrations = path.join(dataRoot, "legacy-replay-migrations");
     await cp(path.resolve("drizzle"), legacyMigrations, { recursive: true });
-    await rm(
-      path.join(legacyMigrations, "20260810083603_glorious_adam_warlock"),
-      { force: true, recursive: true },
-    );
+    await rm(path.join(legacyMigrations, snapshotReplayReceiptMigration), {
+      force: true,
+      recursive: true,
+    });
 
     const legacy = initializeHubDatabase(
       {
@@ -422,12 +447,46 @@ describe("Hub database", () => {
         ],
       },
     );
+    expect(
+      legacy.sqlite
+        .prepare(
+          "select name from pragma_table_info('snapshot_replay_requests')",
+        )
+        .all(),
+    ).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "fulfilled_sequence" }),
+        expect.objectContaining({ name: "fulfilled_wire_shape" }),
+      ]),
+    );
     createHost(legacy, { id: 89, probeId: "probe-legacy-snapshot-replay" });
+    createHost(legacy, { id: 90, probeId: "probe-legacy-replay-receipt" });
     legacy.sqlite
       .prepare(
-        "insert into snapshot_replay_requests (managed_host_id, collector_id, requested_at_ms) values (?, ?, ?)",
+        "insert into snapshot_replay_requests (managed_host_id, collector_id, boot_id, sequence, snapshot_hash, requested_at_ms, fulfilled_at_ms) values (?, ?, ?, ?, ?, ?, ?)",
       )
-      .run(89, "official.host-profile", 1_725_000_000_000);
+      .run(
+        89,
+        "official.host-profile",
+        "boot-pending",
+        3,
+        "snapshot-pending",
+        1_725_000_000_000,
+        null,
+      );
+    legacy.sqlite
+      .prepare(
+        "insert into snapshot_replay_requests (managed_host_id, collector_id, boot_id, sequence, snapshot_hash, requested_at_ms, fulfilled_at_ms) values (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        90,
+        "official.host-profile",
+        "boot-fulfilled",
+        4,
+        "snapshot-fulfilled",
+        1_725_000_000_001,
+        1_725_000_000_002,
+      );
     legacy.close();
 
     const migrated = initializeHubDatabase({
@@ -437,23 +496,52 @@ describe("Hub database", () => {
     expect(
       migrated.sqlite
         .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+          "select managed_host_id, boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests order by managed_host_id",
         )
-        .get(),
-    ).toEqual({
-      boot_id: "",
-      fulfilled_at_ms: null,
-      sequence: 0,
-      snapshot_hash: "",
-    });
+        .all(),
+    ).toEqual([
+      {
+        boot_id: "boot-pending",
+        fulfilled_at_ms: null,
+        fulfilled_sequence: null,
+        fulfilled_wire_shape: null,
+        managed_host_id: 89,
+        sequence: 3,
+        snapshot_hash: "snapshot-pending",
+      },
+      {
+        boot_id: "boot-fulfilled",
+        fulfilled_at_ms: 1_725_000_000_002,
+        fulfilled_sequence: null,
+        fulfilled_wire_shape: null,
+        managed_host_id: 90,
+        sequence: 4,
+        snapshot_hash: "snapshot-fulfilled",
+      },
+    ]);
     expect(
       migrated.snapshotCollectors.snapshotReplayRequestStatus({
-        bootId: "boot-after-migration",
+        bootId: "boot-pending",
         collectorId: "official.host-profile",
         hostId: 89,
-        sequence: 1,
-        snapshotHash: "snapshot-after-migration",
+        sequence: 3,
+        snapshotHash: "snapshot-pending",
       }),
+    ).toBe("pending");
+    const legacyFulfilledRequest = {
+      bootId: "boot-fulfilled",
+      collectorId: "official.host-profile",
+      hostId: 90,
+      sequence: 4,
+      snapshotHash: "snapshot-fulfilled",
+    };
+    expect(
+      migrated.snapshotCollectors.snapshotReplayRequestStatus(
+        legacyFulfilledRequest,
+      ),
+    ).toBe("fulfilled");
+    expect(
+      migrated.snapshotCollectors.snapshotReplayReceipt(legacyFulfilledRequest),
     ).toBeNull();
 
     migrated.close();

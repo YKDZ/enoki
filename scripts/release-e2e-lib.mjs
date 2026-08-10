@@ -169,7 +169,9 @@ async function runHubRestoreCompatibilityWindowScenario({
     },
     releaseTestHost: null,
     reporting: {
+      baselineCandidateHub: null,
       candidateHub: null,
+      postRestoreCandidateHub: null,
       restoredBaselineHub: null,
     },
     result: { status: "running" },
@@ -231,7 +233,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
-    await waitForObservation({
+    const baselineHost = await waitForObservation({
       code: "restore_baseline_reporting_timeout",
       label: "Release Baseline core reporting before Hub State Snapshot",
       observe: () => hub.getHost(hostId),
@@ -247,12 +249,18 @@ async function runHubRestoreCompatibilityWindowScenario({
       beforeUpgrade: baselineIdentity,
       hostId,
     };
-    await waitForObservation({
+    const baselineMetrics = await waitForObservation({
       code: "restore_baseline_metrics_timeout",
       label: "Release Baseline portable Metrics before Hub State Snapshot",
       observe: () => hub.getHostMetrics(hostId),
       poll,
       ready: hasAdvancingPortableMetrics,
+    });
+    const baselineReportingCheckpoint = reportingCheckpoint({
+      code: "restore_baseline_reporting_checkpoint_missing",
+      host: baselineHost,
+      label: "Release Baseline Probe before Candidate Hub switch",
+      metrics: baselineMetrics,
     });
 
     activeBoundary = "snapshot";
@@ -265,15 +273,26 @@ async function runHubRestoreCompatibilityWindowScenario({
     activeBoundary = "migration";
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
-    await waitForObservation({
-      code: "restore_baseline_probe_candidate_hub_timeout",
-      label: "Release Baseline Probe reporting to Candidate Hub",
-      observe: () => hub.getHost(hostId),
-      poll,
-      ready: (value) =>
-        value?.id === hostId &&
-        isCandidateHostReady(value, baseline.probeAssetSet.version),
-    });
+    const { host: baselineCandidateHost, metrics: baselineCandidateMetrics } =
+      await waitForReportingAdvance({
+        checkpoint: baselineReportingCheckpoint,
+        expectedProbeVersion: baseline.probeAssetSet.version,
+        hostId,
+        hostObservation: {
+          code: "restore_baseline_probe_candidate_hub_timeout",
+          label: "Release Baseline Probe reporting to Candidate Hub",
+        },
+        hub,
+        metricsObservation: {
+          code: "restore_baseline_probe_candidate_metrics_timeout",
+          label: "Release Baseline Probe portable Metrics on Candidate Hub",
+        },
+        poll,
+      });
+    evidence.reporting.baselineCandidateHub = {
+      host: compactHostEvidence(baselineCandidateHost),
+      metrics: compactMetricsEvidence(baselineCandidateMetrics),
+    };
     evidence.protocol.baselineProbeToCandidateHub = "succeeded";
     await host.beginUpgradeOwnershipTransition(
       runId,
@@ -405,19 +424,39 @@ async function runHubRestoreCompatibilityWindowScenario({
       host: compactHostEvidence(restoredHost),
       metrics: compactMetricsEvidence(restoredMetrics),
     };
+    const restoredReportingCheckpoint = reportingCheckpoint({
+      code: "restored_baseline_reporting_checkpoint_missing",
+      host: restoredHost,
+      label: "Candidate Probe on restored Release Baseline Hub",
+      metrics: restoredMetrics,
+    });
 
     activeBoundary = "uninstall";
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
-    await waitForObservation({
-      code: "candidate_probe_post_restore_hub_timeout",
-      label: "Candidate Probe reporting after returning to Candidate Hub",
-      observe: () => hub.getHost(hostId),
+    const {
+      host: postRestoreCandidateHost,
+      metrics: postRestoreCandidateMetrics,
+    } = await waitForReportingAdvance({
+      checkpoint: restoredReportingCheckpoint,
+      expectedProbeVersion: candidateManifest.probeAssetSet.version,
+      hostId,
+      hostObservation: {
+        code: "candidate_probe_post_restore_hub_timeout",
+        label: "Candidate Probe reporting after returning to Candidate Hub",
+      },
+      hub,
+      metricsObservation: {
+        code: "candidate_probe_post_restore_metrics_timeout",
+        label:
+          "Candidate Probe portable Metrics after returning to Candidate Hub",
+      },
       poll,
-      ready: (value) =>
-        value?.id === hostId &&
-        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
     });
+    evidence.reporting.postRestoreCandidateHub = {
+      host: compactHostEvidence(postRestoreCandidateHost),
+      metrics: compactMetricsEvidence(postRestoreCandidateMetrics),
+    };
     const requestedUninstall = await hub.requestProbeUninstall(hostId);
     evidence.uninstall.operationTimeline = [requestedUninstall];
     evidence.uninstall.operationTimeline = await hub.waitForProbeOperation(
@@ -633,7 +672,7 @@ async function runPostReplacementRepairUninstallScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
-    await waitForObservation({
+    const baselineHost = await waitForObservation({
       code: "repair_baseline_reporting_timeout",
       label: "Release Baseline Probe reporting before Repair scenario Upgrade",
       observe: () => hub.getHost(hostId),
@@ -643,34 +682,38 @@ async function runPostReplacementRepairUninstallScenario({
         isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
     const baselineIdentity = await host.readProbeIdentity(runId);
-    evidence.metrics.beforeUpgrade = compactMetricsEvidence(
-      await waitForObservation({
-        code: "repair_baseline_metrics_timeout",
-        label: "Release Baseline portable Metrics before Repair",
-        observe: () => hub.getHostMetrics(hostId),
-        poll,
-        ready: hasAdvancingPortableMetrics,
-      }),
-    );
-    const metricCheckpoint = latestPortableMetric(
-      await hub.getHostMetrics(hostId),
-    );
-    if (!metricCheckpoint) {
-      throw assertionError(
-        "repair_metrics_checkpoint_missing",
-        "Repair scenario has no pre-Upgrade portable Metrics checkpoint",
-      );
-    }
+    const baselineMetrics = await waitForObservation({
+      code: "repair_baseline_metrics_timeout",
+      label: "Release Baseline portable Metrics before Repair",
+      observe: () => hub.getHostMetrics(hostId),
+      poll,
+      ready: hasAdvancingPortableMetrics,
+    });
+    const baselineReportingCheckpoint = reportingCheckpoint({
+      code: "repair_reporting_checkpoint_missing",
+      host: baselineHost,
+      label: "Release Baseline Probe before Candidate Hub switch",
+      metrics: baselineMetrics,
+    });
+    evidence.metrics.beforeUpgrade = compactMetricsEvidence(baselineMetrics);
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
-    await waitForObservation({
-      code: "repair_baseline_probe_candidate_hub_compatibility_timeout",
-      label: "Release Baseline Probe reporting to Candidate Hub before Repair",
-      observe: () => hub.getHost(hostId),
+    await waitForReportingAdvance({
+      checkpoint: baselineReportingCheckpoint,
+      expectedProbeVersion: baseline.probeAssetSet.version,
+      hostId,
+      hostObservation: {
+        code: "repair_baseline_probe_candidate_hub_compatibility_timeout",
+        label:
+          "Release Baseline Probe reporting to Candidate Hub before Repair",
+      },
+      hub,
+      metricsObservation: {
+        code: "repair_baseline_probe_candidate_metrics_timeout",
+        label:
+          "Release Baseline Probe portable Metrics on Candidate Hub before Repair",
+      },
       poll,
-      ready: (value) =>
-        value?.id === hostId &&
-        isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
     evidence.probeConfiguration.beforeUpgrade =
       await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
@@ -770,7 +813,7 @@ async function runPostReplacementRepairUninstallScenario({
         poll,
         ready: (samples) =>
           hasAdvancingPortableMetrics(samples) &&
-          metricsAdvanceBeyond(samples, metricCheckpoint),
+          metricsAdvanceBeyond(samples, baselineReportingCheckpoint.metric),
       }),
     );
     evidence.probeConfiguration.afterRepair =
@@ -1568,7 +1611,7 @@ async function runBaselineUpgradeUninstallScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
-    await waitForObservation({
+    const baselineHost = await waitForObservation({
       code: "baseline_host_core_reporting_timeout",
       label: "Release Baseline Probe reporting to the Release Baseline Hub",
       observe: () => hub.getHost(hostId),
@@ -1577,6 +1620,20 @@ async function runBaselineUpgradeUninstallScenario({
         isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
     const baselineIdentity = await host.readProbeIdentity(runId);
+    const baselineMetrics = await waitForObservation({
+      code: "baseline_metrics_checkpoint_timeout",
+      label:
+        "Release Baseline Probe portable Metrics before Candidate Hub switch",
+      observe: () => hub.getHostMetrics(hostId),
+      poll,
+      ready: hasAdvancingPortableMetrics,
+    });
+    const baselineReportingCheckpoint = reportingCheckpoint({
+      code: "baseline_reporting_checkpoint_missing",
+      host: baselineHost,
+      label: "Release Baseline Probe before Candidate Hub switch",
+      metrics: baselineMetrics,
+    });
 
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
@@ -1591,28 +1648,28 @@ async function runBaselineUpgradeUninstallScenario({
         "Candidate Hub did not retain the Release Baseline Host state",
       );
     }
-    const compatibleHost = await waitForObservation({
-      code: "baseline_probe_candidate_hub_compatibility_timeout",
-      label: "Release Baseline Probe reporting to the Candidate Hub",
-      observe: () => hub.getHost(hostId),
-      poll,
-      ready: (value) =>
-        value?.id === hostId &&
-        isCandidateHostReady(value, baseline.probeAssetSet.version),
-    });
+    const { host: compatibleHost, metrics: beforeMetrics } =
+      await waitForReportingAdvance({
+        checkpoint: baselineReportingCheckpoint,
+        expectedProbeVersion: baseline.probeAssetSet.version,
+        hostId,
+        hostObservation: {
+          code: "baseline_probe_candidate_hub_compatibility_timeout",
+          label: "Release Baseline Probe reporting to the Candidate Hub",
+        },
+        hub,
+        metricsObservation: {
+          code: "baseline_probe_candidate_metrics_progression_timeout",
+          label: "Release Baseline Probe portable Metrics on the Candidate Hub",
+        },
+        poll,
+      });
     if (compatibleHost.probeUpgradeStatus !== null) {
       throw assertionError(
         "unattended_probe_upgrade_detected",
         "A Probe Upgrade operation existed before Owner authorization",
       );
     }
-    const beforeMetrics = await waitForObservation({
-      code: "baseline_probe_metrics_progression_timeout",
-      label: "Release Baseline Probe portable Metrics on the Candidate Hub",
-      observe: () => hub.getHostMetrics(hostId),
-      poll,
-      ready: hasAdvancingPortableMetrics,
-    });
     evidence.metrics.beforeUpgrade = compactMetricsEvidence(beforeMetrics);
     evidence.probeConfiguration.beforeUpgrade =
       await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
@@ -5132,6 +5189,54 @@ function metricsAdvanceBeyond(samples, previous) {
   return (
     latest?.sequence > previous?.sequence &&
     latest?.collectedAtMs > previous?.collectedAtMs
+  );
+}
+
+function reportingCheckpoint({ code, host, label, metrics }) {
+  const lastReportAtMs = host?.lastReportAtMs;
+  const metric = latestPortableMetric(metrics);
+  if (!Number.isSafeInteger(lastReportAtMs) || lastReportAtMs < 1 || !metric) {
+    throw assertionError(
+      code,
+      `${label} did not expose a last Report timestamp and portable Metrics checkpoint`,
+    );
+  }
+  return { lastReportAtMs, metric };
+}
+
+export async function waitForReportingAdvance({
+  checkpoint,
+  expectedProbeVersion,
+  hostId,
+  hostObservation,
+  hub,
+  metricsObservation,
+  poll,
+}) {
+  const host = await waitForObservation({
+    ...hostObservation,
+    observe: () => hub.getHost(hostId),
+    poll,
+    ready: (value) =>
+      value?.id === hostId &&
+      isCandidateHostReady(value, expectedProbeVersion) &&
+      reportAdvancedBeyond(value, checkpoint),
+  });
+  const metrics = await waitForObservation({
+    ...metricsObservation,
+    observe: () => hub.getHostMetrics(hostId),
+    poll,
+    ready: (samples) =>
+      hasAdvancingPortableMetrics(samples) &&
+      metricsAdvanceBeyond(samples, checkpoint.metric),
+  });
+  return { host, metrics };
+}
+
+function reportAdvancedBeyond(host, checkpoint) {
+  return (
+    Number.isSafeInteger(host?.lastReportAtMs) &&
+    host.lastReportAtMs > checkpoint.lastReportAtMs
   );
 }
 
