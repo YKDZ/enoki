@@ -3990,7 +3990,10 @@ claim=/var/lib/enoki-release-e2e/claim
 [ -f "$claim/upgrade-before-resources" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$identity_layout" = current ]
+[ "$identity_layout" = current ] || {
+  printf 'installer_recovery_requires_current_identity_layout: found %s\n' "$identity_layout" >&2
+  exit 1
+}
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.recovery.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -4015,7 +4018,6 @@ claim=/var/lib/enoki-release-e2e/claim
 [ ! -e "$claim/post-replacement-fault" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$identity_layout" = current ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.repair.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
