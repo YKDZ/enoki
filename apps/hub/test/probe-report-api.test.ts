@@ -660,6 +660,568 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it("rejects a current Probe successor full observation when the old wire-shape replay is pending", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const currentProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.73",
+    });
+    const changedCurrentProfile = sampleHostProfileSnapshot({
+      hostname: "current-probe-successor-full-observation",
+      probeVersion: "0.1.73",
+    });
+    const changedHash = hashStableHostProfile(changedCurrentProfile);
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-current-successor-full-observation",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: currentProfile,
+                  snapshotHash: hashStableHostProfile(currentProfile),
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-current-successor-full-observation",
+              metrics: [
+                {
+                  collectedAtMs: 1_725_000_000_001,
+                  cpuPercent: 12.5,
+                  sequence: 2,
+                },
+              ],
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 2,
+              sequenceStart: 2,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  snapshotHash: changedHash,
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) {
+      throw new Error("registered Probe Host is missing");
+    }
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.73",
+        hostId: host.id,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
+
+    const successor = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-current-successor-full-observation",
+          operationAcknowledgements: [{ operationId: String(operation.id) }],
+          operationStatuses: [
+            { operationId: String(operation.id), running: {} },
+          ],
+          probeConfigurationError: {
+            errorCode: "probe_configuration_fetch_failed",
+            failedVersion: "default-v1",
+            message: "report request failed: 503 Service Unavailable",
+          },
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 3,
+          sequenceStart: 3,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: changedCurrentProfile,
+              snapshotHash: changedHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(successor.status).toBe(400);
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus({
+        bootId: "boot-current-successor-full-observation",
+        collectorId: "official.host-profile",
+        hostId: host.id,
+        sequence: 2,
+        snapshotHash: changedHash,
+      }),
+    ).toBe("pending");
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "pending" }),
+    );
+
+    database.close();
+  });
+
+  it("accepts a duplicate Startup report with local operation evidence as a normal idempotent report", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const startupProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.73",
+    });
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    const startup = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-startup-operation-retry",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: startupProfile,
+            snapshotHash: hashStableHostProfile(startupProfile),
+          },
+        ],
+      }),
+    ).finish();
+    expect((await send(startup)).status).toBe(200);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) {
+      throw new Error("registered Probe Host is missing");
+    }
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.73",
+        hostId: host.id,
+        nowMs,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
+
+    const retry = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-startup-operation-retry",
+          operationAcknowledgements: [{ operationId: String(operation.id) }],
+          operationStatuses: [
+            { operationId: String(operation.id), running: {} },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: startupProfile,
+              snapshotHash: hashStableHostProfile(startupProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(retry.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "running" }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 1 });
+
+    database.close();
+  });
+
+  it("rejects a legacy full observation that conflicts with an exact pending current replay", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const legacyProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
+    const changedLegacyProfile = sampleHostProfileSnapshot({
+      hostname: "legacy-pending-current-replay-conflict",
+      probeVersion: "0.1.72",
+    });
+    const changedHash = hashStableHostProfile(changedLegacyProfile);
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-legacy-pending-current-replay-conflict",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: legacyProfile,
+                  snapshotHash: hashStableHostProfile(legacyProfile),
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) {
+      throw new Error("registered Probe Host is missing");
+    }
+    database.snapshotCollectors.requestSnapshotReplay({
+      bootId: "boot-legacy-pending-current-replay-conflict",
+      collectorId: "official.host-profile",
+      hostId: host.id,
+      requestedAtMs: 1_725_000_000_000,
+      sequence: 2,
+      snapshotHash: changedHash,
+    });
+
+    const conflicting = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-legacy-pending-current-replay-conflict",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_001,
+              cpuPercent: 12.5,
+              sequence: 2,
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: changedLegacyProfile,
+              snapshotHash: changedHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(conflicting.status).toBe(400);
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus({
+        bootId: "boot-legacy-pending-current-replay-conflict",
+        collectorId: "official.host-profile",
+        hostId: host.id,
+        sequence: 2,
+        snapshotHash: changedHash,
+      }),
+    ).toBe("pending");
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 1 });
+
+    database.close();
+  });
+
+  it("accepts a v0.1.72 full Host Profile-only Observation without a Snapshot Replay receipt", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const startupProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
+    const changedProfile = sampleHostProfileSnapshot({
+      hostname: "v0.1.72-full-only-observation",
+      probeVersion: "0.1.72",
+    });
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-v0-1-72-full-only-observation",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: startupProfile,
+                  snapshotHash: hashStableHostProfile(startupProfile),
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+
+    const fullOnlyObservation = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-full-only-observation",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: changedProfile,
+              snapshotHash: hashStableHostProfile(changedProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(fullOnlyObservation.status).toBe(200);
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({ hostname: "v0.1.72-full-only-observation" }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 2 });
+
+    database.close();
+  });
+
+  it("does not let an old boot pending replay block a new boot v0.1.72 full Observation", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const startupProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
+    const oldBootUnknownProfile = sampleHostProfileSnapshot({
+      hostname: "old-boot-unknown-profile",
+      probeVersion: "0.1.72",
+    });
+    const oldBootUnknownHash = hashStableHostProfile(oldBootUnknownProfile);
+    const newBootProfile = sampleHostProfileSnapshot({
+      hostname: "new-boot-startup-profile",
+      probeVersion: "0.1.72",
+    });
+    const newBootObservationProfile = sampleHostProfileSnapshot({
+      hostname: "new-boot-full-observation",
+      probeVersion: "0.1.72",
+    });
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    const fullProfileFrame = (
+      bootId: string,
+      sequence: number,
+      profile: root.enoki.v1.IHostProfileSnapshot,
+    ) =>
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: profile,
+              snapshotHash: hashStableHostProfile(profile),
+            },
+          ],
+        }),
+      ).finish();
+
+    expect(
+      (await send(fullProfileFrame("boot-v0-1-72-old", 1, startupProfile)))
+        .status,
+    ).toBe(200);
+    const compact = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-old",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_000,
+              cpuPercent: 12.5,
+              sequence: 2,
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              snapshotHash: oldBootUnknownHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(compact.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
+        .requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+
+    expect(
+      (await send(fullProfileFrame("boot-v0-1-72-new", 1, newBootProfile)))
+        .status,
+    ).toBe(200);
+    const newBootObservation = await send(
+      fullProfileFrame("boot-v0-1-72-new", 2, newBootObservationProfile),
+    );
+
+    expect(newBootObservation.status).toBe(200);
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({ hostname: "new-boot-full-observation" }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 4 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-v0-1-72-old",
+      fulfilled_at_ms: null,
+      fulfilled_sequence: null,
+      fulfilled_wire_shape: null,
+      sequence: 2,
+      snapshot_hash: oldBootUnknownHash,
+    });
+
+    database.close();
+  });
+
   it("accepts the v0.1.72 collector-capability full observation without weakening current Probe replay", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -1889,9 +2451,12 @@ describe("Probe report API", () => {
     const registration = await registerProbe(app, enrollmentToken);
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
-    const startupHostProfile = sampleHostProfileSnapshot();
+    const startupHostProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
     const changedHostProfile = sampleHostProfileSnapshot({
       hostname: "v0.1.72-follow-up-host",
+      probeVersion: "0.1.72",
     });
     const changedHash = hashStableHostProfile(changedHostProfile);
     const wrongHashHostProfile = sampleHostProfileSnapshot({
@@ -1961,6 +2526,15 @@ describe("Probe report API", () => {
 
     const host = database.hosts.findByProbeId(registration.probeId);
     expect(host).not.toBeNull();
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: host?.probeVersion ?? "0.1.0",
+        hostId: host?.id ?? -1,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
     const configurationResponse = await app.request(
       `/api/web/hosts/${host?.id}/probe-configuration`,
       {
@@ -2047,6 +2621,13 @@ describe("Probe report API", () => {
     const legacyFollowUpBody = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-v0-1-72-follow-up",
+        operationAcknowledgements: [{ operationId: String(operation.id) }],
+        operationStatuses: [{ operationId: String(operation.id), running: {} }],
+        probeConfigurationError: {
+          errorCode: "probe_configuration_fetch_failed",
+          failedVersion: configuration.configuration.version,
+          message: "report request failed: 503 Service Unavailable",
+        },
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 3,
@@ -2066,6 +2647,16 @@ describe("Probe report API", () => {
       ReportResponse.decode(new Uint8Array(await legacyFollowUp.arrayBuffer()))
         .currentProbeConfigurationVersion,
     ).toBe(configuration.configuration.version);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "running" }),
+    );
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({
+        probeConfigurationErrorCode: "probe_configuration_fetch_failed",
+        probeConfigurationErrorFailedVersion:
+          configuration.configuration.version,
+      }),
+    );
     expect(
       database.sqlite
         .prepare(

@@ -91,6 +91,11 @@ export type SnapshotCollectorStorageRegistry = {
   snapshotReplayRequestStatus: (
     input: SnapshotReplayRequestKey,
   ) => SnapshotReplayRequestState | null;
+  hasPendingSnapshotReplayRequest: (input: {
+    bootId: string;
+    collectorId: string;
+    hostId: number;
+  }) => boolean;
   pendingLegacySnapshotReplayRequest: (
     input: SnapshotReplayRequestKey,
   ) => SnapshotReplayRequestKey | null;
@@ -154,6 +159,22 @@ export function createSnapshotCollectorStorageRegistry(
           ? "pending"
           : "fulfilled"
         : null;
+    },
+    hasPendingSnapshotReplayRequest(input) {
+      return Boolean(
+        database
+          .select({ sequence: snapshotReplayRequests.sequence })
+          .from(snapshotReplayRequests)
+          .where(
+            and(
+              eq(snapshotReplayRequests.hostId, input.hostId),
+              eq(snapshotReplayRequests.bootId, input.bootId),
+              eq(snapshotReplayRequests.collectorId, input.collectorId),
+              isNull(snapshotReplayRequests.fulfilledAtMs),
+            ),
+          )
+          .get(),
+      );
     },
     pendingLegacySnapshotReplayRequest(input) {
       if (input.sequence < 2) {

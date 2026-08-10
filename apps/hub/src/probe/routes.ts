@@ -347,7 +347,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       hostProfileSnapshot,
       report: validatedReport,
       request,
-      storedProbeVersion: host.probeVersion,
     });
     if (!reportResponsibility) {
       return probeJsonError("malformed_probe_report", 400);
@@ -374,12 +373,20 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         probeId: request.probeId,
         sequence: validatedReport.sequenceStart,
       });
-      const isSnapshotReplay =
-        reportResponsibility === "snapshot_replay" ||
+      const bootStartAlreadyAccepted = services.metrics.hasObservation({
+        bootId: request.bootId,
+        probeId: request.probeId,
+        sequence: 1,
+      });
+      const hasCurrentReplayOnlyContents =
+        hasSnapshotReplayOnlyContents(request);
+      const isFullHostProfileReport =
+        reportResponsibility === "full_host_profile" ||
         (reportResponsibility === "startup" &&
           replaySequenceAlreadyAccepted &&
-          hasSnapshotReplayOnlyContents(request));
-      if (isSnapshotReplay) {
+          hasCurrentReplayOnlyContents);
+      let isSnapshotReplay = false;
+      if (isFullHostProfileReport) {
         const snapshotHash =
           hostProfileSnapshot?.snapshotHash ??
           hostProfileSnapshot?.canonicalHash;
@@ -397,6 +404,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           services.snapshotCollectors?.snapshotReplayRequestStatus(
             replayRequest,
           ) ?? null;
+        const hasPendingSnapshotReplayRequest =
+          services.snapshotCollectors?.hasPendingSnapshotReplayRequest({
+            bootId: request.bootId,
+            collectorId: hostProfileCollectorId,
+            hostId: host.id,
+          }) ?? false;
         // v0.1.72 advances to the next sequence when following a compact
         // Host Profile request. Only a still-pending request can authorize
         // that initial +1 full snapshot; after fulfillment its exact retry is
@@ -409,38 +422,70 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         const replayReceipt =
           services.snapshotCollectors?.snapshotReplayReceipt(replayRequest) ??
           null;
+        const hasNoMetrics = (request.metrics ?? []).length === 0;
+        const permitsLegacyFullObservation =
+          reportResponsibility === "full_host_profile" &&
+          permitsLegacyFullHostProfileObservation({
+            reportedProbeVersion:
+              hostProfileSnapshot?.hostProfile?.probeVersion,
+            storedProbeVersion: host.probeVersion,
+          });
         // Snapshot Replay must exactly match the tuple the Hub requested. Its
         // receipt already exists, while recordObservation is an idempotent no-op.
         // A fulfilled tuple accepts only its exact lost-response retry.
-        // The no-registry path is explicit legacy compatibility for injected
-        // route services predating Snapshot Replay request persistence.
-        if (services.snapshotCollectors) {
+        if (!services.snapshotCollectors) {
+          if (!permitsLegacyFullObservation) {
+            throw new ReportBusinessRejection("malformed_probe_report", 400);
+          }
+        } else {
           if (
             replaySequenceAlreadyAccepted &&
+            hasCurrentReplayOnlyContents &&
             replayRequestStatus === "pending"
           ) {
             // The current-Probe replay uses the already accepted sequence;
             // this pending request is fulfilled by its full snapshot.
             snapshotReplayToFulfill = replayRequest;
             snapshotReplayWireShape = "current_sequence";
+            isSnapshotReplay = true;
           } else if (
             replaySequenceAlreadyAccepted &&
+            hasCurrentReplayOnlyContents &&
             replayReceipt?.wireShape === "current_sequence" &&
             replayReceipt.key.sequence === replayRequest.sequence
           ) {
             // Exact current-Probe replay retry. Its receipt already exists.
+            isSnapshotReplay = true;
           } else if (
             replaySequenceAlreadyAccepted &&
+            hasNoMetrics &&
             replayReceipt?.wireShape === "legacy_successor" &&
-            replayReceipt.key.sequence + 1 === replayRequest.sequence
+            replayReceipt.key.sequence + 1 === replayRequest.sequence &&
+            permitsLegacyFullObservation
           ) {
             // Idempotent retry of the v0.1.72 successor-sequence follow-up.
+            isSnapshotReplay = true;
           } else if (
             !replaySequenceAlreadyAccepted &&
-            pendingLegacyReplayRequest
+            hasNoMetrics &&
+            pendingLegacyReplayRequest &&
+            permitsLegacyFullObservation
           ) {
             snapshotReplayToFulfill = pendingLegacyReplayRequest;
             snapshotReplayWireShape = "legacy_successor";
+            isSnapshotReplay = true;
+          } else if (
+            permitsLegacyFullObservation &&
+            bootStartAlreadyAccepted &&
+            replayRequestStatus === null &&
+            !hasPendingSnapshotReplayRequest &&
+            !pendingLegacyReplayRequest &&
+            !replayReceipt
+          ) {
+            // v0.1.72 also emitted ordinary full Host Profile Observations
+            // after its boot had started. No pending or matching replay state
+            // means this is a new time slice, not a replay inferred from its
+            // payload shape.
           } else {
             throw new ReportBusinessRejection("malformed_probe_report", 400);
           }
@@ -2119,12 +2164,10 @@ function reportResponsibilityFor(input: {
   hostProfileSnapshot: ReturnType<typeof hostProfileSnapshotFromReport>;
   report: { sequenceEnd: number; sequenceStart: number };
   request: ProtoMessage;
-  storedProbeVersion: string | null | undefined;
 }):
+  | "full_host_profile"
   | "legacy_observation"
-  | "legacy_full_observation"
   | "observation"
-  | "snapshot_replay"
   | "startup"
   | null {
   const snapshots = (input.request.snapshots ?? []) as ProtoMessage[];
@@ -2163,16 +2206,7 @@ function reportResponsibilityFor(input: {
   }
 
   if (snapshot.hostProfile !== null) {
-    if (hasSnapshotReplayOnlyContents(input.request)) {
-      return "snapshot_replay";
-    }
-
-    return permitsLegacyFullHostProfileObservation({
-      reportedProbeVersion: snapshot.hostProfile.probeVersion,
-      storedProbeVersion: input.storedProbeVersion,
-    })
-      ? "legacy_full_observation"
-      : null;
+    return "full_host_profile";
   }
 
   return "observation";
