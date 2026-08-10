@@ -425,15 +425,23 @@ function openWebSocket(
   });
 }
 
-function readWebSocketJson(socket: WebSocket) {
+function readWebSocketJson(
+  socket: WebSocket,
+  predicate: (message: unknown) => boolean = () => true,
+) {
   return new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for WebSocket message."));
     }, 500);
     const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as unknown;
+      if (!predicate(message)) {
+        return;
+      }
+
       cleanup();
-      resolve(JSON.parse(data.toString()));
+      resolve(message);
     };
     const onError = (error: Error) => {
       cleanup();
@@ -1060,7 +1068,22 @@ describe("WebSocket live updates", () => {
         type: "subscribe_host_detail",
       }),
     );
-    const messages = collectWebSocketJson(socket);
+    const profileUpdate = readWebSocketJson(socket, (message) => {
+      if (!message || typeof message !== "object") {
+        return false;
+      }
+
+      const update = message as {
+        hostId?: unknown;
+        hostProfile?: { hostname?: unknown };
+        type?: unknown;
+      };
+      return (
+        update.type === "host_profile" &&
+        update.hostId === 1 &&
+        update.hostProfile?.hostname === "profile-live-host"
+      );
+    });
     await sendReport(baseUrl, registration, {
       bootId: "boot-profile-live",
       hostProfile: {
@@ -1088,19 +1111,15 @@ describe("WebSocket live updates", () => {
       sequence: 2,
     });
 
-    await expect(messages).resolves.toEqual(
-      expect.arrayContaining([
-        {
-          hostId: 1,
-          hostProfile: expect.objectContaining({
-            cpuCount: 4,
-            hostname: "profile-live-host",
-            probeVersion: "0.2.0",
-          }),
-          type: "host_profile",
-        },
-      ]),
-    );
+    await expect(profileUpdate).resolves.toEqual({
+      hostId: 1,
+      hostProfile: expect.objectContaining({
+        cpuCount: 4,
+        hostname: "profile-live-host",
+        probeVersion: "0.2.0",
+      }),
+      type: "host_profile",
+    });
 
     await closeSocket(socket);
     database.close();
