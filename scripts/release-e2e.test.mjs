@@ -1003,107 +1003,111 @@ describe("Probe Host Harness", () => {
     },
   );
 
-  it.each([
-    ["Installer Recovery", "recoverUpgradeWithInstaller"],
-    ["Repair", "completeRepairOwnershipTransition"],
-  ])(
-    "executes the current-layout ownership completion shell after %s",
-    async (_label, completion) => {
-      const fixture = await createOwnershipCompletionShellFixture();
-      const operation = failedUpgradeOperation();
-      try {
-        await fixture.harness.assertDisposable("run-completion");
-        await fixture.harness.install(officialInstallCommand, "run-completion");
-        await fixture.harness.beginUpgradeOwnershipTransition(
-          "run-completion",
-          operation.targetProbeVersion,
-        );
-        await fixture.harness.bindUpgradeOwnershipTransition(
-          "run-completion",
-          pendingUpgradeOperation(),
-        );
+  it("executes current-layout ownership completion after Installer Recovery", async () => {
+    const fixture = await createOwnershipCompletionShellFixture();
+    const operation = failedUpgradeOperation();
+    try {
+      await prepareOwnershipCompletionFixture(
+        fixture,
+        "run-installer-recovery-completion",
+        operation,
+      );
 
-        if (completion === "recoverUpgradeWithInstaller") {
-          await expect(
-            fixture.harness.recoverUpgradeWithInstaller(
-              officialInstallCommand,
-              "run-completion",
-              operation,
-            ),
-          ).resolves.toMatchObject({ mode: "installer", status: "succeeded" });
-        } else {
-          await fixture.harness.repair("run-completion");
-          await expect(
-            fixture.harness.completeRepairOwnershipTransition(
-              "run-completion",
-              operation,
-            ),
-          ).resolves.toMatchObject({ owned: true });
-        }
-
-        expect(fixture.executedCompletionShell).toBe(true);
-      } finally {
-        await fixture.dispose();
-      }
-    },
-  );
-
-  it.each([
-    ["Installer Recovery", "recoverUpgradeWithInstaller"],
-    ["Repair", "completeRepairOwnershipTransition"],
-  ])(
-    "rejects the legacy v0.1.72 layout without rewriting claim resources after %s",
-    async (_label, completion) => {
-      const fixture = await createOwnershipCompletionShellFixture();
-      const operation = failedUpgradeOperation();
-      try {
-        await fixture.harness.assertDisposable("run-legacy-completion");
-        await fixture.harness.install(
+      await expect(
+        fixture.harness.recoverUpgradeWithInstaller(
           officialInstallCommand,
-          "run-legacy-completion",
-        );
-        await fixture.harness.beginUpgradeOwnershipTransition(
-          "run-legacy-completion",
-          operation.targetProbeVersion,
-        );
-        await fixture.harness.bindUpgradeOwnershipTransition(
-          "run-legacy-completion",
-          pendingUpgradeOperation(),
-        );
-        const resourcesBefore = await fixture.readClaimResources();
+          "run-installer-recovery-completion",
+          operation,
+        ),
+      ).resolves.toMatchObject({ mode: "installer", status: "succeeded" });
+      expect(fixture.executedCompletionShell).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  });
 
-        if (completion === "recoverUpgradeWithInstaller") {
-          fixture.setInstallerIdentityPath("/etc/enoki/probe-bootstrap.toml");
-          await expect(
-            fixture.harness.recoverUpgradeWithInstaller(
-              officialInstallCommand,
-              "run-legacy-completion",
-              operation,
-            ),
-          ).rejects.toThrow(/Could not commit run-owned Probe resources/);
-        } else {
-          await fixture.materializeProbe("/etc/enoki/probe-bootstrap.toml");
-          await fixture.harness.repair("run-legacy-completion");
-          await expect(
-            fixture.harness.completeRepairOwnershipTransition(
-              "run-legacy-completion",
-              operation,
-            ),
-          ).rejects.toThrow(/Could not commit run-owned Probe resources/);
-        }
+  it("rejects a legacy v0.1.72 identity layout after Installer Recovery without rewriting claim resources", async () => {
+    const fixture = await createOwnershipCompletionShellFixture();
+    const operation = failedUpgradeOperation();
+    try {
+      await prepareOwnershipCompletionFixture(
+        fixture,
+        "run-installer-recovery-legacy",
+        operation,
+      );
+      const resourcesBefore = await fixture.readClaimResources();
+      fixture.setInstallerIdentityPath("/etc/enoki/probe-bootstrap.toml");
 
-        expect(fixture.executedCompletionShell).toBe(true);
-        expect(fixture.lastCompletionShell).toContain(
-          '[ "$identity_layout" = current ]',
-        );
-        await expect(fixture.readClaimResources()).resolves.toBe(
-          resourcesBefore,
-        );
-      } finally {
-        await fixture.dispose();
-      }
-    },
-  );
+      await expect(
+        fixture.harness.recoverUpgradeWithInstaller(
+          officialInstallCommand,
+          "run-installer-recovery-legacy",
+          operation,
+        ),
+      ).rejects.toThrow(
+        /installer_recovery_requires_current_identity_layout: found v0_1_72/,
+      );
+      expect(fixture.executedCompletionShell).toBe(true);
+      expect(fixture.lastCompletionShell).toContain(
+        "installer_recovery_requires_current_identity_layout",
+      );
+      await expect(fixture.readClaimResources()).resolves.toBe(resourcesBefore);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("executes current-layout ownership completion after Repair", async () => {
+    const fixture = await createOwnershipCompletionShellFixture();
+    const operation = failedUpgradeOperation();
+    try {
+      await prepareOwnershipCompletionFixture(
+        fixture,
+        "run-repair-current-completion",
+        operation,
+      );
+      await fixture.harness.repair("run-repair-current-completion");
+
+      await expect(
+        fixture.harness.completeRepairOwnershipTransition(
+          "run-repair-current-completion",
+          operation,
+        ),
+      ).resolves.toMatchObject({ owned: true });
+      expect(fixture.executedCompletionShell).toBe(true);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  it("completes Repair with a supported legacy v0.1.72 identity layout and renews ownership for cleanup", async () => {
+    const fixture = await createOwnershipCompletionShellFixture();
+    const operation = failedUpgradeOperation();
+    const runId = "run-repair-legacy-completion";
+    try {
+      await prepareOwnershipCompletionFixture(fixture, runId, operation);
+      const resourcesBefore = await fixture.readClaimResources();
+      await fixture.materializeProbe("/etc/enoki/probe-bootstrap.toml");
+      await fixture.harness.repair(runId);
+
+      await expect(
+        fixture.harness.completeRepairOwnershipTransition(runId, operation),
+      ).resolves.toMatchObject({ owned: true });
+      expect(fixture.lastCompletionShell).not.toContain(
+        "installer_recovery_requires_current_identity_layout",
+      );
+      await expect(fixture.readClaimResources()).resolves.not.toBe(
+        resourcesBefore,
+      );
+      fixture.prepareCleanup();
+      await expect(fixture.harness.cleanup(runId)).resolves.toEqual({
+        clean: true,
+        removedPartialInstallation: true,
+      });
+    } finally {
+      await fixture.dispose();
+    }
+  });
 
   it("rejects an installed Probe binary from a different candidate version", async () => {
     let inventoryCount = 0;
@@ -7545,6 +7549,8 @@ async function createOwnershipCompletionShellFixture({
   installerIdentityPath = "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
 } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-completion-"));
+  let cleanupPrepared = false;
+  let cleanupRemovedResources = false;
   let executedCompletionShell = false;
   let lastCompletionShell = null;
   let nextInstallerIdentityPath = installerIdentityPath;
@@ -7583,6 +7589,18 @@ async function createOwnershipCompletionShellFixture({
   const harness = createProbeHostHarness({
     execute: async (command) => {
       if (command.includes("# enoki-release-e2e:inventory")) {
+        if (cleanupPrepared && !cleanupRemovedResources) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [
+              "/usr/local/bin/enoki-probe",
+              "/etc/enoki/probe-bootstrap.toml",
+              "/etc/enoki/probe-install.toml",
+              "/var/lib/enoki-probe",
+            ],
+            units: ["enoki-probe.service"],
+          });
+        }
         return successfulCommand({
           accounts: { group: false, user: false },
           files: [],
@@ -7596,6 +7614,13 @@ async function createOwnershipCompletionShellFixture({
         return successfulCommandText(
           "Probe Repair succeeded: probe=probe_release_completion version=1.2.3\n",
         );
+      }
+      if (command.includes("# enoki-release-e2e:emergency-cleanup")) {
+        cleanupRemovedResources = true;
+        return successfulCommandText("");
+      }
+      if (command.includes("# enoki-release-e2e:daemon-reload")) {
+        return successfulCommandText("");
       }
       if (!command.includes("# enoki-release-e2e:")) {
         await materializeProbe();
@@ -7623,6 +7648,9 @@ async function createOwnershipCompletionShellFixture({
       return lastCompletionShell;
     },
     materializeProbe,
+    prepareCleanup() {
+      cleanupPrepared = true;
+    },
     readClaimResources: () =>
       readFile(
         path.join(root, "/var/lib/enoki-release-e2e/claim/resources"),
@@ -7632,6 +7660,19 @@ async function createOwnershipCompletionShellFixture({
       nextInstallerIdentityPath = identityPath;
     },
   };
+}
+
+async function prepareOwnershipCompletionFixture(fixture, runId, operation) {
+  await fixture.harness.assertDisposable(runId);
+  await fixture.harness.install(officialInstallCommand, runId);
+  await fixture.harness.beginUpgradeOwnershipTransition(
+    runId,
+    operation.targetProbeVersion,
+  );
+  await fixture.harness.bindUpgradeOwnershipTransition(
+    runId,
+    pendingUpgradeOperation(),
+  );
 }
 
 function pendingUpgradeOperation() {
