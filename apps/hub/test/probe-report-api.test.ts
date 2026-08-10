@@ -3025,6 +3025,7 @@ describe("Probe report API", () => {
 
   it("soft deletes the Host after a Probe Uninstall Operation reports success", async () => {
     const database = await createTemporaryDatabase();
+    const removedHostIds: number[] = [];
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -3032,6 +3033,14 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      liveUpdates: {
+        broadcastDetailSample() {},
+        broadcastHostProfile() {},
+        broadcastHostRemoved(hostId: number) {
+          removedHostIds.push(hostId);
+        },
+        broadcastHostSummary() {},
+      } as never,
       now: () => 1_725_000_010_000,
       probeOperationTokenSecret: "configured-token-signing-secret",
     });
@@ -3085,6 +3094,7 @@ describe("Probe report API", () => {
       runningAtMs: 1_725_000_010_000,
       state: "running",
     });
+    expect(removedHostIds).toEqual([]);
 
     const legacyBearerStatus = await app.request(
       `/api/probe/operations/${operation.id}/status`,
@@ -3117,6 +3127,7 @@ describe("Probe report API", () => {
       ),
     );
     expect(status.status).toBe(200);
+    expect(removedHostIds).toEqual([host.id]);
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {

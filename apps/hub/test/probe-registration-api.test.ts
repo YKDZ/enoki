@@ -775,6 +775,153 @@ describe("Probe registration API", () => {
     database.close();
   });
 
+  it("keeps an Enrollment pending when registration fails pure Host Profile validation", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const identity = createTestProbeIdentity();
+    const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+
+    const rejected = await app.request("/api/probe/register", {
+      body: RegistrationRequest.encode(
+        RegistrationRequest.create({
+          enrollmentToken,
+          probePublicKeyPem: identity.publicKeyPem,
+        }),
+      ).finish(),
+      headers: {
+        "content-type": "application/x-protobuf",
+      },
+      method: "POST",
+    });
+
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({
+      error: "malformed_probe_registration",
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs, managed_host_id as hostId, verification_deadline_at_ms as verificationDeadlineAtMs from enrollment_tokens",
+        )
+        .get(),
+    ).toEqual({
+      hostId: null,
+      status: "pending",
+      usedAtMs: null,
+      verificationDeadlineAtMs: null,
+    });
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from managed_hosts")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    const retry = await registerProbe(app, enrollmentToken);
+    expect(retry.status).toBe(200);
+
+    database.close();
+  });
+
+  it("commits NewHost registration, Host Profile, and verifying Enrollment association together", async () => {
+    const database = await createTemporaryDatabase();
+    const registeredAtMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => registeredAtMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const created = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    const enrollment = (await created.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+    };
+
+    const registration = await registerProbe(app, enrollment.enrollmentToken);
+    expect(registration.status).toBe(200);
+    expect(
+      database.sqlite
+        .prepare(
+          `select
+            enrollment_tokens.status as status,
+            enrollment_tokens.used_at_ms as usedAtMs,
+            enrollment_tokens.managed_host_id as hostId,
+            enrollment_tokens.verification_deadline_at_ms as verificationDeadlineAtMs,
+            (select count(*) from official_host_profiles where managed_host_id = enrollment_tokens.managed_host_id) as profiles
+          from enrollment_tokens where enrollment_id = ?`,
+        )
+        .get(enrollment.enrollmentId),
+    ).toEqual({
+      hostId: 1,
+      profiles: 1,
+      status: "verifying",
+      usedAtMs: registeredAtMs,
+      verificationDeadlineAtMs: registeredAtMs + 60_000,
+    });
+
+    database.close();
+  });
+
+  it("rolls back token consumption and Host creation when Host Profile persistence fails", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    database.sqlite.exec(`
+      create trigger reject_enrollment_host_profile
+      before insert on official_host_profiles
+      begin
+        select raise(abort, 'forced Host Profile write failure');
+      end;
+    `);
+
+    const response = await registerProbe(app, enrollmentToken);
+
+    expect(response.status).toBe(500);
+    expect(
+      database.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs, managed_host_id as hostId, verification_deadline_at_ms as verificationDeadlineAtMs from enrollment_tokens",
+        )
+        .get(),
+    ).toEqual({
+      hostId: null,
+      status: "pending",
+      usedAtMs: null,
+      verificationDeadlineAtMs: null,
+    });
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from managed_hosts")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
   it("rejects Probe registration with an invalid Enrollment Token", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -1283,6 +1430,7 @@ describe("Probe registration API", () => {
     const createdAtMs = Date.now();
     database.enrollments.createPending({
       createdAtMs,
+      enrollmentId: "enr_direct_observed_ip",
       expiresAtMs: createdAtMs + 60_000,
       tokenHash: hashSecret(enrollmentToken),
     });

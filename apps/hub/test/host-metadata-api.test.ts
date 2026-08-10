@@ -729,7 +729,7 @@ describe("Host Metadata API", () => {
     database.close();
   });
 
-  it("keeps a succeeded Probe Uninstall observable to the Owner after Host soft deletion", async () => {
+  it("keeps a succeeded Probe Uninstall observable when Host removal delivery fails", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -738,6 +738,14 @@ describe("Host Metadata API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      liveUpdates: {
+        broadcastDetailSample() {},
+        broadcastHostProfile() {},
+        broadcastHostRemoved() {
+          throw new Error("socket closed");
+        },
+        broadcastHostSummary() {},
+      } as never,
       now: () => 1_725_000_065_000,
     });
     const ownerSession = await loginOwner(app);
@@ -831,6 +839,7 @@ describe("Host Metadata API", () => {
 
   it("can delete Hub-side Host data when the Probe is already gone", async () => {
     const database = await createTemporaryDatabase();
+    const removedHostIds: number[] = [];
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -838,6 +847,14 @@ describe("Host Metadata API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      liveUpdates: {
+        broadcastDetailSample() {},
+        broadcastHostProfile() {},
+        broadcastHostRemoved(hostId: number) {
+          removedHostIds.push(hostId);
+        },
+        broadcastHostSummary() {},
+      } as never,
       now: () => 1_725_000_070_000,
     });
     const ownerSession = await loginOwner(app);
@@ -863,6 +880,7 @@ describe("Host Metadata API", () => {
         id: hostId,
       },
     });
+    expect(removedHostIds).toEqual([hostId]);
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
@@ -889,6 +907,44 @@ describe("Host Metadata API", () => {
         subjectType: "host",
       }),
     );
+
+    database.close();
+  });
+
+  it("keeps a committed Hub-only deletion when realtime delivery fails", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      liveUpdates: {
+        broadcastHostRemoved() {
+          throw new Error("socket closed");
+        },
+      } as never,
+      now: () => 1_725_000_080_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken);
+    const hostId = await firstHostId(app, ownerSession);
+    if (!hostId) {
+      throw new Error("Expected a Host created by Probe Enrollment.");
+    }
+
+    const response = await app.request(
+      `/api/web/hosts/${hostId}?mode=hub-only`,
+      {
+        headers: { cookie: ownerSession },
+        method: "DELETE",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    expect(database.hosts.findActiveById(hostId)).toBeNull();
 
     database.close();
   });

@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   sqliteTable,
@@ -7,6 +8,13 @@ import {
   uniqueIndex,
   real,
 } from "drizzle-orm/sqlite-core";
+
+import {
+  enrollmentStatusValues,
+  enrollmentTargetKindValues,
+  maxEnrollmentRejectionCodeLength,
+  maxEnrollmentRejectionMessageLength,
+} from "../enrollment/lifecycle.js";
 
 export const auditLog = sqliteTable("audit_log", {
   id: integer().primaryKey({ autoIncrement: true }),
@@ -28,13 +36,41 @@ export const enrollmentTokens = sqliteTable(
   "enrollment_tokens",
   {
     id: integer().primaryKey({ autoIncrement: true }),
+    enrollmentId: text(),
     tokenHash: text().notNull(),
     createdAtMs: integer().notNull(),
     expiresAtMs: integer().notNull(),
     usedAtMs: integer(),
+    targetKind: text({ enum: enrollmentTargetKindValues }),
+    targetHostId: integer("target_host_id"),
+    status: text({ enum: enrollmentStatusValues }).notNull().default("expired"),
+    hostId: integer("managed_host_id"),
+    verificationDeadlineAtMs: integer(),
+    readyAtMs: integer(),
+    rejectedAtMs: integer(),
+    expiredAtMs: integer(),
+    rejectionCode: text(),
+    rejectionMessage: text(),
   },
   (table) => [
     uniqueIndex("enrollment_tokens_token_hash_idx").on(table.tokenHash),
+    uniqueIndex("enrollment_tokens_enrollment_id_idx").on(table.enrollmentId),
+    index("enrollment_tokens_status_expiry_idx").on(
+      table.status,
+      table.expiresAtMs,
+    ),
+    check(
+      "enrollment_tokens_status_check",
+      sql`${table.status} in ('pending', 'verifying', 'ready', 'rejected', 'expired')`,
+    ),
+    check(
+      "enrollment_tokens_target_check",
+      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
+    ),
+    check(
+      "enrollment_tokens_rejection_check",
+      sql`(${table.rejectionCode} is null and ${table.rejectionMessage} is null) or (${table.rejectionCode} is not null and length(${table.rejectionCode}) between 1 and ${sql.raw(String(maxEnrollmentRejectionCodeLength))} and (${table.rejectionMessage} is null or length(${table.rejectionMessage}) between 1 and ${sql.raw(String(maxEnrollmentRejectionMessageLength))}))`,
+    ),
   ],
 );
 

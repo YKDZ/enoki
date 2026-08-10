@@ -10,7 +10,11 @@ import WebSocket from "ws";
 import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
-import { createTestProbeIdentity, signedProbeHeaders } from "./probe-test-auth";
+import {
+  createTestProbeIdentity,
+  signedJsonProbeHeaders,
+  signedProbeHeaders,
+} from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 const openServers: Array<{ close: () => Promise<void> }> = [];
@@ -250,6 +254,73 @@ async function sendReport(
   expect(response.status).toBe(200);
 }
 
+async function completeProbeUninstall(
+  baseUrl: string,
+  registration: {
+    privateKeyPem: string;
+    probeId: string;
+  },
+  operationId: number,
+) {
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const ReportResponse = root.enoki.v1.ProbeReportResponse;
+  const reportBody = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: "boot-probe-uninstall",
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: 1,
+      sequenceStart: 1,
+    }),
+  ).finish();
+  const reportUrl = `${baseUrl}/api/probe/report`;
+  const report = await fetch(reportUrl, {
+    body: reportBody,
+    headers: signedProbeHeaders({
+      body: reportBody,
+      pathAndQuery: reportUrl,
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
+    method: "POST",
+  });
+  expect(report.status).toBe(200);
+  const token = ReportResponse.decode(
+    new Uint8Array(await report.arrayBuffer()),
+  ).pendingOperation?.probeUninstall?.operationToken;
+  if (!token) {
+    throw new Error("Expected a Probe Uninstall operation token.");
+  }
+
+  const tokenPath = `/api/probe/operations/${operationId}/token/validate`;
+  const tokenBody = JSON.stringify({ token });
+  const tokenValidation = await fetch(`${baseUrl}${tokenPath}`, {
+    body: tokenBody,
+    headers: signedJsonProbeHeaders({
+      body: tokenBody,
+      pathAndQuery: `${baseUrl}${tokenPath}`,
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
+    method: "POST",
+  });
+  expect(tokenValidation.status).toBe(200);
+
+  const statusPath = `/api/probe/operations/${operationId}/status`;
+  const statusBody = JSON.stringify({ status: "succeeded", token });
+  const status = await fetch(`${baseUrl}${statusPath}`, {
+    body: statusBody,
+    headers: signedJsonProbeHeaders({
+      body: statusBody,
+      pathAndQuery: `${baseUrl}${statusPath}`,
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
+    method: "POST",
+  });
+  expect(status.status).toBe(200);
+}
+
 function openWebSocket(
   url: string,
   options: {
@@ -284,6 +355,36 @@ function readWebSocketJson(socket: WebSocket) {
     const onMessage = (data: WebSocket.RawData) => {
       cleanup();
       resolve(JSON.parse(data.toString()));
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
+function readHostRemoved(socket: WebSocket) {
+  return new Promise<unknown>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for a Host removal message."));
+    }, 500);
+    const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as { type?: string };
+      if (message.type !== "host_removed") {
+        return;
+      }
+
+      cleanup();
+      resolve(message);
     };
     const onError = (error: Error) => {
       cleanup();
@@ -442,6 +543,35 @@ describe("WebSocket live updates", () => {
     ]);
   });
 
+  it("broadcasts a non-secret Host removal hint to every authenticated client", () => {
+    const liveUpdates = createLiveUpdateBroadcaster();
+    const firstClientMessages: unknown[] = [];
+    const secondClientMessages: unknown[] = [];
+    const firstSocket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        firstClientMessages.push(JSON.parse(message) as unknown);
+      },
+    };
+    const secondSocket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        secondClientMessages.push(JSON.parse(message) as unknown);
+      },
+    };
+
+    liveUpdates.addClient(firstSocket as never, { sessionId: "owner-one" });
+    liveUpdates.addClient(secondSocket as never, { sessionId: "owner-two" });
+    liveUpdates.broadcastHostRemoved(42);
+
+    expect(firstClientMessages).toEqual([{ hostId: 42, type: "host_removed" }]);
+    expect(secondClientMessages).toEqual([
+      { hostId: 42, type: "host_removed" },
+    ]);
+  });
+
   it("requires an Owner session for the browser WebSocket endpoint", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({ database });
@@ -480,6 +610,80 @@ describe("WebSocket live updates", () => {
     expect(response.status).toBe(200);
     await expect(closed).resolves.toBeUndefined();
 
+    database.close();
+  });
+
+  it("emits host_removed only after a Hub-only Host deletion commits", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const removal = readWebSocketJson(socket);
+
+    const response = await fetch(
+      `${baseUrl}/api/web/hosts/${host.id}?mode=hub-only`,
+      {
+        headers: { cookie: ownerSession },
+        method: "DELETE",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(removal).resolves.toEqual({
+      hostId: host.id,
+      type: "host_removed",
+    });
+    expect(database.hosts.findActiveById(host.id)).toBeNull();
+
+    await closeSocket(socket);
+    database.close();
+  });
+
+  it("emits host_removed through the real WebSocket only after Probe Uninstall Completion", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({ database });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const deletion = await fetch(`${baseUrl}/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+      method: "DELETE",
+    });
+    const requested = (await deletion.json()) as {
+      probeUninstallRequest: { id: number };
+    };
+    expect(deletion.status).toBe(202);
+
+    const removal = readHostRemoved(socket);
+    await completeProbeUninstall(
+      baseUrl,
+      registration,
+      requested.probeUninstallRequest.id,
+    );
+
+    await expect(removal).resolves.toEqual({
+      hostId: host.id,
+      type: "host_removed",
+    });
+    expect(database.hosts.findActiveById(host.id)).toBeNull();
+
+    await closeSocket(socket);
     database.close();
   });
 

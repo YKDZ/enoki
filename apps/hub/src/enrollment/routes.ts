@@ -10,6 +10,7 @@ import {
   type InstallationCommandConfig,
   renderInstallCommand,
 } from "./install-command.js";
+import { enrollmentStatusResponse, validEnrollmentId } from "./lifecycle.js";
 
 const enrollmentTokenTtlMs = 1000 * 60 * 15;
 
@@ -29,9 +30,11 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
   routes.post("/", (context) => {
     const createdAtMs = now();
     const expiresAtMs = createdAtMs + enrollmentTokenTtlMs;
+    const enrollmentId = createEnrollmentId();
     const enrollmentToken = createEnrollmentToken();
     const row = services.enrollments.createPending({
       createdAtMs,
+      enrollmentId,
       expiresAtMs,
       tokenHash: hashSecret(enrollmentToken),
     });
@@ -40,6 +43,7 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       action: "enrollment_token.create",
       actor: "owner",
       details: {
+        enrollmentId,
         expiresAtMs,
       },
       occurredAtMs: createdAtMs,
@@ -49,9 +53,14 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
+    const status = enrollmentStatusResponse(row);
+    if (!status) {
+      throw new Error("New Enrollment did not satisfy the lifecycle boundary.");
+    }
+
     const response = {
+      ...status,
       enrollmentToken,
-      expiresAtMs,
       ...renderInstallCommand(installation, {
         enrollmentToken,
         requestUrl: context.req.url,
@@ -59,6 +68,21 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
     } satisfies EnrollmentResponse;
 
     return context.json(response, 201);
+  });
+
+  routes.get("/:enrollmentId", (context) => {
+    const enrollmentId = context.req.param("enrollmentId");
+    if (!validEnrollmentId(enrollmentId)) {
+      return context.json({ error: "enrollment_not_found" }, 404);
+    }
+
+    const enrollment = services.enrollments.readStatus(enrollmentId, now());
+    const status = enrollment && enrollmentStatusResponse(enrollment);
+    if (!status) {
+      return context.json({ error: "enrollment_not_found" }, 404);
+    }
+
+    return context.json(status);
   });
 
   return routes;
@@ -70,4 +94,8 @@ export function hashSecret(secret: string) {
 
 function createEnrollmentToken() {
   return `enk_enroll_${randomBytes(32).toString("base64url")}`;
+}
+
+function createEnrollmentId() {
+  return `enr_${randomBytes(16).toString("base64url")}`;
 }

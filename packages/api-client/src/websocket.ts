@@ -100,6 +100,10 @@ export type WebSocketServerMessage =
       hostId: number;
       sample: HostDetailSample;
       type: "host_detail_sample";
+    }
+  | {
+      hostId: number;
+      type: "host_removed";
     };
 
 const hostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
@@ -281,6 +285,10 @@ export const webSocketServerMessageSchema = v.variant("type", [
     hostId: hostIdSchema,
     sample: hostDetailSampleSchema,
     type: v.literal("host_detail_sample"),
+  }),
+  v.strictObject({
+    hostId: hostIdSchema,
+    type: v.literal("host_removed"),
   }),
 ]);
 

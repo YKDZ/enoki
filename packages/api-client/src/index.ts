@@ -72,9 +72,41 @@ export type HostsResponse = {
   hosts: HostSummary[];
 };
 
-export type EnrollmentResponse = {
-  enrollmentToken: string;
+export type EnrollmentStatus =
+  | "pending"
+  | "verifying"
+  | "ready"
+  | "rejected"
+  | "expired";
+
+export type EnrollmentTarget =
+  | {
+      kind: "new_host";
+    }
+  | {
+      hostId: number;
+      kind: "existing_host";
+    };
+
+export type EnrollmentStatusResponse = {
+  createdAtMs: number;
+  enrollmentId: string;
   expiresAtMs: number;
+  expiredAtMs: number | null;
+  hostId: number | null;
+  readyAtMs: number | null;
+  rejectedAtMs: number | null;
+  rejection: {
+    code: string;
+    message: string | null;
+  } | null;
+  status: EnrollmentStatus;
+  target: EnrollmentTarget;
+  verificationDeadlineAtMs: number | null;
+};
+
+export type EnrollmentResponse = EnrollmentStatusResponse & {
+  enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
   installPath: string;

@@ -75,27 +75,34 @@ export function applyHostProfileLiveUpdate(
   };
 }
 
+export function applyHostRemoved(hosts: HostSummary[], hostId: number) {
+  return hosts.filter((host) => host.id !== hostId);
+}
+
 export function useLiveUpdates(options: {
   hosts: Ref<HostSummary[]>;
   isAuthenticated: Ref<boolean>;
   loadHosts: () => Promise<void>;
   onDetailSample?: (sample: HostDetailSample) => void;
   onHostProfile?: (hostId: number, hostProfile: HostProfileSnapshot) => void;
+  onHostRemoved?: (hostId: number) => void;
   onSummary?: (summary: HostLiveSummary) => void;
   reconnectDelayMs?: number;
   recoverDetail?: () => Promise<void>;
+  recoverEnrollment?: () => Promise<void>;
 }) {
   let liveUpdatesSocket: WebSocket | null = null;
   let detailHostId: number | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectGeneration = 0;
   const reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
 
   function connectLiveUpdates() {
     disconnectLiveUpdates();
-    openLiveUpdatesSocket();
+    openLiveUpdatesSocket(null);
   }
 
-  function openLiveUpdatesSocket() {
+  function openLiveUpdatesSocket(recoveryGeneration: number | null) {
     if (!options.isAuthenticated.value) {
       return;
     }
@@ -105,16 +112,30 @@ export function useLiveUpdates(options: {
       `${protocol}//${window.location.host}/api/web/ws`,
     );
     liveUpdatesSocket = socket;
+    let recoveredAfterOpen = false;
 
     socket.addEventListener("message", (event) => {
       void handleLiveUpdate(event.data);
     });
     socket.addEventListener("open", () => {
+      if (liveUpdatesSocket !== socket) {
+        return;
+      }
+
       if (detailHostId !== null) {
         sendClientMessage({
           hostId: detailHostId,
           type: "subscribe_host_detail",
         });
+      }
+
+      if (
+        recoveryGeneration !== null &&
+        recoveryGeneration === reconnectGeneration &&
+        !recoveredAfterOpen
+      ) {
+        recoveredAfterOpen = true;
+        void recoverCurrentHttpState();
       }
     });
     socket.addEventListener("close", () => {
@@ -156,19 +177,20 @@ export function useLiveUpdates(options: {
       return;
     }
 
-    void recoverCurrentHttpState();
+    const recoveryGeneration = ++reconnectGeneration;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      openLiveUpdatesSocket();
+      openLiveUpdatesSocket(recoveryGeneration);
     }, reconnectDelayMs);
   }
 
   async function recoverCurrentHttpState() {
     try {
       await options.loadHosts();
-      if (detailHostId !== null) {
-        await options.recoverDetail?.();
-      }
+      await Promise.all([
+        detailHostId === null ? undefined : options.recoverDetail?.(),
+        options.recoverEnrollment?.(),
+      ]);
     } catch {
       // The reconnect attempt still proceeds; the next close can retry recovery.
     }
@@ -187,6 +209,15 @@ export function useLiveUpdates(options: {
     }
 
     const message = parseWebSocketServerMessage(payload);
+
+    if (message?.type === "host_removed") {
+      options.hosts.value = applyHostRemoved(
+        options.hosts.value,
+        message.hostId,
+      );
+      options.onHostRemoved?.(message.hostId);
+      return;
+    }
 
     if (message?.type === "host_detail_sample") {
       options.onDetailSample?.(message.sample);

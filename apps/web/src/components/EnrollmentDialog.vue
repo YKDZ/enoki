@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { LoaderCircle } from "@lucide/vue";
+import { nextTick, ref, watch } from "vue";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +25,45 @@ defineEmits<{
   createEnrollment: [];
   "update:open": [open: boolean];
 }>();
+
+const installCommandControl = ref<HTMLTextAreaElement | null>(null);
+let focusedInstallCommand: string | null = null;
+
+watch(
+  [
+    () => props.enrollment?.installCommand,
+    () => props.isCreatingEnrollment,
+    () => props.open,
+  ],
+  async ([installCommand, isCreatingEnrollment, isOpen]) => {
+    if (
+      !installCommand ||
+      isCreatingEnrollment ||
+      !isOpen ||
+      installCommand === focusedInstallCommand
+    ) {
+      return;
+    }
+
+    focusedInstallCommand = installCommand;
+    await nextTick();
+    if (
+      !props.open ||
+      props.isCreatingEnrollment ||
+      props.enrollment?.installCommand !== installCommand
+    ) {
+      return;
+    }
+
+    const control = installCommandControl.value;
+    if (!control) {
+      return;
+    }
+
+    control.focus();
+  },
+  { flush: "post" },
+);
 </script>
 
 <template>
@@ -56,7 +96,9 @@ defineEmits<{
 
         <template v-else-if="enrollment">
           <p class="text-muted-foreground text-sm">
-            {{ new Date(enrollment.expiresAtMs).toLocaleString() }} 过期
+            状态：{{
+              enrollment.status === "pending" ? "等待安装" : "正在验证"
+            }}
           </p>
 
           <dl class="grid gap-3 text-sm sm:grid-cols-3">
@@ -74,9 +116,22 @@ defineEmits<{
             </div>
           </dl>
 
-          <pre
-            class="max-h-72 overflow-auto bg-black p-4 font-mono text-xs leading-5 whitespace-pre-wrap text-white"
-          ><code>{{ enrollment.installCommand }}</code></pre>
+          <textarea
+            v-if="enrollment.status === 'pending'"
+            ref="installCommandControl"
+            aria-label="安装命令"
+            autocomplete="off"
+            class="h-44 max-h-72 w-full resize-y overflow-auto bg-black p-4 font-mono text-xs leading-5 text-white"
+            :value="enrollment.installCommand"
+            readonly
+            rows="6"
+            spellcheck="false"
+            wrap="off"
+          />
+
+          <p v-else class="text-muted-foreground text-sm" aria-live="polite">
+            正在验证探针是否已连接到 Hub。
+          </p>
         </template>
 
         <div v-else class="text-muted-foreground text-sm">暂无安装命令。</div>

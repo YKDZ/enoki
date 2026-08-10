@@ -13,7 +13,10 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 
 import type { EnrollmentRepository } from "../database/enrollments.js";
-import type { SnapshotCollectorStorageRegistry } from "../database/host-profiles.js";
+import {
+  hostProfilePersistenceValues,
+  type SnapshotCollectorStorageRegistry,
+} from "../database/host-profiles.js";
 import type {
   HostStatusThresholds,
   HostRepository,
@@ -23,6 +26,7 @@ import type { ProbeConfigurationRepository } from "../database/probe-configurati
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import { hashSecret } from "../enrollment/routes.js";
 import {
+  broadcastHostRemovedHint,
   liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
@@ -54,6 +58,7 @@ const maxProbeReportPayloadBytes = 1024 * 1024;
 const maxProbeOperationPayloadBytes = 16 * 1024;
 const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
+const enrollmentVerificationTtlMs = 60 * 1000;
 const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
 
 type ProtoMessage = Record<string, any>;
@@ -126,64 +131,59 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("snapshot_hash_mismatch", 400);
     }
 
-    const registeredAtMs = now();
-    const enrollment = services.enrollments.consume(
-      hashSecret(request.enrollmentToken),
-      registeredAtMs,
-    );
-
-    if (!enrollment) {
-      return probeJsonError("invalid_enrollment_token", 401);
-    }
-
-    const probeId = createProbeId();
-    const probeSecretPlaceholder = createProbeSecret();
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    if (!hostProfile) {
+    if (!hostProfileSnapshot || !hostProfile) {
       return probeJsonError("malformed_probe_registration", 400);
     }
 
-    const hostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
+    const registeredAtMs = now();
+    const probeId = createProbeId();
+    const probeSecretPlaceholder = createProbeSecret();
+    const hostProfileHash = hostProfileSnapshot.canonicalHash;
     const observedIp = observedIpFromContext(
       context,
       services.trustForwardedHeaders,
     );
     const displayName =
       hostProfile.hostname?.trim() || fallbackDisplayName(probeId);
-
-    const createdHost = services.hosts.create({
-      architecture: hostProfile.architecture || null,
-      clockSkewDetected: false,
-      connectAddress: firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
-      createdAtMs: registeredAtMs,
-      cpuCount: hostProfile.cpuCount || null,
-      cpuModel: hostProfile.cpuModel?.trim() || null,
-      displayName,
-      displayNameEdited: false,
-      hostname: hostProfile.hostname || null,
-      kernel: hostProfile.kernel || null,
-      lastClockSkewMs: null,
-      lastReportAtMs: null,
-      memoryTotalBytes: hostProfile.memoryTotalBytes
-        ? Number(hostProfile.memoryTotalBytes)
-        : null,
-      observedIp,
-      probePublicKeyPem: request.probePublicKeyPem,
-      os: hostProfile.os || null,
-      probeConfigurationVersion: defaultProbeConfiguration.version,
-      probeId,
-      probeSecretHash: hashSecret(probeSecretPlaceholder),
-      probeVersion: hostProfile.probeVersion || null,
-    });
-    if (hostProfile && hostProfileHash) {
-      services.snapshotCollectors?.write({
-        collectorId: hostProfileCollectorId,
-        hostId: createdHost.id,
+    const registration = services.enrollments.registerNewHost({
+      host: {
+        architecture: hostProfile.architecture || null,
+        clockSkewDetected: false,
+        connectAddress:
+          firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
+        createdAtMs: registeredAtMs,
+        cpuCount: hostProfile.cpuCount || null,
+        cpuModel: hostProfile.cpuModel?.trim() || null,
+        displayName,
+        displayNameEdited: false,
+        hostname: hostProfile.hostname || null,
+        kernel: hostProfile.kernel || null,
+        lastClockSkewMs: null,
+        lastReportAtMs: null,
+        memoryTotalBytes: hostProfile.memoryTotalBytes
+          ? Number(hostProfile.memoryTotalBytes)
+          : null,
         observedIp,
+        probePublicKeyPem: request.probePublicKeyPem,
+        os: hostProfile.os || null,
+        probeConfigurationVersion: defaultProbeConfiguration.version,
+        probeId,
+        probeSecretHash: hashSecret(probeSecretPlaceholder),
+        probeVersion: hostProfile.probeVersion || null,
+      },
+      hostProfile: hostProfilePersistenceValues({
         payload: hostProfile,
         snapshotHash: hostProfileHash,
         updatedAtMs: registeredAtMs,
-      });
+      }),
+      registeredAtMs,
+      tokenHash: hashSecret(request.enrollmentToken),
+      verificationDeadlineAtMs: registeredAtMs + enrollmentVerificationTtlMs,
+    });
+
+    if (!registration) {
+      return probeJsonError("invalid_enrollment_token", 401);
     }
 
     const body = RegistrationResponse.encode(
@@ -1093,7 +1093,13 @@ function completeProbeUninstallIfSucceeded(input: {
     return;
   }
 
-  input.services.hosts.softDelete(input.operation.hostId, input.nowMs);
+  const deleted = input.services.hosts.softDelete(
+    input.operation.hostId,
+    input.nowMs,
+  );
+  if (deleted) {
+    broadcastHostRemovedHint(input.services.liveUpdates, deleted.id);
+  }
 }
 
 function markProbeUpgradeSucceededFromHostProfile(input: {

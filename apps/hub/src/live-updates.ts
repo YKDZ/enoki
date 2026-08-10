@@ -22,6 +22,7 @@ export type LiveUpdateBroadcaster = {
     hostId: number,
     hostProfile: HostProfileSnapshot,
   ) => void;
+  broadcastHostRemoved: (hostId: number) => void;
   broadcastHostSummary: (summary: HostLiveSummary) => void;
   closeSession: (sessionId: string) => void;
   handleClientMessage: (socket: WSContext, message: WSMessageReceive) => void;
@@ -63,6 +64,16 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
         if (client.detailHostId === hostId) {
           sendJson(client.socket, message);
         }
+      }
+    },
+    broadcastHostRemoved(hostId) {
+      const message: WebSocketServerMessage = {
+        hostId,
+        type: "host_removed",
+      };
+
+      for (const client of clients.values()) {
+        sendJson(client.socket, message);
       }
     },
     broadcastHostSummary(summary) {
@@ -117,6 +128,17 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
       clients.delete(socket);
     },
   };
+}
+
+export function broadcastHostRemovedHint(
+  liveUpdates: LiveUpdateBroadcaster | null | undefined,
+  hostId: number,
+) {
+  try {
+    liveUpdates?.broadcastHostRemoved(hostId);
+  } catch {
+    // The committed Host lifecycle transition remains authoritative.
+  }
 }
 
 export function liveSummaryFromHost(

@@ -43,7 +43,7 @@ describe("Owner add-host install command", () => {
     );
   });
 
-  it("creates a pending Enrollment Token with a copyable Probe install command", async () => {
+  it("creates a pending NewHost Enrollment with a copyable Probe install command", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -69,11 +69,17 @@ describe("Owner add-host install command", () => {
 
     expect(response.status).toBe(201);
     const body = (await response.json()) as {
+      enrollmentId: string;
       enrollmentToken: string;
+      expiresAtMs: number;
       installCommand: string;
       installPath: string;
+      status: string;
     };
 
+    expect(body.enrollmentId).toMatch(/^enr_/);
+    expect(body.status).toBe("pending");
+    expect(body.expiresAtMs).toBeGreaterThan(Date.now() - 1_000);
     expect(body.installPath).toBe("/usr/local/bin/enoki-probe");
     expect(body.installCommand).toContain(
       "https://hub.example/api/probe/install.sh",
@@ -87,6 +93,11 @@ describe("Owner add-host install command", () => {
     expect(body.installCommand).not.toContain("ENOKI_PROBE_VERSION=");
     expect(body.installCommand).not.toContain("ENOKI_PROBE_DOWNLOAD_URL=");
     expect(body.installCommand).not.toContain("ENOKI_INSTALL_PATH=");
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from managed_hosts")
+        .get(),
+    ).toEqual({ count: 0 });
 
     database.close();
   });
@@ -125,6 +136,63 @@ describe("Owner add-host install command", () => {
     expect(body.installCommand).toContain(
       "ENOKI_INSTALL_PATH='/opt/enoki/bin/enoki-probe'",
     );
+
+    database.close();
+  });
+
+  it("persists an overdue pending Enrollment as expired when the Owner reads its status", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const created = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    const enrollment = (await created.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+      expiresAtMs: number;
+    };
+
+    nowMs = enrollment.expiresAtMs;
+    const statusResponse = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+
+    expect(statusResponse.status).toBe(200);
+    await expect(statusResponse.json()).resolves.toEqual({
+      createdAtMs: 1_725_000_000_000,
+      enrollmentId: enrollment.enrollmentId,
+      expiresAtMs: enrollment.expiresAtMs,
+      expiredAtMs: enrollment.expiresAtMs,
+      hostId: null,
+      readyAtMs: null,
+      rejectedAtMs: null,
+      rejection: null,
+      status: "expired",
+      target: { kind: "new_host" },
+      verificationDeadlineAtMs: null,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select status, expired_at_ms as expiredAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollment.enrollmentId),
+    ).toEqual({
+      expiredAtMs: enrollment.expiresAtMs,
+      status: "expired",
+    });
 
     database.close();
   });

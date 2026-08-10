@@ -40,7 +40,11 @@ import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
 import { useProbeUpgradeMonitor } from "./composables/useProbeUpgradeMonitor";
 import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
-import { shouldCreateEnrollmentOnOpen } from "./lib/enrollment-dialog-state";
+import {
+  reconcileEnrollmentStatus,
+  shouldCreateEnrollmentOnOpen,
+} from "./lib/enrollment-dialog-state";
+import { createEnrollmentStatusReconciler } from "./lib/enrollment-status-reconciliation";
 import {
   hubUnavailableLoginError,
   loginErrorForResponse,
@@ -50,6 +54,7 @@ import { configurationErrorText } from "./lib/probe-configuration";
 import { probeUpgradeToastTitle } from "./lib/probe-upgrade-toast";
 import type {
   EnrollmentResponse,
+  EnrollmentStatusResponse,
   HostMetadataDraft,
   HostMetadataResponse,
   HostProbeConfigurationResponse,
@@ -141,6 +146,34 @@ const sonnerTheme = computed(() => {
 
   return "system";
 });
+const enrollmentStatusReconciler = createEnrollmentStatusReconciler({
+  getActiveEnrollment: () => enrollment.value,
+  getActiveEnrollmentId: () => enrollment.value?.enrollmentId ?? null,
+  isActiveEnrollment: (enrollmentId) =>
+    isShowingEnrollmentDialog.value &&
+    enrollment.value?.enrollmentId === enrollmentId &&
+    ["pending", "verifying"].includes(enrollment.value.status),
+  onStatus(status) {
+    const reconciled = reconcileEnrollmentStatus(enrollment.value, status);
+    enrollment.value = reconciled.enrollment;
+
+    if (!reconciled.shouldClose) {
+      return;
+    }
+
+    isShowingEnrollmentDialog.value = false;
+    if (status.status === "expired") {
+      toast.error("安装命令已过期", {
+        description: "请生成新的安装命令。",
+      });
+    }
+  },
+  onTemporaryFailure(error) {
+    handleUnauthorizedError(error);
+  },
+  readStatus: (enrollmentId) =>
+    apiGet<EnrollmentStatusResponse>(`/api/web/enrollments/${enrollmentId}`),
+});
 const hostListPageCount = computed(() =>
   Math.max(1, Math.ceil(hosts.value.length / hostListPageSize.value)),
 );
@@ -177,11 +210,28 @@ const {
   onHostProfile(hostId, hostProfile) {
     detail.applyHostProfile(hostId, hostProfile);
   },
+  onHostRemoved(hostId) {
+    if (activeHostConfigurationId.value === hostId) {
+      activeHostConfigurationId.value = null;
+      hostConfigurationDraft.value = null;
+    }
+    if (activeHostMetadataId.value === hostId) {
+      activeHostMetadataId.value = null;
+      hostMetadataDraft.value = null;
+      hostMetadataOriginal.value = null;
+    }
+    if (activeDetailHostId.value === hostId) {
+      navigateToOverview();
+    }
+  },
   onSummary(summary) {
     detail.applyLiveSummary(summary);
   },
   recoverDetail() {
     return detail.load();
+  },
+  recoverEnrollment() {
+    return reconcileActiveEnrollment();
   },
 });
 
@@ -213,6 +263,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disconnectLiveUpdates();
   clearHostCardLazyLoadTimer();
+  clearEnrollmentStatusReconciliation();
 });
 
 useEventListener("popstate", syncRouteFromLocation);
@@ -285,6 +336,7 @@ async function logout() {
   enrollment.value = null;
   enrollmentError.value = "";
   isShowingEnrollmentDialog.value = false;
+  clearEnrollmentStatusReconciliation();
   globalConfigurationDraft.value = null;
   globalConfigurationError.value = "";
   globalConfigurationMessage.value = "";
@@ -312,6 +364,7 @@ function requireLogin() {
   loginErrorKind.value = "";
   hostListError.value = "";
   enrollmentError.value = "";
+  clearEnrollmentStatusReconciliation();
   globalConfigurationError.value = "";
   hostConfigurationError.value = "";
   hostMetadataError.value = "";
@@ -382,6 +435,7 @@ async function createEnrollment() {
     }
 
     enrollment.value = (await response.json()) as EnrollmentResponse;
+    scheduleEnrollmentStatusReconciliation();
     await loadHosts();
   } catch {
     enrollmentError.value = "无法连接 Hub，请检查服务是否正在运行。";
@@ -402,6 +456,26 @@ async function openEnrollmentDialog() {
   ) {
     await createEnrollment();
   }
+}
+
+function updateEnrollmentDialogOpen(open: boolean) {
+  isShowingEnrollmentDialog.value = open;
+
+  if (!open) {
+    clearEnrollmentStatusReconciliation();
+  }
+}
+
+function scheduleEnrollmentStatusReconciliation() {
+  enrollmentStatusReconciler.start();
+}
+
+function clearEnrollmentStatusReconciliation() {
+  enrollmentStatusReconciler.stop();
+}
+
+async function reconcileActiveEnrollment() {
+  await enrollmentStatusReconciler.reconcileNow();
 }
 
 async function toggleGlobalConfiguration() {
@@ -918,11 +992,12 @@ function routePath() {
 
       <EnrollmentDialog
         v-if="isAuthenticated"
-        v-model:open="isShowingEnrollmentDialog"
+        :open="isShowingEnrollmentDialog"
         :enrollment="enrollment"
         :enrollment-error="enrollmentError"
         :is-creating-enrollment="isCreatingEnrollment"
         @create-enrollment="createEnrollment"
+        @update:open="updateEnrollmentDialogOpen"
       />
 
       <LayoutLabPage v-if="isLayoutLabRoute" />

@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 
 const tempRoots: string[] = [];
@@ -88,6 +89,214 @@ describe("Hub database", () => {
     ]);
 
     database.close();
+  });
+
+  it("migrates legacy Enrollment Tokens to terminal expired records without changing Hub data", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const preFeatureMigrations = path.join(dataRoot, "pre-feature-migrations");
+    await cp(
+      path.resolve("drizzle/20260625011049_outstanding_iron_lad"),
+      path.join(preFeatureMigrations, "20260625011049_outstanding_iron_lad"),
+      { recursive: true },
+    );
+
+    const legacy = initializeHubDatabase(
+      {
+        dataRoot,
+        sqlitePath: path.join(dataRoot, "enoki.db"),
+      },
+      {
+        migrationLayers: [
+          {
+            historyTable: "__drizzle_migrations",
+            migrationsFolder: preFeatureMigrations,
+            name: "core",
+          },
+          {
+            historyTable: "__official_metrics_migrations",
+            migrationsFolder: path.resolve("drizzle-official-metrics"),
+            name: "official_metrics",
+          },
+        ],
+      },
+    );
+    createHost(legacy, { id: 41, probeId: "probe-preserved" });
+    legacy.audit.record({
+      action: "host.metadata.update",
+      actor: "owner",
+      occurredAtMs: 1_725_000_001_000,
+      outcome: "success",
+      subjectId: "41",
+      subjectType: "host",
+    });
+    legacy.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: null,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1_725_000_002_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: 41,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "pending",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_002_000,
+    });
+    legacy.metrics.recordSample({
+      bootId: "boot-preserved",
+      collectedAtMs: 1_725_000_003_000,
+      cpuPercent: 31,
+      hostId: 41,
+      probeId: "probe-preserved",
+      receivedAtMs: 1_725_000_003_500,
+      sequence: 1,
+    });
+    legacy.sqlite
+      .prepare(
+        `insert into official_host_profiles (
+          managed_host_id, snapshot_hash, payload_json, hostname, os, kernel,
+          architecture, cpu_count, cpu_model, memory_total_bytes, probe_version,
+          collector_capabilities_json, filesystems_json, network_interfaces_json,
+          updated_at_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        41,
+        "profile-hash",
+        "{}",
+        "preserved-host",
+        "linux",
+        "6.8.0",
+        "x86_64",
+        2,
+        null,
+        2_147_483_648,
+        "0.1.0",
+        null,
+        "[]",
+        "[]",
+        1_725_000_004_000,
+      );
+    const insertLegacyEnrollment = legacy.sqlite.prepare(
+      "insert into enrollment_tokens (token_hash, created_at_ms, expires_at_ms, used_at_ms) values (?, ?, ?, ?)",
+    );
+    insertLegacyEnrollment.run(
+      "legacy-unused",
+      1_724_999_000_000,
+      1_724_999_900_000,
+      null,
+    );
+    insertLegacyEnrollment.run(
+      "legacy-used",
+      1_724_999_000_000,
+      1_724_999_900_000,
+      1_724_999_100_000,
+    );
+    insertLegacyEnrollment.run(
+      "legacy-expired",
+      1_724_998_000_000,
+      1_724_998_900_000,
+      null,
+    );
+    legacy.close();
+
+    const migrated = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+
+    expect(
+      migrated.sqlite
+        .prepare(
+          `select enrollment_id as enrollmentId, target_kind as targetKind,
+            target_host_id as targetHostId, status from enrollment_tokens
+            order by token_hash`,
+        )
+        .all(),
+    ).toEqual([
+      {
+        enrollmentId: null,
+        status: "expired",
+        targetHostId: null,
+        targetKind: null,
+      },
+      {
+        enrollmentId: null,
+        status: "expired",
+        targetHostId: null,
+        targetKind: null,
+      },
+      {
+        enrollmentId: null,
+        status: "expired",
+        targetHostId: null,
+        targetKind: null,
+      },
+    ]);
+    expect(
+      migrated.sqlite
+        .prepare(
+          `select
+            (select count(*) from managed_hosts) as hosts,
+            (select count(*) from official_host_profiles) as profiles,
+            (select count(*) from metric_samples) as metrics,
+            (select count(*) from official_metric_cpu) as officialMetricCpu,
+            (select count(*) from probe_operations) as operations,
+            (select count(*) from audit_log) as auditEvents`,
+        )
+        .get(),
+    ).toEqual({
+      auditEvents: 1,
+      hosts: 1,
+      metrics: 1,
+      officialMetricCpu: 1,
+      operations: 1,
+      profiles: 1,
+    });
+    expect(migrated.sqlite.prepare("pragma foreign_key_check").all()).toEqual(
+      [],
+    );
+
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database: migrated,
+      now: () => 1_725_000_010_000,
+    });
+    const login = await app.request("/api/web/auth/login", {
+      body: JSON.stringify({ password: "correct horse battery staple" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const ownerSession = login.headers.get("set-cookie") ?? "";
+    const created = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    expect(created.status).toBe(201);
+    const enrollment = (await created.json()) as { enrollmentId: string };
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({
+        enrollmentId: enrollment.enrollmentId,
+        status: "pending",
+        target: { kind: "new_host" },
+      }),
+    );
+
+    migrated.close();
   });
 
   it("keeps detailed official Metrics tables out of core-only migrations", async () => {

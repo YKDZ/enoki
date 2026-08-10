@@ -19,6 +19,10 @@ import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import { readJsonBody } from "../http/json.js";
+import {
+  broadcastHostRemovedHint,
+  type LiveUpdateBroadcaster,
+} from "../live-updates.js";
 import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import {
   evaluateProbeUpgradeEligibility,
@@ -39,6 +43,7 @@ export type HostRouteServices = {
   audit?: AuditRepository;
   hostStatus?: HostStatusThresholds;
   hosts: HostRepository;
+  liveUpdates?: LiveUpdateBroadcaster | null;
   metrics?: MetricsRepository;
   now?: () => number;
   probeAssetDir?: string;
@@ -481,6 +486,8 @@ export function createHostRoutes(services: HostRouteServices) {
       if (!deleted) {
         return hostMetadataError("host_not_found", 404);
       }
+
+      broadcastHostRemovedHint(services.liveUpdates, deleted.id);
 
       services.audit?.record({
         action: "host.delete",
