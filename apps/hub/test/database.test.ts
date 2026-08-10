@@ -361,6 +361,7 @@ describe("Hub database", () => {
     expect(
       database.snapshotCollectors.fulfillSnapshotReplay({
         ...originalRequest,
+        acceptedSnapshotHash: originalRequest.snapshotHash,
         acceptedSequence: originalRequest.sequence,
         fulfilledAtMs: 1_725_000_000_100,
         wireShape: "current_sequence",
@@ -372,6 +373,7 @@ describe("Hub database", () => {
     expect(
       database.snapshotCollectors.snapshotReplayReceipt(originalRequest),
     ).toEqual({
+      acceptedSnapshotHash: originalRequest.snapshotHash,
       key: originalRequest,
       wireShape: "current_sequence",
     });
@@ -402,12 +404,13 @@ describe("Hub database", () => {
     expect(
       database.sqlite
         .prepare(
-          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_snapshot_hash, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
         )
         .get(),
     ).toEqual({
       boot_id: "boot-after-replacement",
       fulfilled_at_ms: null,
+      fulfilled_snapshot_hash: null,
       fulfilled_sequence: null,
       fulfilled_wire_shape: null,
       sequence: 4,
@@ -496,13 +499,14 @@ describe("Hub database", () => {
     expect(
       migrated.sqlite
         .prepare(
-          "select managed_host_id, boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests order by managed_host_id",
+          "select managed_host_id, boot_id, sequence, snapshot_hash, fulfilled_at_ms, fulfilled_snapshot_hash, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests order by managed_host_id",
         )
         .all(),
     ).toEqual([
       {
         boot_id: "boot-pending",
         fulfilled_at_ms: null,
+        fulfilled_snapshot_hash: null,
         fulfilled_sequence: null,
         fulfilled_wire_shape: null,
         managed_host_id: 89,
@@ -512,6 +516,7 @@ describe("Hub database", () => {
       {
         boot_id: "boot-fulfilled",
         fulfilled_at_ms: 1_725_000_000_002,
+        fulfilled_snapshot_hash: null,
         fulfilled_sequence: null,
         fulfilled_wire_shape: null,
         managed_host_id: 90,

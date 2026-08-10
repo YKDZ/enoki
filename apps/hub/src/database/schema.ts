@@ -185,6 +185,7 @@ export const snapshotReplayRequests = sqliteTable(
     snapshotHash: text("snapshot_hash").notNull().default(""),
     requestedAtMs: integer().notNull(),
     fulfilledAtMs: integer("fulfilled_at_ms"),
+    fulfilledSnapshotHash: text("fulfilled_snapshot_hash"),
     // A fulfilled replay is also a durable receipt for exactly one wire
     // contract. This keeps a v0.1.72 successor retry distinguishable from a
     // current-Probe same-sequence retry after an ordinary Observation arrives.

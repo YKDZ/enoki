@@ -2435,6 +2435,189 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it("accepts a v0.1.72 successor Snapshot Replay after recollection changes the Host Profile hash", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const startupHostProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
+    const requestedHostProfile = sampleHostProfileSnapshot({
+      hostname: "host-profile-at-sequence-8",
+      probeVersion: "0.1.72",
+    });
+    const replayedHostProfile = sampleHostProfileSnapshot({
+      hostname: "host-profile-recollected-at-sequence-9",
+      probeVersion: "0.1.72",
+    });
+    const requestedHash = hashStableHostProfile(requestedHostProfile);
+    const replayedHash = hashStableHostProfile(replayedHostProfile);
+    expect(replayedHash).not.toBe(requestedHash);
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-v0-1-72-recollected-replay",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: startupHostProfile,
+                  snapshotHash: hashStableHostProfile(startupHostProfile),
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+
+    const compactResponse = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-recollected-replay",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_000,
+              cpuPercent: 12.5,
+              sequence: 8,
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 8,
+          sequenceStart: 8,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              snapshotHash: requestedHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(compactResponse.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
+        .requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    expect(host).not.toBeNull();
+    const replayBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-v0-1-72-recollected-replay",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 9,
+        sequenceStart: 9,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: replayedHostProfile,
+            snapshotHash: replayedHash,
+          },
+        ],
+      }),
+    ).finish();
+    const replayResponse = await send(replayBody);
+
+    expect(replayResponse.status).toBe(200);
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({
+        hostname: "host-profile-recollected-at-sequence-9",
+      }),
+    );
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus({
+        bootId: "boot-v0-1-72-recollected-replay",
+        collectorId: "official.host-profile",
+        hostId: host?.id ?? -1,
+        sequence: 8,
+        snapshotHash: requestedHash,
+      }),
+    ).toBe("fulfilled");
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_snapshot_hash, fulfilled_sequence, fulfilled_wire_shape from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-v0-1-72-recollected-replay",
+      fulfilled_sequence: 9,
+      fulfilled_snapshot_hash: replayedHash,
+      fulfilled_wire_shape: "legacy_successor",
+      sequence: 8,
+      snapshot_hash: requestedHash,
+    });
+    const beforeRetry = database.sqlite
+      .prepare(
+        "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
+      )
+      .get();
+    expect((await send(replayBody)).status).toBe(200);
+    expect(
+      database.sqlite
+        .prepare(
+          "select (select count(*) from report_observations) as observations, (select count(*) from metric_samples) as samples",
+        )
+        .get(),
+    ).toEqual(beforeRetry);
+    const conflictingReplayHostProfile = sampleHostProfileSnapshot({
+      hostname: "conflicting-host-profile-at-sequence-9",
+      probeVersion: "0.1.72",
+    });
+    const conflictingReplay = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-recollected-replay",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 9,
+          sequenceStart: 9,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: conflictingReplayHostProfile,
+              snapshotHash: hashStableHostProfile(conflictingReplayHostProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(conflictingReplay.status).toBe(400);
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({
+        hostname: "host-profile-recollected-at-sequence-9",
+      }),
+    );
+
+    database.close();
+  });
+
   it("accepts the v0.1.72 next-sequence Host Profile follow-up and lets it report a Hub configuration update", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -2459,10 +2642,11 @@ describe("Probe report API", () => {
       probeVersion: "0.1.72",
     });
     const changedHash = hashStableHostProfile(changedHostProfile);
-    const wrongHashHostProfile = sampleHostProfileSnapshot({
-      hostname: "v0.1.72-wrong-hash-host",
+    const wrongVersionHostProfile = sampleHostProfileSnapshot({
+      hostname: "v0.1.72-wrong-version-host",
+      probeVersion: "0.1.71",
     });
-    const wrongHash = hashStableHostProfile(wrongHashHostProfile);
+    const wrongVersionHash = hashStableHostProfile(wrongVersionHostProfile);
     const send = (body: Uint8Array) =>
       app.request(
         "/api/probe/report",
@@ -2579,7 +2763,7 @@ describe("Probe report API", () => {
       ).finish(),
     );
     expect(wrongBootLegacyFollowUp.status).toBe(400);
-    const wrongHashLegacyFollowUp = await send(
+    const wrongVersionLegacyFollowUp = await send(
       ReportRequest.encode(
         ReportRequest.create({
           bootId: "boot-v0-1-72-follow-up",
@@ -2590,14 +2774,14 @@ describe("Probe report API", () => {
           snapshots: [
             {
               collectorId: "official.host-profile",
-              hostProfile: wrongHashHostProfile,
-              snapshotHash: wrongHash,
+              hostProfile: wrongVersionHostProfile,
+              snapshotHash: wrongVersionHash,
             },
           ],
         }),
       ).finish(),
     );
-    expect(wrongHashLegacyFollowUp.status).toBe(400);
+    expect(wrongVersionLegacyFollowUp.status).toBe(400);
     const skippedSequence = await send(
       ReportRequest.encode(
         ReportRequest.create({
