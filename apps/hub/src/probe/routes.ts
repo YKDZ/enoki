@@ -41,6 +41,7 @@ import {
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "./configuration.js";
+import { permitsLegacyFullHostProfileObservation } from "./legacy-report-compatibility.js";
 import {
   defaultProbeOperationTokenTtlMs,
   issueProbeOperationToken,
@@ -346,6 +347,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       hostProfileSnapshot,
       report: validatedReport,
       request,
+      storedProbeVersion: host.probeVersion,
     });
     if (!reportResponsibility) {
       return probeJsonError("malformed_probe_report", 400);
@@ -2117,8 +2119,10 @@ function reportResponsibilityFor(input: {
   hostProfileSnapshot: ReturnType<typeof hostProfileSnapshotFromReport>;
   report: { sequenceEnd: number; sequenceStart: number };
   request: ProtoMessage;
+  storedProbeVersion: string | null | undefined;
 }):
   | "legacy_observation"
+  | "legacy_full_observation"
   | "observation"
   | "snapshot_replay"
   | "startup"
@@ -2159,8 +2163,15 @@ function reportResponsibilityFor(input: {
   }
 
   if (snapshot.hostProfile !== null) {
-    return hasSnapshotReplayOnlyContents(input.request)
-      ? "snapshot_replay"
+    if (hasSnapshotReplayOnlyContents(input.request)) {
+      return "snapshot_replay";
+    }
+
+    return permitsLegacyFullHostProfileObservation({
+      reportedProbeVersion: snapshot.hostProfile.probeVersion,
+      storedProbeVersion: input.storedProbeVersion,
+    })
+      ? "legacy_full_observation"
       : null;
   }
 
