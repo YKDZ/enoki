@@ -452,6 +452,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             replaySequenceAlreadyAccepted &&
             hasCurrentReplayOnlyContents &&
             replayReceipt?.wireShape === "current_sequence" &&
+            replayReceipt.acceptedSnapshotHash === snapshotHash &&
             replayReceipt.key.sequence === replayRequest.sequence
           ) {
             // Exact current-Probe replay retry. Its receipt already exists.
@@ -460,6 +461,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             replaySequenceAlreadyAccepted &&
             hasNoMetrics &&
             replayReceipt?.wireShape === "legacy_successor" &&
+            replayReceipt.acceptedSnapshotHash === snapshotHash &&
             replayReceipt.key.sequence + 1 === replayRequest.sequence &&
             permitsLegacyFullObservation
           ) {
@@ -637,8 +639,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       if (
         snapshotReplayToFulfill &&
         (!snapshotReplayWireShape ||
+          !reportedHostProfileHash ||
           !services.snapshotCollectors?.fulfillSnapshotReplay({
             ...snapshotReplayToFulfill,
+            acceptedSnapshotHash: reportedHostProfileHash,
             acceptedSequence: validatedReport.sequenceStart,
             fulfilledAtMs: reportReceivedAtMs,
             wireShape: snapshotReplayWireShape,

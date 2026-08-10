@@ -71,6 +71,7 @@ export type SnapshotReplayReceiptWireShape =
   (typeof snapshotReplayReceiptWireShapes)[number];
 
 export type SnapshotReplayReceipt = {
+  acceptedSnapshotHash: string;
   key: SnapshotReplayRequestKey;
   wireShape: SnapshotReplayReceiptWireShape;
 };
@@ -97,13 +98,14 @@ export type SnapshotCollectorStorageRegistry = {
     hostId: number;
   }) => boolean;
   pendingLegacySnapshotReplayRequest: (
-    input: SnapshotReplayRequestKey,
+    input: Omit<SnapshotReplayRequestKey, "snapshotHash">,
   ) => SnapshotReplayRequestKey | null;
   snapshotReplayReceipt: (
-    input: SnapshotReplayRequestKey,
+    input: Omit<SnapshotReplayRequestKey, "snapshotHash">,
   ) => SnapshotReplayReceipt | null;
   fulfillSnapshotReplay: (
     input: SnapshotReplayRequestKey & {
+      acceptedSnapshotHash: string;
       acceptedSequence: number;
       fulfilledAtMs: number;
       wireShape: SnapshotReplayReceiptWireShape;
@@ -139,6 +141,7 @@ export function createSnapshotCollectorStorageRegistry(
             bootId: input.bootId,
             fulfilledAtMs: null,
             fulfilledSequence: null,
+            fulfilledSnapshotHash: null,
             fulfilledWireShape: null,
             requestedAtMs: input.requestedAtMs,
             sequence: input.sequence,
@@ -184,6 +187,7 @@ export function createSnapshotCollectorStorageRegistry(
       const predecessor = database
         .select({
           sequence: snapshotReplayRequests.sequence,
+          snapshotHash: snapshotReplayRequests.snapshotHash,
         })
         .from(snapshotReplayRequests)
         .where(
@@ -192,7 +196,6 @@ export function createSnapshotCollectorStorageRegistry(
             eq(snapshotReplayRequests.collectorId, input.collectorId),
             eq(snapshotReplayRequests.bootId, input.bootId),
             eq(snapshotReplayRequests.sequence, input.sequence - 1),
-            eq(snapshotReplayRequests.snapshotHash, input.snapshotHash),
             isNull(snapshotReplayRequests.fulfilledAtMs),
           ),
         )
@@ -205,12 +208,15 @@ export function createSnapshotCollectorStorageRegistry(
       return {
         ...input,
         sequence: predecessor.sequence,
+        snapshotHash: predecessor.snapshotHash,
       };
     },
     snapshotReplayReceipt(input) {
       const receipt = database
         .select({
+          fulfilledSnapshotHash: snapshotReplayRequests.fulfilledSnapshotHash,
           sequence: snapshotReplayRequests.sequence,
+          snapshotHash: snapshotReplayRequests.snapshotHash,
           wireShape: snapshotReplayRequests.fulfilledWireShape,
         })
         .from(snapshotReplayRequests)
@@ -219,7 +225,6 @@ export function createSnapshotCollectorStorageRegistry(
             eq(snapshotReplayRequests.hostId, input.hostId),
             eq(snapshotReplayRequests.collectorId, input.collectorId),
             eq(snapshotReplayRequests.bootId, input.bootId),
-            eq(snapshotReplayRequests.snapshotHash, input.snapshotHash),
             isNotNull(snapshotReplayRequests.fulfilledAtMs),
             eq(snapshotReplayRequests.fulfilledSequence, input.sequence),
           ),
@@ -235,9 +240,15 @@ export function createSnapshotCollectorStorageRegistry(
       }
 
       return {
+        // Receipts written before fulfilled_snapshot_hash was introduced can
+        // only have been fulfilled when the accepted and requested hashes
+        // were equal.
+        acceptedSnapshotHash:
+          receipt.fulfilledSnapshotHash ?? receipt.snapshotHash,
         key: {
           ...input,
           sequence: receipt.sequence,
+          snapshotHash: receipt.snapshotHash,
         },
         wireShape: receipt.wireShape,
       };
@@ -249,6 +260,7 @@ export function createSnapshotCollectorStorageRegistry(
           .set({
             fulfilledAtMs: input.fulfilledAtMs,
             fulfilledSequence: input.acceptedSequence,
+            fulfilledSnapshotHash: input.acceptedSnapshotHash,
             fulfilledWireShape: input.wireShape,
           })
           .where(
