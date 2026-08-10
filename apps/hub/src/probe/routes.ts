@@ -18,6 +18,7 @@ import type { EnrollmentRepository } from "../database/enrollments.js";
 import {
   hostProfilePersistenceValues,
   type SnapshotCollectorStorageRegistry,
+  type SnapshotReplayReceiptWireShape,
   type SnapshotReplayRequestKey,
 } from "../database/host-profiles.js";
 import type {
@@ -365,6 +366,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const ingestReport = (reportServices: ProbeRouteServices) => {
       const services = reportServices;
       let snapshotReplayToFulfill: SnapshotReplayRequestKey | null = null;
+      let snapshotReplayWireShape: SnapshotReplayReceiptWireShape | null = null;
       const replaySequenceAlreadyAccepted = services.metrics.hasObservation({
         bootId: request.bootId,
         probeId: request.probeId,
@@ -393,25 +395,51 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           services.snapshotCollectors?.snapshotReplayRequestStatus(
             replayRequest,
           ) ?? null;
-        const snapshotAlreadyStored =
-          services.snapshotCollectors
-            ?.get(hostProfileCollectorId)
-            ?.hasSnapshot(host.id, snapshotHash) ?? false;
+        // v0.1.72 advances to the next sequence when following a compact
+        // Host Profile request. Only a still-pending request can authorize
+        // that initial +1 full snapshot; after fulfillment its exact retry is
+        // matched against the durable receipt below, never inferred from a
+        // predecessor request and a successor Observation.
+        const pendingLegacyReplayRequest =
+          services.snapshotCollectors?.pendingLegacySnapshotReplayRequest(
+            replayRequest,
+          ) ?? null;
+        const replayReceipt =
+          services.snapshotCollectors?.snapshotReplayReceipt(replayRequest) ??
+          null;
         // Snapshot Replay must exactly match the tuple the Hub requested. Its
         // receipt already exists, while recordObservation is an idempotent no-op.
         // A fulfilled tuple accepts only its exact lost-response retry.
         // The no-registry path is explicit legacy compatibility for injected
         // route services predating Snapshot Replay request persistence.
         if (services.snapshotCollectors) {
-          if (!replaySequenceAlreadyAccepted) {
-            throw new ReportBusinessRejection("malformed_probe_report", 400);
-          }
-          if (replayRequestStatus === "pending") {
-            snapshotReplayToFulfill = replayRequest;
-          } else if (
-            replayRequestStatus !== "fulfilled" ||
-            !snapshotAlreadyStored
+          if (
+            replaySequenceAlreadyAccepted &&
+            replayRequestStatus === "pending"
           ) {
+            // The current-Probe replay uses the already accepted sequence;
+            // this pending request is fulfilled by its full snapshot.
+            snapshotReplayToFulfill = replayRequest;
+            snapshotReplayWireShape = "current_sequence";
+          } else if (
+            replaySequenceAlreadyAccepted &&
+            replayReceipt?.wireShape === "current_sequence" &&
+            replayReceipt.key.sequence === replayRequest.sequence
+          ) {
+            // Exact current-Probe replay retry. Its receipt already exists.
+          } else if (
+            replaySequenceAlreadyAccepted &&
+            replayReceipt?.wireShape === "legacy_successor" &&
+            replayReceipt.key.sequence + 1 === replayRequest.sequence
+          ) {
+            // Idempotent retry of the v0.1.72 successor-sequence follow-up.
+          } else if (
+            !replaySequenceAlreadyAccepted &&
+            pendingLegacyReplayRequest
+          ) {
+            snapshotReplayToFulfill = pendingLegacyReplayRequest;
+            snapshotReplayWireShape = "legacy_successor";
+          } else {
             throw new ReportBusinessRejection("malformed_probe_report", 400);
           }
         }
@@ -561,10 +589,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       }
       if (
         snapshotReplayToFulfill &&
-        !services.snapshotCollectors?.fulfillSnapshotReplay({
-          ...snapshotReplayToFulfill,
-          fulfilledAtMs: reportReceivedAtMs,
-        })
+        (!snapshotReplayWireShape ||
+          !services.snapshotCollectors?.fulfillSnapshotReplay({
+            ...snapshotReplayToFulfill,
+            acceptedSequence: validatedReport.sequenceStart,
+            fulfilledAtMs: reportReceivedAtMs,
+            wireShape: snapshotReplayWireShape,
+          }))
       ) {
         throw new ReportBusinessRejection("malformed_probe_report", 400);
       }

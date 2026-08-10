@@ -13,7 +13,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createCiHostExecutor,
@@ -34,6 +34,7 @@ import {
   runReleaseE2EScenario,
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
+  waitForReportingAdvance,
 } from "./release-e2e-lib.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -95,6 +96,86 @@ describe("Release E2E business assertions", () => {
         { ...samples[1], memoryUsedBytes: samples[1].memoryTotalBytes + 1 },
       ]),
     ).toBe(false);
+  });
+
+  it("waits for Candidate core readiness, a newer report, and newer portable Metrics together", async () => {
+    const checkpoint = {
+      lastReportAtMs: 10,
+      metric: portableMetric({
+        collectedAtMs: 20,
+        sequence: 2,
+        uptimeSeconds: 110,
+      }),
+    };
+    const hub = {
+      getHost: vi
+        .fn()
+        .mockResolvedValueOnce(
+          readyHost({ lastReportAtMs: checkpoint.lastReportAtMs }),
+        )
+        .mockResolvedValueOnce(
+          readyHost({
+            hostProfile: {
+              ...readyHost().hostProfile,
+              cpuCount: 0,
+            },
+            lastReportAtMs: checkpoint.lastReportAtMs + 1,
+          }),
+        )
+        .mockResolvedValue(
+          readyHost({ lastReportAtMs: checkpoint.lastReportAtMs + 1 }),
+        ),
+      getHostMetrics: vi
+        .fn()
+        .mockResolvedValueOnce([
+          portableMetric({
+            collectedAtMs: 10,
+            sequence: 1,
+            uptimeSeconds: 100,
+          }),
+          checkpoint.metric,
+        ])
+        .mockResolvedValue([
+          checkpoint.metric,
+          portableMetric({
+            collectedAtMs: 30,
+            sequence: 3,
+            uptimeSeconds: 120,
+          }),
+          portableMetric({
+            collectedAtMs: 40,
+            sequence: 4,
+            uptimeSeconds: 130,
+          }),
+        ]),
+    };
+
+    const reporting = await waitForReportingAdvance({
+      checkpoint,
+      expectedProbeVersion: "1.2.3",
+      hostId: 7,
+      hostObservation: {
+        code: "candidate_host_timeout",
+        label: "Candidate Host reporting",
+      },
+      hub,
+      metricsObservation: {
+        code: "candidate_metrics_timeout",
+        label: "Candidate portable Metrics",
+      },
+      poll: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+    });
+    expect(reporting.host).toMatchObject({ id: 7, lastReportAtMs: 11 });
+    expect(isCandidateHostReady(reporting.host, "1.2.3")).toBe(true);
+    expect(reporting.host.lastReportAtMs).toBeGreaterThan(
+      checkpoint.lastReportAtMs,
+    );
+    expect(reporting.metrics.at(-1)).toMatchObject({
+      collectedAtMs: 40,
+      sequence: 4,
+    });
+    expect(hub.getHost).toHaveBeenCalledTimes(3);
+    expect(hub.getHostMetrics).toHaveBeenCalledTimes(2);
   });
 
   it("proves accepted and running transitions from formal timestamps without requiring an independently-polled accepted state", () => {
@@ -3242,6 +3323,7 @@ describe("Release E2E Orchestrator", () => {
     let identityGeneration = "baseline-install";
     let configurationVersion = "default-v1";
     let metricsEpoch = 0;
+    let reportEpoch = 0;
     const hub = {
       async authenticate() {
         calls.push(`hub.authenticate:${activeHub}`);
@@ -3268,6 +3350,7 @@ describe("Release E2E Orchestrator", () => {
             ...readyHost().hostProfile,
             probeVersion: upgraded ? "1.2.3" : "1.2.2",
           },
+          lastReportAtMs: ++reportEpoch,
           reportedProbeConfigurationVersion: configurationVersion,
         });
       },
@@ -3529,6 +3612,122 @@ describe("Release E2E Orchestrator", () => {
     });
   });
 
+  it("rejects a Candidate switch that only exposes persisted Baseline reporting", async () => {
+    const written = [];
+    let activeHub = "baseline";
+    let installed = false;
+    const persistedHost = readyHost({
+      hostProfile: {
+        ...readyHost().hostProfile,
+        probeVersion: "1.2.2",
+      },
+      lastReportAtMs: 100,
+    });
+    const persistedMetrics = [
+      portableMetric({ collectedAtMs: 90, sequence: 1 }),
+      portableMetric({ collectedAtMs: 95, sequence: 2 }),
+    ];
+    const hub = {
+      async authenticate() {},
+      async createEnrollment() {
+        return { installCommand: officialInstallCommand };
+      },
+      async getAuditLog() {
+        return [];
+      },
+      async getHost() {
+        return { ...persistedHost };
+      },
+      async getHostMetrics() {
+        return persistedMetrics.map((sample) => ({ ...sample }));
+      },
+      async getHostProbeConfiguration() {
+        return {
+          configuration: {
+            enabledCollectorIds: ["official.cpu", "official.memory"],
+            metricsCollectionIntervalSeconds: 5,
+            version: "default-v1",
+          },
+          mode: "inherit",
+        };
+      },
+      async isHostSoftDeleted() {
+        return false;
+      },
+      async listHosts() {
+        return installed ? [{ id: 7 }] : [];
+      },
+      async requestProbeUninstall() {
+        throw new Error("uninstall must not run without Candidate reporting");
+      },
+      async requestProbeUpgrade() {
+        throw new Error("upgrade must not run without Candidate reporting");
+      },
+      async switchToCandidate() {
+        activeHub = "candidate";
+      },
+      async updateHostProbeConfiguration() {
+        throw new Error(
+          "configuration must not run without Candidate reporting",
+        );
+      },
+      async waitForProbeOperation() {
+        throw new Error("operations must not run without Candidate reporting");
+      },
+    };
+    const host = {
+      async assertDisposable() {},
+      async assertInstalled() {},
+      async beginUpgradeOwnershipTransition() {
+        throw new Error("upgrade must not start without Candidate reporting");
+      },
+      async bindUpgradeOwnershipTransition() {},
+      async cleanup() {
+        return { clean: true };
+      },
+      async collectEvidence() {
+        return { activeHub };
+      },
+      async completeUpgradeOwnershipTransition() {},
+      async install() {
+        installed = true;
+      },
+      async readProbeIdentity() {
+        return {
+          identitySha256: "f".repeat(64),
+          probeId: "probe_release_01",
+        };
+      },
+      async recoverUpgradeWithInstaller() {},
+      async verifyUninstallCompletion() {
+        return { clean: true };
+      },
+    };
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host, hub }),
+        },
+        evidenceSink: { write: async (value) => written.push(value) },
+        ownerPassword: "owner-password",
+        runId: "run-persisted-baseline-only",
+        scenario: "baseline-upgrade-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
+      }),
+    ).rejects.toMatchObject({
+      code: "baseline_probe_candidate_hub_compatibility_timeout",
+    });
+    expect(written.at(-1)).toMatchObject({
+      result: {
+        error: { code: "baseline_probe_candidate_hub_compatibility_timeout" },
+        status: "failed",
+      },
+    });
+  });
+
   it("recovers a terminal insufficient-privilege Upgrade with the Candidate installer", async () => {
     let activeHub = "baseline";
     let configurationVersion = "default-v1";
@@ -3537,6 +3736,7 @@ describe("Release E2E Orchestrator", () => {
     let readableIdentityGeneration = null;
     let identityGeneration = "baseline-install";
     let metricsEpoch = 0;
+    let reportEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
       completedAtMs: 3,
@@ -3572,6 +3772,7 @@ describe("Release E2E Orchestrator", () => {
             ...readyHost().hostProfile,
             probeVersion: recovered ? "1.2.3" : "1.2.2",
           },
+          lastReportAtMs: ++reportEpoch,
           reportedProbeConfigurationVersion: configurationVersion,
         });
       },
@@ -3756,7 +3957,7 @@ describe("Release E2E Orchestrator", () => {
     let upgraded = false;
     let readableIdentityGeneration = null;
     let identityGeneration = "baseline-install";
-    let metricsEpoch = 0;
+    let restored = false;
     const snapshotDigest = `sha256:${"d".repeat(64)}`;
     const manifest = candidateManifestWithBaseline();
     const operation = {
@@ -3815,6 +4016,16 @@ describe("Release E2E Orchestrator", () => {
           readableIdentityGeneration = "baseline-restored";
         }
         const afterRestore = activeHub === "baseline" && upgraded;
+        const reportingEpoch =
+          activeHub === "candidate"
+            ? restored
+              ? 5
+              : upgraded
+                ? 3
+                : 2
+            : upgraded
+              ? 4
+              : 1;
         const filesystems = [
           {
             availableBytes: afterRestore ? 700_000_000 : 800_000_000,
@@ -3859,10 +4070,20 @@ describe("Release E2E Orchestrator", () => {
             probeVersion: upgraded ? "1.2.3" : "1.2.2",
             threadCount: afterRestore ? 600 : 550,
           },
+          lastReportAtMs: reportingEpoch * 10,
         });
       },
       async getHostMetrics() {
-        metricsEpoch += 1;
+        const metricsEpoch =
+          activeHub === "candidate"
+            ? restored
+              ? 5
+              : upgraded
+                ? 3
+                : 2
+            : upgraded
+              ? 4
+              : 1;
         const offset = metricsEpoch * 10;
         calls.push(`hub.getHostMetrics:${activeHub}:${upgraded}`);
         return [
@@ -3909,6 +4130,7 @@ describe("Release E2E Orchestrator", () => {
           recoveryTime: "2026-08-02T12:00:00.000Z",
         });
         activeHub = "baseline";
+        restored = true;
         identityGeneration = "baseline-restored";
         return {
           image: {
@@ -4127,6 +4349,14 @@ describe("Release E2E Orchestrator", () => {
         status: "succeeded",
       },
       reporting: {
+        baselineCandidateHub: {
+          host: expect.objectContaining({ id: 7 }),
+          metrics: expect.any(Array),
+        },
+        postRestoreCandidateHub: {
+          host: expect.objectContaining({ id: 7 }),
+          metrics: expect.any(Array),
+        },
         restoredBaselineHub: {
           host: expect.objectContaining({ id: 7 }),
           metrics: expect.any(Array),
@@ -4150,6 +4380,7 @@ describe("Release E2E Orchestrator", () => {
     let activeHub = "baseline";
     let installed = false;
     let metricsEpoch = 0;
+    let reportEpoch = 0;
     let upgraded = false;
     const manifest = candidateManifestWithBaseline();
     const snapshotDigest = `sha256:${"d".repeat(64)}`;
@@ -4197,6 +4428,7 @@ describe("Release E2E Orchestrator", () => {
             ...readyHost().hostProfile,
             probeVersion: upgraded ? "1.2.3" : "1.2.2",
           },
+          lastReportAtMs: ++reportEpoch,
         });
         if (activeHub === "baseline" && upgraded) {
           host.hostProfile.hostname = "typed-but-wrong-hostname";
@@ -4340,7 +4572,6 @@ describe("Release E2E Orchestrator", () => {
     let repaired = false;
     let readableIdentityGeneration = null;
     let identityGeneration = "baseline-install";
-    let metricsEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
       completedAtMs: 20,
@@ -4378,12 +4609,13 @@ describe("Release E2E Orchestrator", () => {
             ...readyHost().hostProfile,
             probeVersion: repaired ? "1.2.3" : "1.2.2",
           },
+          lastReportAtMs: activeHub === "baseline" ? 10 : repaired ? 30 : 20,
           reportedProbeConfigurationVersion: configurationVersion,
         });
       },
       async getHostMetrics() {
-        metricsEpoch += 1;
-        const base = repaired ? 10_000 : 0;
+        const metricsEpoch = activeHub === "baseline" ? 1 : repaired ? 3 : 2;
+        const base = 0;
         return [
           portableMetric({
             collectedAtMs: base + metricsEpoch * 10,
@@ -4692,7 +4924,6 @@ describe("Release E2E Orchestrator", () => {
     activeHub = "baseline";
     configurationVersion = "default-v1";
     installed = false;
-    metricsEpoch = 0;
     repaired = false;
     readableIdentityGeneration = null;
     identityGeneration = "baseline-install";
@@ -4733,7 +4964,6 @@ describe("Release E2E Orchestrator", () => {
     configurationVersion = "default-v1";
     installed = false;
     invalidHostEvidence = true;
-    metricsEpoch = 0;
     repaired = false;
     readableIdentityGeneration = null;
     identityGeneration = "baseline-install";
@@ -6777,6 +7007,7 @@ function readyHost(overrides = {}) {
       probeVersion: "1.2.3",
     },
     id: 7,
+    lastReportAtMs: 1,
     probeUpgradeStatus: null,
     reportedProbeConfigurationVersion: "default-v1",
     status: "online",
