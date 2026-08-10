@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { permitsLegacyFullHostProfileObservation } from "../src/probe/legacy-report-compatibility";
 import {
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
@@ -263,6 +264,70 @@ describe("Probe report API", () => {
         .splice(0)
         .map((root) => rm(root, { force: true, recursive: true })),
     );
+  });
+
+  it.each([
+    {
+      expected: true,
+      name: "accepts the exact published legacy wire version",
+      reportedProbeVersion: "0.1.72",
+      storedProbeVersion: "0.1.72",
+    },
+    {
+      expected: true,
+      name: "accepts trimmed v-prefixed representations of the published legacy version",
+      reportedProbeVersion: " v0.1.72 ",
+      storedProbeVersion: "0.1.72",
+    },
+    {
+      expected: false,
+      name: "rejects a current stored Host version with a downgraded report",
+      reportedProbeVersion: "0.1.72",
+      storedProbeVersion: "0.1.73",
+    },
+    {
+      expected: false,
+      name: "rejects a missing stored Host version",
+      reportedProbeVersion: "0.1.72",
+      storedProbeVersion: undefined,
+    },
+    {
+      expected: false,
+      name: "rejects a malformed stored Host version",
+      reportedProbeVersion: "0.1.72",
+      storedProbeVersion: "legacy",
+    },
+    {
+      expected: false,
+      name: "rejects a current report version",
+      reportedProbeVersion: "0.1.73",
+      storedProbeVersion: "0.1.73",
+    },
+    {
+      expected: false,
+      name: "rejects another legacy version",
+      reportedProbeVersion: "0.1.71",
+      storedProbeVersion: "0.1.71",
+    },
+    {
+      expected: false,
+      name: "rejects prerelease versions",
+      reportedProbeVersion: "0.1.72-rc.1",
+      storedProbeVersion: "0.1.72-rc.1",
+    },
+    {
+      expected: false,
+      name: "rejects leading-zero version components",
+      reportedProbeVersion: "0.01.72",
+      storedProbeVersion: "0.01.72",
+    },
+  ])("$name", ({ expected, reportedProbeVersion, storedProbeVersion }) => {
+    expect(
+      permitsLegacyFullHostProfileObservation({
+        reportedProbeVersion,
+        storedProbeVersion,
+      }),
+    ).toBe(expected);
   });
 
   it("rejects the next authentic Probe report after Hub-only Host deletion", async () => {
@@ -591,6 +656,410 @@ describe("Probe report API", () => {
     await expect(response.json()).resolves.toEqual({
       error: "malformed_probe_report",
     });
+
+    database.close();
+  });
+
+  it("accepts the v0.1.72 collector-capability full observation without weakening current Probe replay", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const legacyStartupProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.72",
+    });
+    const changedLegacyProfile = sampleHostProfileSnapshot({
+      collectorCapabilities: {
+        official: {
+          diskHealth: { diagnostic: "smartctl unavailable", status: 2 },
+        },
+      },
+      probeVersion: "0.1.72",
+    });
+    const initialHash = hashStableHostProfile(legacyStartupProfile);
+    const changedHash = hashStableHostProfile(changedLegacyProfile);
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-v0-1-72-collector-capability",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: legacyStartupProfile,
+                  snapshotHash: initialHash,
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    expect(host).toEqual(expect.objectContaining({ probeVersion: "0.1.72" }));
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.72",
+        hostId: host?.id ?? -1,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
+    const configurationResponse = await app.request(
+      `/api/web/hosts/${host?.id}/probe-configuration`,
+      {
+        body: JSON.stringify({
+          configuration: {
+            enabledCollectorIds: ["official.cpu", "official.memory"],
+            metricsCollectionIntervalSeconds: 3,
+          },
+          mode: "override",
+        }),
+        headers: {
+          "content-type": "application/json",
+          cookie: ownerSession,
+        },
+        method: "PUT",
+      },
+    );
+    expect(configurationResponse.status).toBe(200);
+    const configuration = (await configurationResponse.json()) as {
+      configuration: { version: string };
+    };
+
+    const compact = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-collector-capability",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_001,
+              cpuPercent: 12.5,
+              sequence: 2,
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              snapshotHash: initialHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(compact.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
+        .currentProbeConfigurationVersion,
+    ).toBe(configuration.configuration.version);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "pending" }),
+    );
+
+    // This is v0.1.72's normal observation wire shape when its collector
+    // capability projection changes. It is neither a Snapshot Replay nor a
+    // current-Probe compact snapshot contract exception.
+    const capabilityChange = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-collector-capability",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_002,
+              cpuPercent: 13.5,
+              sequence: 3,
+            },
+          ],
+          operationAcknowledgements: [{ operationId: String(operation.id) }],
+          operationStatuses: [
+            { operationId: String(operation.id), running: {} },
+          ],
+          probeConfigurationError: {
+            errorCode: "probe_configuration_fetch_failed",
+            failedVersion: configuration.configuration.version,
+            message: "report request failed: 503 Service Unavailable",
+          },
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 3,
+          sequenceStart: 3,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: changedLegacyProfile,
+              snapshotHash: changedHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(capabilityChange.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "running" }),
+    );
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({
+        probeConfigurationErrorCode: "probe_configuration_fetch_failed",
+        probeConfigurationErrorFailedVersion:
+          configuration.configuration.version,
+      }),
+    );
+
+    const ConfigurationRequest = root.enoki.v1.ProbeConfigurationRequest;
+    const ConfigurationResponse = root.enoki.v1.ProbeConfigurationResponse;
+    const configurationFetch = await app.request(
+      "/api/probe/config",
+      signedProbeRequest(
+        registration,
+        "/api/probe/config",
+        ConfigurationRequest.encode(
+          ConfigurationRequest.create({
+            currentVersion: "default-v1",
+            probeId: registration.probeId,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(configurationFetch.status).toBe(200);
+    expect(
+      ConfigurationResponse.decode(
+        new Uint8Array(await configurationFetch.arrayBuffer()),
+      ).version,
+    ).toBe(configuration.configuration.version);
+
+    const recovered = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-collector-capability",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_003,
+              cpuPercent: 14.5,
+              sequence: 4,
+            },
+          ],
+          probeConfigurationVersion: configuration.configuration.version,
+          probeId: registration.probeId,
+          sequenceEnd: 4,
+          sequenceStart: 4,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              snapshotHash: changedHash,
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(recovered.status).toBe(200);
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({
+        probeConfigurationErrorCode: null,
+        probeConfigurationErrorFailedVersion: null,
+        probeConfigurationVersion: configuration.configuration.version,
+      }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from metric_samples")
+        .get(),
+    ).toEqual({ count: 3 });
+
+    // The stored Host identity is part of the compatibility boundary. A
+    // signed report cannot opt into the v0.1.72 contract merely by sending a
+    // full Profile with a newer version in this one payload.
+    const newerProfile = sampleHostProfileSnapshot({
+      collectorCapabilities: changedLegacyProfile.collectorCapabilities,
+      probeVersion: "0.1.73",
+    });
+    const newerFullObservation = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-v0-1-72-collector-capability",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_004,
+              cpuPercent: 15.5,
+              sequence: 5,
+            },
+          ],
+          probeConfigurationVersion: configuration.configuration.version,
+          probeId: registration.probeId,
+          sequenceEnd: 5,
+          sequenceStart: 5,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: newerProfile,
+              snapshotHash: hashStableHostProfile(newerProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+    expect(newerFullObservation.status).toBe(400);
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from metric_samples")
+        .get(),
+    ).toEqual({ count: 3 });
+
+    database.close();
+  });
+
+  it("rejects a full legacy observation that tries to downgrade a current stored Host without side effects", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_000_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const currentProfile = sampleHostProfileSnapshot({
+      probeVersion: "0.1.73",
+    });
+    const send = (body: Uint8Array) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+
+    expect(
+      (
+        await send(
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-current-host-rejects-legacy-full-observation",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              snapshots: [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: currentProfile,
+                  snapshotHash: hashStableHostProfile(currentProfile),
+                },
+              ],
+            }),
+          ).finish(),
+        )
+      ).status,
+    ).toBe(200);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) {
+      throw new Error("registered Probe Host is missing");
+    }
+    expect(host).toEqual(expect.objectContaining({ probeVersion: "0.1.73" }));
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.73",
+        hostId: host.id,
+        nowMs: 1_725_000_000_000,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+    );
+    const downgradedProfile = sampleHostProfileSnapshot({
+      collectorCapabilities: {
+        official: {
+          diskHealth: { diagnostic: "smartctl unavailable", status: 2 },
+        },
+      },
+      probeVersion: "0.1.72",
+    });
+
+    const rejected = await send(
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-current-host-rejects-legacy-full-observation",
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_001,
+              cpuPercent: 15.5,
+              sequence: 2,
+            },
+          ],
+          operationAcknowledgements: [{ operationId: String(operation.id) }],
+          operationStatuses: [
+            { operationId: String(operation.id), running: {} },
+          ],
+          probeConfigurationError: {
+            errorCode: "probe_configuration_fetch_failed",
+            failedVersion: "default-v1",
+            message: "report request failed: 503 Service Unavailable",
+          },
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 2,
+          sequenceStart: 2,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: downgradedProfile,
+              snapshotHash: hashStableHostProfile(downgradedProfile),
+            },
+          ],
+        }),
+      ).finish(),
+    );
+
+    expect(rejected.status).toBe(400);
+    await expect(rejected.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "pending" }),
+    );
+    expect(database.hosts.findByProbeId(registration.probeId)).toEqual(
+      expect.objectContaining({
+        probeConfigurationErrorCode: null,
+        probeConfigurationErrorFailedVersion: null,
+        probeVersion: "0.1.73",
+      }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from metric_samples")
+        .get(),
+    ).toEqual({ count: 0 });
 
     database.close();
   });
