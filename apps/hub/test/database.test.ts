@@ -323,6 +323,142 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("persists exact Snapshot Replay requests and resets fulfillment for a newer tuple", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 88, probeId: "probe-snapshot-replay" });
+
+    const originalRequest = {
+      bootId: "boot-before-replacement",
+      collectorId: "official.host-profile",
+      hostId: 88,
+      sequence: 2,
+      snapshotHash: "snapshot-before-replacement",
+    };
+    database.snapshotCollectors.requestSnapshotReplay({
+      ...originalRequest,
+      requestedAtMs: 1_725_000_000_000,
+    });
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
+    ).toBe("pending");
+    expect(
+      database.snapshotCollectors.fulfillSnapshotReplay({
+        ...originalRequest,
+        fulfilledAtMs: 1_725_000_000_100,
+      }),
+    ).toBe(true);
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
+    ).toBe("fulfilled");
+
+    const replacementRequest = {
+      bootId: "boot-after-replacement",
+      collectorId: "official.host-profile",
+      hostId: 88,
+      sequence: 4,
+      snapshotHash: "snapshot-after-replacement",
+    };
+    database.snapshotCollectors.requestSnapshotReplay({
+      ...replacementRequest,
+      requestedAtMs: 1_725_000_000_200,
+    });
+
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
+    ).toBeNull();
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(
+        replacementRequest,
+      ),
+    ).toBe("pending");
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-after-replacement",
+      fulfilled_at_ms: null,
+      sequence: 4,
+      snapshot_hash: "snapshot-after-replacement",
+    });
+
+    database.close();
+  });
+
+  it("migrates unbound legacy Snapshot Replay requests into non-matchable receipts", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const legacyMigrations = path.join(dataRoot, "legacy-replay-migrations");
+    await cp(path.resolve("drizzle"), legacyMigrations, { recursive: true });
+    await rm(
+      path.join(legacyMigrations, "20260810083603_glorious_adam_warlock"),
+      { force: true, recursive: true },
+    );
+
+    const legacy = initializeHubDatabase(
+      {
+        dataRoot,
+        sqlitePath: path.join(dataRoot, "enoki.db"),
+      },
+      {
+        migrationLayers: [
+          {
+            historyTable: "__drizzle_migrations",
+            migrationsFolder: legacyMigrations,
+            name: "core",
+          },
+          {
+            historyTable: "__official_metrics_migrations",
+            migrationsFolder: path.resolve("drizzle-official-metrics"),
+            name: "official_metrics",
+          },
+        ],
+      },
+    );
+    createHost(legacy, { id: 89, probeId: "probe-legacy-snapshot-replay" });
+    legacy.sqlite
+      .prepare(
+        "insert into snapshot_replay_requests (managed_host_id, collector_id, requested_at_ms) values (?, ?, ?)",
+      )
+      .run(89, "official.host-profile", 1_725_000_000_000);
+    legacy.close();
+
+    const migrated = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "",
+      fulfilled_at_ms: null,
+      sequence: 0,
+      snapshot_hash: "",
+    });
+    expect(
+      migrated.snapshotCollectors.snapshotReplayRequestStatus({
+        bootId: "boot-after-migration",
+        collectorId: "official.host-profile",
+        hostId: 89,
+        sequence: 1,
+        snapshotHash: "snapshot-after-migration",
+      }),
+    ).toBeNull();
+
+    migrated.close();
+  });
+
   it("keeps Metrics child rows attached when a sparse official domain row has a different id than its sample", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
@@ -838,6 +974,74 @@ describe("Hub database", () => {
         targetProbeVersion: "0.3.0",
       }),
     );
+
+    database.close();
+  });
+
+  it("atomically supersedes pending ExistingHost Enrollments, conflicts while verifying, and permits terminal retry", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 7, probeId: "probe-existing" });
+    const create = (enrollmentId: string, createdAtMs: number) =>
+      database.enrollments.createPending({
+        createdAtMs,
+        enrollmentId,
+        expiresAtMs: createdAtMs + 60_000,
+        target: { hostId: 7, kind: "existing_host" },
+        tokenHash: `token-${enrollmentId}`,
+      });
+
+    const first = create("enr_existing_first_0001", 1_725_000_000_000);
+    const second = create("enr_existing_second_0002", 1_725_000_001_000);
+    expect(first.kind).toBe("created");
+    expect(second.kind).toBe("created");
+    expect(
+      database.sqlite
+        .prepare(
+          "select enrollment_id as enrollmentId, status, rejection_code as rejectionCode from enrollment_tokens order by id",
+        )
+        .all(),
+    ).toEqual([
+      {
+        enrollmentId: "enr_existing_first_0001",
+        rejectionCode: "superseded",
+        status: "rejected",
+      },
+      {
+        enrollmentId: "enr_existing_second_0002",
+        rejectionCode: null,
+        status: "pending",
+      },
+    ]);
+
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set status = 'verifying', used_at_ms = ?, verification_deadline_at_ms = ? where enrollment_id = ?",
+      )
+      .run(1_725_000_002_000, 1_725_000_062_000, "enr_existing_second_0002");
+    expect(create("enr_existing_conflict_0003", 1_725_000_003_000)).toEqual({
+      kind: "existing_host_verifying",
+    });
+
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set status = 'rejected', rejected_at_ms = ? where enrollment_id = ?",
+      )
+      .run(1_725_000_004_000, "enr_existing_second_0002");
+    expect(create("enr_existing_retry_0004", 1_725_000_005_000)).toEqual(
+      expect.objectContaining({ kind: "created" }),
+    );
+    expect(
+      database.sqlite
+        .prepare(
+          "select name from sqlite_master where type = 'index' and name = 'enrollment_tokens_one_active_existing_host_idx'",
+        )
+        .get(),
+    ).toEqual({ name: "enrollment_tokens_one_active_existing_host_idx" });
 
     database.close();
   });

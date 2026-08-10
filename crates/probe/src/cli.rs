@@ -23,6 +23,7 @@ pub enum ProbeCommand {
     InternalUninstaller {
         bootstrap_config_path: PathBuf,
     },
+    Uninstall,
     Repair,
     Rejected {
         code: &'static str,
@@ -51,6 +52,13 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
         }
         Some("local-install") => parse_internal_local_lifecycle_command(args),
         Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
+        Some("uninstall") => {
+            if args.next().is_none() {
+                ProbeCommand::Uninstall
+            } else {
+                ProbeCommand::Help
+            }
+        }
         Some("internal-upgrader") => parse_internal_upgrader_command(args),
         Some("repair") => {
             if args.next().is_none() {
@@ -254,6 +262,7 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "  enoki-probe register --hub-url <url> ",
             "--enrollment-token <token> --config <path>\n",
             "  sudo enoki-probe repair\n",
+            "  sudo enoki-probe uninstall\n",
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
@@ -273,6 +282,9 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         }
         ProbeCommand::InternalUninstaller { .. } => {
             "Probe Uninstaller performs privileged Probe uninstall execution.\n".to_string()
+        }
+        ProbeCommand::Uninstall => {
+            "Local Probe Uninstall removes this machine's local Probe installation without contacting the Hub.\n".to_string()
         }
         ProbeCommand::Repair => {
             "Probe Repair reinstalls from the bound Hub using the existing Probe Identity.\n"

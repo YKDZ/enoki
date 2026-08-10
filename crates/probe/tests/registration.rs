@@ -10,7 +10,9 @@ use enoki_probe::{
         ProbeConfigurationResponse, ProbeRegistrationRequest, ProbeRegistrationResponse, snapshot,
     },
     registration::{
-        ProbeRegistrationInput, RegistrationError, RegistrationTransport, register_probe,
+        ProbeInstallationInspectionInput, ProbeInstallationRejectionInput, ProbeInstallationTarget,
+        ProbeRegistrationInput, RegistrationError, RegistrationTransport,
+        inspect_probe_installation, register_probe, reject_probe_installation,
     },
 };
 use prost::Message;
@@ -21,6 +23,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
@@ -92,6 +95,91 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
 }
 
 #[test]
+fn installation_inspection_uses_registration_without_generating_an_identity() {
+    let response =
+        ProbeRegistrationResponse {
+            enrollment_id: String::new(),
+            initial_configuration: None,
+            installation_inspection: Some(
+                enoki_probe::protocol::enoki::v1::ProbeInstallationInspectionResponse {
+                    target_kind:
+                        enoki_probe::protocol::enoki::v1::ProbeEnrollmentTargetKind::ExistingHost
+                            as i32,
+                },
+            ),
+            probe_id: String::new(),
+            probe_secret: String::new(),
+            server_time_ms: 0,
+        }
+        .encode_to_vec();
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response,
+    };
+
+    let target = inspect_probe_installation(
+        ProbeInstallationInspectionInput {
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example/base".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("inspection succeeds");
+
+    assert_eq!(target, ProbeInstallationTarget::ExistingHost);
+    assert_eq!(
+        transport.observed_url,
+        "https://hub.example/base/api/probe/register",
+    );
+    let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
+        .expect("inspection request decodes");
+    assert_eq!(request.enrollment_token, "enk_enroll_secret");
+    assert!(request.installation_inspection.is_some());
+    assert!(request.installation_rejection.is_none());
+    assert!(request.probe_public_key_pem.is_empty());
+    assert!(request.snapshots.is_empty());
+}
+
+#[test]
+fn installation_rejection_uses_the_registration_endpoint_without_generating_or_storing_identity() {
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response: Vec::new(),
+    };
+
+    reject_probe_installation(
+        ProbeInstallationRejectionInput {
+            code: "probe_bound_to_different_hub".to_string(),
+            existing_probe_id: "probe_existing_01".to_string(),
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example/base".to_string(),
+            message: "local Probe installation is bound to a different Hub".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("rejection posts");
+
+    assert_eq!(
+        transport.observed_url,
+        "https://hub.example/base/api/probe/register",
+    );
+    let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
+        .expect("rejection request decodes");
+    assert_eq!(request.enrollment_token, "enk_enroll_secret");
+    assert_eq!(request.probe_public_key_pem, "");
+    assert!(request.snapshots.is_empty());
+    let rejection = request.installation_rejection.expect("typed rejection");
+    assert_eq!(rejection.code, "probe_bound_to_different_hub");
+    assert_eq!(rejection.existing_probe_id, "probe_existing_01");
+    assert_eq!(
+        rejection.message,
+        "local Probe installation is bound to a different Hub"
+    );
+}
+
+#[test]
 fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
@@ -114,6 +202,7 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     .expect("write installer bootstrap config");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
@@ -165,6 +254,7 @@ fn probe_registration_does_not_persist_required_host_profile_as_configurable_col
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: vec![
                 "official.host-profile".to_string(),
@@ -209,6 +299,7 @@ fn probe_registration_drops_unknown_initial_collector_ids_from_bootstrap_config(
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: vec![
                 "official.memory".to_string(),
@@ -345,6 +436,7 @@ fn all_collector_ids() -> Vec<String> {
 fn registration_response() -> Vec<u8> {
     ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,

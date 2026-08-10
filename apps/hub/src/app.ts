@@ -134,6 +134,7 @@ export function createHubApp(options: HubAppOptions = {}) {
         createEnrollmentRoutes({
           audit: options.database.audit,
           enrollments: options.database.enrollments,
+          hostStatus: options.hostStatus,
           installation: options.installation,
           now: options.now,
         }),
@@ -275,6 +276,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
   app.route(
     "/api/probe",
     createProbeRoutes({
+      audit: options.database.audit,
       enrollments: options.database.enrollments,
       hosts: options.database.hosts,
       metrics: options.database.metrics,

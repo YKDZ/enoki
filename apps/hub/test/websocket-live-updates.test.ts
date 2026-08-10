@@ -10,6 +10,7 @@ import WebSocket from "ws";
 import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
+import { hashStableHostProfile } from "./host-profile-hash";
 import {
   createTestProbeIdentity,
   signedJsonProbeHeaders,
@@ -149,94 +150,139 @@ async function sendReport(
   } = {},
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const ReportResponse = root.enoki.v1.ProbeReportResponse;
   const sequence = options.sequence ?? 1;
-  const body = ReportRequest.encode(
-    ReportRequest.create({
-      bootId: options.bootId ?? "boot-live-summary",
-      metrics: [
+  const metrics = [
+    {
+      collectedAtMs: 1_725_000_009_500,
+      cpuCores: [
         {
-          collectedAtMs: 1_725_000_009_500,
-          cpuCores: [
-            {
-              idle: 850,
-              name: "cpu0",
-              nice: 10,
-              softirq: 2,
-              steal: 1,
-              system: 40,
-              usagePercent: 15,
-              user: 100,
-            },
-          ],
-          cpuPercent: options.cpuPercent ?? 42.5,
-          disks: [
-            {
-              availableBytes: 512,
-              filesystemType: "ext4",
-              mountPoint: "/",
-              totalBytes: 2_048,
-              usedBytes: 1_536,
-            },
-          ],
-          memoryTotalBytes: 2_147_483_648,
-          memoryUsedBytes: 1_073_741_824,
-          networkInterfaces: [
-            {
-              name: "eth0",
-              rxBytes: 9_000,
-              rxBytesDelta: 4_000,
-              txBytes: 11_000,
-              txBytesDelta: 2_000,
-            },
-          ],
-          sequence,
-          uptimeSeconds: 86_400,
+          idle: 850,
+          name: "cpu0",
+          nice: 10,
+          softirq: 2,
+          steal: 1,
+          system: 40,
+          usagePercent: 15,
+          user: 100,
         },
       ],
+      cpuPercent: options.cpuPercent ?? 42.5,
+      disks: [
+        {
+          availableBytes: 512,
+          filesystemType: "ext4",
+          mountPoint: "/",
+          totalBytes: 2_048,
+          usedBytes: 1_536,
+        },
+      ],
+      memoryTotalBytes: 2_147_483_648,
+      memoryUsedBytes: 1_073_741_824,
+      networkInterfaces: [
+        {
+          name: "eth0",
+          rxBytes: 9_000,
+          rxBytesDelta: 4_000,
+          txBytes: 11_000,
+          txBytesDelta: 2_000,
+        },
+      ],
+      sequence,
+      uptimeSeconds: 86_400,
+    },
+  ];
+  const hostProfile = hostProfileForReport(options);
+  const postReport = async (input: {
+    metrics: typeof metrics;
+    snapshots: root.enoki.v1.ISnapshot[];
+  }) => {
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: options.bootId ?? "boot-live-summary",
+        metrics: input.metrics,
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: sequence,
+        sequenceStart: sequence,
+        snapshots: input.snapshots,
+      }),
+    ).finish();
+    const reportUrl = `${baseUrl}/api/probe/report`;
+    const response = await fetch(reportUrl, {
+      body,
+      headers: signedProbeHeaders({
+        body,
+        pathAndQuery: reportUrl,
+        privateKeyPem: registration.privateKeyPem,
+        probeId: registration.probeId,
+      }),
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    return response;
+  };
+
+  if (!hostProfile) {
+    await postReport({ metrics, snapshots: [] });
+    return;
+  }
+
+  const snapshotHash = hashStableHostProfile(hostProfile);
+  const compactResponse = await postReport({
+    metrics,
+    snapshots: [
+      {
+        collectorId: "official.host-profile",
+        snapshotHash,
+      },
+    ],
+  });
+  expect(
+    ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
+      .requestedSnapshotCollectorIds,
+  ).toEqual(["official.host-profile"]);
+  await postReport({
+    metrics: [],
+    snapshots: [
+      {
+        collectorId: "official.host-profile",
+        hostProfile,
+        snapshotHash,
+      },
+    ],
+  });
+}
+
+async function sendStartupReport(
+  baseUrl: string,
+  registration: {
+    privateKeyPem: string;
+    probeId: string;
+  },
+  input: {
+    bootId: string;
+    hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+  },
+) {
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const hostProfile = input.hostProfile ?? baselineHostProfile();
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: input.bootId,
+      metrics: [],
       probeConfigurationVersion: "default-v1",
       probeId: registration.probeId,
-      sequenceEnd: sequence,
-      sequenceStart: sequence,
-      snapshots:
-        (options.hostProfile ??
-        (options.diskAvailable === undefined
-          ? null
-          : {
-              architecture: "x86_64",
-              collectorCapabilities: {
-                official: {
-                  diskHealth: diskHealthCapability(options.diskAvailable),
-                },
-              },
-              cpuCount: 2,
-              hostname: "managed-host-01",
-              kernel: "6.8.0",
-              memoryTotalBytes: 2_147_483_648,
-              os: "linux",
-              probeVersion: "0.1.0",
-            }))
-          ? [
-              {
-                collectorId: "official.host-profile",
-                hostProfile:
-                  options.hostProfile ??
-                  ({
-                    architecture: "x86_64",
-                    collectorCapabilities: {
-                      official: {
-                        diskHealth: diskHealthCapability(options.diskAvailable),
-                      },
-                    },
-                    cpuCount: 2,
-                    hostname: "managed-host-01",
-                    kernel: "6.8.0",
-                    memoryTotalBytes: 2_147_483_648,
-                    os: "linux",
-                    probeVersion: "0.1.0",
-                  } satisfies root.enoki.v1.IHostProfileSnapshot),
-              },
-            ]
-          : [],
+      sequenceEnd: 1,
+      sequenceStart: 1,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile,
+          snapshotHash: hashStableHostProfile(hostProfile),
+        },
+      ],
     }),
   ).finish();
   const reportUrl = `${baseUrl}/api/probe/report`;
@@ -252,6 +298,39 @@ async function sendReport(
   });
 
   expect(response.status).toBe(200);
+}
+
+function hostProfileForReport(input: {
+  diskAvailable?: boolean;
+  hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+}) {
+  if (input.hostProfile) {
+    return input.hostProfile;
+  }
+  if (input.diskAvailable === undefined) {
+    return null;
+  }
+
+  return {
+    ...baselineHostProfile(),
+    collectorCapabilities: {
+      official: {
+        diskHealth: diskHealthCapability(input.diskAvailable),
+      },
+    },
+  } satisfies root.enoki.v1.IHostProfileSnapshot;
+}
+
+function baselineHostProfile(): root.enoki.v1.IHostProfileSnapshot {
+  return {
+    architecture: "x86_64",
+    cpuCount: 2,
+    hostname: "managed-host-01",
+    kernel: "6.8.0",
+    memoryTotalBytes: 2_147_483_648,
+    os: "linux",
+    probeVersion: "0.1.0",
+  };
 }
 
 async function completeProbeUninstall(
@@ -733,54 +812,65 @@ describe("WebSocket live updates", () => {
         type: "subscribe_host_detail",
       }),
     );
-    const summaryMessage = readWebSocketJson(socket);
-    await sendReport(baseUrl, registration, { diskAvailable: false });
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+    });
+    const summaryMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+      diskAvailable: false,
+      sequence: 2,
+    });
 
-    await expect(summaryMessage).resolves.toEqual({
-      host: {
-        id: 1,
-        collectorCapabilities: {
-          official: {
-            diskHealth: {
-              diagnostic: "SMART data is unsupported",
-              status: 6,
+    await expect(summaryMessages).resolves.toEqual(
+      expect.arrayContaining([
+        {
+          host: {
+            id: 1,
+            collectorCapabilities: {
+              official: {
+                diskHealth: {
+                  diagnostic: "SMART data is unsupported",
+                  status: 6,
+                },
+              },
+            },
+            lastSeenAtMs: 1_725_000_010_000,
+            latestMetrics: {
+              batteryPercent: null,
+              batteryState: null,
+              collectedAtMs: 1_725_000_009_500,
+              cpuIdlePercent: null,
+              cpuIowaitPercent: null,
+              cpuPercent: 42.5,
+              cpuStealPercent: null,
+              cpuSystemPercent: null,
+              cpuUserPercent: null,
+              diskTotalBytes: 2_048,
+              diskUsedBytes: 1_536,
+              memoryCacheBytes: null,
+              memoryTotalBytes: 2_147_483_648,
+              memoryUsedBytes: 1_073_741_824,
+              networkRxBitsPerSecond: 6_400,
+              networkRxBytesDelta: 4_000,
+              networkTxBitsPerSecond: 3_200,
+              networkTxBytesDelta: 2_000,
+              receivedAtMs: 1_725_000_010_000,
+              swapTotalBytes: null,
+              swapUsedBytes: null,
+              temperatureCelsius: null,
+              uptimeSeconds: 86_400,
+            },
+            status: "online",
+            warningFlags: {
+              clockSkew: false,
+              probeConfigurationError: false,
             },
           },
+          type: "host_summary",
         },
-        lastSeenAtMs: 1_725_000_010_000,
-        latestMetrics: {
-          batteryPercent: null,
-          batteryState: null,
-          collectedAtMs: 1_725_000_009_500,
-          cpuIdlePercent: null,
-          cpuIowaitPercent: null,
-          cpuPercent: 42.5,
-          cpuStealPercent: null,
-          cpuSystemPercent: null,
-          cpuUserPercent: null,
-          diskTotalBytes: 2_048,
-          diskUsedBytes: 1_536,
-          memoryCacheBytes: null,
-          memoryTotalBytes: 2_147_483_648,
-          memoryUsedBytes: 1_073_741_824,
-          networkRxBitsPerSecond: 6_400,
-          networkRxBytesDelta: 4_000,
-          networkTxBitsPerSecond: 3_200,
-          networkTxBytesDelta: 2_000,
-          receivedAtMs: 1_725_000_010_000,
-          swapTotalBytes: null,
-          swapUsedBytes: null,
-          temperatureCelsius: null,
-          uptimeSeconds: 86_400,
-        },
-        status: "online",
-        warningFlags: {
-          clockSkew: false,
-          probeConfigurationError: false,
-        },
-      },
-      type: "host_summary",
-    });
+      ]),
+    );
 
     await closeSocket(socket);
     database.close();
@@ -936,6 +1026,9 @@ describe("WebSocket live updates", () => {
     });
     const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
     const registration = await registerProbe(baseUrl, enrollmentToken);
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-profile-live",
+    });
 
     socket.send(
       JSON.stringify({
@@ -945,6 +1038,7 @@ describe("WebSocket live updates", () => {
     );
     const messages = collectWebSocketJson(socket);
     await sendReport(baseUrl, registration, {
+      bootId: "boot-profile-live",
       hostProfile: {
         architecture: "x86_64",
         collectorCapabilities: {

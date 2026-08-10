@@ -11,6 +11,7 @@ pub mod registration;
 pub mod report;
 pub mod runtime;
 pub mod secure_file;
+pub mod transport;
 pub mod upgrader;
 pub mod version;
 

@@ -40,6 +40,8 @@ fn generated_rust_protocol_encodes_probe_registration() {
     };
     let request = ProbeRegistrationRequest {
         enrollment_token: "enrollment-token".to_string(),
+        installation_inspection: None,
+        installation_rejection: None,
         probe_public_key_pem: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----\n"
             .to_string(),
         snapshots: vec![Snapshot {

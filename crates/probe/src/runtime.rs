@@ -16,11 +16,15 @@ use crate::{
     metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
     protocol::enoki::v1::{
         HostProfileSnapshot, ProbeConfigurationError, ProbeConfigurationRequest,
-        ProbeConfigurationResponse, ProbeOperationAcknowledgement, ProbeOperationFailed,
-        ProbeOperationRunning, ProbeOperationStatus, ProbeReportRequest, ProbeReportResponse,
-        probe_operation::Operation, probe_operation_status::Status,
+        ProbeConfigurationResponse, ProbeOperationFailed, ProbeOperationRunning,
+        ProbeOperationStatus, ProbeReportResponse, probe_operation::Operation,
+        probe_operation_status::Status,
     },
-    report::{full_host_profile_report, regular_report, startup_report},
+    report::{
+        ObservationBatchInput, OperationReportProgress, SnapshotReplayInput, StartupReportInput,
+        observation_batch_report, snapshot_replay_report, startup_report,
+    },
+    transport::{HttpAttemptError, post_protobuf},
     upgrader::{
         ProbeUninstallerLaunch, ProbeUpgraderCommandOutput, ProbeUpgraderLaunch,
         ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
@@ -169,27 +173,19 @@ pub fn run_loop_control_from_environment(
 
 #[derive(Debug)]
 pub enum ReportError {
+    Attempt(HttpAttemptError),
     Decode(String),
-    Http(String),
-    HttpStatus { message: String, status: u16 },
     InvalidConfig(&'static str),
     InvalidResponse(&'static str),
     InvalidSigningKey(String),
-    ResponseRead(std::io::Error),
 }
 
 impl fmt::Display for ReportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Attempt(error) => write!(formatter, "report request failed: {error}"),
             Self::Decode(message) => {
                 write!(formatter, "failed to decode report response: {message}")
-            }
-            Self::Http(message) => write!(formatter, "report request failed: {message}"),
-            Self::HttpStatus { message, status } => {
-                write!(
-                    formatter,
-                    "report request failed with HTTP {status}: {message}"
-                )
             }
             Self::InvalidConfig(message) => {
                 write!(formatter, "invalid Probe bootstrap config: {message}")
@@ -200,9 +196,6 @@ impl fmt::Display for ReportError {
             Self::InvalidSigningKey(message) => {
                 write!(formatter, "invalid Probe signing key: {message}")
             }
-            Self::ResponseRead(error) => {
-                write!(formatter, "failed to read report response: {error}")
-            }
         }
     }
 }
@@ -210,10 +203,8 @@ impl fmt::Display for ReportError {
 impl Error for ReportError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::ResponseRead(error) => Some(error),
+            Self::Attempt(error) => Some(error),
             Self::Decode(_)
-            | Self::Http(_)
-            | Self::HttpStatus { .. }
             | Self::InvalidConfig(_)
             | Self::InvalidResponse(_)
             | Self::InvalidSigningKey(_) => None,
@@ -224,15 +215,11 @@ impl Error for ReportError {
 impl ReportError {
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Http(_) => true,
-            Self::HttpStatus { status, .. } => {
-                *status == 408 || *status == 429 || (500..=599).contains(status)
-            }
+            Self::Attempt(error) => error.is_transient(),
             Self::Decode(_)
             | Self::InvalidConfig(_)
             | Self::InvalidResponse(_)
             | Self::InvalidSigningKey(_) => false,
-            Self::ResponseRead(_) => true,
         }
     }
 }
@@ -246,22 +233,12 @@ impl ReportTransport for HttpReportTransport {
         auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
-        let mut request = ureq::post(url)
-            .set("accept", "application/x-protobuf")
-            .set("content-type", "application/x-protobuf");
-        for (name, value) in signed_probe_request_headers("POST", url, auth, &body)
+        let headers = signed_probe_request_headers("POST", url, auth, &body)
             .map_err(ReportError::InvalidSigningKey)?
-        {
-            request = request.set(name, &value);
-        }
-        let response = request.send_bytes(&body).map_err(report_http_error)?;
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .read_to_end(&mut bytes)
-            .map_err(ReportError::ResponseRead)?;
-
-        Ok(bytes)
+            .into_iter()
+            .map(|(name, value)| (name as &str, value))
+            .collect::<Vec<_>>();
+        post_protobuf(url, &body, &headers).map_err(ReportError::Attempt)
     }
 }
 
@@ -450,24 +427,17 @@ fn run_reporting_loop(
     let mut reports_sent = 0;
     let mut metrics_collector = MetricsCollector::default();
     let mut operation_reports = ProbeOperationReportQueue::default();
-    let mut pending_report_body = None;
-    let mut request = startup_report(
+    let request = startup_report(StartupReportInput {
+        boot_id: &boot_id,
+        enrollment_id: bootstrap_config
+            .enrollment_id
+            .as_deref()
+            .unwrap_or_default(),
+        host_profile: host_profile.clone(),
+        operation_progress: OperationReportProgress::from_statuses(local_operation_statuses),
+        probe_configuration_version: &active_configuration.version,
         probe_id,
-        &boot_id,
-        sequence,
-        &active_configuration.version,
-        host_profile.clone(),
-        Vec::new(),
-    );
-    request.enrollment_id = bootstrap_config.enrollment_id.clone().unwrap_or_default();
-    for status in &local_operation_statuses {
-        request
-            .operation_acknowledgements
-            .push(ProbeOperationAcknowledgement {
-                operation_id: status.operation_id.clone(),
-            });
-    }
-    request.operation_statuses = local_operation_statuses;
+    });
     let response = post_startup_report_until_accepted(
         transport,
         hub_url,
@@ -497,18 +467,25 @@ fn run_reporting_loop(
             return Ok(());
         }
 
-        sequence += 1;
+        // Snapshot Replay supplements the accepted Startup Report rather than
+        // creating another Metrics time slice, so it reuses sequence one.
         host_profile = host_profile_provider.collect_host_profile();
-        let request = full_host_profile_report(
+        let request = snapshot_replay_report(SnapshotReplayInput {
+            boot_id: &boot_id,
+            host_profile: host_profile.clone(),
+            probe_configuration_version: &active_configuration.version,
             probe_id,
-            &boot_id,
             sequence,
+        });
+        let response = post_report_with_transient_retry(
+            transport,
+            hub_url,
+            &request_auth,
+            request.encode_to_vec(),
             sequence,
-            &active_configuration.version,
-            host_profile.clone(),
-            Vec::new(),
-        );
-        let response = post_report(transport, hub_url, &request_auth, request.encode_to_vec())?;
+            sleeper,
+            active_configuration.reporting_interval,
+        )?;
         refresh_probe_request_auth(&mut request_auth, &response);
         reports_sent += 1;
         if !report_limit_reached(reports_sent, control) {
@@ -527,56 +504,37 @@ fn run_reporting_loop(
     }
 
     while !report_limit_reached(reports_sent, control) {
-        let request_body = if let Some(request_body) = pending_report_body.take() {
-            sleeper.sleep(active_configuration.reporting_interval);
-            request_body
-        } else {
-            let (sequence_start, sequence_end, metrics) = collect_observation_batch(
-                sleeper,
-                &active_configuration,
-                &mut sequence,
-                &mut metrics_collector,
-            );
+        let (sequence_start, sequence_end, metrics) = collect_observation_batch(
+            sleeper,
+            &active_configuration,
+            &mut sequence,
+            &mut metrics_collector,
+        );
 
-            let latest_host_profile = host_profile_provider.collect_host_profile();
-            let collector_capability_changed =
-                latest_host_profile.collector_capabilities != host_profile.collector_capabilities;
-            host_profile = latest_host_profile;
+        let latest_host_profile = host_profile_provider.collect_host_profile();
+        host_profile = latest_host_profile;
 
-            let request = if collector_capability_changed {
-                full_host_profile_report(
-                    probe_id,
-                    &boot_id,
-                    sequence_start,
-                    sequence_end,
-                    &active_configuration.version,
-                    host_profile.clone(),
-                    metrics,
-                )
-            } else {
-                regular_report(
-                    probe_id,
-                    &boot_id,
-                    sequence_start,
-                    sequence_end,
-                    &active_configuration.version,
-                    &host_profile,
-                    metrics,
-                )
-            };
-            let request = with_configuration_error(request, pending_configuration_error.take());
-            let request = operation_reports.with_operation_reports(request);
+        let request = observation_batch_report(ObservationBatchInput {
+            boot_id: &boot_id,
+            host_profile: &host_profile,
+            metrics,
+            operation_progress: operation_reports.take_progress(),
+            probe_configuration_error: pending_configuration_error.take(),
+            probe_configuration_version: &active_configuration.version,
+            probe_id,
+            sequence_end,
+            sequence_start,
+        });
 
-            request.encode_to_vec()
-        };
-        let response = match post_report(transport, hub_url, &request_auth, request_body.clone()) {
-            Ok(response) => response,
-            Err(error) if error.is_transient() => {
-                pending_report_body = Some(request_body);
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let response = post_report_with_transient_retry(
+            transport,
+            hub_url,
+            &request_auth,
+            request.encode_to_vec(),
+            sequence_end,
+            sleeper,
+            active_configuration.reporting_interval,
+        )?;
         refresh_probe_request_auth(&mut request_auth, &response);
         reports_sent += 1;
         if !report_limit_reached(reports_sent, control) {
@@ -596,29 +554,25 @@ fn run_reporting_loop(
         if host_profile_snapshot_requested(&response)
             && !report_limit_reached(reports_sent, control)
         {
-            sequence += 1;
+            // Replay supplements the accepted Observation Batch and preserves
+            // its sequence end; the next collection advances from that batch.
             host_profile = host_profile_provider.collect_host_profile();
-            let request = full_host_profile_report(
+            let request = snapshot_replay_report(SnapshotReplayInput {
+                boot_id: &boot_id,
+                host_profile: host_profile.clone(),
+                probe_configuration_version: &active_configuration.version,
                 probe_id,
-                &boot_id,
                 sequence,
+            });
+            let response = post_report_with_transient_retry(
+                transport,
+                hub_url,
+                &request_auth,
+                request.encode_to_vec(),
                 sequence,
-                &active_configuration.version,
-                host_profile.clone(),
-                Vec::new(),
-            );
-            let request = with_configuration_error(request, pending_configuration_error.take());
-            let request = operation_reports.with_operation_reports(request);
-            let request_body = request.encode_to_vec();
-            let response =
-                match post_report(transport, hub_url, &request_auth, request_body.clone()) {
-                    Ok(response) => response,
-                    Err(error) if error.is_transient() => {
-                        pending_report_body = Some(request_body);
-                        continue;
-                    }
-                    Err(error) => return Err(error.into()),
-                };
+                sleeper,
+                active_configuration.reporting_interval,
+            )?;
             refresh_probe_request_auth(&mut request_auth, &response);
             reports_sent += 1;
             if !report_limit_reached(reports_sent, control) {
@@ -817,7 +771,6 @@ fn probe_upgrade_outcome_from_launch_result(
 
 #[derive(Default)]
 struct ProbeOperationReportQueue {
-    acknowledgements: Vec<String>,
     seen_operation_ids: HashSet<String>,
     statuses: Vec<(String, Status)>,
 }
@@ -855,7 +808,6 @@ impl ProbeOperationReportQueue {
             }
             None => return,
         };
-        self.acknowledgements.push(operation.id.clone());
         self.statuses.push((
             operation.id.clone(),
             match outcome {
@@ -865,23 +817,16 @@ impl ProbeOperationReportQueue {
         ));
     }
 
-    fn with_operation_reports(&mut self, mut request: ProbeReportRequest) -> ProbeReportRequest {
-        for operation_id in self.acknowledgements.drain(..) {
-            request
-                .operation_acknowledgements
-                .push(ProbeOperationAcknowledgement {
-                    operation_id: operation_id.clone(),
-                });
-        }
-
-        for (operation_id, status) in self.statuses.drain(..) {
-            request.operation_statuses.push(ProbeOperationStatus {
-                operation_id,
-                status: Some(status),
-            });
-        }
-
-        request
+    fn take_progress(&mut self) -> OperationReportProgress {
+        OperationReportProgress::from_statuses(
+            self.statuses
+                .drain(..)
+                .map(|(operation_id, status)| ProbeOperationStatus {
+                    operation_id,
+                    status: Some(status),
+                })
+                .collect(),
+        )
     }
 }
 
@@ -931,18 +876,12 @@ mod operation_report_tests {
             &mut runner,
         );
 
-        let request = queue.with_operation_reports(ProbeReportRequest::default());
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
 
-        assert_eq!(request.operation_acknowledgements.len(), 1);
-        assert_eq!(request.operation_statuses.len(), 1);
-        assert_eq!(
-            request.operation_acknowledgements[0].operation_id,
-            "operation-01"
-        );
-        assert!(matches!(
-            request.operation_statuses[0].status,
-            Some(Status::Running(_))
-        ));
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(acknowledgements[0].operation_id, "operation-01");
+        assert!(matches!(statuses[0].status, Some(Status::Running(_))));
     }
 
     #[test]
@@ -1032,12 +971,12 @@ mod operation_report_tests {
             &mut runner,
         );
 
-        let request = queue.with_operation_reports(ProbeReportRequest::default());
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
 
-        assert_eq!(request.operation_acknowledgements.len(), 1);
-        assert_eq!(request.operation_statuses.len(), 1);
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(statuses.len(), 1);
         assert!(matches!(
-            request.operation_statuses[0].status,
+            statuses[0].status,
             Some(Status::Failed(ref failed)) if failed.error_code == "insufficient_privilege"
         ));
     }
@@ -1068,34 +1007,44 @@ fn post_startup_report_until_accepted(
     body: Vec<u8>,
     sleeper: &mut impl ProbeRuntimeSleeper,
 ) -> Result<ProbeReportResponse, ReportError> {
+    post_report_with_transient_retry(
+        transport,
+        hub_url,
+        auth,
+        body,
+        1,
+        sleeper,
+        Duration::from_secs(1),
+    )
+}
+
+fn post_report_with_transient_retry(
+    transport: &mut impl ReportTransport,
+    hub_url: &str,
+    auth: &ProbeRequestAuth<'_>,
+    body: Vec<u8>,
+    expected_sequence_end: u64,
+    sleeper: &mut impl ProbeRuntimeSleeper,
+    retry_delay: Duration,
+) -> Result<ProbeReportResponse, ReportError> {
     loop {
         match post_report(transport, hub_url, auth, body.clone()) {
-            Ok(response) => {
-                if response.accepted_sequence_end != 1 {
-                    return Err(ReportError::InvalidResponse(
-                        "Startup Report was not accepted at sequence 1",
-                    ));
-                }
+            Ok(response) if response.accepted_sequence_end == expected_sequence_end => {
                 return Ok(response);
             }
+            Ok(_) => {
+                return Err(ReportError::InvalidResponse(
+                    "report acknowledgement did not match expected sequence",
+                ));
+            }
             Err(error) if error.is_transient() => {
-                // The encoded startup body is intentionally retained: a retry has
-                // the same boot ID and sequence while the transport regenerates
-                // request authentication for every HTTP attempt.
-                sleeper.sleep(Duration::from_secs(1));
+                // The encoded body is intentionally retained: every retry has the
+                // same logical report while the HTTP transport regenerates request
+                // authentication material for every attempt.
+                sleeper.sleep(retry_delay);
             }
             Err(error) => return Err(error),
         }
-    }
-}
-
-fn report_http_error(error: ureq::Error) -> ReportError {
-    match error {
-        ureq::Error::Status(status, response) => ReportError::HttpStatus {
-            message: response.status_text().to_string(),
-            status,
-        },
-        ureq::Error::Transport(error) => ReportError::Http(error.to_string()),
     }
 }
 
@@ -1211,14 +1160,6 @@ fn apply_newer_configuration_if_needed(
 struct ConfigurationApplyOutcome {
     active_configuration: ActiveProbeConfiguration,
     configuration_error: Option<ProbeConfigurationError>,
-}
-
-fn with_configuration_error(
-    mut request: ProbeReportRequest,
-    error: Option<ProbeConfigurationError>,
-) -> ProbeReportRequest {
-    request.probe_configuration_error = error;
-    request
 }
 
 fn post_probe_configuration(
@@ -1553,7 +1494,8 @@ fn signed_integer_value(
 mod tests {
     use super::*;
     use crate::protocol::enoki::v1::{
-        ProbeConfigurationResponse, ProbeRegistrationResponse, ProbeUpgradeOperation,
+        ProbeConfigurationResponse, ProbeRegistrationResponse, ProbeReportRequest,
+        ProbeUpgradeOperation,
     };
     use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
@@ -1868,7 +1810,9 @@ mod tests {
         let mut transport = StartupRetryTransport {
             report_attempts: Vec::new(),
             report_responses: VecDeque::from([
-                Err(ReportError::Http("temporary network failure".to_string())),
+                Err(ReportError::Attempt(HttpAttemptError::Network(
+                    "temporary network failure".to_string(),
+                ))),
                 Ok(ProbeReportResponse {
                     accepted_sequence_end: 1,
                     current_probe_configuration_version: "default-v1".to_string(),
@@ -1938,7 +1882,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ReportError::InvalidResponse("Startup Report was not accepted at sequence 1")
+            ReportError::InvalidResponse("report acknowledgement did not match expected sequence")
         ));
     }
 
@@ -1947,9 +1891,11 @@ mod tests {
         let mut transport = StartupRetryTransport {
             report_attempts: Vec::new(),
             report_responses: VecDeque::from([
-                Err(ReportError::ResponseRead(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection ended during the response body",
+                Err(ReportError::Attempt(HttpAttemptError::ResponseRead(
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "connection ended during the response body",
+                    ),
                 ))),
                 Ok(ProbeReportResponse {
                     accepted_sequence_end: 1,
@@ -2114,11 +2060,11 @@ mod tests {
         };
 
         queue.observe_response(&response, &mut runner);
-        let request = queue.with_operation_reports(ProbeReportRequest::default());
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
 
-        assert_eq!(request.operation_acknowledgements.len(), 1);
+        assert_eq!(acknowledgements.len(), 1);
         assert!(matches!(
-            &request.operation_statuses[0],
+            &statuses[0],
             ProbeOperationStatus {
                 status: Some(Status::Failed(failed)),
                 ..
@@ -2151,6 +2097,7 @@ mod tests {
         let mut transport = RegistrationThenOperationTransport {
             observed_report_bodies: Vec::new(),
             registration_response: ProbeRegistrationResponse {
+                installation_inspection: None,
                 enrollment_id: String::new(),
                 initial_configuration: Some(ProbeConfigurationResponse {
                     enabled_collector_ids: Vec::new(),

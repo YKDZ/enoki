@@ -1,8 +1,8 @@
 use enoki_probe::{
     cli::{ProbeCommand, parse_probe_command, render_probe_output},
     local_lifecycle::{
-        LOCAL_LIFECYCLE_COMPLETE_MARKER, probe_local_install_input_from_environment,
-        run_probe_local_install,
+        LOCAL_LIFECYCLE_COMPLETE_MARKER, confirm_probe_local_install_failure,
+        probe_local_install_input_from_environment, run_probe_local_install,
     },
     local_privilege_boundary::{
         CollectorHelperSudoersPlanInput, CollectorHelperSudoersPlanner,
@@ -16,7 +16,8 @@ use enoki_probe::{
     },
     upgrader::{
         HttpProbeUpgraderValidationTransport, ProbeUninstallerRunInput, ProbeUpgraderRunInput,
-        format_probe_upgrader_result, run_probe_repair, run_probe_uninstaller, run_probe_upgrader,
+        format_probe_upgrader_result, run_local_probe_uninstall, run_probe_repair,
+        run_probe_uninstaller, run_probe_upgrader,
     },
 };
 use std::io::Read;
@@ -68,7 +69,12 @@ fn main() {
             match run_probe_local_install(&input) {
                 Ok(()) => println!("{LOCAL_LIFECYCLE_COMPLETE_MARKER}"),
                 Err(error) => {
-                    eprintln!("Probe Local Lifecycle failed: {error}");
+                    match confirm_probe_local_install_failure(&input, &error) {
+                        Ok(()) => eprintln!("Probe Local Lifecycle failed: {error}"),
+                        Err(confirmation) => {
+                            eprintln!("Probe Local Lifecycle failed: {error}; {confirmation}")
+                        }
+                    }
                     std::process::exit(1);
                 }
             }
@@ -123,6 +129,16 @@ fn main() {
                 }
             }
         }
+        ProbeCommand::Uninstall => match run_local_probe_uninstall() {
+            Ok(()) => println!("Local Probe Uninstall completed."),
+            Err(error) => {
+                eprintln!(
+                    "Local Probe Uninstall failed: code={} message={error}",
+                    error.code()
+                );
+                std::process::exit(1);
+            }
+        },
         ProbeCommand::Repair => {
             let mut transport = HttpProbeUpgraderValidationTransport;
             match run_probe_repair(&mut transport) {

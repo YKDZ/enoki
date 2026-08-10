@@ -147,6 +147,7 @@ describe("Metrics Archive file writer", () => {
       createdAtMs: Date.UTC(2024, 7, 12, 12),
       enrollmentId: "enr_metrics_archive_fixture",
       expiresAtMs: Date.UTC(2024, 7, 13, 12),
+      target: { kind: "new_host" },
       tokenHash: "secret-token-hash",
     });
     database.audit.record({

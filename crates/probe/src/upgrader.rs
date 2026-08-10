@@ -209,6 +209,7 @@ pub enum ProbeUpgraderRunError {
     InvalidSigningKey(String),
     IdentityValidation(String),
     Io(std::io::Error),
+    LocalUninstallRootRequired,
     MissingToken,
     PostReplacementRestartFailure(String),
     PostReplacementStatusWriteFailure(String),
@@ -226,6 +227,18 @@ pub enum ProbeUpgraderRunError {
     UninstallStatusReportFailure(String),
     UnsafeArchive(&'static str),
     UnsupportedArchitecture(String),
+}
+
+impl ProbeUpgraderRunError {
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::LocalUninstallRootRequired => "probe_uninstall_root_required",
+            Self::InvalidInstallMetadata(_) => "probe_uninstall_metadata_invalid",
+            Self::UninstallCleanupFailure { code, .. } => code,
+            _ => "probe_uninstall_failed",
+        }
+    }
 }
 
 impl fmt::Display for ProbeUpgraderRunError {
@@ -259,6 +272,9 @@ impl fmt::Display for ProbeUpgraderRunError {
                 write!(formatter, "Probe Identity validation failed: {message}")
             }
             Self::Io(_) => write!(formatter, "failed to read Probe bootstrap config"),
+            Self::LocalUninstallRootRequired => {
+                write!(formatter, "Local Probe Uninstall must run as root")
+            }
             Self::MissingToken => write!(formatter, "missing Probe Operation Token on stdin"),
             Self::PostReplacementRestartFailure(message) => write!(
                 formatter,
@@ -323,6 +339,7 @@ impl Error for ProbeUpgraderRunError {
             | Self::InvalidMetadata(_)
             | Self::InvalidSigningKey(_)
             | Self::IdentityValidation(_)
+            | Self::LocalUninstallRootRequired
             | Self::MissingToken
             | Self::PostReplacementRestartFailure(_)
             | Self::PostReplacementStatusWriteFailure(_)
@@ -1423,6 +1440,27 @@ pub fn run_probe_uninstaller(
     run_probe_uninstaller_with_systemd_runner(input, stdin, transport, &mut systemd)
 }
 
+/// Removes local Probe resources from trusted install metadata only.  This
+/// public, root-authorized path never creates a Hub request; the Hub Host
+/// record therefore remains unchanged for offline removal or re-enrollment.
+pub fn run_local_probe_uninstall() -> Result<(), ProbeUpgraderRunError> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(ProbeUpgraderRunError::LocalUninstallRootRequired);
+    }
+
+    let install_metadata =
+        read_trusted_probe_install_metadata(Path::new(PRODUCTION_INSTALL_METADATA_PATH), None)?;
+    let mut systemd = SystemProbeUpgraderSystemdRunner;
+    execute_probe_uninstall_with_install_metadata_path(
+        &ProbeUninstallerRunInput {
+            bootstrap_config_path: install_metadata.identity_path.clone(),
+        },
+        &install_metadata,
+        &mut systemd,
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+    )
+}
+
 pub fn run_probe_uninstaller_with_systemd_runner(
     input: ProbeUninstallerRunInput,
     stdin: &str,
@@ -1516,7 +1554,94 @@ fn execute_probe_uninstall_with_install_metadata_path(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     install_metadata_path: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let plan = plan_probe_uninstall_cleanup(input, install_metadata, install_metadata_path)?;
+    execute_probe_uninstall_cleanup(&plan, systemd)
+}
+
+/// Runs the same trusted uninstall cleanup core used by both public and
+/// Hub-authorized uninstall paths. The staged local-install candidate uses
+/// this only after it has established that the complete prior installation is
+/// bound to the same Hub.
+pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
+    install_metadata_path: &Path,
+    test_root: Option<&Path>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let install_metadata_path = preflight_rooted_path(test_root, install_metadata_path);
+    let mut install_metadata =
+        read_trusted_probe_install_metadata_read_only(&install_metadata_path, None)?;
+    rebase_trusted_install_metadata_paths(&mut install_metadata, test_root);
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: install_metadata.identity_path.clone(),
+    };
+    let plan = plan_probe_uninstall_cleanup(&input, &install_metadata, &install_metadata_path)?;
+    let mut systemd = SystemProbeUpgraderSystemdRunner;
+    execute_probe_uninstall_cleanup(&plan, &mut systemd)
+}
+
+fn rebase_trusted_install_metadata_paths(
+    metadata: &mut TrustedProbeInstallMetadata,
+    test_root: Option<&Path>,
+) {
+    for path in [
+        &mut metadata.identity_path,
+        &mut metadata.install_path,
+        &mut metadata.operation_status_path,
+        &mut metadata.service_unit_path,
+        &mut metadata.state_dir,
+        &mut metadata.operation_sudoers_path,
+        &mut metadata.collector_helper_sudoers_path,
+    ] {
+        *path = preflight_rooted_path(test_root, path);
+    }
+    for path in &mut metadata.old_sudoers_paths {
+        *path = preflight_rooted_path(test_root, path);
+    }
+}
+
+#[derive(Debug)]
+struct ProbeUninstallCleanupPlan<'a> {
+    input: &'a ProbeUninstallerRunInput,
+    install_metadata: &'a TrustedProbeInstallMetadata,
+    install_metadata_path: &'a Path,
+}
+
+/// Establishes every local deletion target before systemd or filesystem
+/// mutation. Both the offline public command and Hub-authorized operation
+/// invoke this planner through the same executor below.
+fn plan_probe_uninstall_cleanup<'a>(
+    input: &'a ProbeUninstallerRunInput,
+    install_metadata: &'a TrustedProbeInstallMetadata,
+    install_metadata_path: &'a Path,
+) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     ensure_absolute_path(&input.bootstrap_config_path)?;
+    for path in [
+        install_metadata_path,
+        &install_metadata.identity_path,
+        &install_metadata.install_path,
+        &install_metadata.operation_sudoers_path,
+        &install_metadata.collector_helper_sudoers_path,
+        &install_metadata.service_unit_path,
+        &install_metadata.state_dir,
+    ] {
+        ensure_absolute_path(path)?;
+    }
+    for path in &install_metadata.old_sudoers_paths {
+        ensure_absolute_path(path)?;
+    }
+    Ok(ProbeUninstallCleanupPlan {
+        input,
+        install_metadata,
+        install_metadata_path,
+    })
+}
+
+fn execute_probe_uninstall_cleanup(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<(), ProbeUpgraderRunError> {
+    let input = plan.input;
+    let install_metadata = plan.install_metadata;
+    let install_metadata_path = plan.install_metadata_path;
     systemd
         .stop_service(&install_metadata.service_name)
         .map_err(|error| {
@@ -1595,7 +1720,74 @@ fn execute_probe_uninstall_with_install_metadata_path(
             )
         })?;
 
-    Ok(())
+    verify_probe_uninstall_cleanup(plan, systemd)
+}
+
+fn verify_probe_uninstall_cleanup(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = plan.install_metadata;
+    for (path, code, action) in [
+        (
+            metadata.install_path.as_path(),
+            "probe_uninstall_binary_residue",
+            "verifying the Probe binary is absent",
+        ),
+        (
+            metadata.identity_path.as_path(),
+            "probe_uninstall_identity_residue",
+            "verifying the Probe identity is absent",
+        ),
+        (
+            plan.input.bootstrap_config_path.as_path(),
+            "probe_uninstall_config_residue",
+            "verifying the Probe bootstrap config is absent",
+        ),
+        (
+            plan.install_metadata_path,
+            "probe_uninstall_metadata_residue",
+            "verifying install metadata is absent",
+        ),
+        (
+            metadata.state_dir.as_path(),
+            "probe_uninstall_state_residue",
+            "verifying Probe state is absent",
+        ),
+        (
+            metadata.operation_sudoers_path.as_path(),
+            "probe_uninstall_operation_sudoers_residue",
+            "verifying operation sudoers is absent",
+        ),
+        (
+            metadata.collector_helper_sudoers_path.as_path(),
+            "probe_uninstall_collector_sudoers_residue",
+            "verifying collector sudoers is absent",
+        ),
+        (
+            metadata.service_unit_path.as_path(),
+            "probe_uninstall_service_unit_residue",
+            "verifying the service unit is absent",
+        ),
+    ] {
+        verify_path_absent(path, code, action)?;
+    }
+    for path in &metadata.old_sudoers_paths {
+        verify_path_absent(
+            path,
+            "probe_uninstall_legacy_sudoers_residue",
+            "verifying legacy sudoers is absent",
+        )?;
+    }
+    systemd
+        .verify_service_absent(&metadata.service_name)
+        .map_err(|error| {
+            probe_uninstall_cleanup_error(
+                "probe_uninstall_service_verification_failed",
+                "verifying the service is absent",
+                error,
+            )
+        })
 }
 
 fn probe_uninstall_cleanup_error(
@@ -1810,6 +2002,75 @@ struct TrustedProbeInstallMetadata {
     old_sudoers_paths: Vec<PathBuf>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustedProbeInstallPreflight {
+    pub hub_url: String,
+    pub probe_id: String,
+}
+
+pub fn read_trusted_probe_install_preflight(
+    path: &Path,
+    test_root: Option<&Path>,
+) -> Result<TrustedProbeInstallPreflight, ProbeUpgraderRunError> {
+    let metadata = read_trusted_probe_install_metadata_read_only(path, None)?;
+    let mut identity_metadata = metadata.clone();
+    identity_metadata.identity_path = preflight_rooted_path(test_root, &metadata.identity_path);
+    let identity = read_probe_repair_identity(&identity_metadata).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("Probe identity is incomplete or unsafe")
+    })?;
+    let identity_hub_url = identity
+        .hub_url
+        .as_deref()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe identity Hub URL is missing",
+        ))
+        .and_then(|hub_url| {
+            hub_url::normalized_base(hub_url).map_err(|()| {
+                ProbeUpgraderRunError::InvalidInstallMetadata("Probe identity Hub URL is invalid")
+            })
+        })?;
+    if identity_hub_url != metadata.hub_url {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe identity Hub URL does not match install metadata",
+        ));
+    }
+    let probe_id = identity
+        .probe_id
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe identity is missing a Probe ID",
+        ))?;
+    if !valid_public_probe_id(&probe_id) {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe identity has an invalid Probe ID",
+        ));
+    }
+    Ok(TrustedProbeInstallPreflight {
+        hub_url: metadata.hub_url,
+        probe_id,
+    })
+}
+
+fn preflight_rooted_path(test_root: Option<&Path>, path: &Path) -> PathBuf {
+    test_root.map_or_else(
+        || path.to_path_buf(),
+        |root| {
+            root.join(
+                path.strip_prefix("/")
+                    .expect("trusted metadata paths are absolute"),
+            )
+        },
+    )
+}
+
+fn valid_public_probe_id(value: &str) -> bool {
+    value
+        .strip_prefix("probe_")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.len() <= 90)
+        && value["probe_".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TrustedFileMetadata {
     is_regular_file: bool,
@@ -1858,8 +2119,20 @@ fn read_trusted_probe_install_metadata(
     path: &Path,
     legacy_identity_path: Option<&Path>,
 ) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
+    let mut trusted = read_trusted_probe_install_metadata_read_only(path, legacy_identity_path)?;
+    if trusted.schema_version == 0 {
+        write_trusted_probe_install_metadata(path, &trusted)?;
+        trusted.schema_version = 1;
+    }
+    Ok(trusted)
+}
+
+fn read_trusted_probe_install_metadata_read_only(
+    path: &Path,
+    legacy_identity_path: Option<&Path>,
+) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
     let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
-    read_trusted_probe_install_metadata_with_file_metadata(
+    read_trusted_probe_install_metadata_read_only_with_file_metadata(
         path,
         legacy_identity_path,
         TrustedFileMetadata {
@@ -1871,7 +2144,25 @@ fn read_trusted_probe_install_metadata(
     )
 }
 
+#[cfg(test)]
 fn read_trusted_probe_install_metadata_with_file_metadata(
+    path: &Path,
+    legacy_identity_path: Option<&Path>,
+    file_metadata: TrustedFileMetadata,
+) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
+    let mut metadata = read_trusted_probe_install_metadata_read_only_with_file_metadata(
+        path,
+        legacy_identity_path,
+        file_metadata,
+    )?;
+    if metadata.schema_version == 0 {
+        write_trusted_probe_install_metadata(path, &metadata)?;
+        metadata.schema_version = 1;
+    }
+    Ok(metadata)
+}
+
+fn read_trusted_probe_install_metadata_read_only_with_file_metadata(
     path: &Path,
     legacy_identity_path: Option<&Path>,
     file_metadata: TrustedFileMetadata,
@@ -1888,7 +2179,7 @@ fn read_trusted_probe_install_metadata_with_file_metadata(
     }
 
     let contents = fs::read_to_string(path).map_err(ProbeUpgraderRunError::Io)?;
-    let mut metadata =
+    let metadata =
         parse_trusted_probe_install_metadata_with_legacy_identity(&contents, legacy_identity_path)?;
     if metadata.schema_version == 1 {
         if file_metadata.mode != 0o600 {
@@ -1902,8 +2193,6 @@ fn read_trusted_probe_install_metadata_with_file_metadata(
                 "legacy metadata mode is not supported",
             ));
         }
-        write_trusted_probe_install_metadata(path, &metadata)?;
-        metadata.schema_version = 1;
     }
     Ok(metadata)
 }
@@ -2101,6 +2390,22 @@ fn required_install_metadata_path(
     if path == Path::new("/") {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "paths must not be filesystem root",
+        ));
+    }
+    let Some(value) = path.to_str() else {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "paths must be UTF-8",
+        ));
+    };
+    if value
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+        || path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "paths contain unsafe components",
         ));
     }
 
@@ -2919,6 +3224,7 @@ fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
         | ProbeUpgraderRunError::InvalidSigningKey(_)
         | ProbeUpgraderRunError::IdentityValidation(_)
         | ProbeUpgraderRunError::Io(_)
+        | ProbeUpgraderRunError::LocalUninstallRootRequired
         | ProbeUpgraderRunError::MissingToken
         | ProbeUpgraderRunError::TokenValidation(_) => "probe_upgrader_failed",
     }
@@ -4264,6 +4570,7 @@ mod tests {
                 "reset-failed enoki-probe",
                 "verify-service-absent enoki-probe",
                 "remove-service-identity enoki-probe:enoki-probe",
+                "verify-service-absent enoki-probe",
             ],
         );
         assert!(!install_path.exists());
@@ -4693,8 +5000,35 @@ mod tests {
                 "reset-failed enoki-probe",
                 "verify-service-absent enoki-probe",
                 "remove-service-identity enoki-probe:enoki-probe",
+                "verify-service-absent enoki-probe",
             ],
         );
+    }
+
+    #[test]
+    fn uninstall_cleanup_planner_rejects_unsafe_targets_before_any_systemd_or_file_mutation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let status_path = temp.path().join("state/probe-operation-status.toml");
+        let mut install_metadata = trusted_install_metadata(
+            &temp.path().join("bin/enoki-probe"),
+            &status_path,
+            assets_public_key_sha256(),
+        );
+        install_metadata.install_path = PathBuf::from("relative-probe-binary");
+
+        let error = plan_probe_uninstall_cleanup(
+            &ProbeUninstallerRunInput {
+                bootstrap_config_path: temp.path().join("state/probe-bootstrap.toml"),
+            },
+            &install_metadata,
+            &temp.path().join("etc/enoki/probe-install.toml"),
+        )
+        .expect_err("unsafe cleanup targets are rejected before execution");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata("paths must be absolute")
+        ));
     }
 
     #[test]
@@ -4792,6 +5126,21 @@ mod tests {
     }
 
     #[test]
+    fn trusted_install_metadata_rejects_parent_components_before_cleanup_can_start() {
+        let value = "path = \"/var/lib/enoki-probe/../outside\""
+            .parse::<toml::Value>()
+            .expect("metadata value");
+
+        let error = required_install_metadata_path(&value, "path")
+            .expect_err("parent traversal cannot become a cleanup target");
+
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata("paths contain unsafe components")
+        ));
+    }
+
+    #[test]
     fn trusted_install_metadata_uses_fresh_split_sudoers_paths() {
         let temp = tempfile::tempdir().expect("temp dir");
         let (contents, operation_sudoers_path, collector_helper_sudoers_path, legacy_sudoers_path) =
@@ -4853,6 +5202,46 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600,
+        );
+    }
+
+    #[test]
+    fn legacy_install_metadata_preflight_keeps_bytes_mode_and_mtime_unchanged() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (contents, _, _, _) = fresh_split_install_metadata_contents(temp.path());
+        let metadata_path = temp.path().join("etc/enoki/probe-install.toml");
+        let identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
+        fs::create_dir_all(metadata_path.parent().expect("metadata dir")).expect("metadata dir");
+        fs::write(&metadata_path, &contents).expect("legacy metadata");
+        fs::set_permissions(&metadata_path, fs::Permissions::from_mode(0o644))
+            .expect("legacy permissions");
+
+        let mut metadata =
+            parse_trusted_probe_install_metadata(&contents).expect("legacy metadata");
+        metadata.identity_path = identity_path.clone();
+        write_test_bootstrap_config(&identity_path, &metadata).expect("identity");
+        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
+            .expect("identity permissions");
+
+        let before_bytes = fs::read(&metadata_path).expect("metadata bytes");
+        let before_metadata = fs::metadata(&metadata_path).expect("metadata stat");
+        let before_mode = before_metadata.permissions().mode() & 0o777;
+        let before_mtime = (before_metadata.mtime(), before_metadata.mtime_nsec());
+
+        let preflight = read_trusted_probe_install_preflight(&metadata_path, Some(temp.path()))
+            .expect("legacy preflight");
+
+        assert_eq!(preflight.hub_url, "https://hub.example");
+        assert_eq!(preflight.probe_id, "probe_01");
+        let after_metadata = fs::metadata(&metadata_path).expect("metadata stat");
+        assert_eq!(
+            fs::read(&metadata_path).expect("metadata bytes"),
+            before_bytes
+        );
+        assert_eq!(after_metadata.permissions().mode() & 0o777, before_mode);
+        assert_eq!(
+            (after_metadata.mtime(), after_metadata.mtime_nsec()),
+            before_mtime
         );
     }
 

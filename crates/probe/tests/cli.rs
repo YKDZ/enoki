@@ -113,6 +113,26 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
 }
 
 #[test]
+fn parses_public_local_probe_uninstall_without_redirectable_arguments() {
+    assert_eq!(
+        parse_probe_command(["enoki-probe".to_string(), "uninstall".to_string()]),
+        ProbeCommand::Uninstall,
+    );
+
+    for forbidden in ["--config", "--hub-url", "--token", "--force"] {
+        assert_eq!(
+            parse_probe_command([
+                "enoki-probe".to_string(),
+                "uninstall".to_string(),
+                forbidden.to_string(),
+                "value".to_string(),
+            ]),
+            ProbeCommand::Help,
+        );
+    }
+}
+
+#[test]
 fn parses_root_authorized_probe_repair_without_redirectable_arguments() {
     assert_eq!(
         parse_probe_command(["enoki-probe".to_string(), "repair".to_string(),]),

@@ -13,11 +13,89 @@ use std::os::unix::fs::MetadataExt;
 
 use crate::{
     hub_url,
+    registration::{
+        HttpRegistrationTransport, ProbeInstallationInspectionInput,
+        ProbeInstallationRejectionInput, ProbeInstallationTarget, RegistrationError,
+        RegistrationTransport, inspect_probe_installation, prepare_probe_installation_rejection,
+        submit_prepared_installation_rejection,
+    },
     secure_file::{atomic_write, ensure_directory, managed_path_exists},
+    upgrader::{
+        cleanup_trusted_probe_install_for_reenrollment, read_trusted_probe_install_preflight,
+    },
 };
 
 pub const LOCAL_LIFECYCLE_COMPLETE_MARKER: &str = "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE";
 const LEGACY_UPGRADER_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-upgrader";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstallationRejectionRetryPolicy {
+    pub deadline: Duration,
+    pub max_attempts: usize,
+    pub retry_delay: Duration,
+}
+
+const DEFAULT_INSTALLATION_REJECTION_RETRY_POLICY: InstallationRejectionRetryPolicy =
+    InstallationRejectionRetryPolicy {
+        deadline: Duration::from_secs(5),
+        max_attempts: 3,
+        retry_delay: Duration::from_secs(1),
+    };
+
+pub trait InstallationRejectionClock {
+    fn now(&self) -> Duration;
+}
+
+pub trait InstallationRejectionSleeper {
+    fn sleep(&mut self, duration: Duration);
+}
+
+struct MonotonicInstallationRejectionClock {
+    started_at: Instant,
+}
+
+impl MonotonicInstallationRejectionClock {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl InstallationRejectionClock for MonotonicInstallationRejectionClock {
+    fn now(&self) -> Duration {
+        self.started_at.elapsed()
+    }
+}
+
+struct ThreadInstallationRejectionSleeper;
+
+impl InstallationRejectionSleeper for ThreadInstallationRejectionSleeper {
+    fn sleep(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+#[derive(Debug)]
+pub struct InstallationRejectionConfirmationError {
+    error: RegistrationError,
+}
+
+impl fmt::Display for InstallationRejectionConfirmationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Hub未确认 installation rejection: {}",
+            self.error
+        )
+    }
+}
+
+impl Error for InstallationRejectionConfirmationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
+    }
+}
 
 pub fn probe_local_install_input_from_environment(
     candidate_binary: PathBuf,
@@ -38,7 +116,6 @@ pub fn probe_local_install_input_from_environment(
         .transpose()
         .map_err(|_| ProbeLocalLifecycleError::InvalidInput("invalid readiness timeout"))?
         .unwrap_or(60);
-
     Ok(ProbeLocalInstallInput {
         candidate_binary,
         collector_helper_sudoers_path: PathBuf::from(value(
@@ -101,6 +178,11 @@ pub struct ProbeLocalInstallInput {
 #[derive(Debug)]
 pub enum ProbeLocalLifecycleError {
     ExistingInstallation,
+    ExistingInstallationWithProbeId(String),
+    ExistingInstallationBoundToDifferentHub,
+    ExistingInstallationCleanup(String),
+    InstallationInspection(String),
+    InvalidExistingInstallation,
     InvalidInput(&'static str),
     Io(std::io::Error),
     ReadinessTimeout,
@@ -113,6 +195,25 @@ impl fmt::Display for ProbeLocalLifecycleError {
             Self::ExistingInstallation => write!(
                 formatter,
                 "a pre-existing Enoki Probe installation or residue was found; use Local Probe Uninstall or Host Re-enrollment"
+            ),
+            Self::ExistingInstallationWithProbeId(_) => write!(
+                formatter,
+                "a pre-existing Enoki Probe installation was found; use Local Probe Uninstall or Host Re-enrollment"
+            ),
+            Self::ExistingInstallationBoundToDifferentHub => write!(
+                formatter,
+                "a pre-existing Enoki Probe installation is bound to a different Hub; use Local Probe Uninstall before re-enrollment"
+            ),
+            Self::ExistingInstallationCleanup(message) => write!(
+                formatter,
+                "same-Hub Probe re-enrollment cleanup failed: {message}"
+            ),
+            Self::InstallationInspection(message) => {
+                write!(formatter, "Probe installation inspection failed: {message}")
+            }
+            Self::InvalidExistingInstallation => write!(
+                formatter,
+                "pre-existing Enoki Probe installation metadata is unsafe or incomplete; use Local Probe Uninstall before re-enrollment"
             ),
             Self::InvalidInput(message) => {
                 write!(formatter, "invalid Probe Local Lifecycle input: {message}")
@@ -138,9 +239,40 @@ impl Error for ProbeLocalLifecycleError {
         match self {
             Self::Io(error) => Some(error),
             Self::ExistingInstallation
+            | Self::ExistingInstallationWithProbeId(_)
+            | Self::ExistingInstallationBoundToDifferentHub
+            | Self::ExistingInstallationCleanup(_)
+            | Self::InstallationInspection(_)
+            | Self::InvalidExistingInstallation
             | Self::InvalidInput(_)
             | Self::ReadinessTimeout
             | Self::ServiceCommand(_) => None,
+        }
+    }
+}
+
+impl ProbeLocalLifecycleError {
+    #[must_use]
+    pub fn installation_rejection(&self) -> Option<(&'static str, String)> {
+        match self {
+            Self::ExistingInstallation => Some(("existing_probe_installation", String::new())),
+            Self::ExistingInstallationWithProbeId(probe_id) => {
+                Some(("existing_probe_installation", probe_id.clone()))
+            }
+            Self::ExistingInstallationBoundToDifferentHub => Some((
+                "probe_bound_to_different_hub",
+                "local Probe installation is bound to a different Hub".to_string(),
+            )),
+            Self::InvalidExistingInstallation => Some((
+                "probe_installation_metadata_invalid",
+                "local Probe installation metadata is unsafe or incomplete".to_string(),
+            )),
+            Self::InvalidInput(_)
+            | Self::Io(_)
+            | Self::ReadinessTimeout
+            | Self::ServiceCommand(_)
+            | Self::ExistingInstallationCleanup(_)
+            | Self::InstallationInspection(_) => None,
         }
     }
 }
@@ -151,14 +283,108 @@ impl From<std::io::Error> for ProbeLocalLifecycleError {
     }
 }
 
+/// Reports a known Probe Local Lifecycle rejection before the staged installer
+/// exits. A lost 204 response is retried with the exact same protobuf body so
+/// the Hub can confirm the terminal Enrollment idempotently.
+pub fn confirm_probe_local_install_failure(
+    input: &ProbeLocalInstallInput,
+    error: &ProbeLocalLifecycleError,
+) -> Result<(), InstallationRejectionConfirmationError> {
+    let mut transport = HttpRegistrationTransport;
+    let clock = MonotonicInstallationRejectionClock::new();
+    let mut sleeper = ThreadInstallationRejectionSleeper;
+    confirm_probe_local_install_failure_with_retry(
+        input,
+        error,
+        &mut transport,
+        &clock,
+        &mut sleeper,
+        DEFAULT_INSTALLATION_REJECTION_RETRY_POLICY,
+    )
+}
+
+pub fn confirm_probe_local_install_failure_with_retry(
+    input: &ProbeLocalInstallInput,
+    lifecycle_error: &ProbeLocalLifecycleError,
+    transport: &mut impl RegistrationTransport,
+    clock: &impl InstallationRejectionClock,
+    sleeper: &mut impl InstallationRejectionSleeper,
+    policy: InstallationRejectionRetryPolicy,
+) -> Result<(), InstallationRejectionConfirmationError> {
+    let Some((code, message)) = lifecycle_error.installation_rejection() else {
+        return Ok(());
+    };
+    let request = prepare_probe_installation_rejection(ProbeInstallationRejectionInput {
+        code: code.to_string(),
+        existing_probe_id: if code == "existing_probe_installation" {
+            message.clone()
+        } else {
+            String::new()
+        },
+        enrollment_token: input.enrollment_token.clone(),
+        hub_url: input.hub_url.clone(),
+        message: if code == "existing_probe_installation" {
+            String::new()
+        } else {
+            message
+        },
+    })
+    .map_err(|error| InstallationRejectionConfirmationError { error })?;
+    let deadline = clock.now().saturating_add(policy.deadline);
+    let max_attempts = policy.max_attempts.max(1);
+
+    for attempt in 0..max_attempts {
+        match submit_prepared_installation_rejection(&request, transport) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_transient() && attempt + 1 < max_attempts => {
+                let now = clock.now();
+                if now >= deadline {
+                    return Err(InstallationRejectionConfirmationError { error });
+                }
+                sleeper.sleep(policy.retry_delay.min(deadline.saturating_sub(now)));
+            }
+            Err(error) => return Err(InstallationRejectionConfirmationError { error }),
+        }
+    }
+
+    unreachable!("at least one installation rejection attempt is always made")
+}
+
 pub fn run_probe_local_install(
     input: &ProbeLocalInstallInput,
 ) -> Result<(), ProbeLocalLifecycleError> {
+    let mut transport = HttpRegistrationTransport;
+    run_probe_local_install_with_registration_transport(input, &mut transport)
+}
+
+pub fn run_probe_local_install_with_registration_transport(
+    input: &ProbeLocalInstallInput,
+    transport: &mut impl RegistrationTransport,
+) -> Result<(), ProbeLocalLifecycleError> {
     validate_input(input)?;
-    preflight_fresh_installation(input)?;
+    let target = inspect_probe_installation(
+        ProbeInstallationInspectionInput {
+            enrollment_token: input.enrollment_token.clone(),
+            hub_url: input.hub_url.clone(),
+        },
+        transport,
+    )
+    .map_err(|error| ProbeLocalLifecycleError::InstallationInspection(error.to_string()))?;
+    let existing_host_cleanup = preflight_for_installation_target(input, target)?;
     require_root(input)?;
     validate_root_managed_ancestry(input)?;
     ensure_systemd()?;
+
+    if existing_host_cleanup {
+        cleanup_trusted_probe_install_for_reenrollment(
+            &input.install_metadata_path,
+            input.test_root.as_deref(),
+        )
+        .map_err(|error| {
+            ProbeLocalLifecycleError::ExistingInstallationCleanup(error.to_string())
+        })?;
+        preflight_fresh_installation(input)?;
+    }
 
     let mut service_enabled = false;
     let mut service_started = false;
@@ -197,6 +423,39 @@ pub fn run_probe_local_install(
     }
 
     Ok(())
+}
+
+fn preflight_for_installation_target(
+    input: &ProbeLocalInstallInput,
+    target: ProbeInstallationTarget,
+) -> Result<bool, ProbeLocalLifecycleError> {
+    match target {
+        ProbeInstallationTarget::NewHost => preflight_fresh_installation(input).map(|()| false),
+        ProbeInstallationTarget::ExistingHost => preflight_existing_host_reenrollment(input),
+    }
+}
+
+fn preflight_existing_host_reenrollment(
+    input: &ProbeLocalInstallInput,
+) -> Result<bool, ProbeLocalLifecycleError> {
+    let path = rooted_path(input, &input.install_metadata_path);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            preflight_fresh_installation(input).map(|()| false)
+        }
+        Err(error) => Err(ProbeLocalLifecycleError::Io(error)),
+        Ok(_) => {
+            let trusted = read_trusted_probe_install_preflight(&path, input.test_root.as_deref())
+                .map_err(|_| ProbeLocalLifecycleError::InvalidExistingInstallation)?;
+            let candidate_hub = hub_url::normalized_base(&input.hub_url)
+                .map_err(|_| ProbeLocalLifecycleError::InvalidInput("invalid Hub URL"))?;
+            if trusted.hub_url != candidate_hub {
+                Err(ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub)
+            } else {
+                Ok(true)
+            }
+        }
+    }
 }
 
 pub fn render_probe_systemd_service(input: &ProbeLocalInstallInput) -> String {
@@ -265,9 +524,9 @@ fn validate_input(input: &ProbeLocalInstallInput) -> Result<(), ProbeLocalLifecy
 fn preflight_fresh_installation(
     input: &ProbeLocalInstallInput,
 ) -> Result<(), ProbeLocalLifecycleError> {
+    preflight_existing_install_metadata(input)?;
     for path in [
         &input.identity_path,
-        &input.install_metadata_path,
         &input.install_path,
         &input.operation_sudoers_path,
         &input.collector_helper_sudoers_path,
@@ -277,28 +536,53 @@ fn preflight_fresh_installation(
     ] {
         let managed_path = rooted_path(input, path);
         if managed_path_exists(&managed_path)? {
-            return Err(ProbeLocalLifecycleError::ExistingInstallation);
+            return Err(ProbeLocalLifecycleError::InvalidExistingInstallation);
         }
     }
     if command_succeeds("getent", &["group", &input.service_group])
         || command_succeeds("id", &["-u", &input.service_user])
     {
-        return Err(ProbeLocalLifecycleError::ExistingInstallation);
+        return Err(ProbeLocalLifecycleError::InvalidExistingInstallation);
     }
     preflight_systemd_residue(input)?;
     Ok(())
+}
+
+fn preflight_existing_install_metadata(
+    input: &ProbeLocalInstallInput,
+) -> Result<(), ProbeLocalLifecycleError> {
+    let path = rooted_path(input, &input.install_metadata_path);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(ProbeLocalLifecycleError::Io(error)),
+    };
+    let trusted = read_trusted_probe_install_preflight(&path, input.test_root.as_deref())
+        .map_err(|_| ProbeLocalLifecycleError::InvalidExistingInstallation)?;
+    let existing_hub = trusted.hub_url;
+    let candidate_hub = hub_url::normalized_base(&input.hub_url)
+        .map_err(|_| ProbeLocalLifecycleError::InvalidInput("invalid Hub URL"))?;
+    if existing_hub == candidate_hub {
+        Err(ProbeLocalLifecycleError::ExistingInstallationWithProbeId(
+            trusted.probe_id,
+        ))
+    } else {
+        Err(ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub)
+    }
 }
 
 fn preflight_systemd_residue(
     input: &ProbeLocalInstallInput,
 ) -> Result<(), ProbeLocalLifecycleError> {
     let unit = unit_name(input);
-    let enabled = systemd_enabled_state(&unit)?;
-    let load_state = systemd_load_state(&unit)?;
+    let enabled = systemd_enabled_state(&unit)
+        .map_err(|_| ProbeLocalLifecycleError::InvalidExistingInstallation)?;
+    let load_state = systemd_load_state(&unit)
+        .map_err(|_| ProbeLocalLifecycleError::InvalidExistingInstallation)?;
     if systemd_preflight_is_clean(Ok(enabled), Ok(load_state)) {
         Ok(())
     } else {
-        Err(ProbeLocalLifecycleError::ExistingInstallation)
+        Err(ProbeLocalLifecycleError::InvalidExistingInstallation)
     }
 }
 
@@ -331,11 +615,11 @@ fn systemd_load_state(unit: &str) -> Result<String, ProbeLocalLifecycleError> {
             "systemctl show failed for {unit}"
         )));
     }
-    parse_systemd_load_state(&output.stdout)
+    systemd_stdout_value(&output.stdout)
         .map(str::to_string)
         .map_err(|_| {
             ProbeLocalLifecycleError::ServiceCommand(format!(
-                "systemctl show did not return LoadState=not-found for {unit}"
+                "systemctl show did not return a single LoadState value for {unit}"
             ))
         })
 }
@@ -356,6 +640,7 @@ fn parse_systemd_enabled_state(
     }
 }
 
+#[cfg(test)]
 fn parse_systemd_load_state(stdout: &[u8]) -> Result<&str, &'static str> {
     match systemd_stdout_value(stdout)? {
         "not-found" => Ok("not-found"),
@@ -890,9 +1175,22 @@ fn toml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prost::Message;
     use std::sync::Mutex;
 
     static PATH_MUTATION_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    #[derive(Debug, Eq, PartialEq)]
+    struct PathFingerprint {
+        gid: u32,
+        link_target: Option<PathBuf>,
+        mode: u32,
+        mtime: i64,
+        mtime_nsec: i64,
+        contents: Option<Vec<u8>>,
+        uid: u32,
+    }
 
     fn input() -> ProbeLocalInstallInput {
         ProbeLocalInstallInput {
@@ -1126,8 +1424,536 @@ mod tests {
 
         assert!(matches!(
             preflight_fresh_installation(&input),
-            Err(ProbeLocalLifecycleError::ExistingInstallation)
+            Err(ProbeLocalLifecycleError::InvalidExistingInstallation)
         ));
+    }
+
+    #[test]
+    fn existing_host_target_allows_a_machine_without_a_local_probe_installation() {
+        let _path_lock = PATH_MUTATION_LOCK.lock().expect("PATH lock");
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let fake_commands = temporary.path().join("fake-commands");
+        fs::create_dir(&fake_commands).expect("fake command directory");
+        write_test_command(
+            &fake_commands.join("systemctl"),
+            "#!/bin/sh\ncase \"${1:-}\" in\n  is-enabled) printf '%s\\n' disabled; exit 1 ;;\n  show) printf '%s\\n' not-found; exit 0 ;;\n  is-active) exit 0 ;;\nesac\nexit 0\n",
+        );
+        for command in ["getent", "id"] {
+            write_test_command(&fake_commands.join(command), "#!/bin/sh\nexit 1\n");
+        }
+        for command in ["groupadd", "useradd", "chown"] {
+            write_test_command(&fake_commands.join(command), "#!/bin/sh\nexit 0\n");
+        }
+        let candidate = temporary.path().join("candidate");
+        write_test_command(
+            &candidate,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"internal-render-collector-helper-sudoers\" ]; then\n  printf '# helper sudoers\\n'\n  exit 0\nfi\nexit 64\n",
+        );
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+
+        with_test_path(&fake_commands, || {
+            run_with_inspected_target(&input, ProbeInstallationTarget::ExistingHost)
+        })
+        .expect("an ExistingHost target can install where no local Probe remains");
+        assert!(rooted_path(&input, &input.install_path).exists());
+    }
+
+    #[test]
+    fn existing_host_target_cleans_a_complete_same_hub_installation_with_the_staged_candidate() {
+        let _path_lock = PATH_MUTATION_LOCK.lock().expect("PATH lock");
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let fake_commands = temporary.path().join("fake-commands");
+        fs::create_dir(&fake_commands).expect("fake command directory");
+        let command_log = temporary.path().join("commands.log");
+        write_test_command(
+            &fake_commands.join("systemctl"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"${{1:-}}\" in\n  is-enabled) printf '%s\\n' disabled; exit 1 ;;\n  show) printf '%s\\n' not-found; exit 0 ;;\n  is-active) exit 0 ;;\nesac\nexit 0\n",
+                command_log.display(),
+            ),
+        );
+        write_test_command(&fake_commands.join("getent"), "#!/bin/sh\nexit 2\n");
+        write_test_command(&fake_commands.join("id"), "#!/bin/sh\nexit 1\n");
+        for command in ["groupadd", "useradd", "chown", "userdel", "groupdel"] {
+            write_test_command(&fake_commands.join(command), "#!/bin/sh\nexit 0\n");
+        }
+        let candidate = temporary.path().join("candidate");
+        write_test_command(
+            &candidate,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"internal-render-collector-helper-sudoers\" ]; then\n  printf '# helper sudoers\\n'\n  exit 0\nfi\nprintf 'candidate must not be run as the old Probe\\n' >&2\nexit 64\n",
+        );
+        let mut input = input();
+        input.candidate_binary = candidate.clone();
+        input.test_root = Some(temporary.path().to_path_buf());
+        write_install_metadata(&input).expect("trusted install metadata");
+        write_complete_probe_identity(&input, "probe_same_hub_01", &input.hub_url);
+        let old_binary = rooted_path(&input, &input.install_path);
+        fs::create_dir_all(old_binary.parent().expect("old binary parent"))
+            .expect("old binary parent");
+        write_test_command(
+            &old_binary,
+            &format!(
+                "#!/bin/sh\nprintf 'old binary invoked\\n' >> '{}'\nexit 64\n",
+                command_log.display(),
+            ),
+        );
+        for path in [
+            rooted_path(&input, &input.operation_sudoers_path),
+            rooted_path(&input, &input.collector_helper_sudoers_path),
+            rooted_path(&input, &input.service_unit_path),
+        ] {
+            fs::create_dir_all(path.parent().expect("managed parent")).expect("managed parent");
+            fs::write(path, "old managed residue").expect("managed residue");
+        }
+        let stale_state = rooted_path(&input, &input.state_dir).join("old-state");
+        fs::write(&stale_state, "old state").expect("old state");
+        let legacy_sudoers = temporary.path().join("etc/sudoers.d/enoki-probe-upgrader");
+        fs::write(&legacy_sudoers, "legacy sudoers").expect("legacy sudoers");
+
+        with_test_path(&fake_commands, || {
+            run_with_inspected_target(&input, ProbeInstallationTarget::ExistingHost)
+        })
+        .expect("same-Hub re-enrollment cleans and reinstalls with the candidate");
+
+        assert_eq!(
+            fs::read(rooted_path(&input, &input.install_path)).expect("installed candidate"),
+            fs::read(candidate).expect("candidate"),
+        );
+        assert!(rooted_path(&input, &input.identity_path).exists());
+        assert!(rooted_path(&input, &input.install_metadata_path).exists());
+        assert!(!stale_state.exists());
+        assert!(!legacy_sudoers.exists());
+        for path in [
+            rooted_path(&input, &input.operation_sudoers_path),
+            rooted_path(&input, &input.collector_helper_sudoers_path),
+            rooted_path(&input, &input.service_unit_path),
+        ] {
+            assert_ne!(
+                fs::read_to_string(path).expect("reinstalled managed file"),
+                "old managed residue"
+            );
+        }
+        let command_log = fs::read_to_string(command_log).expect("command log");
+        assert!(!command_log.contains("old binary invoked"));
+        for cleanup_command in [
+            "stop enoki-probe",
+            "disable enoki-probe",
+            "reset-failed enoki-probe",
+        ] {
+            assert!(command_log.contains(cleanup_command), "{cleanup_command}");
+        }
+    }
+
+    #[test]
+    fn existing_host_target_rejects_a_cross_hub_installation_before_mutating_it() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        input.hub_url = "https://other-hub.example".to_string();
+        write_install_metadata(&input).expect("trusted install metadata");
+        write_complete_probe_identity(&input, "probe_other_hub_01", &input.hub_url);
+        input.hub_url = "https://hub.example".to_string();
+        let metadata_path = rooted_path(&input, &input.install_metadata_path);
+        let identity_path = rooted_path(&input, &input.identity_path);
+        let metadata_before = path_fingerprint(&metadata_path);
+        let identity_before = path_fingerprint(&identity_path);
+
+        let error = run_with_inspected_target(&input, ProbeInstallationTarget::ExistingHost)
+            .expect_err("cross-Hub local installation must reject re-enrollment");
+
+        assert!(matches!(
+            error,
+            ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub
+        ));
+        assert_eq!(
+            error.installation_rejection().map(|(code, _)| code),
+            Some("probe_bound_to_different_hub"),
+        );
+        assert_eq!(path_fingerprint(&metadata_path), metadata_before);
+        assert_eq!(path_fingerprint(&identity_path), identity_before);
+        assert!(!rooted_path(&input, &input.install_path).exists());
+    }
+
+    #[test]
+    fn existing_host_target_rejects_invalid_local_metadata_before_mutating_it() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        let metadata_path = rooted_path(&input, &input.install_metadata_path);
+        fs::create_dir_all(metadata_path.parent().expect("metadata parent"))
+            .expect("metadata parent");
+        fs::write(&metadata_path, "unsafe = [").expect("invalid metadata");
+        let metadata_before = path_fingerprint(&metadata_path);
+
+        let error = run_with_inspected_target(&input, ProbeInstallationTarget::ExistingHost)
+            .expect_err("invalid local installation metadata must reject re-enrollment");
+
+        assert!(matches!(
+            error,
+            ProbeLocalLifecycleError::InvalidExistingInstallation
+        ));
+        assert_eq!(
+            error.installation_rejection().map(|(code, _)| code),
+            Some("probe_installation_metadata_invalid"),
+        );
+        assert_eq!(path_fingerprint(&metadata_path), metadata_before);
+        assert!(!rooted_path(&input, &input.install_path).exists());
+    }
+
+    #[test]
+    fn existing_host_target_stops_before_installing_when_shared_cleanup_fails() {
+        let _path_lock = PATH_MUTATION_LOCK.lock().expect("PATH lock");
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let fake_commands = temporary.path().join("fake-commands");
+        fs::create_dir(&fake_commands).expect("fake command directory");
+        let command_log = temporary.path().join("commands.log");
+        write_test_command(
+            &fake_commands.join("systemctl"),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"${{1:-}}\" in\n  stop) exit 1 ;;\n  show) printf '%s\\n' loaded; exit 0 ;;\nesac\nexit 0\n",
+                command_log.display(),
+            ),
+        );
+        let candidate = temporary.path().join("candidate");
+        write_test_command(
+            &candidate,
+            "#!/bin/sh\nprintf 'candidate invoked\\n' >&2\nexit 64\n",
+        );
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        write_install_metadata(&input).expect("trusted install metadata");
+        write_complete_probe_identity(&input, "probe_same_hub_01", &input.hub_url);
+        let metadata_path = rooted_path(&input, &input.install_metadata_path);
+        let identity_path = rooted_path(&input, &input.identity_path);
+        let metadata_before = path_fingerprint(&metadata_path);
+        let identity_before = path_fingerprint(&identity_path);
+
+        let error = with_test_path(&fake_commands, || {
+            run_with_inspected_target(&input, ProbeInstallationTarget::ExistingHost)
+        })
+        .expect_err("cleanup failure must stop re-enrollment before installation");
+
+        assert!(matches!(
+            error,
+            ProbeLocalLifecycleError::ExistingInstallationCleanup(_)
+        ));
+        assert_eq!(error.installation_rejection(), None);
+        assert_eq!(path_fingerprint(&metadata_path), metadata_before);
+        assert_eq!(path_fingerprint(&identity_path), identity_before);
+        assert!(!rooted_path(&input, &input.install_path).exists());
+        let command_log = fs::read_to_string(command_log).expect("command log");
+        assert!(command_log.contains("stop enoki-probe"));
+        assert!(!command_log.contains("enable enoki-probe.service"));
+    }
+
+    #[test]
+    fn new_host_inspection_never_cleans_a_same_hub_installation_from_an_environment_marker() {
+        let _path_lock = PATH_MUTATION_LOCK.lock().expect("PATH lock");
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        write_install_metadata(&input).expect("trusted install metadata");
+        write_complete_probe_identity(&input, "probe_same_hub_01", &input.hub_url);
+        let old_binary = rooted_path(&input, &input.install_path);
+        fs::create_dir_all(old_binary.parent().expect("old binary parent"))
+            .expect("old binary parent");
+        fs::write(&old_binary, "old Probe binary").expect("old binary");
+        let metadata_path = rooted_path(&input, &input.install_metadata_path);
+        let metadata_before = path_fingerprint(&metadata_path);
+        let old_binary_before = path_fingerprint(&old_binary);
+
+        let previous = env::var_os("ENOKI_ENROLLMENT_TARGET");
+        // SAFETY: this test serializes and restores its process-wide environment mutation.
+        unsafe { env::set_var("ENOKI_ENROLLMENT_TARGET", "existing_host") };
+        let result = run_with_inspected_target(&input, ProbeInstallationTarget::NewHost);
+        // SAFETY: restores the process-wide environment changed for this serialized test.
+        unsafe {
+            if let Some(previous) = previous {
+                env::set_var("ENOKI_ENROLLMENT_TARGET", previous);
+            } else {
+                env::remove_var("ENOKI_ENROLLMENT_TARGET");
+            }
+        }
+
+        assert!(matches!(
+            result,
+            Err(ProbeLocalLifecycleError::ExistingInstallationWithProbeId(_))
+        ));
+        assert_eq!(path_fingerprint(&metadata_path), metadata_before);
+        assert_eq!(path_fingerprint(&old_binary), old_binary_before);
+    }
+
+    #[test]
+    fn inspection_network_failure_happens_before_any_local_installation_mutation() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        let mut transport = FailingInspectionTransport;
+
+        let error = run_probe_local_install_with_registration_transport(&input, &mut transport)
+            .expect_err("inspection network failure must stop before local mutation");
+
+        assert!(matches!(
+            error,
+            ProbeLocalLifecycleError::InstallationInspection(_)
+        ));
+        for path in [
+            input.install_path.as_path(),
+            input.identity_path.as_path(),
+            input.install_metadata_path.as_path(),
+            input.state_dir.as_path(),
+        ] {
+            assert!(!rooted_path(&input, path).exists(), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn installation_rejection_retries_the_same_encoded_body_until_the_hub_confirms_it() {
+        let input = input();
+        let error = ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub;
+        let mut transport = RejectionRetryTransport {
+            attempts: 0,
+            bodies: Vec::new(),
+        };
+        let now = std::rc::Rc::new(std::cell::Cell::new(Duration::from_secs(10)));
+        let clock = TestInstallationRejectionClock {
+            now: std::rc::Rc::clone(&now),
+        };
+        let mut sleeper = TestInstallationRejectionSleeper {
+            now,
+            sleeps: Vec::new(),
+        };
+
+        confirm_probe_local_install_failure_with_retry(
+            &input,
+            &error,
+            &mut transport,
+            &clock,
+            &mut sleeper,
+            InstallationRejectionRetryPolicy {
+                deadline: Duration::from_secs(5),
+                max_attempts: 3,
+                retry_delay: Duration::from_secs(1),
+            },
+        )
+        .expect("a transient rejection response is retried until Hub confirmation");
+
+        assert_eq!(transport.bodies.len(), 2);
+        assert_eq!(transport.bodies[0], transport.bodies[1]);
+        assert_eq!(sleeper.sleeps, vec![Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn installation_rejection_stops_at_its_deadline_without_leaking_the_enrollment_token() {
+        let input = input();
+        let error = ProbeLocalLifecycleError::ExistingInstallation;
+        let mut transport = AlwaysTransientRejectionTransport { attempts: 0 };
+        let now = std::rc::Rc::new(std::cell::Cell::new(Duration::from_secs(10)));
+        let clock = TestInstallationRejectionClock {
+            now: std::rc::Rc::clone(&now),
+        };
+        let mut sleeper = TestInstallationRejectionSleeper {
+            now,
+            sleeps: Vec::new(),
+        };
+
+        let confirmation = confirm_probe_local_install_failure_with_retry(
+            &input,
+            &error,
+            &mut transport,
+            &clock,
+            &mut sleeper,
+            InstallationRejectionRetryPolicy {
+                deadline: Duration::from_secs(1),
+                max_attempts: 5,
+                retry_delay: Duration::from_secs(1),
+            },
+        )
+        .expect_err("an unconfirmed transient rejection remains an installation failure");
+
+        assert_eq!(transport.attempts, 2);
+        assert_eq!(sleeper.sleeps, vec![Duration::from_secs(1)]);
+        assert!(confirmation.to_string().contains("Hub未确认"));
+        assert!(!confirmation.to_string().contains(&input.enrollment_token));
+    }
+
+    #[test]
+    fn fresh_installation_preflight_distinguishes_a_probe_bound_to_a_different_hub_before_mutation()
+    {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        input.hub_url = "https://other-hub.example".to_string();
+        write_install_metadata(&input).expect("trusted metadata");
+        write_complete_probe_identity(&input, "probe_other_hub_01", &input.hub_url);
+        input.hub_url = "https://hub.example".to_string();
+
+        assert!(matches!(
+            preflight_fresh_installation(&input),
+            Err(ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub)
+        ));
+        assert_eq!(
+            ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub
+                .installation_rejection(),
+            Some((
+                "probe_bound_to_different_hub",
+                "local Probe installation is bound to a different Hub".to_string(),
+            )),
+        );
+    }
+
+    #[test]
+    fn same_hub_preflight_rejects_trusted_metadata_without_an_identity_as_invalid() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        write_install_metadata(&input).expect("trusted metadata");
+
+        assert!(matches!(
+            preflight_fresh_installation(&input),
+            Err(ProbeLocalLifecycleError::InvalidExistingInstallation)
+        ));
+    }
+
+    #[test]
+    fn same_hub_preflight_reports_only_a_strict_existing_public_probe_id_context() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let identity = temporary
+            .path()
+            .join("var/lib/enoki-probe/identity/probe-bootstrap.toml");
+        fs::create_dir_all(identity.parent().expect("identity parent")).expect("identity parent");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+        write_install_metadata(&input).expect("trusted metadata");
+        write_complete_probe_identity(&input, "probe_known_01", "https://hub.example");
+
+        assert_eq!(
+            preflight_fresh_installation(&input)
+                .expect_err("existing installation is rejected")
+                .installation_rejection(),
+            Some(("existing_probe_installation", "probe_known_01".to_string())),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_hub_preflight_rejects_every_untrusted_identity_without_mutating_evidence() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        enum IdentityState {
+            Missing,
+            Symlink,
+            Directory,
+            WrongMode,
+            InvalidToml,
+            MissingProbeId,
+            InvalidProbeId,
+            HubMismatch,
+        }
+
+        for state in [
+            IdentityState::Missing,
+            IdentityState::Symlink,
+            IdentityState::Directory,
+            IdentityState::WrongMode,
+            IdentityState::InvalidToml,
+            IdentityState::MissingProbeId,
+            IdentityState::InvalidProbeId,
+            IdentityState::HubMismatch,
+        ] {
+            let temporary = tempfile::tempdir().expect("tempdir");
+            let candidate = temporary.path().join("candidate");
+            fs::write(&candidate, "candidate").expect("candidate");
+            let mut input = input();
+            input.candidate_binary = candidate;
+            input.test_root = Some(temporary.path().to_path_buf());
+            write_install_metadata(&input).expect("trusted metadata");
+            write_complete_probe_identity(&input, "probe_known_01", "https://hub.example");
+            let identity_path = rooted_path(&input, &input.identity_path);
+
+            match state {
+                IdentityState::Missing => fs::remove_file(&identity_path).expect("remove identity"),
+                IdentityState::Symlink => {
+                    fs::remove_file(&identity_path).expect("remove identity");
+                    symlink("/not/a/real/identity", &identity_path).expect("identity symlink");
+                }
+                IdentityState::Directory => {
+                    fs::remove_file(&identity_path).expect("remove identity");
+                    fs::create_dir(&identity_path).expect("identity directory");
+                }
+                IdentityState::WrongMode => {
+                    fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o640))
+                        .expect("identity mode");
+                }
+                IdentityState::InvalidToml => {
+                    fs::write(&identity_path, "not = [valid").expect("invalid identity");
+                    fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
+                        .expect("identity mode");
+                }
+                IdentityState::MissingProbeId => {
+                    fs::write(
+                        &identity_path,
+                        "hub_url = \"https://hub.example\"\nprobe_private_key_pem = \"test-private-key\"\n",
+                    )
+                    .expect("identity without Probe ID");
+                    fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
+                        .expect("identity mode");
+                }
+                IdentityState::InvalidProbeId => {
+                    let identity = fs::read_to_string(&identity_path).expect("identity");
+                    fs::write(&identity_path, identity.replace("probe_known_01", "probe_"))
+                        .expect("invalid Probe ID");
+                }
+                IdentityState::HubMismatch => {
+                    let identity = fs::read_to_string(&identity_path).expect("identity");
+                    fs::write(
+                        &identity_path,
+                        identity.replace("https://hub.example", "https://other-hub.example"),
+                    )
+                    .expect("Hub mismatch");
+                }
+            }
+
+            let metadata_path = rooted_path(&input, &input.install_metadata_path);
+            let metadata_before = path_fingerprint(&metadata_path);
+            let identity_before = path_fingerprint(&identity_path);
+            let error = preflight_fresh_installation(&input)
+                .expect_err("untrusted Identity rejects fresh installation");
+            assert!(matches!(
+                &error,
+                ProbeLocalLifecycleError::InvalidExistingInstallation
+            ));
+            assert_eq!(
+                error.installation_rejection().map(|(code, _)| code),
+                Some("probe_installation_metadata_invalid")
+            );
+            assert_eq!(path_fingerprint(&metadata_path), metadata_before);
+            assert_eq!(path_fingerprint(&identity_path), identity_before);
+        }
     }
 
     #[cfg(unix)]
@@ -1147,8 +1973,151 @@ mod tests {
 
         assert!(matches!(
             preflight_fresh_installation(&input),
-            Err(ProbeLocalLifecycleError::ExistingInstallation)
+            Err(ProbeLocalLifecycleError::InvalidExistingInstallation)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_absent_preflight_rejects_every_managed_residue_without_mutating_it() {
+        for (managed_path, is_directory) in [
+            ("var/lib/enoki-probe/identity/probe-bootstrap.toml", false),
+            ("usr/local/bin/enoki-probe", false),
+            ("etc/sudoers.d/enoki-probe-operations", false),
+            ("etc/sudoers.d/enoki-probe-collector-helpers", false),
+            ("etc/systemd/system/enoki-probe.service", false),
+            ("var/lib/enoki-probe", true),
+            ("etc/sudoers.d/enoki-probe-upgrader", false),
+        ] {
+            let temporary = tempfile::tempdir().expect("tempdir");
+            let candidate = temporary.path().join("candidate");
+            fs::write(&candidate, "candidate").expect("candidate");
+            let residue = temporary.path().join(managed_path);
+            fs::create_dir_all(residue.parent().expect("residue parent")).expect("residue parent");
+            if is_directory {
+                fs::create_dir(&residue).expect("residue directory");
+            } else {
+                fs::write(&residue, b"pre-existing Enoki residue").expect("residue");
+            }
+            let mut input = input();
+            input.candidate_binary = candidate;
+            input.test_root = Some(temporary.path().to_path_buf());
+
+            let before = path_fingerprint(&residue);
+            let error = preflight_fresh_installation(&input)
+                .expect_err("residue rejects fresh installation");
+            assert!(matches!(
+                &error,
+                ProbeLocalLifecycleError::InvalidExistingInstallation
+            ));
+            assert_eq!(
+                error.installation_rejection().map(|(code, _)| code),
+                Some("probe_installation_metadata_invalid")
+            );
+            assert_eq!(path_fingerprint(&residue), before, "{managed_path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_absent_preflight_classifies_loaded_systemd_as_invalid_with_test_commands() {
+        let _path_lock = PATH_MUTATION_LOCK.lock().expect("PATH lock");
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let fake_commands = temporary.path().join("fake-commands");
+        fs::create_dir(&fake_commands).expect("fake command directory");
+        write_test_command(
+            &fake_commands.join("systemctl"),
+            "#!/bin/sh\ncase \"${1:-}\" in\n  is-enabled) printf '%s\\n' disabled; exit 1 ;;\n  show) printf '%s\\n' loaded; exit 0 ;;\nesac\nexit 1\n",
+        );
+        for command in ["getent", "id"] {
+            write_test_command(&fake_commands.join(command), "#!/bin/sh\nexit 1\n");
+        }
+        let candidate = temporary.path().join("candidate");
+        fs::write(&candidate, "candidate").expect("candidate");
+        let mut input = input();
+        input.candidate_binary = candidate;
+        input.test_root = Some(temporary.path().to_path_buf());
+
+        let old_path = env::var_os("PATH");
+        let test_path = format!(
+            "{}:{}",
+            fake_commands.display(),
+            old_path
+                .as_deref()
+                .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                .to_string_lossy(),
+        );
+        // SAFETY: this test serializes its process-wide PATH mutation and restores
+        // the original value before releasing the lock.
+        unsafe { env::set_var("PATH", &test_path) };
+        let result = preflight_fresh_installation(&input);
+        // SAFETY: restores the process-wide PATH changed for this serialized test.
+        unsafe {
+            if let Some(old_path) = old_path {
+                env::set_var("PATH", old_path);
+            } else {
+                env::remove_var("PATH");
+            }
+        }
+
+        assert!(matches!(
+            result,
+            Err(ProbeLocalLifecycleError::InvalidExistingInstallation)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_absent_preflight_classifies_service_account_or_group_residue_as_invalid_with_test_commands()
+     {
+        let _path_lock = PATH_MUTATION_LOCK.lock().expect("PATH lock");
+
+        for (getent_status, id_status) in [(0, 1), (1, 0)] {
+            let temporary = tempfile::tempdir().expect("tempdir");
+            let fake_commands = temporary.path().join("fake-commands");
+            fs::create_dir(&fake_commands).expect("fake command directory");
+            write_test_command(
+                &fake_commands.join("getent"),
+                &format!("#!/bin/sh\nexit {getent_status}\n"),
+            );
+            write_test_command(
+                &fake_commands.join("id"),
+                &format!("#!/bin/sh\nexit {id_status}\n"),
+            );
+            write_test_command(&fake_commands.join("systemctl"), "#!/bin/sh\nexit 99\n");
+            let candidate = temporary.path().join("candidate");
+            fs::write(&candidate, "candidate").expect("candidate");
+            let mut input = input();
+            input.candidate_binary = candidate;
+            input.test_root = Some(temporary.path().to_path_buf());
+
+            let old_path = env::var_os("PATH");
+            let test_path = format!(
+                "{}:{}",
+                fake_commands.display(),
+                old_path
+                    .as_deref()
+                    .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                    .to_string_lossy(),
+            );
+            // SAFETY: this test serializes its process-wide PATH mutation and restores
+            // the original value before releasing the lock.
+            unsafe { env::set_var("PATH", &test_path) };
+            let result = preflight_fresh_installation(&input);
+            // SAFETY: restores the process-wide PATH changed for this serialized test.
+            unsafe {
+                if let Some(old_path) = old_path {
+                    env::set_var("PATH", old_path);
+                } else {
+                    env::remove_var("PATH");
+                }
+            }
+
+            assert!(matches!(
+                result,
+                Err(ProbeLocalLifecycleError::InvalidExistingInstallation)
+            ));
+        }
     }
 
     #[cfg(unix)]
@@ -1216,7 +2185,7 @@ mod tests {
         // the original value before releasing the lock.
         unsafe { env::set_var("PATH", &test_path) };
 
-        let result = run_probe_local_install(&input);
+        let result = run_with_inspected_target(&input, ProbeInstallationTarget::NewHost);
 
         // SAFETY: restores the process-wide PATH changed for this serialized test.
         unsafe {
@@ -1287,7 +2256,7 @@ mod tests {
         // the original value before releasing the lock.
         unsafe { env::set_var("PATH", &test_path) };
 
-        let result = run_probe_local_install(&input);
+        let result = run_with_inspected_target(&input, ProbeInstallationTarget::NewHost);
 
         // SAFETY: restores the process-wide PATH changed for this serialized test.
         unsafe {
@@ -1309,11 +2278,219 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_complete_probe_identity(
+        input: &ProbeLocalInstallInput,
+        probe_id: &str,
+        hub_url: &str,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let identity_path = rooted_path(input, &input.identity_path);
+        fs::create_dir_all(identity_path.parent().expect("identity parent"))
+            .expect("identity parent");
+        fs::write(
+            &identity_path,
+            [
+                format!("hub_url = {}", toml_string(hub_url)),
+                format!("probe_id = {}", toml_string(probe_id)),
+                "probe_private_key_pem = \"test-private-key\"".to_string(),
+                format!(
+                    "state_dir = {}",
+                    toml_string(&input.state_dir.display().to_string())
+                ),
+                format!(
+                    "operation_status_path = {}",
+                    toml_string(
+                        &input
+                            .state_dir
+                            .join("probe-operation-status.toml")
+                            .display()
+                            .to_string(),
+                    )
+                ),
+                format!(
+                    "install_path = {}",
+                    toml_string(&input.install_path.display().to_string())
+                ),
+                format!("service_name = {}", toml_string(&input.service_name)),
+                format!(
+                    "probe_asset_public_key_sha256 = {}",
+                    toml_string(&input.trusted_asset_public_key_sha256)
+                ),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .expect("identity");
+        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600))
+            .expect("identity mode");
+    }
+
+    #[cfg(unix)]
+    fn path_fingerprint(path: &Path) -> Option<PathFingerprint> {
+        let metadata = fs::symlink_metadata(path).ok()?;
+        Some(PathFingerprint {
+            gid: metadata.gid(),
+            link_target: fs::read_link(path).ok(),
+            mode: metadata.mode(),
+            mtime: metadata.mtime(),
+            mtime_nsec: metadata.mtime_nsec(),
+            contents: fs::read(path).ok(),
+            uid: metadata.uid(),
+        })
+    }
+
+    #[cfg(unix)]
     fn write_test_command(path: &Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
 
         fs::write(path, contents).expect("write test command");
         fs::set_permissions(path, fs::Permissions::from_mode(0o755))
             .expect("make test command executable");
+    }
+
+    fn with_test_path<T>(fake_commands: &Path, operation: impl FnOnce() -> T) -> T {
+        let old_path = env::var_os("PATH");
+        let test_path = format!(
+            "{}:{}",
+            fake_commands.display(),
+            old_path
+                .as_deref()
+                .unwrap_or_else(|| std::ffi::OsStr::new(""))
+                .to_string_lossy(),
+        );
+        // SAFETY: callers hold PATH_MUTATION_LOCK and this restores the value.
+        unsafe { env::set_var("PATH", &test_path) };
+        let result = operation();
+        // SAFETY: restores the process-wide PATH changed for this serialized test.
+        unsafe {
+            if let Some(old_path) = old_path {
+                env::set_var("PATH", old_path);
+            } else {
+                env::remove_var("PATH");
+            }
+        }
+        result
+    }
+
+    struct InspectionTransport {
+        target: ProbeInstallationTarget,
+    }
+
+    struct RejectionRetryTransport {
+        attempts: usize,
+        bodies: Vec<Vec<u8>>,
+    }
+
+    impl RegistrationTransport for RejectionRetryTransport {
+        fn post_protobuf(
+            &mut self,
+            _url: &str,
+            body: Vec<u8>,
+        ) -> Result<Vec<u8>, crate::registration::RegistrationError> {
+            self.bodies.push(body);
+            self.attempts += 1;
+            if self.attempts == 1 {
+                return Err(crate::registration::RegistrationError::Attempt(
+                    crate::transport::HttpAttemptError::Network(
+                        "temporary Hub connection failure".to_string(),
+                    ),
+                ));
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    struct AlwaysTransientRejectionTransport {
+        attempts: usize,
+    }
+
+    impl RegistrationTransport for AlwaysTransientRejectionTransport {
+        fn post_protobuf(
+            &mut self,
+            _url: &str,
+            _body: Vec<u8>,
+        ) -> Result<Vec<u8>, crate::registration::RegistrationError> {
+            self.attempts += 1;
+            Err(crate::registration::RegistrationError::Attempt(
+                crate::transport::HttpAttemptError::Network(
+                    "temporary Hub connection failure".to_string(),
+                ),
+            ))
+        }
+    }
+
+    struct TestInstallationRejectionClock {
+        now: std::rc::Rc<std::cell::Cell<Duration>>,
+    }
+
+    impl InstallationRejectionClock for TestInstallationRejectionClock {
+        fn now(&self) -> Duration {
+            self.now.get()
+        }
+    }
+
+    struct TestInstallationRejectionSleeper {
+        now: std::rc::Rc<std::cell::Cell<Duration>>,
+        sleeps: Vec<Duration>,
+    }
+
+    impl InstallationRejectionSleeper for TestInstallationRejectionSleeper {
+        fn sleep(&mut self, duration: Duration) {
+            self.sleeps.push(duration);
+            self.now.set(self.now.get().saturating_add(duration));
+        }
+    }
+
+    struct FailingInspectionTransport;
+
+    impl RegistrationTransport for FailingInspectionTransport {
+        fn post_protobuf(
+            &mut self,
+            _url: &str,
+            _body: Vec<u8>,
+        ) -> Result<Vec<u8>, crate::registration::RegistrationError> {
+            Err(crate::registration::RegistrationError::Attempt(
+                crate::transport::HttpAttemptError::Network("network unavailable".to_string()),
+            ))
+        }
+    }
+
+    impl RegistrationTransport for InspectionTransport {
+        fn post_protobuf(
+            &mut self,
+            _url: &str,
+            _body: Vec<u8>,
+        ) -> Result<Vec<u8>, crate::registration::RegistrationError> {
+            let target_kind = match self.target {
+                ProbeInstallationTarget::NewHost => {
+                    crate::protocol::enoki::v1::ProbeEnrollmentTargetKind::NewHost
+                }
+                ProbeInstallationTarget::ExistingHost => {
+                    crate::protocol::enoki::v1::ProbeEnrollmentTargetKind::ExistingHost
+                }
+            };
+            Ok(crate::protocol::enoki::v1::ProbeRegistrationResponse {
+                enrollment_id: String::new(),
+                initial_configuration: None,
+                installation_inspection: Some(
+                    crate::protocol::enoki::v1::ProbeInstallationInspectionResponse {
+                        target_kind: target_kind as i32,
+                    },
+                ),
+                probe_id: String::new(),
+                probe_secret: String::new(),
+                server_time_ms: 0,
+            }
+            .encode_to_vec())
+        }
+    }
+
+    fn run_with_inspected_target(
+        input: &ProbeLocalInstallInput,
+        target: ProbeInstallationTarget,
+    ) -> Result<(), ProbeLocalLifecycleError> {
+        let mut transport = InspectionTransport { target };
+        run_probe_local_install_with_registration_transport(input, &mut transport)
     }
 }

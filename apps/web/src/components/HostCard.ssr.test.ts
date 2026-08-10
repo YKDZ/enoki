@@ -69,4 +69,17 @@ describe("Host overview card", () => {
     expect(html).not.toContain("最新上报");
     expect(html).not.toContain(">online<");
   });
+
+  it("marks and highlights the ready Host without changing its button contract", async () => {
+    const html = await renderToString(
+      createSSRApp(HostCard, {
+        highlighted: true,
+        host,
+      }),
+    );
+
+    expect(html).toContain('data-enoki-host-id="1"');
+    expect(html).toContain("ring-primary");
+    expect(html).toContain('tabindex="0"');
+  });
 });

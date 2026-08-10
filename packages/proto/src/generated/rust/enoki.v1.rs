@@ -388,6 +388,33 @@ pub struct ProbeRegistrationRequest {
     pub probe_public_key_pem: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "4")]
     pub snapshots: ::prost::alloc::vec::Vec<Snapshot>,
+    /// An installer may use the existing registration endpoint to safely
+    /// terminate its own nonterminal Enrollment before it has generated an
+    /// identity or mutated the local machine.
+    #[prost(message, optional, tag = "5")]
+    pub installation_rejection: ::core::option::Option<ProbeInstallationRejection>,
+    /// A staged installer asks the authoritative Hub which lifecycle it may run
+    /// before generating an identity or mutating local installation resources.
+    #[prost(message, optional, tag = "6")]
+    pub installation_inspection: ::core::option::Option<ProbeInstallationInspection>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeInstallationInspection {}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeInstallationInspectionResponse {
+    #[prost(enumeration = "ProbeEnrollmentTargetKind", tag = "1")]
+    pub target_kind: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeInstallationRejection {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub message: ::prost::alloc::string::String,
+    /// Public correlation context for same-Hub existing-installation recovery.
+    /// It is deliberately separate from the human-readable message.
+    #[prost(string, tag = "3")]
+    pub existing_probe_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeRegistrationResponse {
@@ -404,6 +431,10 @@ pub struct ProbeRegistrationResponse {
     /// Probes omit it without changing the frame shape.
     #[prost(string, tag = "5")]
     pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "6")]
+    pub installation_inspection: ::core::option::Option<
+        ProbeInstallationInspectionResponse,
+    >,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProbeReportRequest {
@@ -446,4 +477,33 @@ pub struct ProbeReportResponse {
     pub requested_snapshot_collector_ids: ::prost::alloc::vec::Vec<
         ::prost::alloc::string::String,
     >,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ProbeEnrollmentTargetKind {
+    Unspecified = 0,
+    NewHost = 1,
+    ExistingHost = 2,
+}
+impl ProbeEnrollmentTargetKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED",
+            Self::NewHost => "NEW_HOST",
+            Self::ExistingHost => "EXISTING_HOST",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "NEW_HOST" => Some(Self::NewHost),
+            "EXISTING_HOST" => Some(Self::ExistingHost),
+            _ => None,
+        }
+    }
 }

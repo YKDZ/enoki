@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { hashStableHostProfile } from "./host-profile-hash";
 import {
   createTestProbeIdentity,
   signedProbeRequest,
@@ -135,60 +136,91 @@ async function reportHostProfile(
   input: { diskAvailable: boolean | null; sequence: number },
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
-  const body = ReportRequest.encode(
-    ReportRequest.create({
-      bootId: "boot-capability",
-      metrics: [],
-      probeConfigurationVersion: "default-v1",
-      probeId: registration.probeId,
-      sequenceEnd: input.sequence,
-      sequenceStart: input.sequence,
-      snapshots: [
-        {
-          collectorId: "official.host-profile",
-          hostProfile: {
-            architecture: "x86_64",
-            ...(input.diskAvailable === null
-              ? {}
-              : {
-                  collectorCapabilities: {
-                    official: {
-                      diskHealth: diskHealthCapability(input.diskAvailable),
-                    },
-                  },
-                }),
-            cpuCount: 2,
-            cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-            filesystems: input.diskAvailable
-              ? [
-                  {
-                    filesystemType: "ext4",
-                    mountPoint: "/",
-                    totalBytes: 20_000,
-                  },
-                ]
-              : [],
-            hostname: "managed-host-01",
-            kernel: "6.8.0",
-            memoryTotalBytes: 8_589_934_592,
-            networkInterfaces: [
-              {
-                addresses: ["10.0.0.10"],
-                name: "eth0",
-              },
-            ],
-            os: "linux",
-            probeVersion: "0.1.0",
+  const hostProfile = {
+    architecture: "x86_64",
+    ...(input.diskAvailable === null
+      ? {}
+      : {
+          collectorCapabilities: {
+            official: {
+              diskHealth: diskHealthCapability(input.diskAvailable),
+            },
           },
-        },
-      ],
-    }),
-  ).finish();
-  const response = await app.request(
-    "/api/probe/report",
-    signedProbeRequest(registration, "/api/probe/report", body),
-  );
+        }),
+    cpuCount: 2,
+    cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+    filesystems: input.diskAvailable
+      ? [
+          {
+            filesystemType: "ext4",
+            mountPoint: "/",
+            totalBytes: 20_000,
+          },
+        ]
+      : [],
+    hostname: "managed-host-01",
+    kernel: "6.8.0",
+    memoryTotalBytes: 8_589_934_592,
+    networkInterfaces: [
+      {
+        addresses: ["10.0.0.10"],
+        name: "eth0",
+      },
+    ],
+    os: "linux",
+    probeVersion: "0.1.0",
+  } satisfies root.enoki.v1.IHostProfileSnapshot;
+  const snapshotHash = hashStableHostProfile(hostProfile);
+  const postReport = async (snapshots: root.enoki.v1.ISnapshot[]) => {
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-capability",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: input.sequence,
+        sequenceStart: input.sequence,
+        snapshots,
+      }),
+    ).finish();
+    return app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+  };
 
+  if (input.sequence === 1) {
+    const response = await postReport([
+      {
+        collectorId: "official.host-profile",
+        hostProfile,
+        snapshotHash,
+      },
+    ]);
+    expect(response.status).toBe(200);
+    return;
+  }
+
+  const compact = await postReport([
+    {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    },
+  ]);
+  expect(compact.status).toBe(200);
+  const ReportResponse = root.enoki.v1.ProbeReportResponse;
+  expect(
+    ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
+      .requestedSnapshotCollectorIds,
+  ).toEqual(["official.host-profile"]);
+
+  const response = await postReport([
+    {
+      collectorId: "official.host-profile",
+      hostProfile,
+      snapshotHash,
+    },
+  ]);
   expect(response.status).toBe(200);
 }
 

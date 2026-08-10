@@ -140,6 +140,72 @@ describe("Owner add-host install command", () => {
     database.close();
   });
 
+  it("keeps NewHost and ExistingHost install command shapes identical apart from their tokens", async () => {
+    const database = await createTemporaryDatabase();
+    database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "203.0.113.10",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "Offline Host",
+      displayNameEdited: false,
+      id: 7,
+      lastClockSkewMs: null,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-offline-host",
+      probeSecretHash: "secret-hash-offline-host",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      installation: {
+        installPath: "/usr/local/bin/enoki-probe",
+        installScriptPath: "/api/probe/install.sh",
+        publicHubUrl: "https://hub.example",
+      },
+    });
+    const ownerSession = await loginOwner(app);
+    const newHost = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    const existingHost = await app.request("/api/web/enrollments", {
+      body: JSON.stringify({
+        target: { hostId: 7, kind: "existing_host" },
+      }),
+      headers: { "content-type": "application/json", cookie: ownerSession },
+      method: "POST",
+    });
+    expect(newHost.status).toBe(201);
+    expect(existingHost.status).toBe(201);
+    const newCommand = (await newHost.json()) as {
+      enrollmentToken: string;
+      installCommand: string;
+    };
+    const existingCommand = (await existingHost.json()) as {
+      enrollmentToken: string;
+      installCommand: string;
+    };
+
+    expect(
+      newCommand.installCommand.replace(newCommand.enrollmentToken, "<token>"),
+    ).toBe(
+      existingCommand.installCommand.replace(
+        existingCommand.enrollmentToken,
+        "<token>",
+      ),
+    );
+    expect(newCommand.installCommand).not.toContain("ENOKI_ENROLLMENT_TARGET");
+    expect(existingCommand.installCommand).not.toContain(
+      "ENOKI_ENROLLMENT_TARGET",
+    );
+
+    database.close();
+  });
+
   it("persists an overdue pending Enrollment as expired when the Owner reads its status", async () => {
     const database = await createTemporaryDatabase();
     let nowMs = 1_725_000_000_000;

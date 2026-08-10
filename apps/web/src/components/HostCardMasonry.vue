@@ -9,6 +9,7 @@ import type { HostSummary } from "../types";
 
 const props = defineProps<{
   hosts: HostSummary[];
+  highlightedHostId: number | null;
   isLoadingMore: boolean;
   skeletonCount: number;
   visibleCount: number;
@@ -46,6 +47,7 @@ useIntersectionObserver(
       >
         <HostCard
           :host="host"
+          :highlighted="host.id === highlightedHostId"
           @open-host-detail="emit('open-host-detail', $event)"
         />
       </div>

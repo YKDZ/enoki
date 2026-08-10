@@ -13,10 +13,12 @@ import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
 import type { Context } from "hono";
 
+import type { AuditRepository } from "../database/audit.js";
 import type { EnrollmentRepository } from "../database/enrollments.js";
 import {
   hostProfilePersistenceValues,
   type SnapshotCollectorStorageRegistry,
+  type SnapshotReplayRequestKey,
 } from "../database/host-profiles.js";
 import type {
   HostStatusThresholds,
@@ -26,6 +28,10 @@ import type { ProbeReportTransaction } from "../database/index.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import {
+  maxEnrollmentRejectionCodeLength,
+  maxEnrollmentRejectionMessageLength,
+} from "../enrollment/lifecycle.js";
 import { hashSecret } from "../enrollment/routes.js";
 import {
   broadcastHostReadyHint,
@@ -76,6 +82,7 @@ class ReportBusinessRejection extends Error {
 }
 
 export type ProbeRouteServices = {
+  audit?: AuditRepository;
   enrollments: EnrollmentRepository;
   hosts: HostRepository;
   metrics: MetricsRepository;
@@ -128,11 +135,74 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("invalid_enrollment_token", 401);
     }
 
+    const installationRejection = registrationInstallationRejection(request);
+    if (installationRejection === "invalid") {
+      return probeJsonError("malformed_probe_registration", 400);
+    }
+    const installationInspection = registrationInstallationInspection(request);
+    if (installationInspection === "invalid") {
+      return probeJsonError("malformed_probe_registration", 400);
+    }
+    if (installationInspection) {
+      const enrollment = services.enrollments.inspectPending({
+        nowMs: now(),
+        tokenHash: hashSecret(request.enrollmentToken),
+      });
+      if (!enrollment) {
+        return probeJsonError("invalid_enrollment_token", 401);
+      }
+      const body = RegistrationResponse.encode(
+        RegistrationResponse.create({
+          installationInspection: {
+            targetKind:
+              enrollment.targetKind === "new_host"
+                ? enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST
+                : enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST,
+          },
+        }),
+      ).finish();
+      return context.body(toArrayBuffer(body), 200, {
+        "cache-control": "no-store",
+        "content-type": "application/x-protobuf",
+      });
+    }
+    if (installationRejection) {
+      const { existingProbeId, ...rejection } = installationRejection;
+      const rejectionResult = services.enrollments.rejectInstallation({
+        ...rejection,
+        existingProbeId,
+        rejectedAtMs: now(),
+        tokenHash: hashSecret(request.enrollmentToken),
+      });
+      if (!rejectionResult) {
+        return probeJsonError("invalid_enrollment_token", 401);
+      }
+      if (rejectionResult.outcome === "rejected") {
+        services.audit?.record({
+          action: "enrollment.installation_rejected",
+          actor: "system",
+          details: {
+            code: installationRejection.code,
+            enrollmentId: rejectionResult.enrollment.enrollmentId,
+          },
+          occurredAtMs: rejectionResult.enrollment.rejectedAtMs ?? now(),
+          outcome: "success",
+          subjectId: String(rejectionResult.enrollment.id),
+          subjectType: "enrollment_token",
+        });
+      }
+      return context.body(null, 204, { "cache-control": "no-store" });
+    }
+
     if (!validProbePublicKeyPem(request.probePublicKeyPem)) {
       return probeJsonError("probe_public_key_required", 400);
     }
 
     if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
+      return probeJsonError("malformed_probe_registration", 400);
+    }
+
+    if (!validRegistrationResponsibilities(request)) {
       return probeJsonError("malformed_probe_registration", 400);
     }
 
@@ -271,6 +341,15 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("malformed_probe_report", 400);
     }
 
+    const reportResponsibility = reportResponsibilityFor({
+      hostProfileSnapshot,
+      report: validatedReport,
+      request,
+    });
+    if (!reportResponsibility) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
+
     const reportReceivedAtMs = now();
     const prevalidatedOperations = planProbeOperationReportApplication({
       acknowledgements: request.operationAcknowledgements ?? [],
@@ -285,17 +364,71 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     const ingestReport = (reportServices: ProbeRouteServices) => {
       const services = reportServices;
-      const startupEnrollment = isProbeStartupReport({
-        report: validatedReport,
-        reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
-        request,
-      })
-        ? services.enrollments.resolveStartupReport({
-            enrollmentId: nonemptyString(request.enrollmentId),
-            hostId: host.id,
-            reportedAtMs: reportReceivedAtMs,
-          })
-        : null;
+      let snapshotReplayToFulfill: SnapshotReplayRequestKey | null = null;
+      const replaySequenceAlreadyAccepted = services.metrics.hasObservation({
+        bootId: request.bootId,
+        probeId: request.probeId,
+        sequence: validatedReport.sequenceStart,
+      });
+      const isSnapshotReplay =
+        reportResponsibility === "snapshot_replay" ||
+        (reportResponsibility === "startup" &&
+          replaySequenceAlreadyAccepted &&
+          hasSnapshotReplayOnlyContents(request));
+      if (isSnapshotReplay) {
+        const snapshotHash =
+          hostProfileSnapshot?.snapshotHash ??
+          hostProfileSnapshot?.canonicalHash;
+        if (!snapshotHash) {
+          throw new ReportBusinessRejection("malformed_probe_report", 400);
+        }
+        const replayRequest: SnapshotReplayRequestKey = {
+          bootId: request.bootId,
+          collectorId: hostProfileCollectorId,
+          hostId: host.id,
+          sequence: validatedReport.sequenceStart,
+          snapshotHash,
+        };
+        const replayRequestStatus =
+          services.snapshotCollectors?.snapshotReplayRequestStatus(
+            replayRequest,
+          ) ?? null;
+        const snapshotAlreadyStored =
+          services.snapshotCollectors
+            ?.get(hostProfileCollectorId)
+            ?.hasSnapshot(host.id, snapshotHash) ?? false;
+        // Snapshot Replay must exactly match the tuple the Hub requested. Its
+        // receipt already exists, while recordObservation is an idempotent no-op.
+        // A fulfilled tuple accepts only its exact lost-response retry.
+        // The no-registry path is explicit legacy compatibility for injected
+        // route services predating Snapshot Replay request persistence.
+        if (services.snapshotCollectors) {
+          if (!replaySequenceAlreadyAccepted) {
+            throw new ReportBusinessRejection("malformed_probe_report", 400);
+          }
+          if (replayRequestStatus === "pending") {
+            snapshotReplayToFulfill = replayRequest;
+          } else if (
+            replayRequestStatus !== "fulfilled" ||
+            !snapshotAlreadyStored
+          ) {
+            throw new ReportBusinessRejection("malformed_probe_report", 400);
+          }
+        }
+      }
+      const startupEnrollment =
+        !isSnapshotReplay &&
+        isProbeStartupReport({
+          report: validatedReport,
+          reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
+          request,
+        })
+          ? services.enrollments.resolveStartupReport({
+              enrollmentId: nonemptyString(request.enrollmentId),
+              hostId: host.id,
+              reportedAtMs: reportReceivedAtMs,
+            })
+          : null;
 
       if (startupEnrollment?.status === "rejected") {
         // Commit the Enrollment's terminal timeout by itself, then reject the
@@ -344,10 +477,27 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         services.snapshotCollectors
           ?.get(hostProfileCollectorId)
           ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
-      const requestedSnapshotCollectorIds =
-        !reportedHostProfile && !knownHostProfileSnapshot
-          ? [hostProfileCollectorId]
-          : [];
+      const snapshotReplayRequest =
+        !reportedHostProfile &&
+        !knownHostProfileSnapshot &&
+        reportedSnapshotHash
+          ? {
+              bootId: request.bootId,
+              collectorId: hostProfileCollectorId,
+              hostId: host.id,
+              requestedAtMs: reportReceivedAtMs,
+              sequence: validatedReport.sequenceEnd,
+              snapshotHash: reportedSnapshotHash,
+            }
+          : null;
+      const requestedSnapshotCollectorIds = snapshotReplayRequest
+        ? [hostProfileCollectorId]
+        : [];
+      if (snapshotReplayRequest) {
+        services.snapshotCollectors?.requestSnapshotReplay({
+          ...snapshotReplayRequest,
+        });
+      }
       const clockSkew = detectClockSkew(
         request.metrics ?? [],
         reportReceivedAtMs,
@@ -408,6 +558,15 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         if (result?.changed) {
           hostProfileUpdate = result.view;
         }
+      }
+      if (
+        snapshotReplayToFulfill &&
+        !services.snapshotCollectors?.fulfillSnapshotReplay({
+          ...snapshotReplayToFulfill,
+          fulfilledAtMs: reportReceivedAtMs,
+        })
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
       }
       const storedReportedHostProfile =
         !reportedHostProfile &&
@@ -856,6 +1015,68 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
   return routes;
 }
+
+function registrationInstallationRejection(
+  request: ProtoMessage,
+):
+  | { code: string; existingProbeId: string | null; message: string }
+  | "invalid"
+  | null {
+  const rejection = request.installationRejection;
+  if (!rejection) {
+    return null;
+  }
+  if (
+    request.installationInspection ||
+    request.probePublicKeyPem ||
+    (request.snapshots ?? []).length > 0
+  ) {
+    return "invalid";
+  }
+  const code = typeof rejection.code === "string" ? rejection.code : "";
+  const existingProbeId =
+    code === "existing_probe_installation" &&
+    validPublicProbeId(rejection.existingProbeId)
+      ? rejection.existingProbeId
+      : null;
+  const message = installationRejectionMessages[code];
+  if (
+    !message ||
+    code.length > maxEnrollmentRejectionCodeLength ||
+    message.length > maxEnrollmentRejectionMessageLength
+  ) {
+    return "invalid";
+  }
+  return { code, existingProbeId, message };
+}
+
+function registrationInstallationInspection(
+  request: ProtoMessage,
+): "invalid" | { readonly kind: "inspection" } | null {
+  if (!request.installationInspection) {
+    return null;
+  }
+  if (
+    request.installationRejection ||
+    request.probePublicKeyPem ||
+    (request.snapshots ?? []).length > 0
+  ) {
+    return "invalid";
+  }
+  return { kind: "inspection" };
+}
+
+function validPublicProbeId(value: unknown): value is string {
+  return typeof value === "string" && /^probe_[A-Za-z0-9_-]{1,90}$/.test(value);
+}
+
+const installationRejectionMessages: Record<string, string> = {
+  existing_probe_installation: "existing local Probe installation detected",
+  probe_bound_to_different_hub:
+    "local Probe installation is bound to a different Hub",
+  probe_installation_metadata_invalid:
+    "local Probe installation metadata is unsafe or incomplete",
+};
 
 function isProbeStartupReport(input: {
   report: { sequenceEnd: number; sequenceStart: number };
@@ -1438,6 +1659,16 @@ function hostProfileSnapshotFromRegistration(request: ProtoMessage) {
   };
 }
 
+function validRegistrationResponsibilities(request: ProtoMessage) {
+  const snapshots = (request.snapshots ?? []) as ProtoMessage[];
+
+  return (
+    snapshots.length === 1 &&
+    snapshots[0]?.collectorId === hostProfileCollectorId &&
+    Boolean(snapshots[0]?.hostProfile)
+  );
+}
+
 function hostProfileSnapshotFromReport(request: ProtoMessage) {
   const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(
     (snapshot) => snapshot.collectorId === hostProfileCollectorId,
@@ -1849,6 +2080,69 @@ function validateReportEnvelope(request: ProtoMessage) {
   }
 
   return { sequenceEnd, sequenceStart };
+}
+
+function reportResponsibilityFor(input: {
+  hostProfileSnapshot: ReturnType<typeof hostProfileSnapshotFromReport>;
+  report: { sequenceEnd: number; sequenceStart: number };
+  request: ProtoMessage;
+}):
+  | "legacy_observation"
+  | "observation"
+  | "snapshot_replay"
+  | "startup"
+  | null {
+  const snapshots = (input.request.snapshots ?? []) as ProtoMessage[];
+  const snapshot = input.hostProfileSnapshot;
+
+  // Older Probes predate compact snapshot references. Keep their ordinary
+  // Observation Batches compatible, including a legacy sequence-one metrics
+  // batch that was never a Probe Startup Report, while requiring current
+  // Probes to use the typed constructor shape below.
+  if (snapshots.length === 0) {
+    return "legacy_observation";
+  }
+
+  if (
+    snapshots.length !== 1 ||
+    !snapshot ||
+    snapshots[0]?.collectorId !== hostProfileCollectorId
+  ) {
+    return null;
+  }
+
+  if (snapshot.hostProfile === null && !snapshot.snapshotHash) {
+    return null;
+  }
+
+  const isStartup =
+    input.report.sequenceStart === 1 && input.report.sequenceEnd === 1;
+  if (isStartup) {
+    return snapshot.hostProfile !== null &&
+      (input.request.metrics ?? []).length === 0 &&
+      typeof input.request.probeConfigurationVersion === "string" &&
+      input.request.probeConfigurationVersion.length > 0 &&
+      !input.request.probeConfigurationError
+      ? "startup"
+      : null;
+  }
+
+  if (snapshot.hostProfile !== null) {
+    return hasSnapshotReplayOnlyContents(input.request)
+      ? "snapshot_replay"
+      : null;
+  }
+
+  return "observation";
+}
+
+function hasSnapshotReplayOnlyContents(request: ProtoMessage) {
+  return (
+    (request.metrics ?? []).length === 0 &&
+    !request.probeConfigurationError &&
+    (request.operationAcknowledgements ?? []).length === 0 &&
+    (request.operationStatuses ?? []).length === 0
+  );
 }
 
 function detectClockSkew(

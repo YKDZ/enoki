@@ -1,91 +1,130 @@
+use std::collections::BTreeSet;
+
 use crate::{
     collectors::HOST_PROFILE_COLLECTOR_ID,
     host_profile::host_profile_hash,
     protocol::enoki::v1::{
-        HostProfileSnapshot, MetricSample, ProbeReportRequest, Snapshot, snapshot,
+        HostProfileSnapshot, MetricSample, ProbeOperationAcknowledgement, ProbeOperationStatus,
+        ProbeReportRequest, Snapshot, snapshot,
     },
 };
 
-pub trait HostProfileSnapshotSource {
-    fn host_profile_snapshot(&self) -> HostProfileSnapshot;
+#[derive(Debug, Default)]
+pub struct OperationReportProgress {
+    acknowledgements: Vec<ProbeOperationAcknowledgement>,
+    statuses: Vec<ProbeOperationStatus>,
 }
 
-impl HostProfileSnapshotSource for HostProfileSnapshot {
-    fn host_profile_snapshot(&self) -> HostProfileSnapshot {
-        self.clone()
+impl OperationReportProgress {
+    pub fn from_statuses(statuses: Vec<ProbeOperationStatus>) -> Self {
+        let mut operation_ids = BTreeSet::new();
+        let statuses = statuses
+            .into_iter()
+            .filter(|status| {
+                !status.operation_id.is_empty() && operation_ids.insert(status.operation_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let acknowledgements = statuses
+            .iter()
+            .map(|status| ProbeOperationAcknowledgement {
+                operation_id: status.operation_id.clone(),
+            })
+            .collect();
+
+        Self {
+            acknowledgements,
+            statuses,
+        }
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<ProbeOperationAcknowledgement>,
+        Vec<ProbeOperationStatus>,
+    ) {
+        (self.acknowledgements, self.statuses)
     }
 }
 
-pub fn startup_report(
-    probe_id: &str,
-    boot_id: &str,
-    sequence: u64,
-    probe_configuration_version: &str,
-    host_profile: HostProfileSnapshot,
-    metrics: Vec<MetricSample>,
-) -> ProbeReportRequest {
+pub struct StartupReportInput<'a> {
+    pub boot_id: &'a str,
+    pub enrollment_id: &'a str,
+    pub host_profile: HostProfileSnapshot,
+    pub operation_progress: OperationReportProgress,
+    pub probe_configuration_version: &'a str,
+    pub probe_id: &'a str,
+}
+
+pub struct SnapshotReplayInput<'a> {
+    pub boot_id: &'a str,
+    pub host_profile: HostProfileSnapshot,
+    pub probe_configuration_version: &'a str,
+    pub probe_id: &'a str,
+    pub sequence: u64,
+}
+
+pub struct ObservationBatchInput<'a> {
+    pub boot_id: &'a str,
+    pub host_profile: &'a HostProfileSnapshot,
+    pub metrics: Vec<MetricSample>,
+    pub operation_progress: OperationReportProgress,
+    pub probe_configuration_error: Option<crate::protocol::enoki::v1::ProbeConfigurationError>,
+    pub probe_configuration_version: &'a str,
+    pub probe_id: &'a str,
+    pub sequence_end: u64,
+    pub sequence_start: u64,
+}
+
+pub fn startup_report(input: StartupReportInput<'_>) -> ProbeReportRequest {
+    let (operation_acknowledgements, operation_statuses) = input.operation_progress.into_parts();
+
     ProbeReportRequest {
-        boot_id: boot_id.to_string(),
-        enrollment_id: String::new(),
-        metrics,
-        operation_acknowledgements: Vec::new(),
-        operation_statuses: Vec::new(),
+        boot_id: input.boot_id.to_string(),
+        enrollment_id: input.enrollment_id.to_string(),
+        metrics: Vec::new(),
+        operation_acknowledgements,
+        operation_statuses,
         probe_configuration_error: None,
-        probe_configuration_version: probe_configuration_version.to_string(),
-        probe_id: probe_id.to_string(),
-        sequence_end: sequence,
-        sequence_start: sequence,
-        snapshots: vec![full_host_profile_snapshot(host_profile)],
+        probe_configuration_version: input.probe_configuration_version.to_string(),
+        probe_id: input.probe_id.to_string(),
+        sequence_end: 1,
+        sequence_start: 1,
+        snapshots: vec![full_host_profile_snapshot(input.host_profile)],
     }
 }
 
-pub fn full_host_profile_report(
-    probe_id: &str,
-    boot_id: &str,
-    sequence_start: u64,
-    sequence_end: u64,
-    probe_configuration_version: &str,
-    host_profile: HostProfileSnapshot,
-    metrics: Vec<MetricSample>,
-) -> ProbeReportRequest {
+pub fn snapshot_replay_report(input: SnapshotReplayInput<'_>) -> ProbeReportRequest {
     ProbeReportRequest {
-        boot_id: boot_id.to_string(),
+        boot_id: input.boot_id.to_string(),
         enrollment_id: String::new(),
-        metrics,
+        metrics: Vec::new(),
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
         probe_configuration_error: None,
-        probe_configuration_version: probe_configuration_version.to_string(),
-        probe_id: probe_id.to_string(),
-        sequence_end,
-        sequence_start,
-        snapshots: vec![full_host_profile_snapshot(host_profile)],
+        probe_configuration_version: input.probe_configuration_version.to_string(),
+        probe_id: input.probe_id.to_string(),
+        sequence_end: input.sequence,
+        sequence_start: input.sequence,
+        snapshots: vec![full_host_profile_snapshot(input.host_profile)],
     }
 }
 
-pub fn regular_report(
-    probe_id: &str,
-    boot_id: &str,
-    sequence_start: u64,
-    sequence_end: u64,
-    probe_configuration_version: &str,
-    host_profile_source: &impl HostProfileSnapshotSource,
-    metrics: Vec<MetricSample>,
-) -> ProbeReportRequest {
-    let host_profile = host_profile_source.host_profile_snapshot();
+pub fn observation_batch_report(input: ObservationBatchInput<'_>) -> ProbeReportRequest {
+    let (operation_acknowledgements, operation_statuses) = input.operation_progress.into_parts();
 
     ProbeReportRequest {
-        boot_id: boot_id.to_string(),
+        boot_id: input.boot_id.to_string(),
         enrollment_id: String::new(),
-        metrics,
-        operation_acknowledgements: Vec::new(),
-        operation_statuses: Vec::new(),
-        probe_configuration_error: None,
-        probe_configuration_version: probe_configuration_version.to_string(),
-        probe_id: probe_id.to_string(),
-        sequence_end,
-        sequence_start,
-        snapshots: vec![hash_only_host_profile_snapshot(&host_profile)],
+        metrics: input.metrics,
+        operation_acknowledgements,
+        operation_statuses,
+        probe_configuration_error: input.probe_configuration_error,
+        probe_configuration_version: input.probe_configuration_version.to_string(),
+        probe_id: input.probe_id.to_string(),
+        sequence_end: input.sequence_end,
+        sequence_start: input.sequence_start,
+        snapshots: vec![hash_only_host_profile_snapshot(input.host_profile)],
     }
 }
 

@@ -1,7 +1,6 @@
 use std::{
     error::Error,
     fmt,
-    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -13,14 +12,17 @@ use rsa::{
 };
 
 use crate::{
-    collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
-    host_profile::{collect_local_host_profile, host_profile_hash},
+    collectors::is_owner_configurable_collector_id,
+    host_profile::collect_local_host_profile,
     hub_url,
     metrics::MetricsCollectionConfig,
     protocol::enoki::v1::{
-        ProbeRegistrationRequest, ProbeRegistrationResponse, Snapshot, snapshot,
+        HostProfileSnapshot, ProbeEnrollmentTargetKind, ProbeInstallationInspection,
+        ProbeInstallationRejection, ProbeRegistrationRequest, ProbeRegistrationResponse,
     },
+    report::full_host_profile_snapshot,
     secure_file::{atomic_write, read_regular_file},
+    transport::{HttpAttemptError, post_protobuf},
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -36,14 +38,40 @@ pub struct ProbeRegistrationOutcome {
     pub probe_id: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProbeInstallationRejectionInput {
+    pub code: String,
+    pub existing_probe_id: String,
+    pub enrollment_token: String,
+    pub hub_url: String,
+    pub message: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct ProbeInstallationInspectionInput {
+    pub enrollment_token: String,
+    pub hub_url: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProbeInstallationTarget {
+    NewHost,
+    ExistingHost,
+}
+
+pub(crate) struct PreparedInstallationRejection {
+    body: Vec<u8>,
+    url: String,
+}
+
 pub trait RegistrationTransport {
     fn post_protobuf(&mut self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, RegistrationError>;
 }
 
 #[derive(Debug)]
 pub enum RegistrationError {
+    Attempt(HttpAttemptError),
     Decode(String),
-    Http(String),
     InvalidResponse(&'static str),
     Io(std::io::Error),
     KeyGeneration(String),
@@ -52,11 +80,11 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Attempt(error) => write!(formatter, "registration request failed: {error}"),
             Self::Decode(message) => write!(
                 formatter,
                 "failed to decode registration response: {message}"
             ),
-            Self::Http(message) => write!(formatter, "registration request failed: {message}"),
             Self::InvalidResponse(message) => {
                 write!(formatter, "invalid registration response: {message}")
             }
@@ -71,10 +99,9 @@ impl fmt::Display for RegistrationError {
 impl Error for RegistrationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Attempt(error) => Some(error),
             Self::Io(error) => Some(error),
-            Self::Decode(_) | Self::Http(_) | Self::InvalidResponse(_) | Self::KeyGeneration(_) => {
-                None
-            }
+            Self::Decode(_) | Self::InvalidResponse(_) | Self::KeyGeneration(_) => None,
         }
     }
 }
@@ -85,19 +112,18 @@ impl From<std::io::Error> for RegistrationError {
     }
 }
 
+impl RegistrationError {
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Attempt(error) if error.is_transient())
+    }
+}
+
 pub struct HttpRegistrationTransport;
 
 impl RegistrationTransport for HttpRegistrationTransport {
     fn post_protobuf(&mut self, url: &str, body: Vec<u8>) -> Result<Vec<u8>, RegistrationError> {
-        let response = ureq::post(url)
-            .set("accept", "application/x-protobuf")
-            .set("content-type", "application/x-protobuf")
-            .send_bytes(&body)
-            .map_err(|error| RegistrationError::Http(error.to_string()))?;
-        let mut bytes = Vec::new();
-        response.into_reader().read_to_end(&mut bytes)?;
-
-        Ok(bytes)
+        post_protobuf(url, &body, &[]).map_err(RegistrationError::Attempt)
     }
 }
 
@@ -107,15 +133,11 @@ pub fn register_probe(
 ) -> Result<ProbeRegistrationOutcome, RegistrationError> {
     let signing_key = generate_probe_signing_key()?;
     let host_profile = collect_local_host_profile();
-    let request = ProbeRegistrationRequest {
+    let request = registration_request(RegistrationRequestInput {
         enrollment_token: input.enrollment_token,
+        host_profile,
         probe_public_key_pem: signing_key.public_key_pem.clone(),
-        snapshots: vec![Snapshot {
-            collector_id: HOST_PROFILE_COLLECTOR_ID.to_string(),
-            snapshot_hash: host_profile_hash(&host_profile),
-            payload: Some(snapshot::Payload::HostProfile(host_profile)),
-        }],
-    };
+    });
     let response_body =
         transport.post_protobuf(&registration_url(&input.hub_url)?, request.encode_to_vec())?;
     let response = ProbeRegistrationResponse::decode(response_body.as_slice())
@@ -165,9 +187,95 @@ pub fn register_probe(
     })
 }
 
+/// Reads the Hub-owned Enrollment target before the staged installer creates
+/// an identity or changes local Probe resources.
+pub fn inspect_probe_installation(
+    input: ProbeInstallationInspectionInput,
+    transport: &mut impl RegistrationTransport,
+) -> Result<ProbeInstallationTarget, RegistrationError> {
+    let request = ProbeRegistrationRequest {
+        enrollment_token: input.enrollment_token,
+        installation_inspection: Some(ProbeInstallationInspection {}),
+        installation_rejection: None,
+        probe_public_key_pem: String::new(),
+        snapshots: Vec::new(),
+    };
+    let response_body =
+        transport.post_protobuf(&registration_url(&input.hub_url)?, request.encode_to_vec())?;
+    let response = ProbeRegistrationResponse::decode(response_body.as_slice())
+        .map_err(|error| RegistrationError::Decode(error.to_string()))?;
+    let target_kind = response
+        .installation_inspection
+        .ok_or(RegistrationError::InvalidResponse(
+            "missing installation inspection",
+        ))?
+        .target_kind;
+    match ProbeEnrollmentTargetKind::try_from(target_kind).ok() {
+        Some(ProbeEnrollmentTargetKind::NewHost) => Ok(ProbeInstallationTarget::NewHost),
+        Some(ProbeEnrollmentTargetKind::ExistingHost) => Ok(ProbeInstallationTarget::ExistingHost),
+        Some(ProbeEnrollmentTargetKind::Unspecified) | None => Err(
+            RegistrationError::InvalidResponse("invalid installation inspection target"),
+        ),
+    }
+}
+
+/// Uses the existing registration endpoint to terminate the matching pending
+/// Enrollment before a local lifecycle failure can produce an identity.
+pub fn reject_probe_installation(
+    input: ProbeInstallationRejectionInput,
+    transport: &mut impl RegistrationTransport,
+) -> Result<(), RegistrationError> {
+    let request = prepare_probe_installation_rejection(input)?;
+    submit_prepared_installation_rejection(&request, transport)
+}
+
+pub(crate) fn prepare_probe_installation_rejection(
+    input: ProbeInstallationRejectionInput,
+) -> Result<PreparedInstallationRejection, RegistrationError> {
+    let request = ProbeRegistrationRequest {
+        enrollment_token: input.enrollment_token,
+        installation_inspection: None,
+        installation_rejection: Some(ProbeInstallationRejection {
+            code: input.code,
+            existing_probe_id: input.existing_probe_id,
+            message: input.message,
+        }),
+        probe_public_key_pem: String::new(),
+        snapshots: Vec::new(),
+    };
+    Ok(PreparedInstallationRejection {
+        body: request.encode_to_vec(),
+        url: registration_url(&input.hub_url)?,
+    })
+}
+
+pub(crate) fn submit_prepared_installation_rejection(
+    request: &PreparedInstallationRejection,
+    transport: &mut impl RegistrationTransport,
+) -> Result<(), RegistrationError> {
+    transport.post_protobuf(&request.url, request.body.clone())?;
+    Ok(())
+}
+
 struct GeneratedProbeSigningKey {
     private_key_pem: String,
     public_key_pem: String,
+}
+
+struct RegistrationRequestInput {
+    enrollment_token: String,
+    host_profile: HostProfileSnapshot,
+    probe_public_key_pem: String,
+}
+
+fn registration_request(input: RegistrationRequestInput) -> ProbeRegistrationRequest {
+    ProbeRegistrationRequest {
+        enrollment_token: input.enrollment_token,
+        installation_inspection: None,
+        installation_rejection: None,
+        probe_public_key_pem: input.probe_public_key_pem,
+        snapshots: vec![full_host_profile_snapshot(input.host_profile)],
+    }
 }
 
 fn generate_probe_signing_key() -> Result<GeneratedProbeSigningKey, RegistrationError> {

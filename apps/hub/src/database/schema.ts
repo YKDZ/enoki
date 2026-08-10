@@ -55,6 +55,11 @@ export const enrollmentTokens = sqliteTable(
   (table) => [
     uniqueIndex("enrollment_tokens_token_hash_idx").on(table.tokenHash),
     uniqueIndex("enrollment_tokens_enrollment_id_idx").on(table.enrollmentId),
+    uniqueIndex("enrollment_tokens_one_active_existing_host_idx")
+      .on(table.targetHostId)
+      .where(
+        sql`${table.targetKind} = 'existing_host' and ${table.status} in ('pending', 'verifying')`,
+      ),
     index("enrollment_tokens_status_expiry_idx").on(
       table.status,
       table.expiresAtMs,
@@ -161,6 +166,33 @@ export const officialHostProfiles = sqliteTable(
 export type OfficialHostProfileRow = typeof officialHostProfiles.$inferSelect;
 export type NewOfficialHostProfileRow =
   typeof officialHostProfiles.$inferInsert;
+
+export const snapshotReplayRequests = sqliteTable(
+  "snapshot_replay_requests",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    hostId: integer("managed_host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
+    collectorId: text().notNull(),
+    bootId: text("boot_id").notNull().default(""),
+    sequence: integer().notNull().default(0),
+    snapshotHash: text("snapshot_hash").notNull().default(""),
+    requestedAtMs: integer().notNull(),
+    fulfilledAtMs: integer("fulfilled_at_ms"),
+  },
+  (table) => [
+    uniqueIndex("snapshot_replay_requests_host_collector_idx").on(
+      table.hostId,
+      table.collectorId,
+    ),
+  ],
+);
+
+export type SnapshotReplayRequestRow =
+  typeof snapshotReplayRequests.$inferSelect;
+export type NewSnapshotReplayRequestRow =
+  typeof snapshotReplayRequests.$inferInsert;
 
 export const probeRequestNonces = sqliteTable(
   "probe_request_nonces",

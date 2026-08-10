@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
@@ -7,6 +7,7 @@ import {
   enrollmentTokens,
   hosts,
   officialHostProfiles,
+  probeRequestNonces,
   type EnrollmentTokenRow,
   type HostRow,
   type NewHostRow,
@@ -14,11 +15,31 @@ import {
 
 type EnrollmentDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
+export type EnrollmentTarget =
+  | { kind: "new_host" }
+  | { hostId: number; kind: "existing_host" };
+
 export type CreatePendingEnrollmentInput = {
   createdAtMs: number;
   enrollmentId: string;
   expiresAtMs: number;
+  offlineAfterMs?: number;
+  target: EnrollmentTarget;
   tokenHash: string;
+};
+
+export type PendingEnrollmentCreation =
+  | { enrollment: EnrollmentTokenRow; kind: "created" }
+  | { kind: "existing_host_unavailable" }
+  | { kind: "existing_host_verifying" };
+
+export type PendingEnrollmentInspection = {
+  targetKind: "existing_host" | "new_host";
+};
+
+export type InstallationRejectionResult = {
+  enrollment: EnrollmentTokenRow;
+  outcome: "confirmed" | "rejected";
 };
 
 export type RegisterNewHostEnrollmentInput = {
@@ -30,6 +51,17 @@ export type RegisterNewHostEnrollmentInput = {
 };
 
 export type EnrollmentRepository = {
+  inspectPending: (input: {
+    nowMs: number;
+    tokenHash: string;
+  }) => PendingEnrollmentInspection | null;
+  rejectInstallation: (input: {
+    code: string;
+    message: string;
+    rejectedAtMs: number;
+    existingProbeId: string | null;
+    tokenHash: string;
+  }) => InstallationRejectionResult | null;
   resolveStartupReport: (input: {
     enrollmentId: string | null;
     hostId: number;
@@ -38,7 +70,9 @@ export type EnrollmentRepository = {
     | { enrollment: EnrollmentTokenRow; status: "ready" }
     | { enrollment: EnrollmentTokenRow; status: "rejected" }
     | null;
-  createPending: (input: CreatePendingEnrollmentInput) => EnrollmentTokenRow;
+  createPending: (
+    input: CreatePendingEnrollmentInput,
+  ) => PendingEnrollmentCreation;
   registerNewHost: (
     input: RegisterNewHostEnrollmentInput,
   ) => { enrollment: EnrollmentTokenRow; host: HostRow } | null;
@@ -48,10 +82,132 @@ export type EnrollmentRepository = {
   ) => EnrollmentTokenRow | null;
 };
 
+class ExistingHostEnrollmentTargetUnavailable extends Error {}
+
 export function createEnrollmentRepository(
   database: EnrollmentDatabase,
 ): EnrollmentRepository {
   return {
+    inspectPending(input) {
+      const pending = database
+        .select({
+          targetHostId: enrollmentTokens.targetHostId,
+          targetKind: enrollmentTokens.targetKind,
+        })
+        .from(enrollmentTokens)
+        .where(
+          and(
+            eq(enrollmentTokens.tokenHash, input.tokenHash),
+            isNull(enrollmentTokens.usedAtMs),
+            eq(enrollmentTokens.status, "pending"),
+            gt(enrollmentTokens.expiresAtMs, input.nowMs),
+          ),
+        )
+        .get();
+      if (!pending) {
+        return null;
+      }
+      if (pending.targetKind === "new_host") {
+        return { targetKind: "new_host" };
+      }
+      if (
+        pending.targetKind !== "existing_host" ||
+        pending.targetHostId === null
+      ) {
+        return null;
+      }
+      const host = database
+        .select({ id: hosts.id })
+        .from(hosts)
+        .where(
+          and(eq(hosts.id, pending.targetHostId), isNull(hosts.deletedAtMs)),
+        )
+        .get();
+      return host ? { targetKind: "existing_host" } : null;
+    },
+    rejectInstallation(input) {
+      return database.transaction((transaction) => {
+        const matchingHost = input.existingProbeId
+          ? transaction
+              .select({ id: hosts.id })
+              .from(hosts)
+              .where(
+                and(
+                  eq(hosts.probeId, input.existingProbeId),
+                  isNull(hosts.deletedAtMs),
+                ),
+              )
+              .get()
+          : null;
+        const rejected =
+          transaction
+            .update(enrollmentTokens)
+            .set({
+              ...(matchingHost ? { hostId: matchingHost.id } : {}),
+              rejectedAtMs: input.rejectedAtMs,
+              rejectionCode: input.code,
+              rejectionMessage: input.message,
+              status: "rejected",
+            })
+            .where(
+              and(
+                eq(enrollmentTokens.tokenHash, input.tokenHash),
+                or(
+                  and(
+                    eq(enrollmentTokens.status, "pending"),
+                    gt(enrollmentTokens.expiresAtMs, input.rejectedAtMs),
+                  ),
+                  and(
+                    eq(enrollmentTokens.status, "verifying"),
+                    gt(
+                      enrollmentTokens.verificationDeadlineAtMs,
+                      input.rejectedAtMs,
+                    ),
+                  ),
+                ),
+              ),
+            )
+            .returning()
+            .get() ?? null;
+        if (rejected) {
+          return { enrollment: rejected, outcome: "rejected" };
+        }
+
+        const priorRejection = transaction
+          .select()
+          .from(enrollmentTokens)
+          .where(
+            and(
+              eq(enrollmentTokens.tokenHash, input.tokenHash),
+              eq(enrollmentTokens.status, "rejected"),
+            ),
+          )
+          .get();
+        const persistedCanonicalHost =
+          input.code === "existing_probe_installation" &&
+          priorRejection?.hostId !== null &&
+          priorRejection?.hostId !== undefined
+            ? transaction
+                .select({ probeId: hosts.probeId })
+                .from(hosts)
+                .where(eq(hosts.id, priorRejection.hostId))
+                .get()
+            : null;
+        const sameCanonicalContext =
+          input.code !== "existing_probe_installation" ||
+          (input.existingProbeId !== null &&
+            persistedCanonicalHost?.probeId === input.existingProbeId);
+        if (
+          priorRejection &&
+          priorRejection.rejectionCode === input.code &&
+          priorRejection.rejectionMessage === input.message &&
+          sameCanonicalContext
+        ) {
+          return { enrollment: priorRejection, outcome: "confirmed" };
+        }
+        return null;
+      });
+    },
     resolveStartupReport(input) {
       const enrollment =
         database
@@ -153,21 +309,121 @@ export function createEnrollmentRepository(
         throw new Error("Invalid pending Enrollment lifecycle input.");
       }
 
-      const row = database
-        .insert(enrollmentTokens)
-        .values({
-          ...input,
-          status: "pending",
-          targetKind: "new_host",
-        })
-        .returning()
-        .get();
+      return database.transaction((transaction) => {
+        if (input.target.kind === "existing_host") {
+          const target = transaction
+            .select({
+              deletedAtMs: hosts.deletedAtMs,
+              id: hosts.id,
+              lastReportAtMs: hosts.lastReportAtMs,
+            })
+            .from(hosts)
+            .where(
+              and(eq(hosts.id, input.target.hostId), isNull(hosts.deletedAtMs)),
+            )
+            .get();
+          const offlineAfterMs = input.offlineAfterMs ?? 90_000;
+          if (
+            !target ||
+            (target.lastReportAtMs !== null &&
+              Math.max(0, input.createdAtMs - target.lastReportAtMs) <
+                offlineAfterMs)
+          ) {
+            return { kind: "existing_host_unavailable" };
+          }
 
-      if (!row) {
-        throw new Error("Failed to create Enrollment Token.");
-      }
+          transaction
+            .update(enrollmentTokens)
+            .set({
+              expiredAtMs: input.createdAtMs,
+              status: "expired",
+            })
+            .where(
+              and(
+                eq(enrollmentTokens.targetKind, "existing_host"),
+                eq(enrollmentTokens.targetHostId, input.target.hostId),
+                eq(enrollmentTokens.status, "pending"),
+                lte(enrollmentTokens.expiresAtMs, input.createdAtMs),
+              ),
+            )
+            .run();
+          transaction
+            .update(enrollmentTokens)
+            .set({
+              rejectedAtMs: input.createdAtMs,
+              rejectionCode: "probe_startup_timeout",
+              rejectionMessage: null,
+              status: "rejected",
+            })
+            .where(
+              and(
+                eq(enrollmentTokens.targetKind, "existing_host"),
+                eq(enrollmentTokens.targetHostId, input.target.hostId),
+                eq(enrollmentTokens.status, "verifying"),
+                lte(
+                  enrollmentTokens.verificationDeadlineAtMs,
+                  input.createdAtMs,
+                ),
+              ),
+            )
+            .run();
 
-      return row;
+          const active = transaction
+            .select()
+            .from(enrollmentTokens)
+            .where(
+              and(
+                eq(enrollmentTokens.targetKind, "existing_host"),
+                eq(enrollmentTokens.targetHostId, input.target.hostId),
+                inArray(enrollmentTokens.status, ["pending", "verifying"]),
+              ),
+            )
+            .get();
+          if (active?.status === "verifying") {
+            return { kind: "existing_host_verifying" };
+          }
+          if (active?.status === "pending") {
+            transaction
+              .update(enrollmentTokens)
+              .set({
+                rejectedAtMs: input.createdAtMs,
+                rejectionCode: "superseded",
+                rejectionMessage: null,
+                status: "rejected",
+              })
+              .where(
+                and(
+                  eq(enrollmentTokens.id, active.id),
+                  eq(enrollmentTokens.status, "pending"),
+                ),
+              )
+              .run();
+          }
+        }
+
+        const row = transaction
+          .insert(enrollmentTokens)
+          .values({
+            createdAtMs: input.createdAtMs,
+            enrollmentId: input.enrollmentId,
+            expiresAtMs: input.expiresAtMs,
+            status: "pending",
+            targetHostId:
+              input.target.kind === "existing_host"
+                ? input.target.hostId
+                : null,
+            targetKind: input.target.kind,
+            tokenHash: input.tokenHash,
+          })
+          .returning()
+          .get();
+
+        if (!row) {
+          throw new Error("Failed to create Enrollment Token.");
+        }
+
+        return { enrollment: row, kind: "created" };
+      });
     },
     registerNewHost(input) {
       if (
@@ -179,64 +435,105 @@ export function createEnrollmentRepository(
         throw new Error("Invalid Probe Enrollment registration input.");
       }
 
-      return database.transaction((transaction) => {
-        const consumed = transaction
-          .update(enrollmentTokens)
-          .set({
-            status: "verifying",
-            usedAtMs: input.registeredAtMs,
-          })
-          .where(
-            and(
-              eq(enrollmentTokens.tokenHash, input.tokenHash),
-              isNull(enrollmentTokens.usedAtMs),
-              eq(enrollmentTokens.status, "pending"),
-              eq(enrollmentTokens.targetKind, "new_host"),
-              gt(enrollmentTokens.expiresAtMs, input.registeredAtMs),
-            ),
-          )
-          .returning()
-          .get();
+      try {
+        return database.transaction((transaction) => {
+          const pending = transaction
+            .select()
+            .from(enrollmentTokens)
+            .where(
+              and(
+                eq(enrollmentTokens.tokenHash, input.tokenHash),
+                isNull(enrollmentTokens.usedAtMs),
+                eq(enrollmentTokens.status, "pending"),
+                gt(enrollmentTokens.expiresAtMs, input.registeredAtMs),
+              ),
+            )
+            .get();
 
-        if (!consumed) {
+          if (!pending) {
+            return null;
+          }
+
+          const existingHost =
+            pending.targetKind === "existing_host" &&
+            pending.targetHostId !== null
+              ? transaction
+                  .select()
+                  .from(hosts)
+                  .where(
+                    and(
+                      eq(hosts.id, pending.targetHostId),
+                      isNull(hosts.deletedAtMs),
+                    ),
+                  )
+                  .get()
+              : null;
+
+          if (pending.targetKind === "existing_host" && !existingHost) {
+            return null;
+          }
+
+          if (
+            pending.targetKind !== "new_host" &&
+            pending.targetKind !== "existing_host"
+          ) {
+            return null;
+          }
+
+          const consumed = transaction
+            .update(enrollmentTokens)
+            .set({
+              status: "verifying",
+              usedAtMs: input.registeredAtMs,
+            })
+            .where(
+              and(
+                eq(enrollmentTokens.id, pending.id),
+                isNull(enrollmentTokens.usedAtMs),
+                eq(enrollmentTokens.status, "pending"),
+                gt(enrollmentTokens.expiresAtMs, input.registeredAtMs),
+              ),
+            )
+            .returning()
+            .get();
+
+          if (!consumed) {
+            return null;
+          }
+
+          const host =
+            pending.targetKind === "new_host"
+              ? createNewHostForEnrollment(transaction, input)
+              : replaceExistingHostProbeIdentity(
+                  transaction,
+                  existingHost ?? null,
+                  input,
+                );
+
+          const enrollment = transaction
+            .update(enrollmentTokens)
+            .set({
+              hostId: host.id,
+              verificationDeadlineAtMs: input.verificationDeadlineAtMs,
+            })
+            .where(eq(enrollmentTokens.id, consumed.id))
+            .returning()
+            .get();
+
+          if (!enrollment) {
+            throw new Error(
+              "Failed to associate Probe Enrollment with its Host.",
+            );
+          }
+
+          return { enrollment, host };
+        });
+      } catch (error) {
+        if (error instanceof ExistingHostEnrollmentTargetUnavailable) {
           return null;
         }
-
-        const host = transaction
-          .insert(hosts)
-          .values(input.host)
-          .returning()
-          .get();
-        if (!host) {
-          throw new Error("Failed to create Host for Probe Enrollment.");
-        }
-
-        transaction
-          .insert(officialHostProfiles)
-          .values({
-            ...input.hostProfile,
-            hostId: host.id,
-          })
-          .run();
-
-        const enrollment = transaction
-          .update(enrollmentTokens)
-          .set({
-            hostId: host.id,
-            verificationDeadlineAtMs: input.verificationDeadlineAtMs,
-          })
-          .where(eq(enrollmentTokens.id, consumed.id))
-          .returning()
-          .get();
-
-        if (!enrollment) {
-          throw new Error(
-            "Failed to associate Probe Enrollment with its Host.",
-          );
-        }
-
-        return { enrollment, host };
-      });
+        throw error;
+      }
     },
     readStatus(enrollmentId, nowMs) {
       return database.transaction((transaction) => {
@@ -287,4 +584,88 @@ export function createEnrollmentRepository(
       });
     },
   };
+}
+
+function createNewHostForEnrollment(
+  transaction: EnrollmentDatabase,
+  input: RegisterNewHostEnrollmentInput,
+) {
+  const host = transaction.insert(hosts).values(input.host).returning().get();
+  if (!host) {
+    throw new Error("Failed to create Host for Probe Enrollment.");
+  }
+
+  transaction
+    .insert(officialHostProfiles)
+    .values({
+      ...input.hostProfile,
+      hostId: host.id,
+    })
+    .run();
+  return host;
+}
+
+function replaceExistingHostProbeIdentity(
+  transaction: EnrollmentDatabase,
+  existingHost: HostRow | null,
+  input: RegisterNewHostEnrollmentInput,
+) {
+  if (!existingHost) {
+    throw new ExistingHostEnrollmentTargetUnavailable();
+  }
+
+  transaction
+    .delete(probeRequestNonces)
+    .where(eq(probeRequestNonces.probeId, existingHost.probeId))
+    .run();
+
+  const host = transaction
+    .update(hosts)
+    .set({
+      architecture: input.host.architecture,
+      clockSkewDetected: false,
+      connectAddress: existingHost.connectAddressEdited
+        ? undefined
+        : input.host.connectAddress,
+      cpuCount: input.host.cpuCount,
+      cpuModel: input.host.cpuModel,
+      displayName: existingHost.displayNameEdited
+        ? undefined
+        : input.host.displayName,
+      hostname: input.host.hostname,
+      kernel: input.host.kernel,
+      lastClockSkewMs: null,
+      lastReportAtMs: null,
+      memoryTotalBytes: input.host.memoryTotalBytes,
+      observedIp: input.host.observedIp,
+      probeConfigurationErrorCode: null,
+      probeConfigurationErrorFailedVersion: null,
+      probeConfigurationErrorMessage: null,
+      probeConfigurationErrorReportedAtMs: null,
+      os: input.host.os,
+      probeId: input.host.probeId,
+      probePublicKeyPem: input.host.probePublicKeyPem,
+      probeSecretHash: input.host.probeSecretHash,
+      probeVersion: input.host.probeVersion,
+    })
+    .where(and(eq(hosts.id, existingHost.id), isNull(hosts.deletedAtMs)))
+    .returning()
+    .get();
+  if (!host) {
+    throw new ExistingHostEnrollmentTargetUnavailable();
+  }
+
+  transaction
+    .insert(officialHostProfiles)
+    .values({
+      ...input.hostProfile,
+      hostId: host.id,
+    })
+    .onConflictDoUpdate({
+      set: input.hostProfile,
+      target: officialHostProfiles.hostId,
+    })
+    .run();
+
+  return host;
 }

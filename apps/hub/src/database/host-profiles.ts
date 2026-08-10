@@ -4,12 +4,13 @@ import type {
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
   hosts,
   officialHostProfiles,
+  snapshotReplayRequests,
   type NewOfficialHostProfileRow,
 } from "./schema.js";
 
@@ -55,6 +56,14 @@ type RegisteredSnapshotCollectorStorageAdapter = Pick<
   "collectorId" | "hasSnapshot" | "read"
 >;
 
+export type SnapshotReplayRequestKey = {
+  bootId: string;
+  collectorId: string;
+  hostId: number;
+  sequence: number;
+  snapshotHash: string;
+};
+
 export type SnapshotCollectorStorageRegistry = {
   hostProfile: SnapshotCollectorStorageAdapter<
     ProtoHostProfileSnapshot,
@@ -63,6 +72,19 @@ export type SnapshotCollectorStorageRegistry = {
   get: (
     collectorId: string,
   ) => RegisteredSnapshotCollectorStorageAdapter | null;
+  requestSnapshotReplay: (
+    input: SnapshotReplayRequestKey & {
+      requestedAtMs: number;
+    },
+  ) => void;
+  snapshotReplayRequestStatus: (
+    input: SnapshotReplayRequestKey,
+  ) => "fulfilled" | "pending" | null;
+  fulfillSnapshotReplay: (
+    input: SnapshotReplayRequestKey & {
+      fulfilledAtMs: number;
+    },
+  ) => boolean;
   write: (
     input: SnapshotCollectorSnapshotWrite,
   ) => { changed: boolean; view: HostProfileSnapshot } | null;
@@ -80,6 +102,53 @@ export function createSnapshotCollectorStorageRegistry(
     get(collectorId) {
       return adapters.get(collectorId) ?? null;
     },
+    requestSnapshotReplay(input) {
+      database
+        .insert(snapshotReplayRequests)
+        .values({ ...input, fulfilledAtMs: null })
+        .onConflictDoUpdate({
+          target: [
+            snapshotReplayRequests.hostId,
+            snapshotReplayRequests.collectorId,
+          ],
+          set: {
+            bootId: input.bootId,
+            fulfilledAtMs: null,
+            requestedAtMs: input.requestedAtMs,
+            sequence: input.sequence,
+            snapshotHash: input.snapshotHash,
+          },
+        })
+        .run();
+    },
+    snapshotReplayRequestStatus(input) {
+      const row = database
+        .select({ fulfilledAtMs: snapshotReplayRequests.fulfilledAtMs })
+        .from(snapshotReplayRequests)
+        .where(snapshotReplayRequestWhere(input))
+        .get();
+
+      return row
+        ? row.fulfilledAtMs === null
+          ? "pending"
+          : "fulfilled"
+        : null;
+    },
+    fulfillSnapshotReplay(input) {
+      return Boolean(
+        database
+          .update(snapshotReplayRequests)
+          .set({ fulfilledAtMs: input.fulfilledAtMs })
+          .where(
+            and(
+              snapshotReplayRequestWhere(input),
+              isNull(snapshotReplayRequests.fulfilledAtMs),
+            ),
+          )
+          .returning()
+          .get(),
+      );
+    },
     hostProfile,
     write(input) {
       if (input.collectorId === hostProfile.collectorId) {
@@ -89,6 +158,16 @@ export function createSnapshotCollectorStorageRegistry(
       return null;
     },
   };
+}
+
+function snapshotReplayRequestWhere(input: SnapshotReplayRequestKey) {
+  return and(
+    eq(snapshotReplayRequests.hostId, input.hostId),
+    eq(snapshotReplayRequests.collectorId, input.collectorId),
+    eq(snapshotReplayRequests.bootId, input.bootId),
+    eq(snapshotReplayRequests.sequence, input.sequence),
+    eq(snapshotReplayRequests.snapshotHash, input.snapshotHash),
+  );
 }
 
 export function createHostProfileStorageAdapter(
