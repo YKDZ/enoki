@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   hasAdvancingPortableMetrics,
+  hasSupportedProbeIdentityBoundary,
   isCandidateHostReady,
 } from "./release-e2e-lib.mjs";
 import { createGitHubActionsMatrix } from "./release-e2e-matrix.mjs";
@@ -698,7 +699,9 @@ function validateRepairEvidence(evidence, errors) {
     errors,
   );
   validateProbeConfiguration(evidence?.probeConfiguration?.afterRepair, errors);
-  validateInstalledHostBoundary(evidence?.repairHostBoundary, version, errors);
+  validateInstalledHostBoundary(evidence?.repairHostBoundary, version, errors, {
+    requireSupportedIdentity: true,
+  });
   validateLifecycleAuditLog(evidence, true, errors);
 }
 
@@ -796,7 +799,12 @@ function validateLifecycleAuditLog(evidence, requiresUpgrade, errors) {
   }
 }
 
-function validateInstalledHostBoundary(boundary, version, errors) {
+function validateInstalledHostBoundary(
+  boundary,
+  version,
+  errors,
+  { requireSupportedIdentity = false } = {},
+) {
   const inventory = boundary?.inventory;
   const files = inventory?.files;
   if (
@@ -804,6 +812,8 @@ function validateInstalledHostBoundary(boundary, version, errors) {
     inventory?.accounts?.user !== true ||
     inventory?.accounts?.group !== true ||
     !Array.isArray(files) ||
+    (requireSupportedIdentity &&
+      !hasSupportedProbeIdentityBoundary(boundary)) ||
     !files.includes("/usr/local/bin/enoki-probe") ||
     !files.includes("/etc/systemd/system/enoki-probe.service") ||
     !files.includes("/etc/sudoers.d/enoki-probe-operations") ||

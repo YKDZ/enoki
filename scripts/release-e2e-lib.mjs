@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
+const currentProbeIdentityPath =
+  "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
+const v0_1_72ProbeIdentityPath = "/etc/enoki/probe-bootstrap.toml";
+const supportedProbeIdentityPaths = Object.freeze([
+  currentProbeIdentityPath,
+  v0_1_72ProbeIdentityPath,
+]);
+
 // Release E2E infrastructure has one narrowly scoped, run-owned resource
 // definition. It produces the preflight allowlist, recorded fingerprint, and
 // emergency-removal plan; the product installer and uninstaller are never
@@ -8,9 +16,9 @@ const releaseE2EInfrastructureResources = Object.freeze([
   { kind: "file", path: "/usr/local/bin/enoki-probe" },
   {
     kind: "file",
-    path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    path: currentProbeIdentityPath,
   },
-  { kind: "file", path: "/etc/enoki/probe-bootstrap.toml" },
+  { kind: "file", path: v0_1_72ProbeIdentityPath },
   { kind: "file", path: "/etc/enoki/probe-install.toml" },
   { kind: "file", path: "/etc/systemd/system/enoki-probe.service" },
   {
@@ -98,6 +106,24 @@ export const releaseE2EScenarioRegistry = Object.freeze({
   "post-replacement-repair-uninstall":
     runPostReplacementRepairUninstallScenario,
 });
+
+export function hasSupportedProbeIdentityBoundary(boundary) {
+  const files = boundary?.inventory?.files;
+  const identityPath = boundary?.identityPath;
+  if (
+    !Array.isArray(files) ||
+    !supportedProbeIdentityPaths.includes(identityPath)
+  ) {
+    return false;
+  }
+  const presentIdentityPaths = supportedProbeIdentityPaths.filter((path) =>
+    files.includes(path),
+  );
+  return (
+    presentIdentityPaths.length === 1 &&
+    presentIdentityPaths[0] === identityPath
+  );
+}
 
 export async function runReleaseE2EScenario(options) {
   const scenario = options?.scenario;
@@ -1308,7 +1334,6 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
     "user:enoki-probe",
     "group:enoki-probe",
     "/usr/local/bin/enoki-probe",
-    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
     "/etc/enoki/probe-install.toml",
     "/etc/systemd/system/enoki-probe.service",
     "/var/lib/enoki-probe",
@@ -1317,6 +1342,7 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
   ];
   if (
     installed?.probeVersion !== candidateManifest.probeAssetSet.version ||
+    !hasSupportedProbeIdentityBoundary(installed) ||
     required.some((entry) => !installedResidue.includes(entry))
   ) {
     throw new Error("post-Repair filesystem inventory is incomplete");
@@ -2805,15 +2831,13 @@ export function createProbeHostHarness({
           `Probe installation is incomplete: missing ${missing.join(", ")}`,
         );
       }
-      const identityPaths = [
-        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
-        "/etc/enoki/probe-bootstrap.toml",
-      ].filter((path) => residue.includes(path));
       const identityPath = identityPathResult.stdout.trim();
       if (
-        identityPaths.length !== 1 ||
         identityPathResult.code !== 0 ||
-        identityPath !== identityPaths[0]
+        !hasSupportedProbeIdentityBoundary({
+          identityPath,
+          inventory: inspected,
+        })
       ) {
         throw new Error(
           `Probe installation identity boundary is invalid: ${identityPathResult.stderr}`,
