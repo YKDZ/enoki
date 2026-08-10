@@ -483,10 +483,12 @@ function readHostRemoved(socket: WebSocket) {
 function collectWebSocketJson(
   socket: WebSocket,
   options: {
+    predicate?: (message: unknown) => boolean;
     quietMs?: number;
     timeoutMs?: number;
   } = {},
 ) {
+  const predicate = options.predicate ?? (() => true);
   const quietMs = options.quietMs ?? 50;
   const timeoutMs = options.timeoutMs ?? 500;
 
@@ -508,7 +510,12 @@ function collectWebSocketJson(
       }, quietMs);
     };
     const onMessage = (data: WebSocket.RawData) => {
-      messages.push(JSON.parse(data.toString()));
+      const message = JSON.parse(data.toString()) as unknown;
+      if (!predicate(message)) {
+        return;
+      }
+
+      messages.push(message);
       finishAfterQuiet();
     };
     const onError = (error: Error) => {
@@ -815,7 +822,24 @@ describe("WebSocket live updates", () => {
     await sendStartupReport(baseUrl, registration, {
       bootId: "boot-live-summary",
     });
-    const summaryMessages = collectWebSocketJson(socket);
+    const summaryMessages = collectWebSocketJson(socket, {
+      predicate: (message) => {
+        if (!message || typeof message !== "object") {
+          return false;
+        }
+
+        const summary = message as {
+          host?: { collectorCapabilities?: unknown; id?: unknown };
+          type?: unknown;
+        };
+        return (
+          summary.type === "host_summary" &&
+          summary.host?.id === 1 &&
+          typeof summary.host.collectorCapabilities === "object" &&
+          summary.host.collectorCapabilities !== null
+        );
+      },
+    });
     await sendReport(baseUrl, registration, {
       bootId: "boot-live-summary",
       diskAvailable: false,

@@ -1567,8 +1567,11 @@ pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
     test_root: Option<&Path>,
 ) -> Result<(), ProbeUpgraderRunError> {
     let install_metadata_path = preflight_rooted_path(test_root, install_metadata_path);
-    let mut install_metadata =
-        read_trusted_probe_install_metadata_read_only(&install_metadata_path, None)?;
+    let mut install_metadata = read_trusted_probe_install_metadata_read_only_with_expected_owner(
+        &install_metadata_path,
+        None,
+        trusted_read_only_metadata_owner_uid(test_root),
+    )?;
     rebase_trusted_install_metadata_paths(&mut install_metadata, test_root);
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: install_metadata.identity_path.clone(),
@@ -2012,7 +2015,11 @@ pub fn read_trusted_probe_install_preflight(
     path: &Path,
     test_root: Option<&Path>,
 ) -> Result<TrustedProbeInstallPreflight, ProbeUpgraderRunError> {
-    let metadata = read_trusted_probe_install_metadata_read_only(path, None)?;
+    let metadata = read_trusted_probe_install_metadata_read_only_with_expected_owner(
+        path,
+        None,
+        trusted_read_only_metadata_owner_uid(test_root),
+    )?;
     let mut identity_metadata = metadata.clone();
     identity_metadata.identity_path = preflight_rooted_path(test_root, &metadata.identity_path);
     let identity = read_probe_repair_identity(&identity_metadata).map_err(|_| {
@@ -2060,6 +2067,15 @@ fn preflight_rooted_path(test_root: Option<&Path>, path: &Path) -> PathBuf {
             )
         },
     )
+}
+
+fn trusted_read_only_metadata_owner_uid(test_root: Option<&Path>) -> u32 {
+    if test_root.is_some() {
+        // SAFETY: `geteuid` takes no arguments and only reads the process credentials.
+        unsafe { libc::geteuid() }
+    } else {
+        0
+    }
 }
 
 fn valid_public_probe_id(value: &str) -> bool {
@@ -2131,8 +2147,16 @@ fn read_trusted_probe_install_metadata_read_only(
     path: &Path,
     legacy_identity_path: Option<&Path>,
 ) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
+    read_trusted_probe_install_metadata_read_only_with_expected_owner(path, legacy_identity_path, 0)
+}
+
+fn read_trusted_probe_install_metadata_read_only_with_expected_owner(
+    path: &Path,
+    legacy_identity_path: Option<&Path>,
+    expected_owner_uid: u32,
+) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
     let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
-    read_trusted_probe_install_metadata_read_only_with_file_metadata(
+    read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected_owner(
         path,
         legacy_identity_path,
         TrustedFileMetadata {
@@ -2141,6 +2165,7 @@ fn read_trusted_probe_install_metadata_read_only(
             mode: metadata.mode() & 0o777,
             owner_uid: metadata.uid(),
         },
+        expected_owner_uid,
     )
 }
 
@@ -2150,11 +2175,13 @@ fn read_trusted_probe_install_metadata_with_file_metadata(
     legacy_identity_path: Option<&Path>,
     file_metadata: TrustedFileMetadata,
 ) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
-    let mut metadata = read_trusted_probe_install_metadata_read_only_with_file_metadata(
-        path,
-        legacy_identity_path,
-        file_metadata,
-    )?;
+    let mut metadata =
+        read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected_owner(
+            path,
+            legacy_identity_path,
+            file_metadata,
+            0,
+        )?;
     if metadata.schema_version == 0 {
         write_trusted_probe_install_metadata(path, &metadata)?;
         metadata.schema_version = 1;
@@ -2162,17 +2189,18 @@ fn read_trusted_probe_install_metadata_with_file_metadata(
     Ok(metadata)
 }
 
-fn read_trusted_probe_install_metadata_read_only_with_file_metadata(
+fn read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected_owner(
     path: &Path,
     legacy_identity_path: Option<&Path>,
     file_metadata: TrustedFileMetadata,
+    expected_owner_uid: u32,
 ) -> Result<TrustedProbeInstallMetadata, ProbeUpgraderRunError> {
     if file_metadata.is_symlink || !file_metadata.is_regular_file {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "metadata path must be a regular non-symlink file",
         ));
     }
-    if file_metadata.owner_uid != 0 {
+    if file_metadata.owner_uid != expected_owner_uid {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "metadata file is not owned by root",
         ));
