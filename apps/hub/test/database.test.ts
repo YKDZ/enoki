@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 
 const tempRoots: string[] = [];
@@ -90,6 +91,214 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("migrates legacy Enrollment Tokens to terminal expired records without changing Hub data", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const preFeatureMigrations = path.join(dataRoot, "pre-feature-migrations");
+    await cp(
+      path.resolve("drizzle/20260625011049_outstanding_iron_lad"),
+      path.join(preFeatureMigrations, "20260625011049_outstanding_iron_lad"),
+      { recursive: true },
+    );
+
+    const legacy = initializeHubDatabase(
+      {
+        dataRoot,
+        sqlitePath: path.join(dataRoot, "enoki.db"),
+      },
+      {
+        migrationLayers: [
+          {
+            historyTable: "__drizzle_migrations",
+            migrationsFolder: preFeatureMigrations,
+            name: "core",
+          },
+          {
+            historyTable: "__official_metrics_migrations",
+            migrationsFolder: path.resolve("drizzle-official-metrics"),
+            name: "official_metrics",
+          },
+        ],
+      },
+    );
+    createHost(legacy, { id: 41, probeId: "probe-preserved" });
+    legacy.audit.record({
+      action: "host.metadata.update",
+      actor: "owner",
+      occurredAtMs: 1_725_000_001_000,
+      outcome: "success",
+      subjectId: "41",
+      subjectType: "host",
+    });
+    legacy.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: null,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1_725_000_002_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: 41,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "pending",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_002_000,
+    });
+    legacy.metrics.recordSample({
+      bootId: "boot-preserved",
+      collectedAtMs: 1_725_000_003_000,
+      cpuPercent: 31,
+      hostId: 41,
+      probeId: "probe-preserved",
+      receivedAtMs: 1_725_000_003_500,
+      sequence: 1,
+    });
+    legacy.sqlite
+      .prepare(
+        `insert into official_host_profiles (
+          managed_host_id, snapshot_hash, payload_json, hostname, os, kernel,
+          architecture, cpu_count, cpu_model, memory_total_bytes, probe_version,
+          collector_capabilities_json, filesystems_json, network_interfaces_json,
+          updated_at_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        41,
+        "profile-hash",
+        "{}",
+        "preserved-host",
+        "linux",
+        "6.8.0",
+        "x86_64",
+        2,
+        null,
+        2_147_483_648,
+        "0.1.0",
+        null,
+        "[]",
+        "[]",
+        1_725_000_004_000,
+      );
+    const insertLegacyEnrollment = legacy.sqlite.prepare(
+      "insert into enrollment_tokens (token_hash, created_at_ms, expires_at_ms, used_at_ms) values (?, ?, ?, ?)",
+    );
+    insertLegacyEnrollment.run(
+      "legacy-unused",
+      1_724_999_000_000,
+      1_724_999_900_000,
+      null,
+    );
+    insertLegacyEnrollment.run(
+      "legacy-used",
+      1_724_999_000_000,
+      1_724_999_900_000,
+      1_724_999_100_000,
+    );
+    insertLegacyEnrollment.run(
+      "legacy-expired",
+      1_724_998_000_000,
+      1_724_998_900_000,
+      null,
+    );
+    legacy.close();
+
+    const migrated = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+
+    expect(
+      migrated.sqlite
+        .prepare(
+          `select enrollment_id as enrollmentId, target_kind as targetKind,
+            target_host_id as targetHostId, status from enrollment_tokens
+            order by token_hash`,
+        )
+        .all(),
+    ).toEqual([
+      {
+        enrollmentId: null,
+        status: "expired",
+        targetHostId: null,
+        targetKind: null,
+      },
+      {
+        enrollmentId: null,
+        status: "expired",
+        targetHostId: null,
+        targetKind: null,
+      },
+      {
+        enrollmentId: null,
+        status: "expired",
+        targetHostId: null,
+        targetKind: null,
+      },
+    ]);
+    expect(
+      migrated.sqlite
+        .prepare(
+          `select
+            (select count(*) from managed_hosts) as hosts,
+            (select count(*) from official_host_profiles) as profiles,
+            (select count(*) from metric_samples) as metrics,
+            (select count(*) from official_metric_cpu) as officialMetricCpu,
+            (select count(*) from probe_operations) as operations,
+            (select count(*) from audit_log) as auditEvents`,
+        )
+        .get(),
+    ).toEqual({
+      auditEvents: 1,
+      hosts: 1,
+      metrics: 1,
+      officialMetricCpu: 1,
+      operations: 1,
+      profiles: 1,
+    });
+    expect(migrated.sqlite.prepare("pragma foreign_key_check").all()).toEqual(
+      [],
+    );
+
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database: migrated,
+      now: () => 1_725_000_010_000,
+    });
+    const login = await app.request("/api/web/auth/login", {
+      body: JSON.stringify({ password: "correct horse battery staple" }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const ownerSession = login.headers.get("set-cookie") ?? "";
+    const created = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    expect(created.status).toBe(201);
+    const enrollment = (await created.json()) as { enrollmentId: string };
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(status.status).toBe(200);
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({
+        enrollmentId: enrollment.enrollmentId,
+        status: "pending",
+        target: { kind: "new_host" },
+      }),
+    );
+
+    migrated.close();
+  });
+
   it("keeps detailed official Metrics tables out of core-only migrations", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
@@ -112,6 +321,142 @@ describe("Hub database", () => {
     );
 
     database.close();
+  });
+
+  it("persists exact Snapshot Replay requests and resets fulfillment for a newer tuple", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 88, probeId: "probe-snapshot-replay" });
+
+    const originalRequest = {
+      bootId: "boot-before-replacement",
+      collectorId: "official.host-profile",
+      hostId: 88,
+      sequence: 2,
+      snapshotHash: "snapshot-before-replacement",
+    };
+    database.snapshotCollectors.requestSnapshotReplay({
+      ...originalRequest,
+      requestedAtMs: 1_725_000_000_000,
+    });
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
+    ).toBe("pending");
+    expect(
+      database.snapshotCollectors.fulfillSnapshotReplay({
+        ...originalRequest,
+        fulfilledAtMs: 1_725_000_000_100,
+      }),
+    ).toBe(true);
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
+    ).toBe("fulfilled");
+
+    const replacementRequest = {
+      bootId: "boot-after-replacement",
+      collectorId: "official.host-profile",
+      hostId: 88,
+      sequence: 4,
+      snapshotHash: "snapshot-after-replacement",
+    };
+    database.snapshotCollectors.requestSnapshotReplay({
+      ...replacementRequest,
+      requestedAtMs: 1_725_000_000_200,
+    });
+
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(originalRequest),
+    ).toBeNull();
+    expect(
+      database.snapshotCollectors.snapshotReplayRequestStatus(
+        replacementRequest,
+      ),
+    ).toBe("pending");
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-after-replacement",
+      fulfilled_at_ms: null,
+      sequence: 4,
+      snapshot_hash: "snapshot-after-replacement",
+    });
+
+    database.close();
+  });
+
+  it("migrates unbound legacy Snapshot Replay requests into non-matchable receipts", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const legacyMigrations = path.join(dataRoot, "legacy-replay-migrations");
+    await cp(path.resolve("drizzle"), legacyMigrations, { recursive: true });
+    await rm(
+      path.join(legacyMigrations, "20260810083603_glorious_adam_warlock"),
+      { force: true, recursive: true },
+    );
+
+    const legacy = initializeHubDatabase(
+      {
+        dataRoot,
+        sqlitePath: path.join(dataRoot, "enoki.db"),
+      },
+      {
+        migrationLayers: [
+          {
+            historyTable: "__drizzle_migrations",
+            migrationsFolder: legacyMigrations,
+            name: "core",
+          },
+          {
+            historyTable: "__official_metrics_migrations",
+            migrationsFolder: path.resolve("drizzle-official-metrics"),
+            name: "official_metrics",
+          },
+        ],
+      },
+    );
+    createHost(legacy, { id: 89, probeId: "probe-legacy-snapshot-replay" });
+    legacy.sqlite
+      .prepare(
+        "insert into snapshot_replay_requests (managed_host_id, collector_id, requested_at_ms) values (?, ?, ?)",
+      )
+      .run(89, "official.host-profile", 1_725_000_000_000);
+    legacy.close();
+
+    const migrated = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "",
+      fulfilled_at_ms: null,
+      sequence: 0,
+      snapshot_hash: "",
+    });
+    expect(
+      migrated.snapshotCollectors.snapshotReplayRequestStatus({
+        bootId: "boot-after-migration",
+        collectorId: "official.host-profile",
+        hostId: 89,
+        sequence: 1,
+        snapshotHash: "snapshot-after-migration",
+      }),
+    ).toBeNull();
+
+    migrated.close();
   });
 
   it("keeps Metrics child rows attached when a sparse official domain row has a different id than its sample", async () => {
@@ -629,6 +974,74 @@ describe("Hub database", () => {
         targetProbeVersion: "0.3.0",
       }),
     );
+
+    database.close();
+  });
+
+  it("atomically supersedes pending ExistingHost Enrollments, conflicts while verifying, and permits terminal retry", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const database = initializeHubDatabase({
+      dataRoot,
+      sqlitePath: path.join(dataRoot, "enoki.db"),
+    });
+    createHost(database, { id: 7, probeId: "probe-existing" });
+    const create = (enrollmentId: string, createdAtMs: number) =>
+      database.enrollments.createPending({
+        createdAtMs,
+        enrollmentId,
+        expiresAtMs: createdAtMs + 60_000,
+        target: { hostId: 7, kind: "existing_host" },
+        tokenHash: `token-${enrollmentId}`,
+      });
+
+    const first = create("enr_existing_first_0001", 1_725_000_000_000);
+    const second = create("enr_existing_second_0002", 1_725_000_001_000);
+    expect(first.kind).toBe("created");
+    expect(second.kind).toBe("created");
+    expect(
+      database.sqlite
+        .prepare(
+          "select enrollment_id as enrollmentId, status, rejection_code as rejectionCode from enrollment_tokens order by id",
+        )
+        .all(),
+    ).toEqual([
+      {
+        enrollmentId: "enr_existing_first_0001",
+        rejectionCode: "superseded",
+        status: "rejected",
+      },
+      {
+        enrollmentId: "enr_existing_second_0002",
+        rejectionCode: null,
+        status: "pending",
+      },
+    ]);
+
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set status = 'verifying', used_at_ms = ?, verification_deadline_at_ms = ? where enrollment_id = ?",
+      )
+      .run(1_725_000_002_000, 1_725_000_062_000, "enr_existing_second_0002");
+    expect(create("enr_existing_conflict_0003", 1_725_000_003_000)).toEqual({
+      kind: "existing_host_verifying",
+    });
+
+    database.sqlite
+      .prepare(
+        "update enrollment_tokens set status = 'rejected', rejected_at_ms = ? where enrollment_id = ?",
+      )
+      .run(1_725_000_004_000, "enr_existing_second_0002");
+    expect(create("enr_existing_retry_0004", 1_725_000_005_000)).toEqual(
+      expect.objectContaining({ kind: "created" }),
+    );
+    expect(
+      database.sqlite
+        .prepare(
+          "select name from sqlite_master where type = 'index' and name = 'enrollment_tokens_one_active_existing_host_idx'",
+        )
+        .get(),
+    ).toEqual({ name: "enrollment_tokens_one_active_existing_host_idx" });
 
     database.close();
   });

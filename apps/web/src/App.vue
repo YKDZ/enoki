@@ -12,6 +12,7 @@ import { ConfigProvider } from "reka-ui";
 import {
   computed,
   defineAsyncComponent,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
@@ -40,7 +41,13 @@ import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
 import { useProbeUpgradeMonitor } from "./composables/useProbeUpgradeMonitor";
 import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
-import { shouldCreateEnrollmentOnOpen } from "./lib/enrollment-dialog-state";
+import {
+  enrollmentTerminalMessage,
+  matchingHostAction,
+  reconcileEnrollmentStatus,
+  shouldCreateEnrollmentOnOpen,
+} from "./lib/enrollment-dialog-state";
+import { createEnrollmentStatusReconciler } from "./lib/enrollment-status-reconciliation";
 import {
   hubUnavailableLoginError,
   loginErrorForResponse,
@@ -48,8 +55,14 @@ import {
 } from "./lib/login-errors";
 import { configurationErrorText } from "./lib/probe-configuration";
 import { probeUpgradeToastTitle } from "./lib/probe-upgrade-toast";
+import {
+  matchesActiveReadyEnrollment,
+  readyEnrollmentCompletion,
+} from "./lib/ready-enrollment-flow";
+import { locateReadyHost } from "./lib/ready-host-reveal";
 import type {
   EnrollmentResponse,
+  EnrollmentStatusResponse,
   HostMetadataDraft,
   HostMetadataResponse,
   HostProbeConfigurationResponse,
@@ -100,9 +113,11 @@ const hostCardBatchSize = 12;
 const hostListPage = useStorage("enoki-overview-list-page", 1);
 const hostListPageSize = useStorage("enoki-overview-list-page-size", 10);
 const hostCardVisibleCount = ref(12);
+const highlightedReadyHostId = ref<number | null>(null);
 const isLoadingMoreHostCards = ref(false);
 const hostListPageSizeOptions = [10, 20, 50, 100];
 let hostCardLazyLoadTimer: ReturnType<typeof setTimeout> | null = null;
+let readyHostHighlightTimer: ReturnType<typeof setTimeout> | null = null;
 const enrollment = ref<EnrollmentResponse | null>(null);
 const enrollmentError = ref("");
 const globalConfigurationDraft = ref<ProbeConfiguration | null>(null);
@@ -141,6 +156,22 @@ const sonnerTheme = computed(() => {
 
   return "system";
 });
+const enrollmentStatusReconciler = createEnrollmentStatusReconciler({
+  getActiveEnrollment: () => enrollment.value,
+  getActiveEnrollmentId: () => enrollment.value?.enrollmentId ?? null,
+  isActiveEnrollment: (enrollmentId) =>
+    isShowingEnrollmentDialog.value &&
+    enrollment.value?.enrollmentId === enrollmentId &&
+    ["pending", "verifying"].includes(enrollment.value.status),
+  onStatus(status) {
+    void applyAuthoritativeEnrollmentStatus(status);
+  },
+  onTemporaryFailure(error) {
+    handleUnauthorizedError(error);
+  },
+  readStatus: (enrollmentId) =>
+    apiGet<EnrollmentStatusResponse>(`/api/web/enrollments/${enrollmentId}`),
+});
 const hostListPageCount = computed(() =>
   Math.max(1, Math.ceil(hosts.value.length / hostListPageSize.value)),
 );
@@ -177,11 +208,31 @@ const {
   onHostProfile(hostId, hostProfile) {
     detail.applyHostProfile(hostId, hostProfile);
   },
+  onHostReady(hint) {
+    void handleHostReadyHint(hint);
+  },
+  onHostRemoved(hostId) {
+    if (activeHostConfigurationId.value === hostId) {
+      activeHostConfigurationId.value = null;
+      hostConfigurationDraft.value = null;
+    }
+    if (activeHostMetadataId.value === hostId) {
+      activeHostMetadataId.value = null;
+      hostMetadataDraft.value = null;
+      hostMetadataOriginal.value = null;
+    }
+    if (activeDetailHostId.value === hostId) {
+      navigateToOverview();
+    }
+  },
   onSummary(summary) {
     detail.applyLiveSummary(summary);
   },
   recoverDetail() {
     return detail.load();
+  },
+  recoverEnrollment() {
+    return reconcileActiveEnrollment();
   },
 });
 
@@ -213,6 +264,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disconnectLiveUpdates();
   clearHostCardLazyLoadTimer();
+  clearReadyHostHighlight();
+  clearEnrollmentStatusReconciliation();
 });
 
 useEventListener("popstate", syncRouteFromLocation);
@@ -285,6 +338,7 @@ async function logout() {
   enrollment.value = null;
   enrollmentError.value = "";
   isShowingEnrollmentDialog.value = false;
+  clearEnrollmentStatusReconciliation();
   globalConfigurationDraft.value = null;
   globalConfigurationError.value = "";
   globalConfigurationMessage.value = "";
@@ -312,6 +366,7 @@ function requireLogin() {
   loginErrorKind.value = "";
   hostListError.value = "";
   enrollmentError.value = "";
+  clearEnrollmentStatusReconciliation();
   globalConfigurationError.value = "";
   hostConfigurationError.value = "";
   hostMetadataError.value = "";
@@ -382,6 +437,7 @@ async function createEnrollment() {
     }
 
     enrollment.value = (await response.json()) as EnrollmentResponse;
+    scheduleEnrollmentStatusReconciliation();
     await loadHosts();
   } catch {
     enrollmentError.value = "无法连接 Hub，请检查服务是否正在运行。";
@@ -402,6 +458,172 @@ async function openEnrollmentDialog() {
   ) {
     await createEnrollment();
   }
+}
+
+function updateEnrollmentDialogOpen(open: boolean) {
+  isShowingEnrollmentDialog.value = open;
+
+  if (!open) {
+    clearEnrollmentStatusReconciliation();
+  }
+}
+
+function scheduleEnrollmentStatusReconciliation() {
+  enrollmentStatusReconciler.start();
+}
+
+function clearEnrollmentStatusReconciliation() {
+  enrollmentStatusReconciler.stop();
+}
+
+async function reconcileActiveEnrollment() {
+  await enrollmentStatusReconciler.reconcileNow();
+}
+
+async function handleHostReadyHint(hint: {
+  enrollmentId: string;
+  hostId: number;
+}) {
+  if (
+    !matchesActiveReadyEnrollment({
+      activeEnrollmentId: enrollment.value?.enrollmentId,
+      hintEnrollmentId: hint.enrollmentId,
+      isDialogOpen: isShowingEnrollmentDialog.value,
+    })
+  ) {
+    return;
+  }
+
+  try {
+    const status = await apiGet<EnrollmentStatusResponse>(
+      `/api/web/enrollments/${hint.enrollmentId}`,
+    );
+    if (status.status !== "ready" || status.hostId !== hint.hostId) {
+      return;
+    }
+    await applyAuthoritativeEnrollmentStatus(status);
+  } catch (error) {
+    handleUnauthorizedError(error);
+  }
+}
+
+async function applyAuthoritativeEnrollmentStatus(
+  status: EnrollmentStatusResponse,
+) {
+  const reconciled = reconcileEnrollmentStatus(enrollment.value, status);
+  enrollment.value = reconciled.enrollment;
+
+  if (!reconciled.shouldClose) {
+    return;
+  }
+
+  isShowingEnrollmentDialog.value = false;
+  clearEnrollmentStatusReconciliation();
+  if (status.status === "ready") {
+    const completion = readyEnrollmentCompletion(
+      status,
+      activeDetailHostId.value,
+    );
+    if (completion.returnToOverview) {
+      navigateToOverview();
+    }
+    if (completion.reloadHosts) {
+      await loadHosts();
+      if (status.hostId) {
+        await revealReadyHost(status.hostId);
+      }
+    }
+    toast.success("主机已就绪", {
+      description: "探针已完成与 Hub 的首次报告。",
+    });
+    return;
+  }
+  if (status.status === "expired") {
+    toast.error("安装命令已过期", {
+      description: "请生成新的安装命令。",
+    });
+    return;
+  }
+  const terminalMessage = enrollmentTerminalMessage(status);
+  if (terminalMessage) {
+    const existingHostId = matchingHostAction({
+      hostId: status.hostId,
+      hosts: hosts.value,
+    });
+    toast.error(terminalMessage.title, {
+      description: terminalMessage.description,
+      ...(existingHostId !== null
+        ? {
+            action: {
+              label: "查看可重新注册主机",
+              onClick: () => void createExistingHostEnrollment(existingHostId),
+            },
+          }
+        : {}),
+    });
+  }
+}
+
+async function createExistingHostEnrollment(hostId: number) {
+  try {
+    const response = await fetch("/api/web/enrollments", {
+      body: JSON.stringify({ target: { hostId, kind: "existing_host" } }),
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    if (handleUnauthorizedResponse(response)) return;
+    if (!response.ok) {
+      showExistingHostEnrollmentFailure(
+        hostId,
+        await responseErrorCode(response),
+      );
+      return;
+    }
+    enrollment.value = (await response.json()) as EnrollmentResponse;
+    enrollmentError.value = "";
+    isShowingEnrollmentDialog.value = true;
+    scheduleEnrollmentStatusReconciliation();
+  } catch {
+    showExistingHostEnrollmentFailure(hostId, null);
+  }
+}
+
+async function responseErrorCode(response: Response) {
+  try {
+    const body = (await response.json()) as { error?: unknown } | null;
+    return typeof body?.error === "string" ? body.error : null;
+  } catch {
+    return null;
+  }
+}
+
+function showExistingHostEnrollmentFailure(
+  hostId: number,
+  errorCode: string | null,
+) {
+  const feedback =
+    errorCode === "existing_host_reenrollment_verifying"
+      ? {
+          description: "已有重新注册正在进行中，请刷新后重试。",
+          title: "已有重新注册进行中",
+        }
+      : errorCode === "existing_host_reenrollment_unavailable"
+        ? {
+            description: "主机状态已变化，请刷新后重试。",
+            title: "主机状态已变化",
+          }
+        : {
+            description: "请稍后重试。",
+            title: "无法创建主机重新注册命令",
+          };
+  toast.error(feedback.title, {
+    action: {
+      label: "重新尝试",
+      onClick: () => void createExistingHostEnrollment(hostId),
+    },
+    description: feedback.description,
+  });
 }
 
 async function toggleGlobalConfiguration() {
@@ -871,6 +1093,60 @@ function clearHostCardLazyLoadTimer() {
   hostCardLazyLoadTimer = null;
 }
 
+async function revealReadyHost(hostId: number) {
+  const location = locateReadyHost({
+    cardBatchSize: hostCardBatchSize,
+    currentCardVisibleCount: hostCardVisibleCount.value,
+    hosts: hosts.value,
+    hostId,
+    listPageSize: hostListPageSize.value,
+    listSortDirection: hostListSortDirection.value,
+    listSortKey: hostListSortKey.value,
+    overviewView: overviewView.value,
+  });
+  if (!location) {
+    return;
+  }
+
+  if (location.cardVisibleCount !== null) {
+    hostCardVisibleCount.value = location.cardVisibleCount;
+  }
+  if (location.listPage !== null) {
+    hostListPage.value = location.listPage;
+  }
+  highlightedReadyHostId.value = hostId;
+  clearReadyHostHighlight();
+  await nextTick();
+
+  const target = document.querySelector<HTMLElement>(
+    `[data-enoki-host-id="${hostId}"]`,
+  );
+  if (!target) {
+    highlightedReadyHostId.value = null;
+    return;
+  }
+  const reducedMotion = window.matchMedia?.(
+    "(prefers-reduced-motion: reduce)",
+  ).matches;
+  target.scrollIntoView({
+    behavior: reducedMotion ? "auto" : "smooth",
+    block: "center",
+  });
+  target.focus({ preventScroll: true });
+  readyHostHighlightTimer = setTimeout(() => {
+    highlightedReadyHostId.value = null;
+    readyHostHighlightTimer = null;
+  }, 2_500);
+}
+
+function clearReadyHostHighlight() {
+  if (!readyHostHighlightTimer) {
+    return;
+  }
+  clearTimeout(readyHostHighlightTimer);
+  readyHostHighlightTimer = null;
+}
+
 function normalizeOption(value: number, options: number[], fallback: number) {
   return options.includes(value) ? value : fallback;
 }
@@ -918,11 +1194,12 @@ function routePath() {
 
       <EnrollmentDialog
         v-if="isAuthenticated"
-        v-model:open="isShowingEnrollmentDialog"
+        :open="isShowingEnrollmentDialog"
         :enrollment="enrollment"
         :enrollment-error="enrollmentError"
         :is-creating-enrollment="isCreatingEnrollment"
         @create-enrollment="createEnrollment"
+        @update:open="updateEnrollmentDialogOpen"
       />
 
       <LayoutLabPage v-if="isLayoutLabRoute" />
@@ -1065,6 +1342,7 @@ function routePath() {
             v-model:sort-direction="hostListSortDirection"
             v-model:sort-key="hostListSortKey"
             :hosts="hosts"
+            :highlighted-host-id="highlightedReadyHostId"
             :page="hostListPage"
             :page-size="hostListPageSize"
             @open-host-detail="openHostDetail"
@@ -1081,6 +1359,7 @@ function routePath() {
         <HostCardMasonry
           v-else-if="!isLoadingHosts && hosts.length > 0"
           :hosts="hosts"
+          :highlighted-host-id="highlightedReadyHostId"
           :is-loading-more="isLoadingMoreHostCards"
           :skeleton-count="hostCardBatchSize"
           :visible-count="hostCardVisibleCount"

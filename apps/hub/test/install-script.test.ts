@@ -58,9 +58,12 @@ describe("Probe systemd installer", () => {
     });
     await expect(
       readFile(path.join(root, "usr/local/bin/enoki-probe"), "utf8"),
-    ).resolves.toContain("echo probe");
+    ).resolves.toContain("local-install");
     await expect(
-      readFile(path.join(root, "etc/enoki/probe-bootstrap.toml"), "utf8"),
+      readFile(
+        path.join(root, "var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+        "utf8",
+      ),
     ).resolves.toBe(
       [
         'hub_url = "https://hub.example"',
@@ -85,7 +88,7 @@ describe("Probe systemd installer", () => {
         "schema_version = 1",
         'hub_url = "https://hub.example"',
         'install_path = "/usr/local/bin/enoki-probe"',
-        'identity_path = "/etc/enoki/probe-bootstrap.toml"',
+        'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"',
         'state_dir = "/var/lib/enoki-probe"',
         'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
         'service_name = "enoki-probe"',
@@ -120,8 +123,8 @@ describe("Probe systemd installer", () => {
     ).resolves.toBe(
       [
         "# Managed by Enoki Probe installer.",
-        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /etc/enoki/probe-bootstrap.toml",
-        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /etc/enoki/probe-bootstrap.toml",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- /usr/local/bin/enoki-probe internal-upgrader --config /var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /var/lib/enoki-probe/identity/probe-bootstrap.toml",
         "",
       ].join("\n"),
     );
@@ -191,10 +194,10 @@ describe("Probe systemd installer", () => {
     ).resolves.toContain("enable enoki-probe.service");
     await expect(
       readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("stop enoki-probe.service");
+    ).resolves.toContain("start --no-block enoki-probe.service");
     await expect(
       readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("restart enoki-probe.service");
+    ).resolves.toContain("is-active --quiet enoki-probe.service");
   });
 
   it("installs without a collector-helper sudoers file when the Probe planner exposes no helpers", async () => {
@@ -226,6 +229,31 @@ describe("Probe systemd installer", () => {
     await expect(
       readFile(path.join(root, "tmp/probe-planner.log"), "utf8"),
     ).resolves.toContain("internal-render-collector-helper-sudoers");
+  });
+
+  it("does not fall back to a shell installation path when the candidate omits the lifecycle completion marker", async () => {
+    const root = await createTempRoot("enoki-install-missing-marker-root-");
+    const assets = await createProbeAssets(root, {
+      localLifecycleCompletes: false,
+    });
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain(
+      "did not complete the typed Probe Local Lifecycle",
+    );
+    await expect(
+      readFile(path.join(root, "usr/local/bin/enoki-probe"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects install settings that could inject systemd or sudoers directives before writing privileged files", async () => {
@@ -313,7 +341,7 @@ describe("Probe systemd installer", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("reinstalls as an in-place update when the existing Probe belongs to the same Hub", async () => {
+  it("preserves an existing Probe installation instead of overwriting it", async () => {
     const root = await createTempRoot("enoki-install-update-root-");
     const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, {
@@ -321,7 +349,10 @@ describe("Probe systemd installer", () => {
       serviceGroupExists: true,
       serviceUserExists: true,
     });
-    const bootstrapPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    const bootstrapPath = path.join(
+      root,
+      "var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    );
     const operationStatusPath = path.join(
       root,
       "var/lib/enoki-probe/probe-operation-status.toml",
@@ -359,22 +390,13 @@ describe("Probe systemd installer", () => {
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
     });
 
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("pre-existing Enoki Probe installation");
     await expect(readFile(bootstrapPath, "utf8")).resolves.toBe(
       [
-        'hub_url = "https://hub.example"',
+        'hub_url = "https://hub.example/"',
         'probe_id = "probe_existing"',
         'probe_private_key_pem = "existing-private-key"',
-        'state_dir = "/var/lib/enoki-probe"',
-        'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
-        'install_path = "/usr/local/bin/enoki-probe"',
-        'service_name = "enoki-probe"',
-        'service_user = "enoki-probe"',
-        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
-        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
-        `probe_asset_public_key_sha256 = "${assets.publicKeySha256}"`,
-        'upgrader_launch = "systemd"',
-        'log_level = "info"',
         'probe_configuration_version = "default-v2"',
         "metrics_collection_interval_seconds = 1",
         'enabled_collector_ids = ["official.cpu", "official.memory"]',
@@ -386,16 +408,10 @@ describe("Probe systemd installer", () => {
     );
     await expect(
       readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("stop enoki-probe.service");
-    await expect(
-      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("restart enoki-probe.service");
-    await expect(
-      readFile(path.join(root, "tmp/useradd.log"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
+    ).resolves.not.toContain("start --no-block enoki-probe.service");
   });
 
-  it("uses a new enrollment token when the existing same-Hub Probe identity has no signing key", async () => {
+  it("preserves a legacy existing Probe installation instead of replacing its identity", async () => {
     const root = await createTempRoot("enoki-install-update-legacy-root-");
     const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, {
@@ -403,7 +419,10 @@ describe("Probe systemd installer", () => {
       serviceGroupExists: true,
       serviceUserExists: true,
     });
-    const bootstrapPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    const bootstrapPath = path.join(
+      root,
+      "var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    );
     const operationStatusPath = path.join(
       root,
       "var/lib/enoki-probe/probe-operation-status.toml",
@@ -438,24 +457,23 @@ describe("Probe systemd installer", () => {
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
     });
 
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("pre-existing Enoki Probe installation");
     const bootstrapConfig = await readFile(bootstrapPath, "utf8");
-    expect(bootstrapConfig).toContain(
-      'enrollment_token = "enk_enroll_legacy_reinstall"',
-    );
-    expect(bootstrapConfig).not.toContain("probe_existing");
-    expect(bootstrapConfig).not.toContain("enk_probe_existing");
-    expect(bootstrapConfig).not.toContain("probe_configuration_version");
-    await expect(stat(operationStatusPath)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    expect(bootstrapConfig).not.toContain("enk_enroll_legacy_reinstall");
+    expect(bootstrapConfig).toContain("probe_existing");
+    expect(bootstrapConfig).toContain("probe_configuration_version");
+    await expect(stat(operationStatusPath)).resolves.toBeDefined();
   });
 
-  it("uses a new enrollment token when reinstalling for a different Hub", async () => {
+  it("preserves an existing Probe from a different Hub", async () => {
     const root = await createTempRoot("enoki-install-update-new-hub-root-");
     const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, { assetDir: assets.dir });
-    const bootstrapPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    const bootstrapPath = path.join(
+      root,
+      "var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    );
     await mkdir(path.dirname(bootstrapPath), { recursive: true });
     await writeFile(
       bootstrapPath,
@@ -475,11 +493,12 @@ describe("Probe systemd installer", () => {
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
     });
 
-    expect(result.code).toBe(0);
-    await expect(readFile(bootstrapPath, "utf8")).resolves.toContain(
-      'enrollment_token = "enk_enroll_new_hub"',
-    );
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("pre-existing Enoki Probe installation");
     await expect(readFile(bootstrapPath, "utf8")).resolves.not.toContain(
+      "enk_enroll_new_hub",
+    );
+    await expect(readFile(bootstrapPath, "utf8")).resolves.toContain(
       "probe_existing",
     );
   });
@@ -510,7 +529,7 @@ describe("Probe systemd installer", () => {
     expect(result.code).toBe(0);
     await expect(
       readFile(path.join(root, "opt/enoki/bin/enoki-probe"), "utf8"),
-    ).resolves.toContain("echo probe");
+    ).resolves.toContain("local-install");
     await expect(
       readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
     ).resolves.toContain('install_path = "/opt/enoki/bin/enoki-probe"');
@@ -525,7 +544,7 @@ describe("Probe systemd installer", () => {
         "utf8",
       ),
     ).resolves.toContain(
-      "ExecStart=/opt/enoki/bin/enoki-probe run --config /etc/enoki/probe-bootstrap.toml",
+      "ExecStart=/opt/enoki/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml",
     );
   });
 
@@ -579,7 +598,10 @@ describe("Probe systemd installer", () => {
 
     expect(result.code).toBe(0);
     await expect(
-      readFile(path.join(root, "etc/enoki/probe-bootstrap.toml"), "utf8"),
+      readFile(
+        path.join(root, "var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+        "utf8",
+      ),
     ).resolves.toBe(
       [
         'hub_url = "https://hub.example"',
@@ -601,7 +623,8 @@ describe("Probe systemd installer", () => {
 
   it("fails clearly when systemd is unavailable", async () => {
     const root = await createTempRoot("enoki-install-nosystemd-root-");
-    const commands = await createCommandMocks(root);
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
 
     await rm(path.join(root, "run/systemd/system"), {
       force: true,
@@ -610,7 +633,8 @@ describe("Probe systemd installer", () => {
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
-      ENOKI_HUB_URL: "https://hub.example",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
       ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
       ENOKI_TEST_ROOT: root,
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
@@ -622,118 +646,22 @@ describe("Probe systemd installer", () => {
 
   it("fails clearly when the installer is not run as root", async () => {
     const root = await createTempRoot("enoki-install-nonroot-root-");
+    const assets = await createProbeAssets(root);
     const commands = await createCommandMocks(root, {
+      assetDir: assets.dir,
       currentUserId: "1000",
     });
 
     const result = await runInstaller({
       ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
-      ENOKI_HUB_URL: "https://hub.example",
+      ENOKI_HUB_URL: assets.hubUrl,
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
       PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
     });
 
     expect(result.code).toBe(1);
-    expect(result.stderr).toContain("run this installer as root");
-  });
-
-  it("uninstalls the systemd service, files, state, and default service account", async () => {
-    const root = await createTempRoot("enoki-uninstall-root-");
-    const commands = await createCommandMocks(root, {
-      serviceGroupExists: true,
-      serviceUserExists: true,
-    });
-    await mkdir(path.join(root, "usr/local/bin"), { recursive: true });
-    await mkdir(path.join(root, "etc/enoki"), { recursive: true });
-    await mkdir(path.join(root, "etc/sudoers.d"), { recursive: true });
-    await mkdir(path.join(root, "etc/systemd/system"), { recursive: true });
-    await mkdir(path.join(root, "var/lib/enoki-probe"), { recursive: true });
-    await writeFile(path.join(root, "usr/local/bin/enoki-probe"), "probe");
-    await writeFile(
-      path.join(root, "etc/enoki/probe-bootstrap.toml"),
-      "config",
-    );
-    await writeFile(
-      path.join(root, "etc/systemd/system/enoki-probe.service"),
-      "service",
-    );
-    await writeFile(
-      path.join(root, "etc/sudoers.d/enoki-probe-upgrader"),
-      "legacy sudoers",
-    );
-    await writeFile(
-      path.join(root, "etc/sudoers.d/enoki-probe-operations"),
-      "operation sudoers",
-    );
-    await writeFile(
-      path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
-      "collector helper sudoers",
-    );
-    await writeFile(
-      path.join(root, "etc/enoki/probe-install.toml"),
-      "metadata",
-    );
-    await writeFile(path.join(root, "var/lib/enoki-probe/state"), "state");
-
-    const result = await runInstaller({
-      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
-      ENOKI_TEST_ROOT: root,
-      ENOKI_UNINSTALL: "1",
-      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
-    });
-
-    expect(result).toEqual({
-      code: 0,
-      stderr: "",
-      stdout: "Enoki Probe uninstalled.\n",
-    });
-    await expect(
-      readFile(path.join(root, "usr/local/bin/enoki-probe"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(path.join(root, "etc/enoki/probe-bootstrap.toml"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(
-        path.join(root, "etc/systemd/system/enoki-probe.service"),
-        "utf8",
-      ),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(path.join(root, "etc/sudoers.d/enoki-probe-upgrader"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(path.join(root, "etc/sudoers.d/enoki-probe-operations"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(
-        path.join(root, "etc/sudoers.d/enoki-probe-collector-helpers"),
-        "utf8",
-      ),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(path.join(root, "var/lib/enoki-probe/state"), "utf8"),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("stop enoki-probe.service");
-    await expect(
-      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("disable enoki-probe.service");
-    await expect(
-      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("daemon-reload");
-    await expect(
-      readFile(path.join(root, "tmp/systemctl.log"), "utf8"),
-    ).resolves.toContain("reset-failed enoki-probe.service");
-    await expect(
-      readFile(path.join(root, "tmp/userdel.log"), "utf8"),
-    ).resolves.toContain("enoki-probe");
-    await expect(
-      readFile(path.join(root, "tmp/groupdel.log"), "utf8"),
-    ).resolves.toContain("enoki-probe");
+    expect(result.stderr).toContain("must run as root");
   });
 
   it("rejects a Probe artifact when sha256 verification fails", async () => {
@@ -825,8 +753,14 @@ describe("Probe systemd installer", () => {
     );
   });
 
-  it.each(["http://localhost.evil", "http://localhost@evil.example"])(
-    "rejects HTTP Hub URLs whose host is not exactly localhost: %s",
+  it.each([
+    "http://localhost.evil",
+    "http://localhost@evil.example",
+    "https://owner:password@hub.example",
+    "https://hub.example/path?token=not-allowed",
+    "https://hub.example/#fragment",
+  ])(
+    "rejects Hub URLs with an unsafe authority or request component: %s",
     async (hubUrl) => {
       const root = await createTempRoot("enoki-install-root-");
       const assets = await createProbeAssets(root);
@@ -842,7 +776,7 @@ describe("Probe systemd installer", () => {
       });
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain("ENOKI_HUB_URL must use https");
+      expect(result.stderr).toContain("ENOKI_HUB_URL must");
     },
   );
 });
@@ -863,6 +797,7 @@ async function createProbeAssets(
     | {
         archiveEntry?: "regular" | "symlink";
         collectorHelperSudoers?: string;
+        localLifecycleCompletes?: boolean;
         sha256?: string;
         signature?: Buffer;
         target?: string;
@@ -895,6 +830,8 @@ async function createProbeAssets(
     await writeFile(
       binaryPath,
       `#!/bin/sh
+set -eu
+
 if [ "\${1:-}" = "internal-render-collector-helper-sudoers" ]; then
   printf '%s\\n' "$*" >> '${path.join(root, "tmp/probe-planner.log")}'
   if [ "${collectorHelperSudoersIsPresent ? "1" : "0"}" = "1" ]; then
@@ -904,7 +841,165 @@ EOF
   fi
   exit 0
 fi
-echo probe
+
+if [ "\${1:-}" != "local-install" ] || [ "\${2:-}" != "--candidate" ]; then
+  echo "unexpected Probe test-double command: $*" >&2
+  exit 64
+fi
+
+if [ "${options.localLifecycleCompletes === false ? "0" : "1"}" = "0" ]; then
+  exit 0
+fi
+
+install_path="\${ENOKI_INSTALL_PATH-/usr/local/bin/enoki-probe}"
+config_path="\${ENOKI_CONFIG_PATH-/var/lib/enoki-probe/identity/probe-bootstrap.toml}"
+state_dir="\${ENOKI_STATE_DIR-/var/lib/enoki-probe}"
+service_user="\${ENOKI_SERVICE_USER-enoki-probe}"
+service_group="\${ENOKI_SERVICE_GROUP-enoki-probe}"
+log_level="\${ENOKI_LOG_LEVEL-info}"
+metadata_path="\${ENOKI_INSTALL_METADATA_PATH-/etc/enoki/probe-install.toml}"
+operation_sudoers="\${ENOKI_OPERATION_SUDOERS_PATH-/etc/sudoers.d/enoki-probe-operations}"
+collector_sudoers="\${ENOKI_COLLECTOR_HELPER_SUDOERS_PATH-/etc/sudoers.d/enoki-probe-collector-helpers}"
+unit_path="\${ENOKI_SERVICE_UNIT_PATH-/etc/systemd/system/enoki-probe.service}"
+
+fail() {
+  echo "invalid Probe Local Lifecycle input: $1" >&2
+  exit 1
+}
+
+validate_account() {
+  case "$2" in
+    ""|*[!a-z0-9_-]*|[0-9-]*) fail "$1" ;;
+  esac
+}
+
+validate_path() {
+  case "$2" in
+    "" ) fail "$1 is required" ;;
+    /* ) ;;
+    * ) fail "$1" ;;
+  esac
+  case "$2" in
+    *" "*|*"\n"*|*"\r"*|*"\t"*|*/../*|*/..|*/./*|*/.) fail "$1" ;;
+  esac
+}
+
+validate_account ENOKI_SERVICE_USER "$service_user"
+validate_account ENOKI_SERVICE_GROUP "$service_group"
+validate_path ENOKI_INSTALL_PATH "$install_path"
+validate_path ENOKI_CONFIG_PATH "$config_path"
+validate_path ENOKI_STATE_DIR "$state_dir"
+
+if ! systemctl --version >/dev/null 2>&1 || [ ! -d "\${ENOKI_SYSTEMD_RUNTIME_DIR-/run/systemd/system}" ]; then
+  echo "Probe Local Lifecycle systemd failure: systemd is required" >&2
+  exit 1
+fi
+if [ -z "\${ENOKI_TEST_ROOT:-}" ] && [ "$(id -u)" != "0" ]; then
+  echo "invalid Probe Local Lifecycle input: Probe Local Lifecycle must run as root" >&2
+  exit 1
+fi
+root="\${ENOKI_TEST_ROOT:?test root is required}"
+
+for managed_path in "$install_path" "$config_path" "$state_dir" "$metadata_path" "$operation_sudoers" "$collector_sudoers" "$unit_path"; do
+  if [ -e "$root$managed_path" ]; then
+    echo "a pre-existing Enoki Probe installation or residue was found" >&2
+    exit 1
+  fi
+done
+
+toml_string() {
+  node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' "$1"
+}
+
+if ! getent group "$service_group" >/dev/null 2>&1; then
+  groupadd --system "$service_group"
+fi
+if ! id -u "$service_user" >/dev/null 2>&1; then
+  useradd --system --gid "$service_group" --home-dir "$state_dir" --shell /usr/sbin/nologin "$service_user"
+fi
+
+mkdir -p "$(dirname "$root$install_path")" "$(dirname "$root$config_path")" "$root$state_dir" "$(dirname "$root$metadata_path")" "$(dirname "$root$operation_sudoers")" "$(dirname "$root$unit_path")"
+cp "$3" "$root$install_path"
+chmod 0755 "$root$install_path"
+
+{
+  printf 'hub_url = '; toml_string "$ENOKI_HUB_URL"; printf '\\n'
+  printf 'enrollment_token = '; toml_string "$ENOKI_ENROLLMENT_TOKEN"; printf '\\n'
+  printf 'state_dir = '; toml_string "$state_dir"; printf '\\n'
+  printf 'operation_status_path = '; toml_string "$state_dir/probe-operation-status.toml"; printf '\\n'
+  printf 'install_path = '; toml_string "$install_path"; printf '\\n'
+  printf 'service_name = "enoki-probe"\\n'
+  printf 'service_user = '; toml_string "$service_user"; printf '\\n'
+  printf 'operation_sudoers_path = '; toml_string "$operation_sudoers"; printf '\\n'
+  printf 'collector_helper_sudoers_path = '; toml_string "$collector_sudoers"; printf '\\n'
+  printf 'probe_asset_public_key_sha256 = '; toml_string "$ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256"; printf '\\n'
+  printf 'upgrader_launch = "systemd"\\n'
+  printf 'log_level = '; toml_string "$log_level"; printf '\\n'
+} > "$root$config_path"
+chmod 0600 "$root$config_path"
+
+hub_without_trailing_slash="\${ENOKI_HUB_URL%/}"
+{
+  printf 'schema_version = 1\\n'
+  printf 'hub_url = '; toml_string "$hub_without_trailing_slash"; printf '\\n'
+  printf 'install_path = '; toml_string "$install_path"; printf '\\n'
+  printf 'identity_path = '; toml_string "$config_path"; printf '\\n'
+  printf 'state_dir = '; toml_string "$state_dir"; printf '\\n'
+  printf 'operation_status_path = '; toml_string "$state_dir/probe-operation-status.toml"; printf '\\n'
+  printf 'service_name = "enoki-probe"\\n'
+  printf 'service_user = '; toml_string "$service_user"; printf '\\n'
+  printf 'service_group = '; toml_string "$service_group"; printf '\\n'
+  printf 'service_unit_path = "/etc/systemd/system/enoki-probe.service"\\n'
+  printf 'operation_sudoers_path = '; toml_string "$operation_sudoers"; printf '\\n'
+  printf 'collector_helper_sudoers_path = '; toml_string "$collector_sudoers"; printf '\\n'
+  printf 'probe_asset_public_key_sha256 = '; toml_string "$ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256"; printf '\\n'
+} > "$root$metadata_path"
+chmod 0600 "$root$metadata_path"
+
+cat > "$root$unit_path" <<EOF
+[Unit]
+Description=Enoki Probe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=$service_user
+Group=$service_group
+ExecStart=$install_path run --config $config_path
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=5s
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectControlGroups=true
+ReadWritePaths=$state_dir $(dirname "$config_path")
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "$root$operation_sudoers" <<EOF
+# Managed by Enoki Probe installer.
+$service_user ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-upgrader --property=Type=exec -- $install_path internal-upgrader --config $config_path
+$service_user ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- $install_path internal-uninstaller --config $config_path
+EOF
+chmod 0440 "$root$operation_sudoers"
+
+"$root$install_path" internal-render-collector-helper-sudoers --service-user "$service_user" --probe-binary "$install_path" > "$root$collector_sudoers"
+if [ ! -s "$root$collector_sudoers" ]; then
+  rm -f "$root$collector_sudoers"
+else
+  chmod 0440 "$root$collector_sudoers"
+fi
+rm -f "$root/etc/sudoers.d/enoki-probe-upgrader"
+systemctl daemon-reload
+systemctl enable enoki-probe.service
+systemctl start --no-block enoki-probe.service
+systemctl is-active --quiet enoki-probe.service
+printf '%s\\n' ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE
 `,
     );
     await chmod(binaryPath, 0o755);

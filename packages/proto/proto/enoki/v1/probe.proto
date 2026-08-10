@@ -11,6 +11,33 @@ message ProbeRegistrationRequest {
   string enrollment_token = 1;
   string probe_public_key_pem = 3;
   repeated Snapshot snapshots = 4;
+  // An installer may use the existing registration endpoint to safely
+  // terminate its own nonterminal Enrollment before it has generated an
+  // identity or mutated the local machine.
+  ProbeInstallationRejection installation_rejection = 5;
+  // A staged installer asks the authoritative Hub which lifecycle it may run
+  // before generating an identity or mutating local installation resources.
+  ProbeInstallationInspection installation_inspection = 6;
+}
+
+message ProbeInstallationInspection {}
+
+enum ProbeEnrollmentTargetKind {
+  PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED = 0;
+  NEW_HOST = 1;
+  EXISTING_HOST = 2;
+}
+
+message ProbeInstallationInspectionResponse {
+  ProbeEnrollmentTargetKind target_kind = 1;
+}
+
+message ProbeInstallationRejection {
+  string code = 1;
+  string message = 2;
+  // Public correlation context for same-Hub existing-installation recovery.
+  // It is deliberately separate from the human-readable message.
+  string existing_probe_id = 3;
 }
 
 message ProbeRegistrationResponse {
@@ -18,6 +45,11 @@ message ProbeRegistrationResponse {
   string probe_secret = 2;
   int64 server_time_ms = 3;
   ProbeConfigurationResponse initial_configuration = 4;
+  // Correlates the immediately following Probe Startup Report with the
+  // enrollment attempt that created this Probe Identity.  Older Hubs and
+  // Probes omit it without changing the frame shape.
+  string enrollment_id = 5;
+  ProbeInstallationInspectionResponse installation_inspection = 6;
 }
 
 message ProbeReportRequest {
@@ -31,6 +63,7 @@ message ProbeReportRequest {
   repeated ProbeOperationAcknowledgement operation_acknowledgements = 10;
   repeated ProbeOperationStatus operation_statuses = 11;
   repeated Snapshot snapshots = 12;
+  string enrollment_id = 13;
 }
 
 message ProbeReportResponse {

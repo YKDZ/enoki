@@ -3,6 +3,7 @@ export type {
   DiskHealthCollectorCapability,
   DiskHealthMetric,
   EnrollmentResponse,
+  EnrollmentStatusResponse,
   HostDetail,
   HostDetailResponse,
   HostMetadataResponse,

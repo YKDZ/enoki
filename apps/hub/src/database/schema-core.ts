@@ -10,4 +10,5 @@ export {
   probeOperations,
   probeRequestNonces,
   reportObservations,
+  snapshotReplayRequests,
 } from "./schema.js";

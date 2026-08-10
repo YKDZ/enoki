@@ -1,18 +1,130 @@
-import { readFile } from "node:fs/promises";
+// @vitest-environment happy-dom
 
-import { describe, expect, it } from "vitest";
+import { mount } from "@vue/test-utils";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 
-describe("Enrollment dialog source", () => {
-  it("renders install commands without clipboard controls", async () => {
-    const source = await readFile(
-      new URL("./EnrollmentDialog.vue", import.meta.url),
-      "utf8",
+import type { EnrollmentResponse } from "../types";
+import EnrollmentDialog from "./EnrollmentDialog.vue";
+
+const pendingEnrollment: EnrollmentResponse = {
+  createdAtMs: 1_725_000_000_000,
+  enrollmentId: "enr_1234567890abcdef",
+  enrollmentToken: "enk_enroll_component_test",
+  expiredAtMs: null,
+  expiresAtMs: 1_725_000_900_000,
+  hostId: null,
+  hubUrl: "https://hub.example.test",
+  installCommand: "curl https://hub.example.test/api/probe/install.sh | sh",
+  installPath: "/usr/local/bin/enoki-probe",
+  readyAtMs: null,
+  rejectedAtMs: null,
+  rejection: null,
+  status: "pending",
+  target: { kind: "new_host" },
+  verificationDeadlineAtMs: null,
+};
+
+describe("Enrollment dialog command control", () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  it("mounts and focuses one native read-only command textarea when the command arrives", async () => {
+    const focus = vi.spyOn(HTMLTextAreaElement.prototype, "focus");
+    const wrapper = mount(EnrollmentDialog, {
+      attachTo: document.body,
+      props: dialogProps({ enrollment: null }),
+    });
+
+    await wrapper.setProps({ enrollment: pendingEnrollment });
+    await flushRender();
+
+    const command = mountedCommand();
+    expect(command.value).toBe(pendingEnrollment.installCommand);
+    expect(command.readOnly).toBe(true);
+    expect(command.autocomplete).toBe("off");
+    expect(command.getAttribute("wrap")).toBe("off");
+    expect(document.activeElement).toBe(command);
+    expect(focus).toHaveBeenCalled();
+    const focusCallsAfterCommandArrival = focus.mock.calls.length;
+
+    await wrapper.setProps({
+      enrollment: {
+        ...pendingEnrollment,
+        expiresAtMs: pendingEnrollment.expiresAtMs + 1,
+      },
+    });
+    await flushRender();
+
+    expect(document.activeElement).toBe(command);
+    expect(focus).toHaveBeenCalledTimes(focusCallsAfterCommandArrival);
+    wrapper.unmount();
+  });
+
+  it("keeps native selection, input, and paste behavior scoped to the read-only textarea", async () => {
+    const wrapper = mount(EnrollmentDialog, {
+      attachTo: document.body,
+      props: dialogProps({ enrollment: pendingEnrollment }),
+    });
+    await flushRender();
+
+    const command = mountedCommand();
+    command.select();
+    expect(command.selectionStart).toBe(0);
+    expect(command.selectionEnd).toBe(command.value.length);
+
+    const initialValue = command.value;
+    command.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        data: "mutate",
+        inputType: "insertText",
+      }),
+    );
+    command.dispatchEvent(
+      new ClipboardEvent("paste", {
+        bubbles: true,
+        clipboardData: new DataTransfer(),
+      }),
     );
 
-    expect(source).toContain("bg-black");
-    expect(source).toContain("font-mono");
-    expect(source).not.toContain("useClipboard");
-    expect(source).not.toContain("copyInstallCommand");
-    expect(source).not.toContain("复制失败");
+    expect(command.readOnly).toBe(true);
+    expect(command.value).toBe(initialValue);
+    wrapper.unmount();
   });
 });
+
+type DialogProps = {
+  enrollment: EnrollmentResponse | null;
+  enrollmentError: string;
+  isCreatingEnrollment: boolean;
+  open: boolean;
+};
+
+function dialogProps(overrides: Partial<DialogProps>): DialogProps {
+  return {
+    enrollment: null,
+    enrollmentError: "",
+    isCreatingEnrollment: false,
+    open: true,
+    ...overrides,
+  };
+}
+
+async function flushRender() {
+  await nextTick();
+  await nextTick();
+}
+
+function mountedCommand() {
+  const command = document.querySelector<HTMLTextAreaElement>(
+    'textarea[aria-label="安装命令"]',
+  );
+  if (!command) {
+    throw new Error("Expected the mounted Enrollment command textarea.");
+  }
+
+  return command;
+}

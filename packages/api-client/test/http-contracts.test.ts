@@ -126,11 +126,21 @@ describe("HTTP API contracts", () => {
       authenticated: true,
     } satisfies SessionResponse;
     const enrollment = {
+      createdAtMs: 1_725_000_000_000,
+      enrollmentId: "enr_example",
       enrollmentToken: "enk_enroll_example",
       expiresAtMs: 1_725_000_900_000,
+      expiredAtMs: null,
+      hostId: null,
       hubUrl: "https://hub.example.test",
       installCommand: "curl https://hub.example.test/install.sh | sh",
       installPath: "/opt/enoki",
+      readyAtMs: null,
+      rejectedAtMs: null,
+      rejection: null,
+      status: "pending",
+      target: { kind: "new_host" },
+      verificationDeadlineAtMs: null,
     } satisfies EnrollmentResponse;
     const probeConfiguration = {
       configuration: {

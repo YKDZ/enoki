@@ -62,6 +62,23 @@ fn parses_probe_run_command_for_systemd_service_entrypoint() {
 }
 
 #[test]
+fn parses_the_typed_probe_local_lifecycle_entrypoint_for_a_staged_candidate_only() {
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "local-install".to_string(),
+        "--candidate".to_string(),
+        "/tmp/enoki-probe-candidate".to_string(),
+    ]);
+
+    assert_eq!(
+        command,
+        ProbeCommand::InternalLocalLifecycle {
+            candidate_binary: PathBuf::from("/tmp/enoki-probe-candidate"),
+        },
+    );
+}
+
+#[test]
 fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
@@ -93,6 +110,26 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
             bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
         },
     );
+}
+
+#[test]
+fn parses_public_local_probe_uninstall_without_redirectable_arguments() {
+    assert_eq!(
+        parse_probe_command(["enoki-probe".to_string(), "uninstall".to_string()]),
+        ProbeCommand::Uninstall,
+    );
+
+    for forbidden in ["--config", "--hub-url", "--token", "--force"] {
+        assert_eq!(
+            parse_probe_command([
+                "enoki-probe".to_string(),
+                "uninstall".to_string(),
+                forbidden.to_string(),
+                "value".to_string(),
+            ]),
+            ProbeCommand::Help,
+        );
+    }
 }
 
 #[test]

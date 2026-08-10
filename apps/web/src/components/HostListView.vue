@@ -25,6 +25,7 @@ import {
   formatDuration,
 } from "@/lib/format";
 import { hostStatusText } from "@/lib/host-display";
+import { sortHostsForOverview } from "@/lib/ready-host-reveal";
 
 import type { HostSummary } from "../types";
 
@@ -40,6 +41,7 @@ export type HostListSortDirection = "asc" | "desc";
 
 const props = defineProps<{
   hosts: HostSummary[];
+  highlightedHostId?: number | null;
   page: number;
   pageSize: number;
 }>();
@@ -93,22 +95,7 @@ const MetricInline = defineComponent({
 });
 
 const sortedHosts = computed(() => {
-  const activeSortKey = sortKey.value;
-
-  if (!activeSortKey) {
-    return props.hosts;
-  }
-
-  return [...props.hosts].sort((left, right) => {
-    const leftValue = sortValue(left, activeSortKey);
-    const rightValue = sortValue(right, activeSortKey);
-    const result =
-      typeof leftValue === "string" && typeof rightValue === "string"
-        ? leftValue.localeCompare(rightValue, "zh-Hans-CN")
-        : Number(leftValue) - Number(rightValue);
-
-    return sortDirection.value === "asc" ? result : -result;
-  });
+  return sortHostsForOverview(props.hosts, sortKey.value, sortDirection.value);
 });
 const visibleHosts = computed(() => {
   const start = (props.page - 1) * props.pageSize;
@@ -130,36 +117,6 @@ function setSort(nextKey: HostListSortKey) {
 
   sortKey.value = null;
   sortDirection.value = "asc";
-}
-
-function sortValue(host: HostSummary, key: HostListSortKey) {
-  const metrics = host.latestMetrics;
-
-  if (key === "name") {
-    return host.displayName;
-  }
-
-  if (key === "cpu") {
-    return metrics?.cpuPercent ?? -1;
-  }
-
-  if (key === "memory") {
-    return memoryPercent(host) ?? -1;
-  }
-
-  if (key === "disk") {
-    return diskPercent(host) ?? -1;
-  }
-
-  if (key === "rx") {
-    return metrics?.networkRxBitsPerSecond ?? -1;
-  }
-
-  if (key === "tx") {
-    return metrics?.networkTxBitsPerSecond ?? -1;
-  }
-
-  return metrics?.uptimeSeconds ?? -1;
 }
 
 function statusClass(status: string) {
@@ -226,7 +183,11 @@ function SortIcon(key: HostListSortKey) {
         v-for="host in visibleHosts"
         :key="host.id"
         type="button"
-        class="bg-card text-card-foreground hover:bg-accent/40 grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] items-center gap-3 rounded-md border px-3 py-3 text-left transition"
+        :data-enoki-host-id="host.id"
+        :class="[
+          'bg-card text-card-foreground hover:bg-accent/40 grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] items-center gap-3 rounded-md border px-3 py-3 text-left transition',
+          host.id === highlightedHostId && 'ring-primary ring-2 ring-offset-2',
+        ]"
         @click="$emit('openHostDetail', host.id)"
       >
         <div class="min-w-0">

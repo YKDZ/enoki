@@ -23,6 +23,7 @@ import type { HostSummary } from "../types";
 
 const props = defineProps<{
   host: HostSummary;
+  highlighted?: boolean;
 }>();
 
 defineEmits<{
@@ -84,7 +85,11 @@ function memoryPercent() {
 
 <template>
   <Card
-    class="border-border bg-card text-card-foreground cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md"
+    :data-enoki-host-id="host.id"
+    :class="[
+      'border-border bg-card text-card-foreground cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md',
+      highlighted && 'ring-primary ring-2 ring-offset-2',
+    ]"
     role="button"
     tabindex="0"
     @click="$emit('openHostDetail', host.id)"

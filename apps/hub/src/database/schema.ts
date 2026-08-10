@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   sqliteTable,
@@ -7,6 +8,13 @@ import {
   uniqueIndex,
   real,
 } from "drizzle-orm/sqlite-core";
+
+import {
+  enrollmentStatusValues,
+  enrollmentTargetKindValues,
+  maxEnrollmentRejectionCodeLength,
+  maxEnrollmentRejectionMessageLength,
+} from "../enrollment/lifecycle.js";
 
 export const auditLog = sqliteTable("audit_log", {
   id: integer().primaryKey({ autoIncrement: true }),
@@ -28,13 +36,46 @@ export const enrollmentTokens = sqliteTable(
   "enrollment_tokens",
   {
     id: integer().primaryKey({ autoIncrement: true }),
+    enrollmentId: text(),
     tokenHash: text().notNull(),
     createdAtMs: integer().notNull(),
     expiresAtMs: integer().notNull(),
     usedAtMs: integer(),
+    targetKind: text({ enum: enrollmentTargetKindValues }),
+    targetHostId: integer("target_host_id"),
+    status: text({ enum: enrollmentStatusValues }).notNull().default("expired"),
+    hostId: integer("managed_host_id"),
+    verificationDeadlineAtMs: integer(),
+    readyAtMs: integer(),
+    rejectedAtMs: integer(),
+    expiredAtMs: integer(),
+    rejectionCode: text(),
+    rejectionMessage: text(),
   },
   (table) => [
     uniqueIndex("enrollment_tokens_token_hash_idx").on(table.tokenHash),
+    uniqueIndex("enrollment_tokens_enrollment_id_idx").on(table.enrollmentId),
+    uniqueIndex("enrollment_tokens_one_active_existing_host_idx")
+      .on(table.targetHostId)
+      .where(
+        sql`${table.targetKind} = 'existing_host' and ${table.status} in ('pending', 'verifying')`,
+      ),
+    index("enrollment_tokens_status_expiry_idx").on(
+      table.status,
+      table.expiresAtMs,
+    ),
+    check(
+      "enrollment_tokens_status_check",
+      sql`${table.status} in ('pending', 'verifying', 'ready', 'rejected', 'expired')`,
+    ),
+    check(
+      "enrollment_tokens_target_check",
+      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
+    ),
+    check(
+      "enrollment_tokens_rejection_check",
+      sql`(${table.rejectionCode} is null and ${table.rejectionMessage} is null) or (${table.rejectionCode} is not null and length(${table.rejectionCode}) between 1 and ${sql.raw(String(maxEnrollmentRejectionCodeLength))} and (${table.rejectionMessage} is null or length(${table.rejectionMessage}) between 1 and ${sql.raw(String(maxEnrollmentRejectionMessageLength))}))`,
+    ),
   ],
 );
 
@@ -125,6 +166,33 @@ export const officialHostProfiles = sqliteTable(
 export type OfficialHostProfileRow = typeof officialHostProfiles.$inferSelect;
 export type NewOfficialHostProfileRow =
   typeof officialHostProfiles.$inferInsert;
+
+export const snapshotReplayRequests = sqliteTable(
+  "snapshot_replay_requests",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    hostId: integer("managed_host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
+    collectorId: text().notNull(),
+    bootId: text("boot_id").notNull().default(""),
+    sequence: integer().notNull().default(0),
+    snapshotHash: text("snapshot_hash").notNull().default(""),
+    requestedAtMs: integer().notNull(),
+    fulfilledAtMs: integer("fulfilled_at_ms"),
+  },
+  (table) => [
+    uniqueIndex("snapshot_replay_requests_host_collector_idx").on(
+      table.hostId,
+      table.collectorId,
+    ),
+  ],
+);
+
+export type SnapshotReplayRequestRow =
+  typeof snapshotReplayRequests.$inferSelect;
+export type NewSnapshotReplayRequestRow =
+  typeof snapshotReplayRequests.$inferInsert;
 
 export const probeRequestNonces = sqliteTable(
   "probe_request_nonces",

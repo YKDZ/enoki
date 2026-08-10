@@ -14,11 +14,12 @@ use enoki_probe::{
     },
     registration::{RegistrationError, RegistrationTransport},
     runtime::{
-        HostProfileProvider, ProbeRequestAuth, ProbeRunError, ProbeRunInput, ProbeRuntimeSleeper,
-        ProbeTransport, ReportError, ReportTransport, RunLoopControl,
-        run_loop_control_from_environment, run_probe, run_probe_with_loop_control,
-        run_probe_with_loop_control_and_host_profile_provider,
+        HostProfileProvider, PERMANENT_REPORT_EXIT_STATUS, ProbeRequestAuth, ProbeRunError,
+        ProbeRunInput, ProbeRuntimeSleeper, ProbeTransport, ReportError, ReportTransport,
+        RunLoopControl, probe_run_exit_status, run_loop_control_from_environment, run_probe,
+        run_probe_with_loop_control, run_probe_with_loop_control_and_host_profile_provider,
     },
+    transport::HttpAttemptError,
 };
 use prost::Message;
 
@@ -89,6 +90,8 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
         .join("\n"),
     );
     let response = ProbeRegistrationResponse {
+        enrollment_id: "enrollment-01".to_string(),
+        installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
@@ -150,6 +153,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     assert_eq!(report.probe_id, "probe_01");
     assert_eq!(report.sequence_start, 1);
     assert_eq!(report.sequence_end, 1);
+    assert_eq!(report.enrollment_id, "enrollment-01");
     assert!(
         report
             .snapshots
@@ -479,7 +483,7 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
 }
 
 #[test]
-fn probe_run_sends_full_host_profile_on_the_next_report_when_the_hub_requests_it() {
+fn probe_run_reuses_the_startup_sequence_for_snapshot_replay_before_metrics_begin() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -503,11 +507,19 @@ fn probe_run_sends_full_host_profile_on_the_next_report_when_the_hub_requests_it
             }
             .encode_to_vec(),
             ProbeReportResponse {
-                accepted_sequence_end: 2,
+                accepted_sequence_end: 1,
                 current_probe_configuration_version: "default-v1".to_string(),
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
                 server_time_ms: 1_725_000_000_001,
+            }
+            .encode_to_vec(),
+            ProbeReportResponse {
+                accepted_sequence_end: 4,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1_725_000_000_002,
             }
             .encode_to_vec(),
         ],
@@ -523,28 +535,46 @@ fn probe_run_sends_full_host_profile_on_the_next_report_when_the_hub_requests_it
         &mut transport,
         &mut sleeper,
         RunLoopControl {
-            max_reports: Some(2),
+            max_reports: Some(3),
         },
     )
     .expect("startup report succeeds");
 
-    assert_eq!(transport.observed_report_bodies.len(), 2);
-    let follow_up = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
+    assert_eq!(transport.observed_report_bodies.len(), 3);
+    let replay = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
         .expect("follow-up report request decodes");
-    assert_eq!(follow_up.probe_id, "probe_01");
+    assert_eq!(replay.probe_id, "probe_01");
     let startup = ProbeReportRequest::decode(transport.observed_report_bodies[0].as_slice())
         .expect("startup report request decodes");
-    assert_eq!(follow_up.boot_id, startup.boot_id);
-    assert_eq!(follow_up.sequence_start, 2);
-    assert_eq!(follow_up.sequence_end, 2);
+    assert_eq!(replay.boot_id, startup.boot_id);
+    assert_eq!(replay.sequence_start, 1);
+    assert_eq!(replay.sequence_end, 1);
     assert!(
-        follow_up
+        replay
             .snapshots
             .iter()
             .any(|snapshot| snapshot.payload.is_some())
     );
-    assert!(!follow_up.snapshots[0].snapshot_hash.is_empty());
-    assert!(follow_up.metrics.is_empty());
+    assert!(!replay.snapshots[0].snapshot_hash.is_empty());
+    assert!(replay.metrics.is_empty());
+
+    let first_observation =
+        ProbeReportRequest::decode(transport.observed_report_bodies[2].as_slice())
+            .expect("first Observation Batch decodes");
+    assert_eq!(
+        (
+            first_observation.sequence_start,
+            first_observation.sequence_end
+        ),
+        (2, 4)
+    );
+    assert_eq!(
+        first_observation
+            .metrics
+            .first()
+            .map(|metric| metric.sequence),
+        Some(2)
+    );
 }
 
 #[test]
@@ -564,7 +594,7 @@ fn probe_run_sends_full_host_profile_snapshot_when_the_hub_requests_it() {
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response_requesting_host_profile_snapshot(1),
-            report_response(2, false),
+            report_response(1, false),
         ],
         ..RecordingProbeTransport::default()
     };
@@ -586,8 +616,8 @@ fn probe_run_sends_full_host_profile_snapshot_when_the_hub_requests_it() {
     assert_eq!(transport.observed_report_bodies.len(), 2);
     let follow_up = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
         .expect("follow-up report request decodes");
-    assert_eq!(follow_up.sequence_start, 2);
-    assert_eq!(follow_up.sequence_end, 2);
+    assert_eq!(follow_up.sequence_start, 1);
+    assert_eq!(follow_up.sequence_end, 1);
     assert_eq!(follow_up.snapshots.len(), 1);
     assert_eq!(follow_up.snapshots[0].collector_id, "official.host-profile");
     assert!(!follow_up.snapshots[0].snapshot_hash.is_empty());
@@ -599,7 +629,170 @@ fn probe_run_sends_full_host_profile_snapshot_when_the_hub_requests_it() {
 }
 
 #[test]
-fn probe_run_loop_sends_full_host_profile_when_collector_capability_changes() {
+fn probe_run_reuses_the_triggering_observation_batch_end_for_snapshot_replay() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response(1, false),
+            report_response(4, true),
+            report_response(4, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(3),
+        },
+    )
+    .expect("Snapshot Replay reuses the Observation Batch acknowledgement");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    assert_eq!((reports[1].sequence_start, reports[1].sequence_end), (2, 4));
+    assert!(reports[1].snapshots[0].payload.is_none());
+    assert_eq!(
+        reports[1].metrics.first().map(|metric| metric.sequence),
+        Some(2)
+    );
+    assert_eq!((reports[2].sequence_start, reports[2].sequence_end), (4, 4));
+    assert!(matches!(
+        reports[2].snapshots[0].payload,
+        Some(enoki_probe::protocol::enoki::v1::snapshot::Payload::HostProfile(_))
+    ));
+    assert!(reports[2].metrics.is_empty());
+}
+
+#[test]
+fn probe_run_retries_a_snapshot_replay_without_recollecting_or_advancing_its_sequence() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 1",
+            "enabled_collector_ids = []",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        response_results: vec![
+            Ok(report_response_requesting_host_profile_snapshot(1)),
+            Err(ReportError::Attempt(HttpAttemptError::HttpStatus {
+                message: "Service Unavailable".to_string(),
+                status: 503,
+            })),
+            Ok(report_response(1, false)),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+    )
+    .expect("Snapshot Replay retries after a transient Hub failure");
+
+    assert_eq!(transport.observed_report_bodies.len(), 3);
+    assert_eq!(
+        transport.observed_report_bodies[1],
+        transport.observed_report_bodies[2]
+    );
+    let snapshot_replay =
+        ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
+            .expect("Snapshot Replay decodes");
+    assert_eq!(
+        (snapshot_replay.sequence_start, snapshot_replay.sequence_end),
+        (1, 1)
+    );
+    assert!(snapshot_replay.metrics.is_empty());
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(3)]);
+}
+
+#[test]
+fn probe_run_rejects_zero_stale_or_ahead_acknowledgements_for_a_snapshot_replay() {
+    for acknowledged_sequence_end in [0, 2] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        write_secure_bootstrap_config(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                "",
+            ]
+            .join("\n"),
+        );
+        let mut transport = RecordingProbeTransport {
+            response_results: vec![
+                Ok(report_response_requesting_host_profile_snapshot(1)),
+                Ok(report_response(acknowledged_sequence_end, false)),
+            ],
+            ..RecordingProbeTransport::default()
+        };
+        let mut sleeper = RecordingSleeper::default();
+
+        let error = run_probe_with_loop_control(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut sleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+        )
+        .expect_err("Snapshot Replay acknowledgement must match its sequence");
+
+        assert_eq!(transport.observed_report_bodies.len(), 2);
+        let snapshot_replay =
+            ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
+                .expect("Snapshot Replay decodes");
+        assert_eq!(
+            (snapshot_replay.sequence_start, snapshot_replay.sequence_end),
+            (1, 1)
+        );
+        assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
+        assert!(sleeper.observed_sleeps.is_empty());
+    }
+}
+
+#[test]
+fn probe_run_loop_keeps_collector_capability_changes_compact_until_the_hub_requests_a_snapshot() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -666,14 +859,11 @@ fn probe_run_loop_sends_full_host_profile_when_collector_capability_changes() {
     );
     assert_eq!(reports[1].sequence_start, 2);
     assert_eq!(reports[1].sequence_end, 2);
-    assert_eq!(
-        full_host_profile_payload(&reports[1])
-            .collector_capabilities
-            .as_ref()
-            .and_then(|capabilities| capabilities.official.as_ref())
-            .and_then(|official| official.disk_health.as_ref())
-            .map(|disk_health| disk_health.status()),
-        Some(DiskHealthCollectorCapabilityStatus::UnsupportedSmartData),
+    assert!(
+        reports[1]
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.payload.is_none())
     );
     assert_ne!(
         reports[0].snapshots[0].snapshot_hash,
@@ -693,7 +883,7 @@ fn probe_run_loop_sends_full_host_profile_when_collector_capability_changes() {
 }
 
 #[test]
-fn probe_run_loop_preserves_metric_batch_sequence_range_when_capability_changes() {
+fn probe_run_loop_keeps_metric_batch_sequence_range_compact_when_capabilities_change() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
@@ -730,7 +920,7 @@ fn probe_run_loop_preserves_metric_batch_sequence_range_when_capability_changes(
         },
         &mut host_profile_provider,
     )
-    .expect("run loop sends full Host Profile with the metric batch");
+    .expect("run loop sends a compact Observation Batch with the metric batch");
 
     let reports = transport
         .observed_report_bodies
@@ -749,14 +939,11 @@ fn probe_run_loop_preserves_metric_batch_sequence_range_when_capability_changes(
             .collect::<Vec<_>>(),
         vec![2, 3, 4],
     );
-    assert_eq!(
-        full_host_profile_payload(report)
-            .collector_capabilities
-            .as_ref()
-            .and_then(|capabilities| capabilities.official.as_ref())
-            .and_then(|official| official.disk_health.as_ref())
-            .map(|disk_health| disk_health.status()),
-        Some(DiskHealthCollectorCapabilityStatus::UnsupportedSmartData),
+    assert!(
+        report
+            .snapshots
+            .iter()
+            .all(|snapshot| snapshot.payload.is_none())
     );
 }
 
@@ -778,8 +965,8 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response(1, false),
-            report_response(2, false),
-            report_response(3, false),
+            report_response(4, false),
+            report_response(7, false),
         ],
         ..RecordingProbeTransport::default()
     };
@@ -881,7 +1068,7 @@ fn probe_run_loop_omits_disabled_individual_metric_fields() {
     let mut transport = RecordingProbeTransport {
         responses: vec![
             report_response_with_version(1, "memory-only-v1"),
-            report_response_with_version(2, "memory-only-v1"),
+            report_response_with_version(4, "memory-only-v1"),
         ],
         ..RecordingProbeTransport::default()
     };
@@ -982,7 +1169,7 @@ fn probe_run_loop_uses_a_derived_three_sample_reporting_window_at_one_second_col
         .join("\n"),
     );
     let mut transport = RecordingProbeTransport {
-        responses: vec![report_response(1, false), report_response(2, false)],
+        responses: vec![report_response(1, false), report_response(4, false)],
         ..RecordingProbeTransport::default()
     };
     let mut sleeper = RecordingSleeper::default();
@@ -1297,7 +1484,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
             }
             .encode_to_vec(),
             ProbeReportResponse {
-                accepted_sequence_end: 2,
+                accepted_sequence_end: 4,
                 current_probe_configuration_version: "global-bad".to_string(),
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
@@ -1377,7 +1564,7 @@ fn probe_run_rejects_host_profile_in_fetched_probe_configuration() {
             }
             .encode_to_vec(),
             ProbeReportResponse {
-                accepted_sequence_end: 2,
+                accepted_sequence_end: 4,
                 current_probe_configuration_version: "global-host-profile".to_string(),
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
@@ -1448,9 +1635,11 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
                 server_time_ms: 1_725_000_000_000,
             }
             .encode_to_vec()),
-            Err(ReportError::Http("503 Service Unavailable".to_string())),
+            Err(ReportError::Attempt(HttpAttemptError::Network(
+                "503 Service Unavailable".to_string(),
+            ))),
             Ok(ProbeReportResponse {
-                accepted_sequence_end: 2,
+                accepted_sequence_end: 4,
                 current_probe_configuration_version: "global-2".to_string(),
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
@@ -1537,7 +1726,7 @@ fn probe_run_keeps_reporting_when_configuration_response_is_malformed() {
             .encode_to_vec(),
             vec![0xff, 0xff, 0xff],
             ProbeReportResponse {
-                accepted_sequence_end: 2,
+                accepted_sequence_end: 4,
                 current_probe_configuration_version: "global-2".to_string(),
                 pending_operation: None,
                 requested_snapshot_collector_ids: Vec::new(),
@@ -1594,8 +1783,10 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
     let mut transport = RecordingProbeTransport {
         response_results: vec![
             Ok(report_response(1, false)),
-            Err(ReportError::Http("connection refused".to_string())),
-            Ok(report_response(2, false)),
+            Err(ReportError::Attempt(HttpAttemptError::Network(
+                "connection refused".to_string(),
+            ))),
+            Ok(report_response(4, false)),
         ],
         ..RecordingProbeTransport::default()
     };
@@ -1635,6 +1826,160 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
             .collect::<Vec<_>>(),
         vec![(1, 1), (2, 4), (2, 4)],
     );
+}
+
+#[test]
+fn probe_run_rejects_zero_stale_or_ahead_acknowledgements_for_an_observation_batch() {
+    for acknowledged_sequence_end in [0, 1, 3] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+        write_secure_bootstrap_config(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                "",
+            ]
+            .join("\n"),
+        );
+        let mut transport = RecordingProbeTransport {
+            response_results: vec![
+                Ok(report_response(1, false)),
+                Ok(report_response(acknowledged_sequence_end, false)),
+            ],
+            ..RecordingProbeTransport::default()
+        };
+        let mut sleeper = RecordingSleeper::default();
+
+        let error = run_probe_with_loop_control(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut sleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+        )
+        .expect_err("Observation Batch acknowledgement must match its sequence");
+
+        assert_eq!(transport.observed_report_bodies.len(), 2);
+        let observation =
+            ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
+                .expect("Observation Batch decodes");
+        assert_eq!(
+            (observation.sequence_start, observation.sequence_end),
+            (2, 2)
+        );
+        assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
+        assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(3)]);
+    }
+}
+
+#[test]
+fn probe_run_rejects_a_bad_acknowledgement_for_an_operation_bearing_report() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 1",
+            "enabled_collector_ids = []",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        response_results: vec![
+            Ok(report_response_with_operation(
+                "operation-01",
+                "0.1.0",
+                "0.2.0",
+            )),
+            Ok(report_response(0, false)),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    let error = run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+    )
+    .expect_err("operation-bearing report acknowledgement must match its sequence");
+
+    assert_eq!(transport.observed_report_bodies.len(), 2);
+    let operation_report =
+        ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
+            .expect("operation-bearing report decodes");
+    assert_eq!(operation_report.sequence_end, 2);
+    assert_eq!(
+        operation_report.operation_acknowledgements[0].operation_id,
+        "operation-01"
+    );
+    assert_eq!(
+        operation_report.operation_statuses[0].operation_id,
+        "operation-01"
+    );
+    assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(3)]);
+}
+
+#[test]
+fn later_permanent_authorization_rejection_stops_the_probe_with_systemd_terminal_status() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 1",
+            "enabled_collector_ids = []",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        response_results: vec![
+            Ok(report_response(1, false)),
+            Err(ReportError::Attempt(HttpAttemptError::HttpStatus {
+                message: "Unauthorized".to_string(),
+                status: 401,
+            })),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    let error = run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+    )
+    .expect_err("Hub authorization rejection is terminal for later Observation Batches");
+
+    assert_eq!(transport.observed_report_bodies.len(), 2);
+    assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(3)]);
 }
 
 #[test]

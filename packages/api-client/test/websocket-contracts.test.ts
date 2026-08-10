@@ -150,6 +150,25 @@ describe("WebSocket contracts", () => {
     });
   });
 
+  it("validates non-secret Host removal hints", () => {
+    expect(
+      parseWebSocketServerMessage({
+        hostId: 42,
+        type: "host_removed",
+      }),
+    ).toEqual({
+      hostId: 42,
+      type: "host_removed",
+    });
+    expect(
+      parseWebSocketServerMessage({
+        hostId: 42,
+        probeId: "secret-probe-id",
+        type: "host_removed",
+      }),
+    ).toBeNull();
+  });
+
   it("validates precomputed network throughput in summary metrics", () => {
     expect(
       parseWebSocketServerMessage({

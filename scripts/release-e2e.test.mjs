@@ -1,5 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +28,7 @@ import {
   createProbeHostHarness,
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
+  renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
   validateSuccessfulRepairBoundaryEvidence,
@@ -295,6 +303,52 @@ describe("successful Probe Repair boundary evidence", () => {
 });
 
 describe("Probe Host Harness", () => {
+  it("fingerprints same-path content, recursive directory closure, and file ownership metadata", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-fingerprint-"),
+    );
+    const binary = path.join(root, "enoki-probe");
+    const stateDirectory = path.join(root, "state");
+    const identity = path.join(stateDirectory, "identity.toml");
+    const resources = [
+      { kind: "file", path: binary },
+      { kind: "directory", path: stateDirectory },
+    ];
+    const fingerprint = async () => {
+      const result = await execFileAsync("sh", [
+        "-c",
+        `${renderReleaseE2EResourceFingerprint(resources)}\nfingerprint`,
+      ]);
+      return result.stdout;
+    };
+
+    try {
+      await writeFile(binary, "first", "utf8");
+      await mkdir(stateDirectory);
+      await writeFile(identity, "identity", "utf8");
+      await chmod(binary, 0o644);
+      const baseline = await fingerprint();
+
+      await writeFile(binary, "other", "utf8");
+      await expect(fingerprint()).resolves.not.toBe(baseline);
+      await writeFile(binary, "first", "utf8");
+      await expect(fingerprint()).resolves.toBe(baseline);
+
+      const unexpectedMember = path.join(stateDirectory, "unexpected");
+      await writeFile(unexpectedMember, "new member", "utf8");
+      await expect(fingerprint()).resolves.not.toBe(baseline);
+      await rm(unexpectedMember);
+      await expect(fingerprint()).resolves.toBe(baseline);
+
+      await chmod(binary, 0o600);
+      await expect(fingerprint()).resolves.not.toBe(baseline);
+      await chmod(binary, 0o644);
+      await expect(fingerprint()).resolves.toBe(baseline);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   it("proves the declared Ubuntu architecture and host systemd boundary", async () => {
     const harness = createProbeHostHarness({
       execute: async (command) => {
@@ -443,7 +497,7 @@ describe("Probe Host Harness", () => {
           return successfulCommand({
             accounts: { group: true, user: true },
             files: [
-              "/etc/enoki/probe-bootstrap.toml",
+              "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
               "/etc/enoki/probe-install.toml",
               "/etc/systemd/system/enoki-probe.service",
               "/etc/sudoers.d/enoki-probe-operations",
@@ -467,7 +521,7 @@ describe("Probe Host Harness", () => {
         }
         if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
           return successfulCommandText(
-            "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /etc/enoki/probe-bootstrap.toml",
+            "enoki-probe ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=enoki-probe-uninstaller --property=Type=exec -- /usr/local/bin/enoki-probe internal-uninstaller --config /var/lib/enoki-probe/identity/probe-bootstrap.toml",
           );
         }
         if (command.includes("# enoki-release-e2e:binary-version")) {
@@ -486,7 +540,7 @@ describe("Probe Host Harness", () => {
         ) {
           return successfulCommandText("owned\n");
         }
-        return successfulCommandText("Enoki Probe installed.\n");
+        return successfulCommandText(productInstallerOutput());
       },
     });
 
@@ -574,7 +628,7 @@ describe("Probe Host Harness", () => {
           return successfulCommand({
             accounts: { group: true, user: true },
             files: [
-              "/etc/enoki/probe-bootstrap.toml",
+              "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
               "/etc/enoki/probe-install.toml",
               "/etc/systemd/system/enoki-probe.service",
               "/etc/sudoers.d/enoki-probe-operations",
@@ -777,6 +831,333 @@ describe("Probe Host Harness", () => {
     );
   });
 
+  it("uses the public Local Probe Uninstall command and proves its shared cleanup boundary", async () => {
+    const commands = [];
+    const dependencies = JSON.stringify({
+      curl: "/usr/bin/curl",
+      sudo: "/usr/bin/sudo",
+      systemdRun: "/usr/bin/systemd-run",
+    });
+    const harness = createProbeHostHarness({
+      execute: async (command, options) => {
+        commands.push({ command, options });
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(dependencies);
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:daemon-reload")) {
+          return successfulCommandText("");
+        }
+        if (command.includes("# enoki-release-e2e:journald")) {
+          return successfulCommandText("retained Probe journal\n");
+        }
+        if (command.includes("# enoki-release-e2e:local-probe-uninstall")) {
+          return successfulCommandText("Local Probe Uninstall completed.\n");
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+
+    await harness.assertDisposable("run-local-uninstall");
+    await harness.install(officialInstallCommand, "run-local-uninstall");
+    await expect(
+      harness.localUninstall("run-local-uninstall"),
+    ).resolves.toMatchObject({
+      completion: {
+        clean: true,
+        journaldRetained: true,
+        sharedDependenciesRetained: true,
+      },
+      output: {
+        code: 0,
+        stdout: "Local Probe Uninstall completed.\n",
+      },
+    });
+    await harness.install(
+      "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_reenroll' bash",
+      "run-local-uninstall",
+    );
+    expect(commands).toContainEqual({
+      command:
+        "# enoki-release-e2e:local-probe-uninstall\n/usr/local/bin/enoki-probe uninstall\n",
+      options: { root: true },
+    });
+    expect(
+      commands.filter(({ command }) =>
+        command.includes("# enoki-release-e2e:claim"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      commands.some(({ command }) =>
+        command.includes("# enoki-release-e2e:renew-resources"),
+      ),
+    ).toBe(true);
+  });
+
+  it("captures an ordinary repeated Add rejection before the installed Probe mutates", async () => {
+    const commands = [];
+    const state = {
+      binarySha256: "a".repeat(64),
+      identity: {
+        identitySha256: "b".repeat(64),
+        probeId: "probe_release_01",
+      },
+      installMetadataSha256: "c".repeat(64),
+      restartCount: 3,
+      service: {
+        ActiveState: "active",
+        LoadState: "loaded",
+        SubState: "running",
+      },
+    };
+    const harness = createProbeHostHarness({
+      execute: async (command, options) => {
+        commands.push({ command, options });
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:installed-state")) {
+          return successfulCommand(state);
+        }
+        if (command.includes("ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat'")) {
+          return {
+            code: 1,
+            stderr:
+              "Probe Local Lifecycle failed: code=existing_probe_installation message=a pre-existing Enoki Probe installation was found; use Local Probe Uninstall or Host Re-enrollment\nEnoki Probe install failed: staged Probe candidate did not complete the typed Probe Local Lifecycle.\n",
+            stdout: "",
+          };
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+    const repeatedCommand =
+      "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat' bash";
+
+    await harness.assertDisposable("run-repeat-add");
+    await harness.install(officialInstallCommand, "run-repeat-add");
+    const before = await harness.captureInstallationState("run-repeat-add");
+    await expect(
+      harness.rejectRepeatedInstall(repeatedCommand, "run-repeat-add"),
+    ).resolves.toMatchObject({ code: "existing_probe_installation" });
+    const after = await harness.captureInstallationState("run-repeat-add");
+
+    expect(after).toEqual(before);
+    expect(commands).toContainEqual({
+      command: `${repeatedCommand}\n`,
+      options: { root: true, sensitive: true },
+    });
+  });
+
+  it("waits for a permanent report rejection without starting the service again", async () => {
+    const commands = [];
+    const terminalEvidence = {
+      binarySha256: "a".repeat(64),
+      identity: {
+        identitySha256: "b".repeat(64),
+        probeId: "probe_release_02",
+      },
+      installMetadataSha256: "c".repeat(64),
+      restartCountAfterObservation: 4,
+      restartCountBeforeObservation: 4,
+      service: {
+        ActiveState: "failed",
+        ExecMainStatus: 78,
+        LoadState: "loaded",
+        SubState: "failed",
+      },
+    };
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (
+          command.includes("# enoki-release-e2e:permanent-report-rejection")
+        ) {
+          return successfulCommand(terminalEvidence);
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+
+    await harness.assertDisposable("run-terminal-report");
+    await harness.install(officialInstallCommand, "run-terminal-report");
+    await expect(
+      harness.awaitPermanentReportRejection("run-terminal-report"),
+    ).resolves.toEqual(terminalEvidence);
+
+    const observation = commands.find((command) =>
+      command.includes("# enoki-release-e2e:permanent-report-rejection"),
+    );
+    expect(observation).toContain("ExecMainStatus");
+    expect(observation).toContain("NRestarts");
+    expect(observation).toContain("sleep 10");
+    expect(observation).not.toContain("systemctl start");
+  });
+
+  it("collects redacted terminal diagnostics for the Hub-only deletion boundary", async () => {
+    const commands = [];
+    let installed = false;
+    const diagnostics = {
+      binary: { sha256: "a".repeat(64), version: "1.2.3" },
+      identity: {
+        identitySha256: "b".repeat(64),
+        probeId: "probe_release_02",
+      },
+      installMetadataSha256: "c".repeat(64),
+      service: {
+        ActiveState: "failed",
+        ExecMainStatus: 78,
+        LoadState: "loaded",
+        NRestarts: 3,
+        Result: "exit-code",
+        SubState: "failed",
+      },
+    };
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: installed, user: installed },
+            files: installed
+              ? ["/usr/local/bin/enoki-probe", "/etc/enoki/probe-install.toml"]
+              : [],
+            units: installed ? ["enoki-probe.service"] : [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return successfulCommandText("recorded\n");
+        }
+        if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
+          return successfulCommand(diagnostics);
+        }
+        if (command.includes("# enoki-release-e2e:journald")) {
+          return successfulCommandText(
+            "Probe report rejected: code=host_not_found\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:installed-sudoers")) {
+          return successfulCommandText(
+            "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller\n",
+          );
+        }
+        if (command.includes("# enoki-release-e2e:systemd-diagnostics")) {
+          return successfulCommandText(
+            "LoadState=loaded\nActiveState=failed\nSubState=failed\n",
+          );
+        }
+        if (command.includes("ENOKI_ENROLLMENT_TOKEN")) installed = true;
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+
+    await harness.assertDisposable("run-terminal-diagnostics");
+    await harness.install(officialInstallCommand, "run-terminal-diagnostics");
+    await expect(
+      harness.collectDiagnostics("run-terminal-diagnostics"),
+    ).resolves.toEqual({
+      installation: {
+        available: true,
+        output: successfulCommand(diagnostics),
+        value: diagnostics,
+      },
+      inventory: {
+        available: true,
+        output: successfulCommand({
+          accounts: { group: true, user: true },
+          files: [
+            "/usr/local/bin/enoki-probe",
+            "/etc/enoki/probe-install.toml",
+          ],
+          units: ["enoki-probe.service"],
+        }),
+        value: {
+          accounts: { group: true, user: true },
+          files: [
+            "/usr/local/bin/enoki-probe",
+            "/etc/enoki/probe-install.toml",
+          ],
+          units: ["enoki-probe.service"],
+        },
+      },
+      journald: {
+        available: true,
+        output: {
+          code: 0,
+          stderr: "",
+          stdout: "Probe report rejected: code=host_not_found\n",
+        },
+        value: "Probe report rejected: code=host_not_found\n",
+      },
+      sudoers: {
+        available: true,
+        output: {
+          code: 0,
+          stderr: "",
+          stdout:
+            "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller\n",
+        },
+        value:
+          "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller\n",
+      },
+      systemd: {
+        available: true,
+        output: {
+          code: 0,
+          stderr: "",
+          stdout: "LoadState=loaded\nActiveState=failed\nSubState=failed\n",
+        },
+        value: "LoadState=loaded\nActiveState=failed\nSubState=failed\n",
+      },
+    });
+  });
+
   it("collects successful post-Uninstall systemd, journald, privilege, and filesystem observations", async () => {
     const commands = [];
     const harness = createProbeHostHarness({
@@ -843,7 +1224,69 @@ describe("Probe Host Harness", () => {
     expect(sudoers).toContain("exit 1");
   });
 
-  it("uses the current run claim to clean a partial installation", async () => {
+  it("retains partial component diagnostics before Host ownership is established", async () => {
+    const commands = [];
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
+          return { code: 1, stderr: "Probe is not installed", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:journald")) {
+          return { code: 1, stderr: "journal unavailable", stdout: "" };
+        }
+        if (command.includes("# enoki-release-e2e:installed-sudoers")) {
+          throw Object.assign(new Error("sudoers collector unavailable"), {
+            code: "sudoers_unavailable",
+          });
+        }
+        if (command.includes("# enoki-release-e2e:systemd-diagnostics")) {
+          return { code: 1, stderr: "unit not found", stdout: "" };
+        }
+        throw new Error("unexpected diagnostics command");
+      },
+    });
+
+    const diagnostics = await harness.collectDiagnostics(
+      "run-early-diagnostics",
+    );
+    expect(diagnostics).toMatchObject({
+      installation: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+      inventory: {
+        available: true,
+        value: {
+          accounts: { group: false, user: false },
+          files: [],
+          units: [],
+        },
+      },
+      journald: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+      sudoers: {
+        available: false,
+        error: { code: "sudoers_unavailable" },
+      },
+      systemd: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+    });
+    expect(commands).toHaveLength(5);
+  });
+
+  it("uses only run-owned emergency infrastructure cleanup for a partial installation", async () => {
     const commands = [];
     let inventoryCount = 0;
     const harness = createProbeHostHarness({
@@ -874,10 +1317,7 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:dependencies")) {
           return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
         }
-        if (
-          command.includes("enk_enroll_secret") &&
-          !command.includes("ENOKI_UNINSTALL=1")
-        ) {
+        if (command.includes("enk_enroll_secret")) {
           return { code: 1, stderr: "interrupted", stdout: "" };
         }
         return successfulCommandText("");
@@ -886,14 +1326,153 @@ describe("Probe Host Harness", () => {
     await harness.assertDisposable("run-partial");
     await expect(
       harness.install(officialInstallCommand, "run-partial"),
-    ).rejects.toThrow("interrupted");
+    ).rejects.toMatchObject({
+      code: "probe_installation_failed",
+      installerEvidence: { code: 1, stderr: "interrupted" },
+    });
 
-    await expect(harness.cleanup("run-partial")).resolves.toMatchObject({
+    await expect(harness.cleanup("run-partial")).resolves.toEqual({
       clean: true,
       removedPartialInstallation: true,
     });
     expect(
-      commands.filter((command) => command.includes("ENOKI_UNINSTALL=1")),
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:emergency-cleanup"),
+      ),
+    ).toBe(true);
+    const emergency = commands.find((command) =>
+      command.includes("# enoki-release-e2e:emergency-cleanup"),
+    );
+    expect(emergency).toContain('cat "$claim/run-id"');
+    expect(emergency).toContain('cat "$claim/token"');
+    expect(emergency).toContain('fingerprint > "$temporary"');
+    expect(emergency).toContain('cmp --silent "$claim/resources" "$temporary"');
+    expect(emergency).toContain("sha256sum");
+    expect(emergency).toContain("find -P");
+    expect(emergency).toContain("stat -c");
+    expect(emergency).not.toContain("expected_resource()");
+    expect(emergency).not.toContain('done < "$claim/resources"');
+    expect(
+      commands.some((command) => command.includes("ENOKI_UNINSTALL")),
+    ).toBe(false);
+  });
+
+  it("retains successful installer evidence when run-resource recording fails", async () => {
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:record-resources")) {
+          return { code: 1, stderr: "resource recording failed", stdout: "" };
+        }
+        return successfulCommandText(productInstallerOutput());
+      },
+    });
+
+    await harness.assertDisposable("run-recording-failure");
+    await expect(
+      harness.install(officialInstallCommand, "run-recording-failure"),
+    ).rejects.toMatchObject({
+      code: "probe_resource_recording_failed",
+      installerEvidence: {
+        code: 0,
+        stdout: expect.stringContaining("ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE"),
+      },
+    });
+  });
+
+  it("retains command evidence when a diagnostic parser rejects its output", async () => {
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:installed-diagnostics")) {
+          return successfulCommandText("not-json");
+        }
+        return { code: 1, stderr: "unavailable", stdout: "" };
+      },
+    });
+
+    await expect(
+      harness.collectDiagnostics("run-diagnostic-parser-failure"),
+    ).resolves.toMatchObject({
+      installation: {
+        available: false,
+        error: { message: expect.stringContaining("was not valid JSON") },
+        output: { code: 0, stderr: "", stdout: "not-json" },
+      },
+    });
+  });
+
+  it("releases the run claim and independently verifies a normally clean Release Test Host", async () => {
+    const commands = [];
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        commands.push(command);
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+        }
+        if (command.includes("# enoki-release-e2e:verify-claim")) {
+          return successfulCommandText("owned\n");
+        }
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText("absent\n");
+        }
+        return successfulCommandText("recorded\n");
+      },
+    });
+
+    await harness.assertDisposable("run-clean-release");
+    await harness.install(officialInstallCommand, "run-clean-release");
+    await expect(harness.cleanup("run-clean-release")).resolves.toEqual({
+      clean: true,
+      removedPartialInstallation: false,
+    });
+    await expect(harness.verifyClean("run-clean-release")).resolves.toEqual({
+      clean: true,
+      inventory: {
+        accounts: { group: false, user: false },
+        files: [],
+        units: [],
+      },
+    });
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:remove-claim"),
+      ),
+    ).toBe(true);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:verify-clean"),
+      ),
+    ).toBe(false);
+    expect(
+      commands.filter((command) =>
+        command.includes("# enoki-release-e2e:daemon-reload"),
+      ),
     ).toHaveLength(1);
   });
 
@@ -963,7 +1542,6 @@ describe("Probe Host Harness", () => {
     for (const marker of [
       "# enoki-release-e2e:remove-post-replacement-fault",
       "# enoki-release-e2e:verify-resources",
-      "ENOKI_UNINSTALL=1",
       "# enoki-release-e2e:daemon-reload",
       "# enoki-release-e2e:remove-claim",
       "# enoki-release-e2e:inspect-claim",
@@ -972,95 +1550,11 @@ describe("Probe Host Harness", () => {
     }
   });
 
-  it("best-effort cleans known Probe paths when an authorized Upgrade fails before ownership completion", async () => {
-    const commands = [];
-    let inventoryCount = 0;
-    const harness = createProbeHostHarness({
-      execute: async (command) => {
-        commands.push(command);
-        if (command.includes("# enoki-release-e2e:inventory")) {
-          inventoryCount += 1;
-          return successfulCommand(
-            inventoryCount === 1 || inventoryCount >= 3
-              ? {
-                  accounts: { group: false, user: false },
-                  files: [],
-                  units: [],
-                }
-              : {
-                  accounts: { group: true, user: true },
-                  files: [
-                    "/etc/enoki/probe-install.toml",
-                    "/etc/sudoers.d/enoki-probe-collector-helpers",
-                    "/usr/local/bin/enoki-probe",
-                  ],
-                  units: ["enoki-probe.service"],
-                },
-          );
-        }
-        if (command.includes("# enoki-release-e2e:dependencies")) {
-          return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
-        }
-        if (command.includes("# enoki-release-e2e:verify-claim")) {
-          return successfulCommandText("owned\n");
-        }
-        if (command.includes("# enoki-release-e2e:verify-resources")) {
-          return {
-            code: 75,
-            stderr: "run-owned resource fingerprint changed\n",
-            stdout: "",
-          };
-        }
-        if (command.includes("# enoki-release-e2e:verify-upgrade-ownership")) {
-          return successfulCommandText("owned\n");
-        }
-        if (command.includes("# enoki-release-e2e:inspect-claim")) {
-          return successfulCommandText("absent\n");
-        }
-        return successfulCommandText("owned\n");
-      },
-    });
-
-    await harness.assertDisposable("run-upgrade-failure");
-    await harness.install(officialInstallCommand, "run-upgrade-failure");
-    await harness.beginUpgradeOwnershipTransition(
-      "run-upgrade-failure",
-      "1.2.3",
-    );
-    await harness.bindUpgradeOwnershipTransition("run-upgrade-failure", {
-      acceptedAtMs: null,
-      completedAtMs: null,
-      createdAtMs: 1,
-      failure: null,
-      hostId: 7,
-      id: 41,
-      kind: "probe_upgrade",
-      runningAtMs: null,
-      state: "pending",
-      targetProbeVersion: "1.2.3",
-      updatedAtMs: 1,
-    });
-
-    await expect(harness.cleanup("run-upgrade-failure")).resolves.toMatchObject(
-      {
-        clean: true,
-        removedPartialInstallation: true,
-      },
-    );
-    const transitionCheck = commands.find((command) =>
-      command.includes("# enoki-release-e2e:verify-upgrade-ownership"),
-    );
-    expect(transitionCheck).toContain("upgrade-operation-id");
-    expect(transitionCheck).toContain("upgrade-target");
-    expect(transitionCheck).toContain(
-      'install_path = "/usr/local/bin/enoki-probe"',
-    );
-    expect(
-      commands.filter((command) => command.includes("ENOKI_UNINSTALL=1")),
-    ).toHaveLength(1);
-  });
-
-  it("refuses to absorb a changed known path without a bound Upgrade operation", async () => {
+  it.each([
+    ["a same-path file replacement"],
+    ["an added member in a recorded directory"],
+    ["a recorded owner or mode change"],
+  ])("refuses emergency cleanup after %s", async () => {
     const commands = [];
     let inventoryCount = 0;
     const harness = createProbeHostHarness({
@@ -1089,10 +1583,14 @@ describe("Probe Host Harness", () => {
           return successfulCommandText("owned\n");
         }
         if (command.includes("# enoki-release-e2e:verify-resources")) {
-          return { code: 75, stderr: "fingerprint changed\n", stdout: "" };
+          return {
+            code: 75,
+            stderr: "run-owned resource fingerprint changed\n",
+            stdout: "",
+          };
         }
-        if (command.includes("# enoki-release-e2e:verify-upgrade-ownership")) {
-          return { code: 1, stderr: "no bound operation\n", stdout: "" };
+        if (command.includes("# enoki-release-e2e:inspect-claim")) {
+          return successfulCommandText("owned\n");
         }
         return successfulCommandText("recorded\n");
       },
@@ -1102,15 +1600,149 @@ describe("Probe Host Harness", () => {
     await harness.install(officialInstallCommand, "run-foreign-change");
 
     await expect(harness.cleanup("run-foreign-change")).rejects.toThrow(
-      /fingerprint changed.*no bound operation/s,
+      /fingerprint changed/,
     );
     expect(
-      commands.some((command) => command.includes("ENOKI_UNINSTALL=1")),
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:emergency-cleanup"),
+      ),
+    ).toBe(false);
+    expect(
+      commands.some((command) =>
+        command.includes("# enoki-release-e2e:remove-claim"),
+      ),
     ).toBe(false);
   });
 });
 
 describe("Hub Lifecycle Client", () => {
+  it("creates an ExistingHost Enrollment through the authenticated Owner API", async () => {
+    const requests = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const pathname = new URL(url).pathname;
+        requests.push({
+          body: init.body ?? null,
+          cookie: new Headers(init.headers).get("cookie"),
+          method: init.method ?? "GET",
+          pathname,
+        });
+        if (pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (pathname === "/api/web/enrollments") {
+          return jsonResponse(
+            {
+              enrollmentId: "enr_existing_host_0001",
+              enrollmentToken: "enk_enroll_release_e2e_test_token",
+              installCommand: officialInstallCommand,
+              status: "pending",
+              target: { hostId: 7, kind: "existing_host" },
+            },
+            201,
+          );
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(
+      client.createEnrollment({ hostId: 7, kind: "existing_host" }),
+    ).resolves.toMatchObject({
+      enrollmentId: "enr_existing_host_0001",
+      target: { hostId: 7, kind: "existing_host" },
+    });
+    expect(requests).toContainEqual({
+      body: JSON.stringify({ target: { hostId: 7, kind: "existing_host" } }),
+      cookie: "enoki_owner_session=session-1",
+      method: "POST",
+      pathname: "/api/web/enrollments",
+    });
+  });
+
+  it("deletes a Host through the production Hub-only Owner API", async () => {
+    const requests = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const parsed = new URL(url);
+        requests.push({
+          cookie: new Headers(init.headers).get("cookie"),
+          method: init.method ?? "GET",
+          pathname: parsed.pathname,
+          search: parsed.search,
+        });
+        if (parsed.pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (parsed.pathname === "/api/web/hosts/7") {
+          return jsonResponse(
+            { deletedHost: { deletedAtMs: 1_725_000_000_000, id: 7 } },
+            200,
+          );
+        }
+        throw new Error(`unexpected request ${parsed.pathname}`);
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(client.deleteHostHubOnly(7)).resolves.toEqual({
+      deletedAtMs: 1_725_000_000_000,
+      id: 7,
+    });
+    expect(requests).toContainEqual({
+      cookie: "enoki_owner_session=session-1",
+      method: "DELETE",
+      pathname: "/api/web/hosts/7",
+      search: "?mode=hub-only",
+    });
+  });
+
+  it("reads the terminal typed rejection for the matching Enrollment", async () => {
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const pathname = new URL(url).pathname;
+        if (pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (pathname === "/api/web/enrollments/enr_repeated_add_0001") {
+          return jsonResponse({
+            enrollmentId: "enr_repeated_add_0001",
+            hostId: null,
+            rejection: {
+              code: "existing_probe_installation",
+              message: "existing local Probe installation detected",
+            },
+            status: "rejected",
+            target: { kind: "new_host" },
+          });
+        }
+        throw new Error(
+          `unexpected request ${pathname} ${init.method ?? "GET"}`,
+        );
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(
+      client.getEnrollment("enr_repeated_add_0001"),
+    ).resolves.toMatchObject({
+      enrollmentId: "enr_repeated_add_0001",
+      rejection: { code: "existing_probe_installation" },
+      status: "rejected",
+      target: { kind: "new_host" },
+    });
+  });
+
   it("authorizes Probe Upgrade once through the authenticated Owner API", async () => {
     const requests = [];
     const client = createHubLifecycleClient({
@@ -1463,7 +2095,10 @@ describe("Hub Lifecycle Client", () => {
         }
         return jsonResponse({ host: readyHost() });
       }
-      if (pathname === "/api/web/hosts/7/metrics" && search === "?window=1m") {
+      if (
+        pathname === "/api/web/hosts/7/metrics" &&
+        ["?window=1m", "?window=24h"].includes(search)
+      ) {
         return jsonResponse({
           metrics: {
             samples: [{ collectedAtMs: 10, sequence: 1, uptimeSeconds: 100 }],
@@ -1513,6 +2148,9 @@ describe("Hub Lifecycle Client", () => {
     await expect(client.getHostMetrics(7)).resolves.toEqual([
       { collectedAtMs: 10, sequence: 1, uptimeSeconds: 100 },
     ]);
+    await expect(client.getHostMetrics(7, { window: "24h" })).resolves.toEqual([
+      { collectedAtMs: 10, sequence: 1, uptimeSeconds: 100 },
+    ]);
     await expect(client.getHostProbeConfiguration(7)).resolves.toMatchObject({
       mode: "inherit",
     });
@@ -1533,10 +2171,120 @@ describe("Hub Lifecycle Client", () => {
       expect.objectContaining({ action: "host.delete", subjectId: "7" }),
     ]);
   });
+
+  it("retains redacted created Enrollment IDs and their latest statuses in client evidence", async () => {
+    const fetch_ = async (url, init = {}) => {
+      const { pathname } = new URL(url);
+      const method = init.method ?? "GET";
+      if (pathname === "/api/web/auth/login") {
+        return jsonResponse({ authenticated: true }, 200, {
+          "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+        });
+      }
+      if (pathname === "/api/web/enrollments" && method === "POST") {
+        return jsonResponse({
+          enrollmentId: "enr_client_evidence_0001",
+          enrollmentToken: "enk_enroll_client_evidence_token",
+          installCommand: officialInstallCommand,
+          status: "pending",
+          target: { kind: "new_host" },
+        });
+      }
+      if (pathname === "/api/web/enrollments/enr_client_evidence_0001") {
+        return jsonResponse({
+          enrollmentId: "enr_client_evidence_0001",
+          hostId: null,
+          rejection: {
+            code: "existing_probe_installation",
+            message: "existing local Probe installation detected",
+          },
+          status: "rejected",
+          target: { kind: "new_host" },
+        });
+      }
+      throw new Error(`unexpected request ${method} ${pathname}`);
+    };
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: fetch_,
+    });
+
+    await client.authenticate("owner-password");
+    await client.createEnrollment({ kind: "new_host" });
+
+    const evidence = await client.collectEvidence();
+    expect(evidence).toMatchObject({
+      enrollments: [
+        {
+          enrollmentId: "enr_client_evidence_0001",
+          hostId: null,
+          rejection: {
+            code: "existing_probe_installation",
+            message: "existing local Probe installation detected",
+          },
+          readError: null,
+          status: "rejected",
+          target: { kind: "new_host" },
+        },
+      ],
+    });
+    const serialized = JSON.stringify(evidence);
+    expect(serialized).not.toContain("enk_enroll_client_evidence_token");
+    expect(serialized).not.toContain(officialInstallCommand);
+  });
+
+  it("retains the last Enrollment state and its refresh error without retry recursion", async () => {
+    const requests = [];
+    const fetch_ = async (url, init = {}) => {
+      const { pathname } = new URL(url);
+      const method = init.method ?? "GET";
+      requests.push(`${method} ${pathname}`);
+      if (pathname === "/api/web/auth/login") {
+        return jsonResponse({ authenticated: true }, 200, {
+          "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+        });
+      }
+      if (pathname === "/api/web/enrollments" && method === "POST") {
+        return jsonResponse({
+          enrollmentId: "enr_client_refresh_error_0001",
+          enrollmentToken: "enk_enroll_client_refresh_error_token",
+          installCommand: officialInstallCommand,
+          status: "pending",
+          target: { kind: "new_host" },
+        });
+      }
+      if (pathname === "/api/web/enrollments/enr_client_refresh_error_0001") {
+        return jsonResponse({ error: "enrollment_refresh_unavailable" }, 503);
+      }
+      throw new Error(`unexpected request ${method} ${pathname}`);
+    };
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: fetch_,
+    });
+
+    await client.authenticate("owner-password");
+    await client.createEnrollment({ kind: "new_host" });
+    await expect(client.collectEvidence()).resolves.toMatchObject({
+      enrollments: [
+        {
+          enrollmentId: "enr_client_refresh_error_0001",
+          readError: { code: "enrollment_refresh_unavailable" },
+          status: "pending",
+        },
+      ],
+    });
+    expect(
+      requests.filter(
+        (request) =>
+          request === "GET /api/web/enrollments/enr_client_refresh_error_0001",
+      ),
+    ).toHaveLength(1);
+  });
 });
 
 describe("Release E2E Orchestrator", () => {
-  it("proves one fresh install through Probe Uninstall Completion", async () => {
+  it("rejects legacy Fresh scenario participants that omit the lifecycle contract", async () => {
     const calls = [];
     let hostsObservation = 0;
     let detailObservation = 0;
@@ -1656,72 +2404,399 @@ describe("Release E2E Orchestrator", () => {
       },
     };
     const written = [];
-    const result = await runReleaseE2EScenario({
-      candidateManifest: candidateManifest(),
-      environment: {
-        async cleanup() {
-          calls.push("environment.cleanup");
-          return { clean: true };
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifest(),
+        environment: {
+          async cleanup() {
+            calls.push("environment.cleanup");
+            return { clean: true };
+          },
+          async start() {
+            calls.push("environment.start");
+            return {
+              host,
+              hub,
+              infrastructure: {
+                artifactAccess: "github-actions",
+                connection: "local",
+                kind: "ci",
+                matrixCellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+                provisioning: "github-hosted-runner",
+              },
+              releaseTestHost: {
+                architecture: "x86_64",
+                operatingSystem: "ubuntu",
+                operatingSystemVersion: "22.04",
+                pid1: "systemd",
+                virtualization: "kvm",
+              },
+            };
+          },
         },
-        async start() {
-          calls.push("environment.start");
-          return {
-            host,
-            hub,
-            infrastructure: {
-              artifactAccess: "github-actions",
-              connection: "local",
-              kind: "ci",
-              matrixCellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
-              provisioning: "github-hosted-runner",
-            },
-            releaseTestHost: {
-              architecture: "x86_64",
-              operatingSystem: "ubuntu",
-              operatingSystemVersion: "22.04",
-              pid1: "systemd",
-              virtualization: "kvm",
-            },
-          };
+        evidenceSink: {
+          async write(value) {
+            written.push(value);
+          },
         },
-      },
-      evidenceSink: {
-        async write(value) {
-          written.push(value);
-        },
-      },
-      ownerPassword: "owner-password",
-      runId: "run-123",
-      scenario: "fresh-install-uninstall",
-      timing: { intervalMs: 1, timeoutMs: 10, sleep: async () => {} },
-    });
-
-    expect(result.status).toBe("succeeded");
-    expect(
-      calls.filter((call) => call.startsWith("hub.requestProbeUninstall")),
-    ).toEqual(["hub.requestProbeUninstall:7"]);
+        ownerPassword: "owner-password",
+        runId: "run-123",
+        scenario: "fresh-install-uninstall",
+        timing: { intervalMs: 1, timeoutMs: 10, sleep: async () => {} },
+      }),
+    ).rejects.toMatchObject({ code: "release_e2e_failed" });
     expect(calls.indexOf("host.collectEvidence")).toBeLessThan(
       calls.indexOf("host.cleanup"),
     );
     expect(calls.at(-1)).toBe("environment.cleanup");
+    expect(written.at(-1)).toMatchObject({ result: { status: "failed" } });
+  });
+
+  it("proves the expanded fresh installation lifecycle without resubmitting mutations", async () => {
+    const calls = [];
+    const completion = {
+      clean: true,
+      inventory: {
+        accounts: { group: false, user: false },
+        files: [],
+        units: [],
+      },
+      journaldRetained: true,
+      sharedDependenciesRetained: true,
+    };
+    const installedState = {
+      binarySha256: "a".repeat(64),
+      identity: {
+        identitySha256: "b".repeat(64),
+        probeId: "probe_release_01",
+      },
+      installMetadataSha256: "c".repeat(64),
+      restartCount: 2,
+      service: {
+        ActiveState: "active",
+        LoadState: "loaded",
+        SubState: "running",
+      },
+    };
+    let enrollmentCount = 0;
+    let installCount = 0;
+    let lifecycle = "empty";
+    let newEnrollmentCalls = 0;
+    let offlineObservations = 0;
+    let probeConfiguration = {
+      enabledCollectorIds: ["official.cpu", "official.memory"],
+      metricsCollectionIntervalSeconds: 5,
+    };
+    const enrollment = (input) => ({
+      enrollmentId: `enr_release_lifecycle_${++enrollmentCount}`,
+      enrollmentToken: "enk_enroll_release_e2e_test_token",
+      installCommand: officialInstallCommand,
+      status: "pending",
+      target: input,
+    });
+    const initialEnrollment = enrollment({ kind: "new_host" });
+    const rejectedEnrollment = enrollment({ kind: "new_host" });
+    const reenrollment = enrollment({ hostId: 7, kind: "existing_host" });
+    const hub = {
+      async authenticate() {
+        calls.push("hub.authenticate");
+      },
+      async collectEvidence() {
+        calls.push("hub.collectEvidence");
+        return { apiTimeline: [{ pathname: "/api/web/hosts/7" }] };
+      },
+      async createEnrollment(target) {
+        calls.push(`hub.createEnrollment:${target.kind}`);
+        return target.kind === "existing_host"
+          ? reenrollment
+          : ++newEnrollmentCalls === 1
+            ? initialEnrollment
+            : rejectedEnrollment;
+      },
+      async deleteHostHubOnly(hostId) {
+        calls.push(`hub.deleteHostHubOnly:${hostId}`);
+        lifecycle = "deleted";
+        return { deletedAtMs: 100, id: hostId };
+      },
+      async getAuditLog() {
+        calls.push("hub.getAuditLog");
+        return freshLifecycleAuditLog();
+      },
+      async getEnrollment(enrollmentId) {
+        calls.push(`hub.getEnrollment:${enrollmentId}`);
+        return {
+          enrollmentId,
+          hostId: null,
+          rejection: {
+            code: "existing_probe_installation",
+            message: "existing local Probe installation detected",
+          },
+          status: "rejected",
+          target: { kind: "new_host" },
+        };
+      },
+      async getHost() {
+        calls.push(`hub.getHost:${lifecycle}`);
+        if (lifecycle === "offline") {
+          offlineObservations += 1;
+          return {
+            ...readyHost(),
+            status: offlineObservations >= 92 ? "offline" : "stale",
+          };
+        }
+        if (lifecycle === "deleted") {
+          throw new Error("deleted Host must not be read");
+        }
+        return readyHost({
+          reportedProbeConfigurationVersion: "host-2-1",
+        });
+      },
+      async getHostMetrics() {
+        calls.push("hub.getHostMetrics");
+        const samples = [
+          portableMetric({
+            collectedAtMs: 10,
+            sequence: 1,
+            uptimeSeconds: 100,
+          }),
+          portableMetric({
+            collectedAtMs: 20,
+            sequence: 2,
+            uptimeSeconds: 110,
+          }),
+        ];
+        return lifecycle === "reenrolled"
+          ? [
+              ...samples,
+              portableMetric({
+                collectedAtMs: 30,
+                sequence: 3,
+                uptimeSeconds: 120,
+              }),
+              portableMetric({
+                collectedAtMs: 40,
+                sequence: 4,
+                uptimeSeconds: 130,
+              }),
+            ]
+          : samples;
+      },
+      async getHostProbeConfiguration() {
+        calls.push("hub.getHostProbeConfiguration");
+        return {
+          configuration: {
+            ...probeConfiguration,
+            version: "host-2-1",
+          },
+          mode: "override",
+        };
+      },
+      async isHostSoftDeleted(hostId) {
+        calls.push(`hub.isHostSoftDeleted:${hostId}`);
+        return lifecycle === "deleted";
+      },
+      async listHosts() {
+        calls.push(`hub.listHosts:${lifecycle}`);
+        return lifecycle === "empty"
+          ? []
+          : lifecycle === "deleted"
+            ? []
+            : [{ id: 7 }];
+      },
+      async updateHostProbeConfiguration(_hostId, input) {
+        calls.push("hub.updateHostProbeConfiguration");
+        probeConfiguration = input.configuration;
+        return {
+          configuration: { ...input.configuration, version: "host-2-1" },
+          mode: "override",
+        };
+      },
+    };
+    const host = {
+      async assertDisposable() {
+        calls.push("host.assertDisposable");
+      },
+      async assertInstalled() {
+        calls.push("host.assertInstalled");
+        return { service: { User: "enoki-probe" } };
+      },
+      async awaitPermanentReportRejection() {
+        calls.push("host.awaitPermanentReportRejection");
+        return {
+          binarySha256: "a".repeat(64),
+          identity: {
+            identitySha256: "d".repeat(64),
+            probeId: "probe_release_02",
+          },
+          installMetadataSha256: "e".repeat(64),
+          restartCountAfterObservation: 3,
+          restartCountBeforeObservation: 3,
+          service: {
+            ActiveState: "failed",
+            ExecMainStatus: 78,
+            LoadState: "loaded",
+            SubState: "failed",
+          },
+        };
+      },
+      async captureInstallationState() {
+        calls.push("host.captureInstallationState");
+        return installedState;
+      },
+      async cleanup() {
+        calls.push("host.cleanup");
+        return { clean: true };
+      },
+      async collectDiagnostics() {
+        calls.push("host.collectDiagnostics");
+        return {
+          inventory: {
+            available: true,
+            output: { code: 0, stderr: "", stdout: "{}" },
+            value: { files: ["/usr/local/bin/enoki-probe"] },
+          },
+        };
+      },
+      async collectEvidence() {
+        calls.push("host.collectEvidence");
+        return { inventory: completion.inventory };
+      },
+      async install() {
+        installCount += 1;
+        lifecycle = installCount === 1 ? "online" : "reenrolled";
+        calls.push(`host.install:${installCount}`);
+        return {
+          output: {
+            code: 0,
+            stderr: "",
+            stdout: productInstallerOutput(),
+          },
+        };
+      },
+      async localUninstall() {
+        calls.push("host.localUninstall");
+        lifecycle = lifecycle === "deleted" ? "deleted" : "offline";
+        return {
+          completion,
+          output: {
+            code: 0,
+            stderr: "",
+            stdout: "Local Probe Uninstall completed.",
+          },
+        };
+      },
+      async readProbeIdentity() {
+        calls.push("host.readProbeIdentity");
+        return installCount === 1
+          ? installedState.identity
+          : { identitySha256: "d".repeat(64), probeId: "probe_release_02" };
+      },
+      async rejectRepeatedInstall() {
+        calls.push("host.rejectRepeatedInstall");
+        return {
+          code: "existing_probe_installation",
+          output: { code: 1, stderr: "typed rejection", stdout: "" },
+        };
+      },
+      async verifyUninstallCompletion() {
+        calls.push("host.verifyUninstallCompletion");
+        return completion;
+      },
+    };
+    const written = [];
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifest(),
+        environment: {
+          async cleanup() {
+            calls.push("environment.cleanup");
+            return { clean: true };
+          },
+          async start() {
+            calls.push("environment.start");
+            return { host, hub };
+          },
+        },
+        evidenceSink: {
+          async write(value) {
+            written.push(value);
+          },
+        },
+        ownerPassword: "owner-password",
+        runId: "run-expanded-fresh",
+        scenario: "fresh-install-uninstall",
+        timing: {
+          intervalMs: 1,
+          sleep: async () => {},
+          timeoutMs: 10,
+        },
+      }),
+    ).resolves.toEqual({ status: "succeeded" });
+
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        "host.rejectRepeatedInstall",
+        "host.localUninstall",
+        "hub.createEnrollment:existing_host",
+        "hub.deleteHostHubOnly:7",
+        "host.awaitPermanentReportRejection",
+      ]),
+    );
+    expect(calls.filter((call) => call === "host.install:1")).toHaveLength(1);
+    expect(calls.filter((call) => call === "host.install:2")).toHaveLength(1);
+    expect(
+      calls.filter((call) => call === "hub.createEnrollment:new_host"),
+    ).toHaveLength(2);
+    expect(
+      calls.filter((call) => call === "hub.createEnrollment:existing_host"),
+    ).toHaveLength(1);
+    expect(
+      calls.filter((call) => call === "hub.deleteHostHubOnly:7"),
+    ).toHaveLength(1);
+    expect(
+      calls.filter((call) => call === "hub.updateHostProbeConfiguration"),
+    ).toHaveLength(1);
+    expect(
+      calls.filter((call) => call === "host.rejectRepeatedInstall"),
+    ).toHaveLength(1);
+    expect(
+      calls.filter((call) => call === "host.awaitPermanentReportRejection"),
+    ).toHaveLength(1);
+    expect(calls.filter((call) => call === "host.localUninstall")).toHaveLength(
+      2,
+    );
+    expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
-      candidate: candidateManifest().candidate,
-      infrastructure: {
-        artifactAccess: "github-actions",
-        connection: "local",
-        kind: "ci",
+      finalLocalUninstall: { completion: { clean: true } },
+      hubOnlyDeletion: {
+        deletedHost: { id: 7 },
+        permanentReportRejection: {
+          restartCountAfterObservation: 3,
+          restartCountBeforeObservation: 3,
+        },
       },
-      operationTimeline: [
-        expect.objectContaining({ state: "pending" }),
-        expect.objectContaining({ state: "running" }),
-        expect.objectContaining({ state: "succeeded" }),
-      ],
-      result: { status: "succeeded" },
-      releaseTestHost: {
-        operatingSystemVersion: "22.04",
-        pid1: "systemd",
+      reEnrollment: {
+        hostId: 7,
+        identity: {
+          after: { probeId: "probe_release_02" },
+          before: { probeId: "probe_release_01" },
+        },
+        metricsHistory: {
+          anchors: expect.arrayContaining([
+            expect.objectContaining({ sequence: 1 }),
+            expect.objectContaining({ sequence: 2 }),
+            expect.objectContaining({ sequence: 4 }),
+          ]),
+        },
       },
-      runId: "run-123",
+      metricsHistory: {
+        anchors: [
+          expect.objectContaining({ sequence: 1 }),
+          expect.objectContaining({ sequence: 2 }),
+        ],
+      },
+      repeatedAdd: { rejection: { code: "existing_probe_installation" } },
     });
   });
 
@@ -3348,7 +4423,41 @@ describe("Release E2E Orchestrator", () => {
           journald: "enk_enroll_secret owner-password",
           systemd: "captured",
         }),
+      collectDiagnostics: () =>
+        participant("host.collectDiagnostics", {
+          installation: {
+            available: false,
+            error: { code: "diagnostic_command_failed" },
+          },
+          inventory: {
+            available: true,
+            value: {
+              accounts: { group: false, user: false },
+              files: [],
+              units: [],
+            },
+          },
+          journald: {
+            available: false,
+            error: { code: "diagnostic_command_failed" },
+          },
+          sudoers: {
+            available: false,
+            error: { code: "sudoers_unavailable" },
+          },
+          systemd: {
+            available: false,
+            error: { code: "diagnostic_command_failed" },
+          },
+        }),
       install: () => participant("host.install"),
+      awaitPermanentReportRejection: () =>
+        participant("host.awaitPermanentReportRejection"),
+      captureInstallationState: () =>
+        participant("host.captureInstallationState"),
+      localUninstall: () => participant("host.localUninstall"),
+      readProbeIdentity: () => participant("host.readProbeIdentity"),
+      rejectRepeatedInstall: () => participant("host.rejectRepeatedInstall"),
       verifyUninstallCompletion: () =>
         participant("host.verifyUninstallCompletion"),
     };
@@ -3358,7 +4467,9 @@ describe("Release E2E Orchestrator", () => {
         calls.push("hub.createEnrollment");
         throw primary;
       },
+      deleteHostHubOnly: () => participant("hub.deleteHostHubOnly"),
       getHost: () => participant("hub.getHost"),
+      getEnrollment: () => participant("hub.getEnrollment"),
       getAuditLog: () => participant("hub.getAuditLog", []),
       getHostMetrics: () => participant("hub.getHostMetrics"),
       getHostProbeConfiguration: () =>
@@ -3413,6 +4524,15 @@ describe("Release E2E Orchestrator", () => {
         journald: expect.stringContaining("[REDACTED"),
         systemd: "captured",
       },
+      diagnostics: {
+        host: {
+          inventory: { available: true },
+          installation: { available: false },
+          journald: { available: false },
+          sudoers: { available: false },
+          systemd: { available: false },
+        },
+      },
       result: {
         error: {
           code: "hub_api_unavailable",
@@ -3426,6 +4546,131 @@ describe("Release E2E Orchestrator", () => {
     expect(serialized).not.toContain("enk_enroll_secret");
     expect(serialized).not.toContain("probe-secret");
     expect(serialized).not.toContain("owner-session-secret");
+  });
+
+  it("retains redacted failed installer evidence without retaining its command", async () => {
+    const failure = Object.assign(new Error("Probe installation failed"), {
+      code: "probe_installation_failed",
+      installerEvidence: {
+        code: 1,
+        stderr: "installer rejected the token",
+        stdout: `${officialInstallCommand}\nENOKI_ENROLLMENT_TOKEN=enk_enroll_failed_installer_token curl install failed`,
+      },
+    });
+    const enrollment = {
+      enrollmentId: "enr_failed_installer",
+      enrollmentToken: "enk_enroll_failed_installer_token",
+      installCommand: officialInstallCommand,
+      status: "pending",
+      target: { kind: "new_host" },
+    };
+    const partialDiagnostics = {
+      installation: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+      inventory: {
+        available: true,
+        value: {
+          accounts: { group: false, user: false },
+          files: [],
+          units: [],
+        },
+      },
+      journald: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+      sudoers: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+      systemd: {
+        available: false,
+        error: { code: "diagnostic_command_failed" },
+      },
+    };
+    const host = {
+      assertDisposable: async () => {},
+      assertInstalled: async () => {},
+      awaitPermanentReportRejection: async () => {},
+      captureInstallationState: async () => {},
+      cleanup: async () => ({ clean: true }),
+      collectDiagnostics: async () => partialDiagnostics,
+      collectEvidence: async () => ({ available: true }),
+      install: async () => {
+        throw failure;
+      },
+      localUninstall: async () => {},
+      readProbeIdentity: async () => {},
+      rejectRepeatedInstall: async () => {},
+    };
+    const hub = {
+      authenticate: async () => {},
+      collectEvidence: async () => ({
+        apiTimeline: [],
+        enrollments: [
+          {
+            enrollmentId: enrollment.enrollmentId,
+            hostId: null,
+            rejection: null,
+            status: "pending",
+            target: enrollment.target,
+          },
+        ],
+      }),
+      createEnrollment: async () => enrollment,
+      deleteHostHubOnly: async () => {},
+      getAuditLog: async () => [],
+      getEnrollment: async () => {},
+      getHost: async () => {},
+      getHostMetrics: async () => [],
+      getHostProbeConfiguration: async () => {},
+      isHostSoftDeleted: async () => false,
+      listHosts: async () => [],
+      updateHostProbeConfiguration: async () => {},
+    };
+    const written = [];
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifest(),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host, hub }),
+        },
+        evidenceSink: { write: async (value) => written.push(value) },
+        ownerPassword: "owner-password",
+        runId: "run-failed-installer",
+        scenario: "fresh-install-uninstall",
+      }),
+    ).rejects.toMatchObject({ code: "probe_installation_failed" });
+
+    const artifact = written.at(-1);
+    expect(artifact).toMatchObject({
+      diagnostics: { host: { inventory: { available: true } } },
+      hubEvidence: {
+        enrollments: [
+          expect.objectContaining({
+            enrollmentId: "enr_failed_installer",
+            status: "pending",
+          }),
+        ],
+      },
+      result: {
+        error: {
+          code: "probe_installation_failed",
+          installerEvidence: {
+            code: 1,
+            stdout: expect.stringContaining("[REDACTED_INSTALLER_COMMAND]"),
+          },
+        },
+      },
+    });
+    const serialized = JSON.stringify(artifact);
+    expect(serialized).not.toContain("enk_enroll_secret");
+    expect(serialized).not.toContain("enk_enroll_failed_installer_token");
+    expect(serialized).not.toContain(officialInstallCommand);
   });
 });
 
@@ -3786,9 +5031,15 @@ describe("Release E2E command", () => {
       const methods = [
         "assertDisposable",
         "assertInstalled",
+        "awaitPermanentReportRejection",
+        "captureInstallationState",
         "cleanup",
+        "collectDiagnostics",
         "collectEvidence",
         "install",
+        "localUninstall",
+        "readProbeIdentity",
+        "rejectRepeatedInstall",
         "verifyUninstallCompletion",
       ];
       const host = Object.fromEntries(
@@ -3800,7 +5051,9 @@ describe("Release E2E command", () => {
       const hubMethods = [
         "authenticate",
         "createEnrollment",
+        "deleteHostHubOnly",
         "getAuditLog",
+        "getEnrollment",
         "getHost",
         "getHostMetrics",
         "getHostProbeConfiguration",
@@ -4944,6 +6197,10 @@ function successfulCommandText(stdout) {
   return { code: 0, stderr: "", stdout };
 }
 
+function productInstallerOutput() {
+  return "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n";
+}
+
 const officialInstallCommand =
   "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' bash";
 
@@ -5072,6 +6329,60 @@ function lifecycleAuditLog() {
   ];
 }
 
+function freshLifecycleAuditLog() {
+  return [
+    {
+      action: "enrollment_token.create",
+      actor: "owner",
+      details: { target: { kind: "new_host" } },
+      id: 1,
+      occurredAtMs: 10,
+      outcome: "success",
+      subjectId: "1",
+      subjectType: "enrollment_token",
+    },
+    {
+      action: "enrollment.installation_rejected",
+      actor: "system",
+      details: { code: "existing_probe_installation" },
+      id: 2,
+      occurredAtMs: 20,
+      outcome: "success",
+      subjectId: "2",
+      subjectType: "enrollment_token",
+    },
+    {
+      action: "probe_configuration.host.override",
+      actor: "owner",
+      id: 3,
+      occurredAtMs: 30,
+      outcome: "success",
+      subjectId: "7",
+      subjectType: "host",
+    },
+    {
+      action: "enrollment_token.create",
+      actor: "owner",
+      details: { target: { hostId: 7, kind: "existing_host" } },
+      id: 4,
+      occurredAtMs: 40,
+      outcome: "success",
+      subjectId: "3",
+      subjectType: "enrollment_token",
+    },
+    {
+      action: "host.delete",
+      actor: "owner",
+      details: { hostId: 7, mode: "hub-only" },
+      id: 5,
+      occurredAtMs: 50,
+      outcome: "success",
+      subjectId: "7",
+      subjectType: "host",
+    },
+  ];
+}
+
 function baselineUpgradeAuditLog() {
   return [
     ...lifecycleAuditLog(),
@@ -5155,7 +6466,7 @@ function successfulRepairBoundaryEvidence() {
     accounts: { group: true, user: true },
     files: [
       "/usr/local/bin/enoki-probe",
-      "/etc/enoki/probe-bootstrap.toml",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
       "/etc/enoki/probe-install.toml",
       "/etc/systemd/system/enoki-probe.service",
       "/var/lib/enoki-probe",

@@ -10,7 +10,12 @@ import WebSocket from "ws";
 import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
-import { createTestProbeIdentity, signedProbeHeaders } from "./probe-test-auth";
+import { hashStableHostProfile } from "./host-profile-hash";
+import {
+  createTestProbeIdentity,
+  signedJsonProbeHeaders,
+  signedProbeHeaders,
+} from "./probe-test-auth";
 
 const tempRoots: string[] = [];
 const openServers: Array<{ close: () => Promise<void> }> = [];
@@ -145,94 +150,139 @@ async function sendReport(
   } = {},
 ) {
   const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const ReportResponse = root.enoki.v1.ProbeReportResponse;
   const sequence = options.sequence ?? 1;
-  const body = ReportRequest.encode(
-    ReportRequest.create({
-      bootId: options.bootId ?? "boot-live-summary",
-      metrics: [
+  const metrics = [
+    {
+      collectedAtMs: 1_725_000_009_500,
+      cpuCores: [
         {
-          collectedAtMs: 1_725_000_009_500,
-          cpuCores: [
-            {
-              idle: 850,
-              name: "cpu0",
-              nice: 10,
-              softirq: 2,
-              steal: 1,
-              system: 40,
-              usagePercent: 15,
-              user: 100,
-            },
-          ],
-          cpuPercent: options.cpuPercent ?? 42.5,
-          disks: [
-            {
-              availableBytes: 512,
-              filesystemType: "ext4",
-              mountPoint: "/",
-              totalBytes: 2_048,
-              usedBytes: 1_536,
-            },
-          ],
-          memoryTotalBytes: 2_147_483_648,
-          memoryUsedBytes: 1_073_741_824,
-          networkInterfaces: [
-            {
-              name: "eth0",
-              rxBytes: 9_000,
-              rxBytesDelta: 4_000,
-              txBytes: 11_000,
-              txBytesDelta: 2_000,
-            },
-          ],
-          sequence,
-          uptimeSeconds: 86_400,
+          idle: 850,
+          name: "cpu0",
+          nice: 10,
+          softirq: 2,
+          steal: 1,
+          system: 40,
+          usagePercent: 15,
+          user: 100,
         },
       ],
+      cpuPercent: options.cpuPercent ?? 42.5,
+      disks: [
+        {
+          availableBytes: 512,
+          filesystemType: "ext4",
+          mountPoint: "/",
+          totalBytes: 2_048,
+          usedBytes: 1_536,
+        },
+      ],
+      memoryTotalBytes: 2_147_483_648,
+      memoryUsedBytes: 1_073_741_824,
+      networkInterfaces: [
+        {
+          name: "eth0",
+          rxBytes: 9_000,
+          rxBytesDelta: 4_000,
+          txBytes: 11_000,
+          txBytesDelta: 2_000,
+        },
+      ],
+      sequence,
+      uptimeSeconds: 86_400,
+    },
+  ];
+  const hostProfile = hostProfileForReport(options);
+  const postReport = async (input: {
+    metrics: typeof metrics;
+    snapshots: root.enoki.v1.ISnapshot[];
+  }) => {
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: options.bootId ?? "boot-live-summary",
+        metrics: input.metrics,
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: sequence,
+        sequenceStart: sequence,
+        snapshots: input.snapshots,
+      }),
+    ).finish();
+    const reportUrl = `${baseUrl}/api/probe/report`;
+    const response = await fetch(reportUrl, {
+      body,
+      headers: signedProbeHeaders({
+        body,
+        pathAndQuery: reportUrl,
+        privateKeyPem: registration.privateKeyPem,
+        probeId: registration.probeId,
+      }),
+      method: "POST",
+    });
+
+    expect(response.status).toBe(200);
+    return response;
+  };
+
+  if (!hostProfile) {
+    await postReport({ metrics, snapshots: [] });
+    return;
+  }
+
+  const snapshotHash = hashStableHostProfile(hostProfile);
+  const compactResponse = await postReport({
+    metrics,
+    snapshots: [
+      {
+        collectorId: "official.host-profile",
+        snapshotHash,
+      },
+    ],
+  });
+  expect(
+    ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
+      .requestedSnapshotCollectorIds,
+  ).toEqual(["official.host-profile"]);
+  await postReport({
+    metrics: [],
+    snapshots: [
+      {
+        collectorId: "official.host-profile",
+        hostProfile,
+        snapshotHash,
+      },
+    ],
+  });
+}
+
+async function sendStartupReport(
+  baseUrl: string,
+  registration: {
+    privateKeyPem: string;
+    probeId: string;
+  },
+  input: {
+    bootId: string;
+    hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+  },
+) {
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const hostProfile = input.hostProfile ?? baselineHostProfile();
+  const body = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: input.bootId,
+      metrics: [],
       probeConfigurationVersion: "default-v1",
       probeId: registration.probeId,
-      sequenceEnd: sequence,
-      sequenceStart: sequence,
-      snapshots:
-        (options.hostProfile ??
-        (options.diskAvailable === undefined
-          ? null
-          : {
-              architecture: "x86_64",
-              collectorCapabilities: {
-                official: {
-                  diskHealth: diskHealthCapability(options.diskAvailable),
-                },
-              },
-              cpuCount: 2,
-              hostname: "managed-host-01",
-              kernel: "6.8.0",
-              memoryTotalBytes: 2_147_483_648,
-              os: "linux",
-              probeVersion: "0.1.0",
-            }))
-          ? [
-              {
-                collectorId: "official.host-profile",
-                hostProfile:
-                  options.hostProfile ??
-                  ({
-                    architecture: "x86_64",
-                    collectorCapabilities: {
-                      official: {
-                        diskHealth: diskHealthCapability(options.diskAvailable),
-                      },
-                    },
-                    cpuCount: 2,
-                    hostname: "managed-host-01",
-                    kernel: "6.8.0",
-                    memoryTotalBytes: 2_147_483_648,
-                    os: "linux",
-                    probeVersion: "0.1.0",
-                  } satisfies root.enoki.v1.IHostProfileSnapshot),
-              },
-            ]
-          : [],
+      sequenceEnd: 1,
+      sequenceStart: 1,
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile,
+          snapshotHash: hashStableHostProfile(hostProfile),
+        },
+      ],
     }),
   ).finish();
   const reportUrl = `${baseUrl}/api/probe/report`;
@@ -248,6 +298,106 @@ async function sendReport(
   });
 
   expect(response.status).toBe(200);
+}
+
+function hostProfileForReport(input: {
+  diskAvailable?: boolean;
+  hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+}) {
+  if (input.hostProfile) {
+    return input.hostProfile;
+  }
+  if (input.diskAvailable === undefined) {
+    return null;
+  }
+
+  return {
+    ...baselineHostProfile(),
+    collectorCapabilities: {
+      official: {
+        diskHealth: diskHealthCapability(input.diskAvailable),
+      },
+    },
+  } satisfies root.enoki.v1.IHostProfileSnapshot;
+}
+
+function baselineHostProfile(): root.enoki.v1.IHostProfileSnapshot {
+  return {
+    architecture: "x86_64",
+    cpuCount: 2,
+    hostname: "managed-host-01",
+    kernel: "6.8.0",
+    memoryTotalBytes: 2_147_483_648,
+    os: "linux",
+    probeVersion: "0.1.0",
+  };
+}
+
+async function completeProbeUninstall(
+  baseUrl: string,
+  registration: {
+    privateKeyPem: string;
+    probeId: string;
+  },
+  operationId: number,
+) {
+  const ReportRequest = root.enoki.v1.ProbeReportRequest;
+  const ReportResponse = root.enoki.v1.ProbeReportResponse;
+  const reportBody = ReportRequest.encode(
+    ReportRequest.create({
+      bootId: "boot-probe-uninstall",
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceEnd: 1,
+      sequenceStart: 1,
+    }),
+  ).finish();
+  const reportUrl = `${baseUrl}/api/probe/report`;
+  const report = await fetch(reportUrl, {
+    body: reportBody,
+    headers: signedProbeHeaders({
+      body: reportBody,
+      pathAndQuery: reportUrl,
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
+    method: "POST",
+  });
+  expect(report.status).toBe(200);
+  const token = ReportResponse.decode(
+    new Uint8Array(await report.arrayBuffer()),
+  ).pendingOperation?.probeUninstall?.operationToken;
+  if (!token) {
+    throw new Error("Expected a Probe Uninstall operation token.");
+  }
+
+  const tokenPath = `/api/probe/operations/${operationId}/token/validate`;
+  const tokenBody = JSON.stringify({ token });
+  const tokenValidation = await fetch(`${baseUrl}${tokenPath}`, {
+    body: tokenBody,
+    headers: signedJsonProbeHeaders({
+      body: tokenBody,
+      pathAndQuery: `${baseUrl}${tokenPath}`,
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
+    method: "POST",
+  });
+  expect(tokenValidation.status).toBe(200);
+
+  const statusPath = `/api/probe/operations/${operationId}/status`;
+  const statusBody = JSON.stringify({ status: "succeeded", token });
+  const status = await fetch(`${baseUrl}${statusPath}`, {
+    body: statusBody,
+    headers: signedJsonProbeHeaders({
+      body: statusBody,
+      pathAndQuery: `${baseUrl}${statusPath}`,
+      privateKeyPem: registration.privateKeyPem,
+      probeId: registration.probeId,
+    }),
+    method: "POST",
+  });
+  expect(status.status).toBe(200);
 }
 
 function openWebSocket(
@@ -275,15 +425,53 @@ function openWebSocket(
   });
 }
 
-function readWebSocketJson(socket: WebSocket) {
+function readWebSocketJson(
+  socket: WebSocket,
+  predicate: (message: unknown) => boolean = () => true,
+) {
   return new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for WebSocket message."));
     }, 500);
     const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as unknown;
+      if (!predicate(message)) {
+        return;
+      }
+
       cleanup();
-      resolve(JSON.parse(data.toString()));
+      resolve(message);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+  });
+}
+
+function readHostRemoved(socket: WebSocket) {
+  return new Promise<unknown>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for a Host removal message."));
+    }, 500);
+    const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as { type?: string };
+      if (message.type !== "host_removed") {
+        return;
+      }
+
+      cleanup();
+      resolve(message);
     };
     const onError = (error: Error) => {
       cleanup();
@@ -303,10 +491,12 @@ function readWebSocketJson(socket: WebSocket) {
 function collectWebSocketJson(
   socket: WebSocket,
   options: {
+    predicate?: (message: unknown) => boolean;
     quietMs?: number;
     timeoutMs?: number;
   } = {},
 ) {
+  const predicate = options.predicate ?? (() => true);
   const quietMs = options.quietMs ?? 50;
   const timeoutMs = options.timeoutMs ?? 500;
 
@@ -328,7 +518,12 @@ function collectWebSocketJson(
       }, quietMs);
     };
     const onMessage = (data: WebSocket.RawData) => {
-      messages.push(JSON.parse(data.toString()));
+      const message = JSON.parse(data.toString()) as unknown;
+      if (!predicate(message)) {
+        return;
+      }
+
+      messages.push(message);
       finishAfterQuiet();
     };
     const onError = (error: Error) => {
@@ -442,6 +637,61 @@ describe("WebSocket live updates", () => {
     ]);
   });
 
+  it("broadcasts a non-secret Host removal hint to every authenticated client", () => {
+    const liveUpdates = createLiveUpdateBroadcaster();
+    const firstClientMessages: unknown[] = [];
+    const secondClientMessages: unknown[] = [];
+    const firstSocket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        firstClientMessages.push(JSON.parse(message) as unknown);
+      },
+    };
+    const secondSocket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        secondClientMessages.push(JSON.parse(message) as unknown);
+      },
+    };
+
+    liveUpdates.addClient(firstSocket as never, { sessionId: "owner-one" });
+    liveUpdates.addClient(secondSocket as never, { sessionId: "owner-two" });
+    liveUpdates.broadcastHostRemoved(42);
+
+    expect(firstClientMessages).toEqual([{ hostId: 42, type: "host_removed" }]);
+    expect(secondClientMessages).toEqual([
+      { hostId: 42, type: "host_removed" },
+    ]);
+  });
+
+  it("broadcasts a post-commit Host readiness hint with only its Enrollment and Host correlation", () => {
+    const liveUpdates = createLiveUpdateBroadcaster();
+    const messages: unknown[] = [];
+    const socket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        messages.push(JSON.parse(message) as unknown);
+      },
+    };
+
+    liveUpdates.addClient(socket as never, { sessionId: "owner-one" });
+    liveUpdates.broadcastHostReady({
+      enrollmentId: "enr_1234567890abcdef",
+      hostId: 42,
+    });
+
+    expect(messages).toEqual([
+      {
+        enrollmentId: "enr_1234567890abcdef",
+        hostId: 42,
+        type: "host_ready",
+      },
+    ]);
+  });
+
   it("requires an Owner session for the browser WebSocket endpoint", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({ database });
@@ -483,6 +733,80 @@ describe("WebSocket live updates", () => {
     database.close();
   });
 
+  it("emits host_removed only after a Hub-only Host deletion commits", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const removal = readWebSocketJson(socket);
+
+    const response = await fetch(
+      `${baseUrl}/api/web/hosts/${host.id}?mode=hub-only`,
+      {
+        headers: { cookie: ownerSession },
+        method: "DELETE",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(removal).resolves.toEqual({
+      hostId: host.id,
+      type: "host_removed",
+    });
+    expect(database.hosts.findActiveById(host.id)).toBeNull();
+
+    await closeSocket(socket);
+    database.close();
+  });
+
+  it("emits host_removed through the real WebSocket only after Probe Uninstall Completion", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({ database });
+    const ownerSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: ownerSession,
+    });
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const deletion = await fetch(`${baseUrl}/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+      method: "DELETE",
+    });
+    const requested = (await deletion.json()) as {
+      probeUninstallRequest: { id: number };
+    };
+    expect(deletion.status).toBe(202);
+
+    const removal = readHostRemoved(socket);
+    await completeProbeUninstall(
+      baseUrl,
+      registration,
+      requested.probeUninstallRequest.id,
+    );
+
+    await expect(removal).resolves.toEqual({
+      hostId: host.id,
+      type: "host_removed",
+    });
+    expect(database.hosts.findActiveById(host.id)).toBeNull();
+
+    await closeSocket(socket);
+    database.close();
+  });
+
   it("broadcasts a lightweight Host summary after an accepted Probe report", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({
@@ -503,54 +827,82 @@ describe("WebSocket live updates", () => {
         type: "subscribe_host_detail",
       }),
     );
-    const summaryMessage = readWebSocketJson(socket);
-    await sendReport(baseUrl, registration, { diskAvailable: false });
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+    });
+    const summaryMessages = collectWebSocketJson(socket, {
+      predicate: (message) => {
+        if (!message || typeof message !== "object") {
+          return false;
+        }
 
-    await expect(summaryMessage).resolves.toEqual({
-      host: {
-        id: 1,
-        collectorCapabilities: {
-          official: {
-            diskHealth: {
-              diagnostic: "SMART data is unsupported",
-              status: 6,
+        const summary = message as {
+          host?: { collectorCapabilities?: unknown; id?: unknown };
+          type?: unknown;
+        };
+        return (
+          summary.type === "host_summary" &&
+          summary.host?.id === 1 &&
+          typeof summary.host.collectorCapabilities === "object" &&
+          summary.host.collectorCapabilities !== null
+        );
+      },
+    });
+    await sendReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+      diskAvailable: false,
+      sequence: 2,
+    });
+
+    await expect(summaryMessages).resolves.toEqual(
+      expect.arrayContaining([
+        {
+          host: {
+            id: 1,
+            collectorCapabilities: {
+              official: {
+                diskHealth: {
+                  diagnostic: "SMART data is unsupported",
+                  status: 6,
+                },
+              },
+            },
+            lastSeenAtMs: 1_725_000_010_000,
+            latestMetrics: {
+              batteryPercent: null,
+              batteryState: null,
+              collectedAtMs: 1_725_000_009_500,
+              cpuIdlePercent: null,
+              cpuIowaitPercent: null,
+              cpuPercent: 42.5,
+              cpuStealPercent: null,
+              cpuSystemPercent: null,
+              cpuUserPercent: null,
+              diskTotalBytes: 2_048,
+              diskUsedBytes: 1_536,
+              memoryCacheBytes: null,
+              memoryTotalBytes: 2_147_483_648,
+              memoryUsedBytes: 1_073_741_824,
+              networkRxBitsPerSecond: 6_400,
+              networkRxBytesDelta: 4_000,
+              networkTxBitsPerSecond: 3_200,
+              networkTxBytesDelta: 2_000,
+              receivedAtMs: 1_725_000_010_000,
+              swapTotalBytes: null,
+              swapUsedBytes: null,
+              temperatureCelsius: null,
+              uptimeSeconds: 86_400,
+            },
+            status: "online",
+            warningFlags: {
+              clockSkew: false,
+              probeConfigurationError: false,
             },
           },
+          type: "host_summary",
         },
-        lastSeenAtMs: 1_725_000_010_000,
-        latestMetrics: {
-          batteryPercent: null,
-          batteryState: null,
-          collectedAtMs: 1_725_000_009_500,
-          cpuIdlePercent: null,
-          cpuIowaitPercent: null,
-          cpuPercent: 42.5,
-          cpuStealPercent: null,
-          cpuSystemPercent: null,
-          cpuUserPercent: null,
-          diskTotalBytes: 2_048,
-          diskUsedBytes: 1_536,
-          memoryCacheBytes: null,
-          memoryTotalBytes: 2_147_483_648,
-          memoryUsedBytes: 1_073_741_824,
-          networkRxBitsPerSecond: 6_400,
-          networkRxBytesDelta: 4_000,
-          networkTxBitsPerSecond: 3_200,
-          networkTxBytesDelta: 2_000,
-          receivedAtMs: 1_725_000_010_000,
-          swapTotalBytes: null,
-          swapUsedBytes: null,
-          temperatureCelsius: null,
-          uptimeSeconds: 86_400,
-        },
-        status: "online",
-        warningFlags: {
-          clockSkew: false,
-          probeConfigurationError: false,
-        },
-      },
-      type: "host_summary",
-    });
+      ]),
+    );
 
     await closeSocket(socket);
     database.close();
@@ -706,6 +1058,9 @@ describe("WebSocket live updates", () => {
     });
     const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
     const registration = await registerProbe(baseUrl, enrollmentToken);
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-profile-live",
+    });
 
     socket.send(
       JSON.stringify({
@@ -713,8 +1068,24 @@ describe("WebSocket live updates", () => {
         type: "subscribe_host_detail",
       }),
     );
-    const messages = collectWebSocketJson(socket);
+    const profileUpdate = readWebSocketJson(socket, (message) => {
+      if (!message || typeof message !== "object") {
+        return false;
+      }
+
+      const update = message as {
+        hostId?: unknown;
+        hostProfile?: { hostname?: unknown };
+        type?: unknown;
+      };
+      return (
+        update.type === "host_profile" &&
+        update.hostId === 1 &&
+        update.hostProfile?.hostname === "profile-live-host"
+      );
+    });
     await sendReport(baseUrl, registration, {
+      bootId: "boot-profile-live",
       hostProfile: {
         architecture: "x86_64",
         collectorCapabilities: {
@@ -740,19 +1111,15 @@ describe("WebSocket live updates", () => {
       sequence: 2,
     });
 
-    await expect(messages).resolves.toEqual(
-      expect.arrayContaining([
-        {
-          hostId: 1,
-          hostProfile: expect.objectContaining({
-            cpuCount: 4,
-            hostname: "profile-live-host",
-            probeVersion: "0.2.0",
-          }),
-          type: "host_profile",
-        },
-      ]),
-    );
+    await expect(profileUpdate).resolves.toEqual({
+      hostId: 1,
+      hostProfile: expect.objectContaining({
+        cpuCount: 4,
+        hostname: "profile-live-host",
+        probeVersion: "0.2.0",
+      }),
+      type: "host_profile",
+    });
 
     await closeSocket(socket);
     database.close();

@@ -142,6 +142,9 @@ export type MetricHistorySample = MetricSampleRow & {
 };
 
 export type MetricsRepository = {
+  hasObservation: (
+    input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
+  ) => boolean;
   findLatestSample: (hostId: number) =>
     | (MetricSampleRow & {
         diskHealth: MetricHistorySample["diskHealth"];
@@ -164,6 +167,22 @@ export function createMetricsRepository(
   database: MetricsDatabase,
 ): MetricsRepository {
   return {
+    hasObservation(input) {
+      return Boolean(
+        database
+          .select({ id: reportObservations.id })
+          .from(reportObservations)
+          .where(
+            and(
+              eq(reportObservations.bootId, input.bootId),
+              eq(reportObservations.probeId, input.probeId),
+              eq(reportObservations.sequence, input.sequence),
+            ),
+          )
+          .limit(1)
+          .get(),
+      );
+    },
     findLatestSample(hostId) {
       const sample =
         database

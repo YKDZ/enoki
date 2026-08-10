@@ -4,6 +4,7 @@ import { ref } from "vue";
 import type { HostSummary } from "../types";
 import {
   applyHostLiveSummary,
+  applyHostRemoved,
   applyHostProfileLiveUpdate,
   useLiveUpdates,
 } from "./useLiveUpdates";
@@ -97,6 +98,17 @@ describe("live Host summaries", () => {
       hosts: [existingHost],
       needsReload: true,
     });
+  });
+
+  it("removes matching Hosts from open state without changing unrelated or duplicate events", () => {
+    const otherHost = {
+      ...existingHost,
+      id: 2,
+    };
+
+    expect(applyHostRemoved([existingHost, otherHost], 1)).toEqual([otherHost]);
+    expect(applyHostRemoved([existingHost], 2)).toEqual([existingHost]);
+    expect(applyHostRemoved([], 1)).toEqual([]);
   });
 
   it("updates Collector Capability from live Host summaries", () => {
@@ -338,6 +350,69 @@ describe("live Host summaries", () => {
     ]);
   });
 
+  it("applies a Host removal hint without reloading the entire page", async () => {
+    const hosts = ref<HostSummary[]>([existingHost]);
+    let reloadCount = 0;
+    const removedHostIds: number[] = [];
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {
+        reloadCount += 1;
+      },
+      onHostRemoved(hostId) {
+        removedHostIds.push(hostId);
+      },
+    });
+
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        hostId: existingHost.id,
+        type: "host_removed",
+      }),
+    );
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        hostId: existingHost.id,
+        type: "host_removed",
+      }),
+    );
+
+    expect(hosts.value).toEqual([]);
+    expect(removedHostIds).toEqual([existingHost.id, existingHost.id]);
+    expect(reloadCount).toBe(0);
+  });
+
+  it("passes a non-secret matching-ready hint to Enrollment coordination without treating it as Host state", async () => {
+    const hosts = ref<HostSummary[]>([existingHost]);
+    const readyHints: unknown[] = [];
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {},
+      onHostReady(hint) {
+        readyHints.push(hint);
+      },
+    });
+
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        enrollmentId: "enr_1234567890abcdef",
+        hostId: existingHost.id,
+        type: "host_ready",
+      }),
+    );
+
+    expect(readyHints).toEqual([
+      {
+        enrollmentId: "enr_1234567890abcdef",
+        hostId: existingHost.id,
+        type: "host_ready",
+      },
+    ]);
+    expect(hosts.value).toEqual([existingHost]);
+  });
+
   it("passes Host Profile live updates to the detail handler and updates summaries", async () => {
     const hosts = ref<HostSummary[]>([existingHost]);
     const hostProfiles: unknown[] = [];
@@ -395,7 +470,7 @@ describe("live Host summaries", () => {
     ]);
   });
 
-  it("reconnects and refreshes HTTP state when the live socket closes", async () => {
+  it("recovers authoritative HTTP state after a reconnect opens, not for the initial open", async () => {
     vi.useFakeTimers();
     globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
     globalThis.window = {
@@ -408,15 +483,20 @@ describe("live Host summaries", () => {
     const hosts = ref<HostSummary[]>([existingHost]);
     let hostReloadCount = 0;
     let detailRecoveryCount = 0;
+    let enrollmentRecoveryCount = 0;
     const liveUpdates = useLiveUpdates({
       hosts,
       isAuthenticated: ref(true),
       async loadHosts() {
         hostReloadCount += 1;
+        hosts.value = [];
       },
       reconnectDelayMs: 25,
       async recoverDetail() {
         detailRecoveryCount += 1;
+      },
+      async recoverEnrollment() {
+        enrollmentRecoveryCount += 1;
       },
     });
 
@@ -432,15 +512,21 @@ describe("live Host summaries", () => {
         type: "subscribe_host_detail",
       }),
     );
+    expect(hostReloadCount).toBe(0);
+    expect(detailRecoveryCount).toBe(0);
+    expect(enrollmentRecoveryCount).toBe(0);
 
     fakeSockets[0]?.emit("close");
     await Promise.resolve();
 
-    expect(hostReloadCount).toBe(1);
-    expect(detailRecoveryCount).toBe(1);
+    expect(hostReloadCount).toBe(0);
+    expect(detailRecoveryCount).toBe(0);
+    expect(enrollmentRecoveryCount).toBe(0);
 
     await vi.advanceTimersByTimeAsync(25);
     fakeSockets[1]?.emit("open");
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(fakeSockets).toHaveLength(2);
     expect(fakeSockets[1]?.sent).toContain(
@@ -449,6 +535,10 @@ describe("live Host summaries", () => {
         type: "subscribe_host_detail",
       }),
     );
+    expect(hostReloadCount).toBe(1);
+    expect(detailRecoveryCount).toBe(1);
+    expect(enrollmentRecoveryCount).toBe(1);
+    expect(hosts.value).toEqual([]);
 
     liveUpdates.disconnectLiveUpdates();
   });

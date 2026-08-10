@@ -4,10 +4,15 @@ import type {
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
-import { hosts, officialHostProfiles } from "./schema.js";
+import {
+  hosts,
+  officialHostProfiles,
+  snapshotReplayRequests,
+  type NewOfficialHostProfileRow,
+} from "./schema.js";
 
 type HostProfileDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 type ProtoHostProfileSnapshot = enoki.v1.IHostProfileSnapshot;
@@ -41,10 +46,23 @@ export type HostProfileSnapshotWrite = {
 
 export type SnapshotCollectorSnapshotWrite = HostProfileSnapshotWrite;
 
+export type HostProfilePersistenceValues = Omit<
+  NewOfficialHostProfileRow,
+  "hostId"
+>;
+
 type RegisteredSnapshotCollectorStorageAdapter = Pick<
   SnapshotCollectorStorageAdapter<unknown, unknown>,
   "collectorId" | "hasSnapshot" | "read"
 >;
+
+export type SnapshotReplayRequestKey = {
+  bootId: string;
+  collectorId: string;
+  hostId: number;
+  sequence: number;
+  snapshotHash: string;
+};
 
 export type SnapshotCollectorStorageRegistry = {
   hostProfile: SnapshotCollectorStorageAdapter<
@@ -54,6 +72,19 @@ export type SnapshotCollectorStorageRegistry = {
   get: (
     collectorId: string,
   ) => RegisteredSnapshotCollectorStorageAdapter | null;
+  requestSnapshotReplay: (
+    input: SnapshotReplayRequestKey & {
+      requestedAtMs: number;
+    },
+  ) => void;
+  snapshotReplayRequestStatus: (
+    input: SnapshotReplayRequestKey,
+  ) => "fulfilled" | "pending" | null;
+  fulfillSnapshotReplay: (
+    input: SnapshotReplayRequestKey & {
+      fulfilledAtMs: number;
+    },
+  ) => boolean;
   write: (
     input: SnapshotCollectorSnapshotWrite,
   ) => { changed: boolean; view: HostProfileSnapshot } | null;
@@ -71,6 +102,53 @@ export function createSnapshotCollectorStorageRegistry(
     get(collectorId) {
       return adapters.get(collectorId) ?? null;
     },
+    requestSnapshotReplay(input) {
+      database
+        .insert(snapshotReplayRequests)
+        .values({ ...input, fulfilledAtMs: null })
+        .onConflictDoUpdate({
+          target: [
+            snapshotReplayRequests.hostId,
+            snapshotReplayRequests.collectorId,
+          ],
+          set: {
+            bootId: input.bootId,
+            fulfilledAtMs: null,
+            requestedAtMs: input.requestedAtMs,
+            sequence: input.sequence,
+            snapshotHash: input.snapshotHash,
+          },
+        })
+        .run();
+    },
+    snapshotReplayRequestStatus(input) {
+      const row = database
+        .select({ fulfilledAtMs: snapshotReplayRequests.fulfilledAtMs })
+        .from(snapshotReplayRequests)
+        .where(snapshotReplayRequestWhere(input))
+        .get();
+
+      return row
+        ? row.fulfilledAtMs === null
+          ? "pending"
+          : "fulfilled"
+        : null;
+    },
+    fulfillSnapshotReplay(input) {
+      return Boolean(
+        database
+          .update(snapshotReplayRequests)
+          .set({ fulfilledAtMs: input.fulfilledAtMs })
+          .where(
+            and(
+              snapshotReplayRequestWhere(input),
+              isNull(snapshotReplayRequests.fulfilledAtMs),
+            ),
+          )
+          .returning()
+          .get(),
+      );
+    },
     hostProfile,
     write(input) {
       if (input.collectorId === hostProfile.collectorId) {
@@ -80,6 +158,16 @@ export function createSnapshotCollectorStorageRegistry(
       return null;
     },
   };
+}
+
+function snapshotReplayRequestWhere(input: SnapshotReplayRequestKey) {
+  return and(
+    eq(snapshotReplayRequests.hostId, input.hostId),
+    eq(snapshotReplayRequests.collectorId, input.collectorId),
+    eq(snapshotReplayRequests.bootId, input.bootId),
+    eq(snapshotReplayRequests.sequence, input.sequence),
+    eq(snapshotReplayRequests.snapshotHash, input.snapshotHash),
+  );
 }
 
 export function createHostProfileStorageAdapter(
@@ -141,23 +229,12 @@ export function createHostProfileStorageAdapter(
         }
 
         const values = {
-          architecture: view.architecture,
-          collectorCapabilitiesJson: view.collectorCapabilities
-            ? JSON.stringify(view.collectorCapabilities)
-            : null,
-          cpuCount: view.cpuCount,
-          cpuModel: view.cpuModel,
-          filesystemsJson: JSON.stringify(view.filesystems),
-          hostname: view.hostname,
+          ...hostProfilePersistenceValues({
+            payload: input.payload,
+            snapshotHash: input.snapshotHash,
+            updatedAtMs: input.updatedAtMs,
+          }),
           hostId: input.hostId,
-          kernel: view.kernel,
-          memoryTotalBytes: view.memoryTotalBytes,
-          networkInterfacesJson: JSON.stringify(view.networkInterfaces),
-          os: view.os,
-          payloadJson: JSON.stringify(view),
-          probeVersion: view.probeVersion,
-          snapshotHash: input.snapshotHash,
-          updatedAtMs: input.updatedAtMs,
         };
 
         if (existing) {
@@ -188,6 +265,33 @@ export function createHostProfileStorageAdapter(
         return { changed: true, view };
       });
     },
+  };
+}
+
+export function hostProfilePersistenceValues(input: {
+  payload: ProtoHostProfileSnapshot;
+  snapshotHash: string;
+  updatedAtMs: number;
+}): HostProfilePersistenceValues {
+  const view = normalizeHostProfile(input.payload);
+
+  return {
+    architecture: view.architecture,
+    collectorCapabilitiesJson: view.collectorCapabilities
+      ? JSON.stringify(view.collectorCapabilities)
+      : null,
+    cpuCount: view.cpuCount,
+    cpuModel: view.cpuModel,
+    filesystemsJson: JSON.stringify(view.filesystems),
+    hostname: view.hostname,
+    kernel: view.kernel,
+    memoryTotalBytes: view.memoryTotalBytes,
+    networkInterfacesJson: JSON.stringify(view.networkInterfaces),
+    os: view.os,
+    payloadJson: JSON.stringify(view),
+    probeVersion: view.probeVersion,
+    snapshotHash: input.snapshotHash,
+    updatedAtMs: input.updatedAtMs,
   };
 }
 

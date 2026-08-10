@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
@@ -68,7 +70,9 @@ function validateHostScenarioEvidence(evidence, outcome) {
   if (evidence?.schemaVersion !== 2) errors.push("invalid schemaVersion");
   if (evidence?.phase !== "succeeded") errors.push("phase was not succeeded");
   validateCleanupEvidence(evidence?.cleanup, errors);
-  validateUninstallEvidence(evidence?.uninstall, errors);
+  if (evidence?.scenario !== "fresh-install-uninstall") {
+    validateUninstallEvidence(evidence?.uninstall, errors);
+  }
 
   const requiredByScenario = {
     "baseline-upgrade-uninstall": [
@@ -85,8 +89,16 @@ function validateHostScenarioEvidence(evidence, outcome) {
       "auditLog",
       "host",
       "hostBoundary",
+      "diagnostics",
+      "finalLocalUninstall",
+      "hubOnlyDeletion",
+      "initialInstall",
+      "localUninstall",
       "metrics",
+      "metricsHistory",
       "probeConfiguration",
+      "reEnrollment",
+      "repeatedAdd",
     ],
     "hub-restore-compatibility-window": [
       "hostProfileContinuity",
@@ -134,9 +146,428 @@ function validateFreshEvidence(evidence, errors) {
     errors.push("fresh Host Profile is invalid");
   }
   validateMetrics(evidence?.metrics, "fresh reporting", errors);
+  validateMetricsHistoryPreservation(evidence, errors);
   validateProbeConfiguration(evidence?.probeConfiguration, errors);
-  validateLifecycleAuditLog(evidence, false, errors);
+  validateFreshLifecycleAuditLog(evidence, errors);
   validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
+  validateInstallerEvidence(
+    evidence?.initialInstall,
+    "initial Probe installer",
+    errors,
+  );
+  validateRepeatedAddEvidence(evidence?.repeatedAdd, errors);
+  validateLocalUninstallEvidence(
+    evidence?.localUninstall,
+    evidence?.host?.id,
+    "first Local Probe Uninstall",
+    errors,
+  );
+  validateReEnrollmentEvidence(evidence, errors);
+  validateHubOnlyDeletionEvidence(evidence, errors);
+  validateLocalUninstallEvidence(
+    evidence?.finalLocalUninstall,
+    null,
+    "final Local Probe Uninstall",
+    errors,
+  );
+  validateDiagnosticsEvidence(evidence?.diagnostics, errors);
+}
+
+function validateInstallerEvidence(value, label, errors) {
+  const output = value?.output;
+  if (
+    output?.code !== 0 ||
+    typeof output?.stdout !== "string" ||
+    typeof output?.stderr !== "string" ||
+    !output.stdout.includes("ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE") ||
+    !output.stdout.includes("Enoki Probe installed as enoki-probe.service.") ||
+    containsUnredactedSecret(output)
+  ) {
+    errors.push(`${label} output is invalid`);
+  }
+}
+
+function validateRepeatedAddEvidence(repeatedAdd, errors) {
+  if (
+    repeatedAdd?.enrollment?.target?.kind !== "new_host" ||
+    repeatedAdd?.enrollmentStatus?.status !== "rejected" ||
+    repeatedAdd?.enrollmentStatus?.rejection?.code !==
+      "existing_probe_installation" ||
+    repeatedAdd?.rejection?.code !== "existing_probe_installation" ||
+    !sameHubHostProjection(repeatedAdd?.hostBefore, repeatedAdd?.hostAfter) ||
+    JSON.stringify(repeatedAdd?.stateBefore) !==
+      JSON.stringify(repeatedAdd?.stateAfter) ||
+    !validInstalledState(repeatedAdd?.stateBefore)
+  ) {
+    errors.push("repeated Add rejection evidence is invalid");
+  }
+}
+
+function validateLocalUninstallEvidence(value, expectedHostId, label, errors) {
+  const completion = value?.completion;
+  const inventory = completion?.inventory;
+  const activeHost = value?.activeHost;
+  const offlineHost = value?.offlineHost;
+  if (
+    completion?.clean !== true ||
+    completion?.journaldRetained !== true ||
+    completion?.sharedDependenciesRetained !== true ||
+    inventory?.accounts?.user !== false ||
+    inventory?.accounts?.group !== false ||
+    !Array.isArray(inventory?.files) ||
+    inventory.files.length !== 0 ||
+    !Array.isArray(inventory?.units) ||
+    inventory.units.length !== 0 ||
+    (expectedHostId !== null &&
+      (activeHost?.id !== expectedHostId ||
+        activeHost?.status === "offline" ||
+        offlineHost?.id !== expectedHostId ||
+        offlineHost?.status !== "offline"))
+  ) {
+    errors.push(`${label} evidence is invalid`);
+  }
+}
+
+function validateReEnrollmentEvidence(evidence, errors) {
+  const reEnrollment = evidence?.reEnrollment;
+  const before = reEnrollment?.identity?.before;
+  const after = reEnrollment?.identity?.after;
+  if (
+    reEnrollment?.hostId !== evidence?.host?.id ||
+    reEnrollment?.host?.id !== evidence?.host?.id ||
+    reEnrollment?.enrollment?.target?.kind !== "existing_host" ||
+    reEnrollment.enrollment.target.hostId !== evidence?.host?.id ||
+    !isCandidateHostReady(
+      reEnrollment?.host,
+      candidateProbeVersion(evidence),
+    ) ||
+    !validProbeIdentity(before) ||
+    !validProbeIdentity(after) ||
+    after.probeId === before.probeId ||
+    after.identitySha256 === before.identitySha256 ||
+    !hasAdvancingPortableMetrics(reEnrollment?.metrics) ||
+    !sameEffectiveProbeConfiguration(
+      reEnrollment?.probeConfiguration,
+      evidence?.probeConfiguration,
+    ) ||
+    !validInstalledBoundary(
+      reEnrollment?.hostBoundary,
+      candidateProbeVersion(evidence),
+    )
+  ) {
+    errors.push("Host Re-enrollment evidence is invalid");
+  }
+  validateInstallerEvidence(
+    reEnrollment?.installer,
+    "Host Re-enrollment installer",
+    errors,
+  );
+}
+
+function validateMetricsHistoryPreservation(evidence, errors) {
+  const initial = evidence?.metricsHistory;
+  const reEnrollment = evidence?.reEnrollment?.metricsHistory;
+  if (
+    !validMetricsHistory(initial) ||
+    !validMetricsHistory(reEnrollment) ||
+    !initial.anchors.every((anchor) =>
+      reEnrollment.anchors.some((candidate) =>
+        sameMetricAnchor(candidate, anchor),
+      ),
+    ) ||
+    !reEnrollment.anchors.some(
+      (anchor) =>
+        anchor.sequence > initial.anchors.at(-1).sequence &&
+        anchor.collectedAtMs > initial.anchors.at(-1).collectedAtMs,
+    )
+  ) {
+    errors.push("Host Re-enrollment Metrics history is invalid");
+  }
+}
+
+function validMetricsHistory(value) {
+  return (
+    Array.isArray(value?.anchors) &&
+    value.anchors.length >= 2 &&
+    value.anchors.every(validMetricAnchor) &&
+    value.anchors.every(
+      (anchor, index) =>
+        index === 0 ||
+        (anchor.sequence > value.anchors[index - 1].sequence &&
+          anchor.collectedAtMs > value.anchors[index - 1].collectedAtMs),
+    ) &&
+    /^[0-9a-f]{64}$/.test(value?.sha256 ?? "") &&
+    createHash("sha256").update(JSON.stringify(value.anchors)).digest("hex") ===
+      value.sha256
+  );
+}
+
+function validMetricAnchor(value) {
+  return (
+    Number.isSafeInteger(value?.sequence) &&
+    value.sequence >= 0 &&
+    Number.isSafeInteger(value?.collectedAtMs) &&
+    value.collectedAtMs > 0 &&
+    Number.isFinite(value?.uptimeSeconds) &&
+    value.uptimeSeconds >= 0 &&
+    Number.isFinite(value?.cpuPercent) &&
+    value.cpuPercent >= 0 &&
+    value.cpuPercent <= 100 &&
+    Number.isSafeInteger(value?.memoryTotalBytes) &&
+    value.memoryTotalBytes > 0 &&
+    Number.isSafeInteger(value?.memoryUsedBytes) &&
+    value.memoryUsedBytes >= 0 &&
+    value.memoryUsedBytes <= value.memoryTotalBytes
+  );
+}
+
+function sameMetricAnchor(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function validateHubOnlyDeletionEvidence(evidence, errors) {
+  const deletion = evidence?.hubOnlyDeletion;
+  const terminal = deletion?.permanentReportRejection;
+  if (
+    deletion?.deletedHost?.id !== evidence?.host?.id ||
+    !Number.isSafeInteger(deletion?.deletedHost?.deletedAtMs) ||
+    deletion.deletedHost.deletedAtMs < 0 ||
+    !validPermanentReportRejection(terminal)
+  ) {
+    errors.push("Hub-only deletion or permanent rejection evidence is invalid");
+  }
+}
+
+function validateDiagnosticsEvidence(diagnostics, errors) {
+  const host = diagnostics?.host;
+  const installation = host?.installation?.value;
+  const inventory = host?.inventory?.value;
+  if (
+    host?.inventory?.available !== true ||
+    typeof inventory?.accounts?.group !== "boolean" ||
+    typeof inventory?.accounts?.user !== "boolean" ||
+    !Array.isArray(inventory?.files) ||
+    !inventory.files.includes("/usr/local/bin/enoki-probe") ||
+    !inventory.files.includes("/etc/enoki/probe-install.toml") ||
+    !Array.isArray(inventory?.units) ||
+    !inventory.units.includes("enoki-probe.service") ||
+    host?.installation?.available !== true ||
+    !validTerminalDiagnosticInstallation(installation) ||
+    !validAvailableDiagnosticCommand(host?.journald) ||
+    !validAvailableDiagnosticCommand(host?.sudoers) ||
+    !validTerminalSystemdDiagnostic(host?.systemd) ||
+    !Array.isArray(diagnostics?.hub?.apiTimeline) ||
+    containsUnredactedSecret(diagnostics)
+  ) {
+    errors.push("redacted failure diagnostics are incomplete");
+  }
+}
+
+function validAvailableDiagnosticCommand(value) {
+  return (
+    value?.available === true &&
+    validCommandEvidence(value?.output) &&
+    value.output.stdout.trim().length > 0
+  );
+}
+
+function validTerminalSystemdDiagnostic(value) {
+  return (
+    validAvailableDiagnosticCommand(value) &&
+    /^LoadState=loaded$/m.test(value.output.stdout) &&
+    /^ActiveState=failed$/m.test(value.output.stdout) &&
+    /^ExecMainStatus=78$/m.test(value.output.stdout)
+  );
+}
+
+function sameHubHostProjection(before, after) {
+  return (
+    Number.isSafeInteger(before?.id) &&
+    before.id > 0 &&
+    validHostMetadata(before?.hostMetadata) &&
+    JSON.stringify(before) === JSON.stringify(after)
+  );
+}
+
+function validHostMetadata(value) {
+  const keys = ["connectAddress", "description", "displayName", "observedIp"];
+  return (
+    Object.keys(value ?? {})
+      .sort()
+      .join(",") === keys.sort().join(",") &&
+    keys.every((key) => value[key] === null || typeof value[key] === "string")
+  );
+}
+
+function sameEffectiveProbeConfiguration(current, expected) {
+  return (
+    current?.mode === expected?.mode &&
+    JSON.stringify(canonicalSemanticValue(current?.configuration)) ===
+      JSON.stringify(expected?.configuration)
+  );
+}
+
+function canonicalSemanticValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalSemanticValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entryValue]) => [key, canonicalSemanticValue(entryValue)]),
+    );
+  }
+  return value;
+}
+
+function validTerminalDiagnosticInstallation(value) {
+  return (
+    /^[0-9a-f]{64}$/.test(value?.binary?.sha256 ?? "") &&
+    /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+      value?.binary?.version ?? "",
+    ) &&
+    /^[0-9a-f]{64}$/.test(value?.installMetadataSha256 ?? "") &&
+    validProbeIdentity(value?.identity) &&
+    value?.service?.LoadState === "loaded" &&
+    value.service?.ActiveState === "failed" &&
+    value.service?.SubState === "failed" &&
+    value.service?.ExecMainStatus === 78 &&
+    Number.isSafeInteger(value.service?.NRestarts) &&
+    value.service.NRestarts >= 0 &&
+    typeof value.service?.Result === "string" &&
+    value.service.Result.length > 0
+  );
+}
+
+function validCommandEvidence(value) {
+  return (
+    Number.isSafeInteger(value?.code) &&
+    typeof value?.stdout === "string" &&
+    typeof value?.stderr === "string"
+  );
+}
+
+function validateFreshLifecycleAuditLog(evidence, errors) {
+  const auditLog = evidence?.auditLog;
+  const hostId = evidence?.host?.id;
+  const validEvent = (event) =>
+    Number.isSafeInteger(event?.id) &&
+    event.id > 0 &&
+    Number.isSafeInteger(event?.occurredAtMs) &&
+    event.occurredAtMs > 0 &&
+    typeof event?.subjectId === "string" &&
+    event.subjectId.length > 0 &&
+    typeof event?.subjectType === "string" &&
+    event.subjectType.length > 0 &&
+    event.outcome === "success";
+  const find = (predicate) =>
+    Array.isArray(auditLog) && auditLog.find(predicate);
+  if (
+    !find(
+      (event) =>
+        event?.action === "enrollment_token.create" &&
+        validEvent(event) &&
+        event.actor === "owner" &&
+        event.details?.target?.kind === "new_host",
+    ) ||
+    !find(
+      (event) =>
+        event?.action === "enrollment.installation_rejected" &&
+        validEvent(event) &&
+        event.actor === "system" &&
+        event.details?.code === "existing_probe_installation",
+    ) ||
+    !find(
+      (event) =>
+        event?.action === "enrollment_token.create" &&
+        validEvent(event) &&
+        event.actor === "owner" &&
+        event.details?.target?.kind === "existing_host" &&
+        event.details.target.hostId === hostId,
+    ) ||
+    !find(
+      (event) =>
+        event?.action === "probe_configuration.host.override" &&
+        validEvent(event) &&
+        event.actor === "owner" &&
+        event.subjectId === String(hostId),
+    ) ||
+    !find(
+      (event) =>
+        event?.action === "host.delete" &&
+        validEvent(event) &&
+        event.actor === "owner" &&
+        event.subjectId === String(hostId) &&
+        event.subjectType === "host" &&
+        event.details?.hostId === hostId &&
+        event.details?.mode === "hub-only",
+    )
+  ) {
+    errors.push("fresh lifecycle Audit Log is invalid");
+  }
+}
+
+function validProbeIdentity(identity) {
+  return (
+    typeof identity?.probeId === "string" &&
+    identity.probeId.length > 0 &&
+    /^[0-9a-f]{64}$/.test(identity?.identitySha256 ?? "")
+  );
+}
+
+function validInstalledState(state) {
+  return (
+    /^[0-9a-f]{64}$/.test(state?.binarySha256 ?? "") &&
+    /^[0-9a-f]{64}$/.test(state?.installMetadataSha256 ?? "") &&
+    validProbeIdentity(state?.identity) &&
+    Number.isSafeInteger(state?.restartCount) &&
+    state.restartCount >= 0 &&
+    state.service?.LoadState === "loaded" &&
+    state.service?.ActiveState === "active" &&
+    state.service?.SubState === "running"
+  );
+}
+
+function validInstalledBoundary(boundary, version) {
+  const errors = [];
+  validateInstalledHostBoundary(boundary, version, errors);
+  return errors.length === 0;
+}
+
+function validPermanentReportRejection(value) {
+  return (
+    /^[0-9a-f]{64}$/.test(value?.binarySha256 ?? "") &&
+    /^[0-9a-f]{64}$/.test(value?.installMetadataSha256 ?? "") &&
+    validProbeIdentity(value?.identity) &&
+    Number.isSafeInteger(value?.restartCountBeforeObservation) &&
+    value.restartCountBeforeObservation >= 0 &&
+    value.restartCountAfterObservation ===
+      value.restartCountBeforeObservation &&
+    value.service?.LoadState === "loaded" &&
+    value.service?.ActiveState === "failed" &&
+    value.service?.SubState === "failed" &&
+    value.service?.ExecMainStatus === 78
+  );
+}
+
+function containsUnredactedSecret(value) {
+  if (typeof value === "string") {
+    return (
+      /enk_enroll_[A-Za-z0-9_-]+/.test(value) ||
+      /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----/.test(value) ||
+      /ENOKI_ENROLLMENT_TOKEN\s*=/.test(value)
+    );
+  }
+  if (Array.isArray(value)) return value.some(containsUnredactedSecret);
+  if (value && typeof value === "object") {
+    return Object.entries(value).some(([key, child]) =>
+      /(?:owner.?password|enrollment.?token|private.?key|signing.?private)/i.test(
+        key,
+      )
+        ? child !== "[REDACTED]"
+        : containsUnredactedSecret(child),
+    );
+  }
+  return false;
 }
 
 function validateBaselineEvidence(evidence, errors) {
@@ -293,6 +724,12 @@ function validateMetricsProgression(before, after, label, errors) {
 function validateProbeConfiguration(configuration, errors) {
   if (
     configuration?.mode !== "override" ||
+    !configuration?.configuration ||
+    !Array.isArray(configuration.configuration.enabledCollectorIds) ||
+    !Number.isSafeInteger(
+      configuration.configuration.metricsCollectionIntervalSeconds,
+    ) ||
+    configuration.configuration.version !== configuration?.version ||
     typeof configuration?.version !== "string" ||
     !configuration.version ||
     configuration.reportedVersion !== configuration.version

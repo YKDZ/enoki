@@ -1,16 +1,50 @@
 import { createHash, randomUUID } from "node:crypto";
 
-const managedHostPaths = Object.freeze([
-  "/usr/local/bin/enoki-probe",
-  "/etc/enoki/probe-bootstrap.toml",
-  "/etc/enoki/probe-install.toml",
-  "/etc/systemd/system/enoki-probe.service",
-  "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
-  "/var/lib/enoki-probe",
-  "/etc/sudoers.d/enoki-probe-operations",
-  "/etc/sudoers.d/enoki-probe-collector-helpers",
-  "/etc/sudoers.d/enoki-probe-upgrader",
+// Release E2E infrastructure has one narrowly scoped, run-owned resource
+// definition. It produces the preflight allowlist, recorded fingerprint, and
+// emergency-removal plan; the product installer and uninstaller are never
+// invoked by this test-only path.
+const releaseE2EInfrastructureResources = Object.freeze([
+  { kind: "file", path: "/usr/local/bin/enoki-probe" },
+  {
+    kind: "file",
+    path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+  },
+  { kind: "file", path: "/etc/enoki/probe-install.toml" },
+  { kind: "file", path: "/etc/systemd/system/enoki-probe.service" },
+  {
+    kind: "file",
+    path: "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
+  },
+  { kind: "directory", path: "/var/lib/enoki-probe" },
+  { kind: "file", path: "/etc/sudoers.d/enoki-probe-operations" },
+  {
+    kind: "file",
+    path: "/etc/sudoers.d/enoki-probe-collector-helpers",
+  },
+  { kind: "file", path: "/etc/sudoers.d/enoki-probe-upgrader" },
+  { kind: "user", name: "enoki-probe" },
+  { kind: "group", name: "enoki-probe" },
+  { kind: "service", name: "enoki-probe.service" },
 ]);
+
+const managedHostPaths = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter((resource) => "path" in resource)
+    .map((resource) => resource.path),
+);
+
+const releaseE2EUsers = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter((resource) => resource.kind === "user")
+    .map((resource) => resource.name),
+);
+
+const releaseE2EGroups = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter((resource) => resource.kind === "group")
+    .map((resource) => resource.name),
+);
 
 const terminalProbeOperationStates = new Set([
   "succeeded",
@@ -18,6 +52,12 @@ const terminalProbeOperationStates = new Set([
   "superseded",
   "canceled",
 ]);
+
+const hubHostOfflineAfterLocalUninstallMs = 90_000;
+const localUninstallOfflineObservationHeadroomMs = 30_000;
+const defaultLocalUninstallOfflineObservationTimeoutMs =
+  hubHostOfflineAfterLocalUninstallMs +
+  localUninstallOfflineObservationHeadroomMs;
 
 const probeOperationStateRank = Object.freeze({
   accepted: 1,
@@ -1223,7 +1263,7 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
     "user:enoki-probe",
     "group:enoki-probe",
     "/usr/local/bin/enoki-probe",
-    "/etc/enoki/probe-bootstrap.toml",
+    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
     "/etc/enoki/probe-install.toml",
     "/etc/systemd/system/enoki-probe.service",
     "/var/lib/enoki-probe",
@@ -1314,6 +1354,100 @@ function assertHostInventoryEvidence(inventory) {
     Object.keys(inventory.accounts).sort().join(",") !== "group,user"
   ) {
     throw new Error("filesystem inventory collection is invalid");
+  }
+}
+
+function assertInstalledStateEvidence(state) {
+  if (
+    !state ||
+    Object.keys(state).sort().join(",") !==
+      "binarySha256,identity,installMetadataSha256,restartCount,service" ||
+    !/^[0-9a-f]{64}$/.test(state.binarySha256 ?? "") ||
+    !/^[0-9a-f]{64}$/.test(state.installMetadataSha256 ?? "") ||
+    !Number.isSafeInteger(state.restartCount) ||
+    state.restartCount < 0 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(
+      state.identity?.probeId ?? "",
+    ) ||
+    !/^[0-9a-f]{64}$/.test(state.identity?.identitySha256 ?? "") ||
+    state.service?.LoadState !== "loaded" ||
+    state.service?.ActiveState !== "active" ||
+    state.service?.SubState !== "running" ||
+    Object.keys(state.service ?? {})
+      .sort()
+      .join(",") !== "ActiveState,LoadState,SubState" ||
+    Object.keys(state.identity ?? {})
+      .sort()
+      .join(",") !== "identitySha256,probeId"
+  ) {
+    throw new Error("installed Probe state evidence is invalid");
+  }
+}
+
+function assertPermanentReportRejectionEvidence(evidence) {
+  if (
+    !evidence ||
+    Object.keys(evidence).sort().join(",") !==
+      "binarySha256,identity,installMetadataSha256,restartCountAfterObservation,restartCountBeforeObservation,service" ||
+    !/^[0-9a-f]{64}$/.test(evidence.binarySha256 ?? "") ||
+    !/^[0-9a-f]{64}$/.test(evidence.installMetadataSha256 ?? "") ||
+    !Number.isSafeInteger(evidence.restartCountBeforeObservation) ||
+    evidence.restartCountBeforeObservation < 0 ||
+    evidence.restartCountAfterObservation !==
+      evidence.restartCountBeforeObservation ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(
+      evidence.identity?.probeId ?? "",
+    ) ||
+    !/^[0-9a-f]{64}$/.test(evidence.identity?.identitySha256 ?? "") ||
+    evidence.service?.LoadState !== "loaded" ||
+    evidence.service?.ActiveState !== "failed" ||
+    evidence.service?.SubState !== "failed" ||
+    evidence.service?.ExecMainStatus !== 78 ||
+    Object.keys(evidence.service ?? {})
+      .sort()
+      .join(",") !== "ActiveState,ExecMainStatus,LoadState,SubState" ||
+    Object.keys(evidence.identity ?? {})
+      .sort()
+      .join(",") !== "identitySha256,probeId"
+  ) {
+    throw new Error("permanent Probe report rejection evidence is invalid");
+  }
+}
+
+function assertInstalledDiagnosticsEvidence(evidence) {
+  if (
+    !evidence ||
+    Object.keys(evidence).sort().join(",") !==
+      "binary,identity,installMetadataSha256,service" ||
+    !/^[0-9a-f]{64}$/.test(evidence.binary?.sha256 ?? "") ||
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+      evidence.binary?.version ?? "",
+    ) ||
+    !/^[0-9a-f]{64}$/.test(evidence.installMetadataSha256 ?? "") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(
+      evidence.identity?.probeId ?? "",
+    ) ||
+    !/^[0-9a-f]{64}$/.test(evidence.identity?.identitySha256 ?? "") ||
+    evidence.service?.LoadState !== "loaded" ||
+    evidence.service?.ActiveState !== "failed" ||
+    evidence.service?.SubState !== "failed" ||
+    evidence.service?.ExecMainStatus !== 78 ||
+    !Number.isSafeInteger(evidence.service?.NRestarts) ||
+    evidence.service.NRestarts < 0 ||
+    typeof evidence.service?.Result !== "string" ||
+    !evidence.service.Result ||
+    Object.keys(evidence.binary ?? {})
+      .sort()
+      .join(",") !== "sha256,version" ||
+    Object.keys(evidence.identity ?? {})
+      .sort()
+      .join(",") !== "identitySha256,probeId" ||
+    Object.keys(evidence.service ?? {})
+      .sort()
+      .join(",") !==
+      "ActiveState,ExecMainStatus,LoadState,NRestarts,Result,SubState"
+  ) {
+    throw new Error("terminal Probe diagnostic evidence is invalid");
   }
 }
 
@@ -1722,6 +1856,7 @@ async function runFreshInstallUninstallScenario({
   }
 
   const poll = normalizedPollTiming(timing);
+  const offlinePoll = localUninstallOfflineObservationPoll(timing, poll);
   const evidence = {
     auditLog: null,
     candidate: candidateManifest.candidate,
@@ -1730,26 +1865,27 @@ async function runFreshInstallUninstallScenario({
       probeAssetSetVersion: candidateManifest.probeAssetSet.version,
     },
     cleanup: null,
+    diagnostics: null,
+    finalLocalUninstall: null,
     host: null,
     hostBoundary: null,
     hostEvidence: null,
+    hubOnlyDeletion: null,
     hubEvidence: null,
+    initialInstall: null,
     infrastructure: null,
+    localUninstall: null,
     metrics: null,
-    operationTimeline: [],
+    metricsHistory: null,
     phase: "scenario-running",
     probeConfiguration: null,
+    reEnrollment: null,
     releaseTestHost: null,
+    repeatedAdd: null,
     result: { status: "running" },
     runId,
     scenario,
     schemaVersion: 2,
-    uninstall: {
-      hostCompletion: null,
-      hubSoftDeleted: false,
-      operationTimeline: [],
-      status: "pending",
-    },
   };
   let resources = null;
   let primaryError = null;
@@ -1759,7 +1895,7 @@ async function runFreshInstallUninstallScenario({
   try {
     resources = await environment.start({ candidateManifest, runId });
     const { host, hub } = resources ?? {};
-    assertScenarioParticipants(host, hub);
+    assertFreshInstallScenarioParticipants(host, hub);
     evidence.infrastructure = resources?.infrastructure ?? null;
     evidence.releaseTestHost = resources?.releaseTestHost ?? null;
 
@@ -1773,14 +1909,11 @@ async function runFreshInstallUninstallScenario({
       );
     }
 
-    const enrollment = await hub.createEnrollment();
-    if (!enrollment?.installCommand) {
-      throw assertionError(
-        "enrollment_command_missing",
-        "Hub did not return an official Probe install command",
-      );
-    }
-    await host.install(enrollment.installCommand, runId);
+    const newHostTarget = { kind: "new_host" };
+    const enrollment = await hub.createEnrollment(newHostTarget);
+    assertCreatedEnrollment(enrollment, newHostTarget);
+    const initialInstall = await host.install(enrollment.installCommand, runId);
+    evidence.initialInstall = initialInstall;
     evidence.hostBoundary = await host.assertInstalled(
       runId,
       candidateManifest.probeAssetSet.version,
@@ -1806,15 +1939,17 @@ async function runFreshInstallUninstallScenario({
         isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
     });
     evidence.host = compactHostEvidence(ready);
+    const initialIdentity = await host.readProbeIdentity(runId);
 
     const samples = await waitForObservation({
       code: "metrics_progression_timeout",
       label: "two advancing portable Metrics samples",
-      observe: () => hub.getHostMetrics(hostId),
+      observe: () => hub.getHostMetrics(hostId, { window: "24h" }),
       poll,
       ready: hasAdvancingPortableMetrics,
     });
     evidence.metrics = compactMetricsEvidence(samples);
+    evidence.metricsHistory = metricsHistoryEvidence(samples);
 
     evidence.probeConfiguration = await proveProbeConfigurationRoundTrip({
       hostId,
@@ -1822,52 +1957,187 @@ async function runFreshInstallUninstallScenario({
       poll,
     });
 
-    const requested = await hub.requestProbeUninstall(hostId);
-    evidence.operationTimeline = [requested];
-    evidence.operationTimeline = await hub.waitForProbeOperation(requested, {
-      intervalMs: poll.intervalMs,
-      timeoutMs: poll.timeoutMs,
-    });
-    evidence.uninstall.operationTimeline = evidence.operationTimeline;
-    const finalOperation = evidence.operationTimeline.at(-1);
-    if (finalOperation?.state !== "succeeded" || finalOperation.failure) {
-      throw assertionError(
-        "probe_uninstall_failed",
-        `Probe Uninstall did not succeed: ${JSON.stringify(finalOperation)}`,
-      );
-    }
-    evidence.uninstall.hubSoftDeleted = await hub.isHostSoftDeleted(hostId);
-    if (!evidence.uninstall.hubSoftDeleted) {
-      throw assertionError(
-        "host_not_soft_deleted",
-        "Probe Uninstall succeeded but the Host remains active",
-      );
-    }
-    evidence.auditLog = assertLifecycleAuditLog(
-      await hub.getAuditLog(),
-      hostId,
-      requested.id,
+    const repeatedEnrollment = await hub.createEnrollment(newHostTarget);
+    assertCreatedEnrollment(repeatedEnrollment, newHostTarget);
+    const hostBeforeRepeatedAdd = stableHubHostProjection(
+      await hub.getHost(hostId),
     );
-    const completion = await host.verifyUninstallCompletion(runId);
-    evidence.uninstall.hostCompletion = completion;
+    const stateBeforeRepeatedAdd = await host.captureInstallationState(runId);
+    const rejection = await host.rejectRepeatedInstall(
+      repeatedEnrollment.installCommand,
+      runId,
+    );
+    const stateAfterRepeatedAdd = await host.captureInstallationState(runId);
     if (
-      completion?.clean !== true ||
-      completion?.journaldRetained !== true ||
-      completion?.sharedDependenciesRetained !== true
+      JSON.stringify(stateAfterRepeatedAdd) !==
+      JSON.stringify(stateBeforeRepeatedAdd)
     ) {
       throw assertionError(
-        "probe_uninstall_residue",
-        `Host did not satisfy Probe Uninstall Completion: ${JSON.stringify(completion)}`,
+        "repeated_add_mutated_installation",
+        "Ordinary repeated Add changed the installed Probe boundary",
       );
     }
-    evidence.uninstall.status = "succeeded";
+    const hostAfterRepeatedAdd = stableHubHostProjection(
+      await hub.getHost(hostId),
+    );
+    if (
+      JSON.stringify(hostAfterRepeatedAdd) !==
+      JSON.stringify(hostBeforeRepeatedAdd)
+    ) {
+      throw assertionError(
+        "repeated_add_mutated_hub_host",
+        "Ordinary repeated Add changed the stable Hub Host projection",
+      );
+    }
+    const rejectedEnrollment = await waitForObservation({
+      code: "repeated_add_rejection_timeout",
+      label: "terminal repeated Add rejection",
+      observe: () => hub.getEnrollment(repeatedEnrollment.enrollmentId),
+      poll,
+      ready: (value) =>
+        value?.status === "rejected" &&
+        value?.rejection?.code === "existing_probe_installation",
+    });
+    evidence.repeatedAdd = {
+      enrollment: compactEnrollmentEvidence(repeatedEnrollment),
+      enrollmentStatus: compactEnrollmentStatusEvidence(rejectedEnrollment),
+      rejection,
+      hostAfter: hostAfterRepeatedAdd,
+      hostBefore: hostBeforeRepeatedAdd,
+      stateAfter: stateAfterRepeatedAdd,
+      stateBefore: stateBeforeRepeatedAdd,
+    };
+
+    const localUninstall = await host.localUninstall(runId);
+    assertLocalUninstallCompletion(localUninstall?.completion);
+    const hostAfterLocalUninstall = await hub.getHost(hostId);
+    if (
+      hostAfterLocalUninstall?.id !== hostId ||
+      hostAfterLocalUninstall?.status === "offline"
+    ) {
+      throw assertionError(
+        "local_uninstall_host_not_active",
+        "Local Probe Uninstall did not leave an active non-offline Hub Host before bounded offline observation",
+      );
+    }
+    const offlineHost = await waitForObservation({
+      code: "host_offline_after_local_uninstall_timeout",
+      label: "active Host becoming offline after Local Probe Uninstall",
+      observe: () => hub.getHost(hostId),
+      poll: offlinePoll,
+      ready: (value) => value?.id === hostId && value?.status === "offline",
+    });
+    evidence.localUninstall = {
+      activeHost: compactHostEvidence(hostAfterLocalUninstall),
+      completion: localUninstall.completion,
+      offlineHost: compactHostEvidence(offlineHost),
+      output: localUninstall.output,
+    };
+
+    const existingHostTarget = { hostId, kind: "existing_host" };
+    const reEnrollment = await hub.createEnrollment(existingHostTarget);
+    assertCreatedEnrollment(reEnrollment, existingHostTarget);
+    const reEnrollmentInstall = await host.install(
+      reEnrollment.installCommand,
+      runId,
+    );
+    const reEnrollmentBoundary = await host.assertInstalled(
+      runId,
+      candidateManifest.probeAssetSet.version,
+    );
+    const reEnrollmentIdentity = await host.readProbeIdentity(runId);
+    if (
+      reEnrollmentIdentity.probeId === initialIdentity.probeId ||
+      reEnrollmentIdentity.identitySha256 === initialIdentity.identitySha256
+    ) {
+      throw assertionError(
+        "reenrollment_identity_not_replaced",
+        "Host Re-enrollment did not replace the Probe Identity",
+      );
+    }
+    const renewed = await waitForObservation({
+      code: "host_reenrollment_timeout",
+      label: "re-enrolled Host with renewed readiness",
+      observe: () => hub.getHost(hostId),
+      poll,
+      ready: (value) =>
+        value?.id === hostId &&
+        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
+    });
+    const reEnrollmentMetrics = await waitForObservation({
+      code: "reenrollment_metrics_progression_timeout",
+      label: "new portable Metrics after Host Re-enrollment",
+      observe: () => hub.getHostMetrics(hostId, { window: "24h" }),
+      poll,
+      ready: (value) =>
+        hasAdvancingPortableMetrics(value) &&
+        hasPortableMetricsAfter(value, samples) &&
+        retainsInitialMetricSample(value, samples) &&
+        retainsMetricHistoryAnchors(value, evidence.metricsHistory.anchors),
+    });
+    const reEnrollmentConfiguration =
+      await hub.getHostProbeConfiguration(hostId);
+    if (
+      !sameEffectiveProbeConfiguration(
+        reEnrollmentConfiguration,
+        evidence.probeConfiguration,
+      )
+    ) {
+      throw assertionError(
+        "reenrollment_configuration_not_preserved",
+        "Host Re-enrollment did not preserve Owner Probe Configuration",
+      );
+    }
+    evidence.reEnrollment = {
+      enrollment: compactEnrollmentEvidence(reEnrollment),
+      host: compactHostEvidence(renewed),
+      hostBoundary: reEnrollmentBoundary,
+      hostId,
+      identity: { after: reEnrollmentIdentity, before: initialIdentity },
+      installer: reEnrollmentInstall,
+      metrics: compactMetricsEvidence(reEnrollmentMetrics),
+      metricsHistory: metricsHistoryEvidence(reEnrollmentMetrics, {
+        retain: evidence.metricsHistory.anchors,
+      }),
+      probeConfiguration: reEnrollmentConfiguration,
+    };
+
+    const deletedHost = await hub.deleteHostHubOnly(hostId);
+    const deleted = await waitForObservation({
+      code: "hub_only_host_deletion_timeout",
+      label: "Hub-only Host removal",
+      observe: () => hub.isHostSoftDeleted(hostId),
+      poll,
+      ready: (value) => value === true,
+    });
+    if (deleted !== true || deletedHost?.id !== hostId) {
+      throw assertionError(
+        "hub_only_host_deletion_invalid",
+        "Hub-only deletion did not remove the expected Host",
+      );
+    }
+    const permanentReportRejection =
+      await host.awaitPermanentReportRejection(runId);
+    evidence.diagnostics = {
+      host: await host.collectDiagnostics(runId),
+      hub: await hub.collectEvidence(),
+    };
+    evidence.hubOnlyDeletion = {
+      deletedHost,
+      permanentReportRejection,
+    };
+
+    const finalLocalUninstall = await host.localUninstall(runId);
+    assertLocalUninstallCompletion(finalLocalUninstall?.completion);
+    evidence.finalLocalUninstall = finalLocalUninstall;
+    evidence.auditLog = assertFreshLifecycleAuditLog(
+      await hub.getAuditLog(),
+      hostId,
+    );
     evidence.result = { status: "succeeded" };
     evidence.phase = "succeeded";
   } catch (error) {
     primaryError = error;
-    if (Array.isArray(error?.timeline)) {
-      evidence.operationTimeline = error.timeline;
-    }
     evidence.result = { error: serializedError(error), status: "failed" };
     evidence.phase = "failed";
   } finally {
@@ -1883,6 +2153,18 @@ async function runFreshInstallUninstallScenario({
         evidence.hostEvidence = await resources.host.collectEvidence(runId);
       } catch (error) {
         evidence.hostEvidence = { error: serializedError(error) };
+      }
+    }
+    if (evidence.diagnostics === null && resources?.host?.collectDiagnostics) {
+      try {
+        evidence.diagnostics = {
+          host: await resources.host.collectDiagnostics(runId),
+          hub: resources?.hub?.collectEvidence
+            ? await resources.hub.collectEvidence()
+            : null,
+        };
+      } catch (error) {
+        evidence.diagnostics = { error: serializedError(error) };
       }
     }
 
@@ -1946,6 +2228,7 @@ export function createHubLifecycleClient({
 }) {
   const normalizedBaseUrl = new URL(baseUrl);
   const apiTimeline = [];
+  const enrollments = new Map();
   let ownerCookie = "";
 
   async function request(pathname, init = {}, allowedStatuses = []) {
@@ -1977,6 +2260,26 @@ export function createHubLifecycleClient({
     return { body, response };
   }
 
+  async function readTrackedEnrollment(enrollmentId) {
+    const { body } = await request(`/api/web/enrollments/${enrollmentId}`);
+    assertEnrollmentStatus(body, enrollmentId);
+    recordEnrollmentEvidence(enrollments, body);
+    return body;
+  }
+
+  async function refreshTrackedEnrollment(enrollmentId) {
+    try {
+      await readTrackedEnrollment(enrollmentId);
+    } catch (error) {
+      const previous = enrollments.get(enrollmentId);
+      enrollments.set(enrollmentId, {
+        ...previous,
+        enrollmentId,
+        readError: serializedError(error),
+      });
+    }
+  }
+
   return {
     async authenticate(password) {
       if (!password) throw new Error("Owner password is required");
@@ -1993,11 +2296,21 @@ export function createHubLifecycleClient({
     },
 
     async collectEvidence() {
-      return { apiTimeline: [...apiTimeline] };
+      await Promise.all(
+        [...enrollments.keys()].map((enrollmentId) =>
+          refreshTrackedEnrollment(enrollmentId),
+        ),
+      );
+      return {
+        apiTimeline: [...apiTimeline],
+        enrollments: [...enrollments.values()],
+      };
     },
 
-    async createEnrollment() {
+    async createEnrollment(target) {
+      if (target !== undefined) assertEnrollmentTarget(target);
       const { body } = await request("/api/web/enrollments", {
+        ...(target === undefined ? {} : { body: JSON.stringify({ target }) }),
         method: "POST",
       });
       if (
@@ -2006,7 +2319,24 @@ export function createHubLifecycleClient({
       ) {
         throw new Error("Hub returned an invalid Enrollment response");
       }
+      recordEnrollmentEvidence(enrollments, body);
       return body;
+    },
+
+    async deleteHostHubOnly(hostId) {
+      assertPositiveInteger(hostId, "Host ID");
+      const { body } = await request(`/api/web/hosts/${hostId}?mode=hub-only`, {
+        method: "DELETE",
+      });
+      const deleted = body?.deletedHost;
+      if (
+        deleted?.id !== hostId ||
+        !Number.isSafeInteger(deleted?.deletedAtMs) ||
+        deleted.deletedAtMs < 0
+      ) {
+        throw new Error("Hub returned an invalid Hub-only Host deletion");
+      }
+      return deleted;
     },
 
     async getHost(hostId) {
@@ -2026,10 +2356,16 @@ export function createHubLifecycleClient({
       return body.auditLog;
     },
 
-    async getHostMetrics(hostId) {
+    async getEnrollment(enrollmentId) {
+      assertEnrollmentId(enrollmentId);
+      return readTrackedEnrollment(enrollmentId);
+    },
+
+    async getHostMetrics(hostId, { window = "1m" } = {}) {
       assertPositiveInteger(hostId, "Host ID");
+      assertMetricsWindow(window);
       const { body } = await request(
-        `/api/web/hosts/${hostId}/metrics?window=1m`,
+        `/api/web/hosts/${hostId}/metrics?window=${window}`,
       );
       if (!Array.isArray(body?.metrics?.samples)) {
         throw new Error("Hub returned an invalid Metrics response");
@@ -2204,12 +2540,12 @@ export function createProbeHostHarness({
   }
 
   let disposableRunId = null;
-  let installCommandForCleanup = null;
   if (!/^[0-9a-f-]{36}$/.test(ownershipToken)) {
     throw new Error("Probe Host Harness ownership token is invalid");
   }
   let runOwnsMutation = false;
   let postReplacementFaultArmed = false;
+  let readyForReinstallation = false;
   let sharedDependenciesBefore = null;
 
   async function inventory() {
@@ -2222,6 +2558,38 @@ export function createProbeHostHarness({
     const inspected = parseJson(result.stdout, "Release Test Host inventory");
     assertHostInventoryEvidence(inspected);
     return inspected;
+  }
+
+  async function collectDiagnosticComponent({
+    label,
+    parse = (value) => value,
+    script,
+    validate = () => {},
+  }) {
+    let output = null;
+    try {
+      const result = await execute(script, { root: true });
+      output = commandEvidence(result);
+      if (result.code !== 0) {
+        return {
+          available: false,
+          error: {
+            code: "diagnostic_command_failed",
+            message: `${label} diagnostic command exited ${result.code}`,
+          },
+          output,
+        };
+      }
+      const value = parse(result.stdout);
+      validate(value);
+      return { available: true, output, value };
+    } catch (error) {
+      return {
+        available: false,
+        error: serializedError(error),
+        ...(output ? { output } : {}),
+      };
+    }
   }
 
   return {
@@ -2292,35 +2660,51 @@ export function createProbeHostHarness({
         );
       }
       assertInstallCommand(installCommand);
-      const claim = await execute(claimRunScript(runId, ownershipToken), {
-        root: true,
-      });
-      if (claim.code !== 0) {
+      const reinstallation = runOwnsMutation;
+      if (reinstallation && !readyForReinstallation) {
         throw new Error(
-          `Could not claim Release Test Host run: ${claim.stderr}`,
+          "Release Test Host must complete Local Probe Uninstall before reinstallation",
         );
       }
-      runOwnsMutation = true;
-      installCommandForCleanup = installCommand;
+      if (!reinstallation) {
+        const claim = await execute(claimRunScript(runId, ownershipToken), {
+          root: true,
+        });
+        if (claim.code !== 0) {
+          throw new Error(
+            `Could not claim Release Test Host run: ${claim.stderr}`,
+          );
+        }
+        runOwnsMutation = true;
+      }
       const result = await execute(`${installCommand}\n`, {
         root: true,
         sensitive: true,
       });
       const recorded = await execute(
-        recordRunResourcesScript(runId, ownershipToken),
+        reinstallation
+          ? renewRunResourcesScript(runId, ownershipToken)
+          : recordRunResourcesScript(runId, ownershipToken),
         { root: true },
       );
       if (recorded.code !== 0) {
-        throw new Error(
+        const error = new Error(
           `Could not record run-owned Probe resources: ${recorded.stderr}`,
         );
+        error.code = "probe_resource_recording_failed";
+        error.installerEvidence = commandEvidence(result);
+        throw error;
       }
       if (result.code !== 0) {
-        throw new Error(
-          `Probe installation failed (${result.code}): ${result.stderr}`,
+        const error = new Error(
+          `Probe installation failed (${result.code}); redacted installer evidence was retained`,
         );
+        error.code = "probe_installation_failed";
+        error.installerEvidence = commandEvidence(result);
+        throw error;
       }
-      return { runId };
+      readyForReinstallation = false;
+      return { output: commandEvidence(result), runId };
     },
 
     async assertInstalled(runId, expectedProbeVersion) {
@@ -2344,7 +2728,7 @@ export function createProbeHostHarness({
         "user:enoki-probe",
         "group:enoki-probe",
         "/usr/local/bin/enoki-probe",
-        "/etc/enoki/probe-bootstrap.toml",
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
         "/etc/enoki/probe-install.toml",
         "/etc/systemd/system/enoki-probe.service",
         "/var/lib/enoki-probe",
@@ -2399,6 +2783,98 @@ export function createProbeHostHarness({
         probeVersion,
         service,
         sudoers: sudoersResult.stdout,
+      };
+    },
+
+    async captureInstallationState(runId) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      const result = await execute(installedStateScript(), { root: true });
+      if (result.code !== 0) {
+        throw new Error(
+          `Installed Probe state inspection failed (${result.code}): ${result.stderr}`,
+        );
+      }
+      const state = parseJson(result.stdout, "installed Probe state");
+      assertInstalledStateEvidence(state);
+      return state;
+    },
+
+    async rejectRepeatedInstall(installCommand, runId) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      assertInstallCommand(installCommand);
+      const result = await execute(`${installCommand}\n`, {
+        root: true,
+        sensitive: true,
+      });
+      const rejection = `${result.stdout}\n${result.stderr}`.match(
+        /\bcode=([a-z0-9_]+)\b/,
+      )?.[1];
+      if (result.code === 0 || rejection !== "existing_probe_installation") {
+        throw new Error(
+          `Repeated Probe Add did not return existing_probe_installation: ${result.stderr || result.stdout}`,
+        );
+      }
+      return {
+        code: rejection,
+        output: commandEvidence(result),
+      };
+    },
+
+    async awaitPermanentReportRejection(runId) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      const result = await execute(permanentReportRejectionScript(), {
+        root: true,
+      });
+      if (result.code !== 0) {
+        throw new Error(
+          `Permanent Probe report rejection was not observed: ${result.stderr}`,
+        );
+      }
+      const evidence = parseJson(
+        result.stdout,
+        "permanent Probe report rejection evidence",
+      );
+      assertPermanentReportRejectionEvidence(evidence);
+      return evidence;
+    },
+
+    async collectDiagnostics(runId) {
+      assertRunId(runId);
+      const [inventory, installation, journald, sudoers, systemd] =
+        await Promise.all([
+          collectDiagnosticComponent({
+            label: "Host inventory",
+            parse: (value) =>
+              parseJson(value, "terminal Release Test Host inventory"),
+            script: hostInventoryScript(),
+            validate: assertHostInventoryEvidence,
+          }),
+          collectDiagnosticComponent({
+            label: "Probe installation",
+            parse: (value) =>
+              parseJson(value, "terminal Probe diagnostic evidence"),
+            script: installedDiagnosticsScript(),
+            validate: assertInstalledDiagnosticsEvidence,
+          }),
+          collectDiagnosticComponent({
+            label: "Probe journald",
+            script: journaldEvidenceScript(),
+          }),
+          collectDiagnosticComponent({
+            label: "Probe sudoers",
+            script: installedSudoersDiagnosticsScript(),
+          }),
+          collectDiagnosticComponent({
+            label: "Probe systemd",
+            script: systemdDiagnosticsScript(),
+          }),
+        ]);
+      return {
+        installation,
+        inventory,
+        journald,
+        sudoers,
+        systemd,
       };
     },
 
@@ -2665,6 +3141,25 @@ export function createProbeHostHarness({
       return { operationId: operation.id, owned: true };
     },
 
+    async localUninstall(runId) {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      const result = await execute(
+        "# enoki-release-e2e:local-probe-uninstall\n/usr/local/bin/enoki-probe uninstall\n",
+        { root: true },
+      );
+      if (
+        result.code !== 0 ||
+        result.stdout.trim() !== "Local Probe Uninstall completed."
+      ) {
+        throw new Error(
+          `Local Probe Uninstall failed (${result.code}): ${result.stderr || result.stdout}`,
+        );
+      }
+      const completion = await this.verifyUninstallCompletion(runId);
+      readyForReinstallation = true;
+      return { completion, output: commandEvidence(result) };
+    },
+
     async cleanup(runId) {
       assertRunId(runId);
       if (disposableRunId !== runId || !runOwnsMutation) {
@@ -2715,42 +3210,26 @@ export function createProbeHostHarness({
           verifyRunResourcesScript(runId, ownershipToken),
           { root: true },
         );
-        let resourcesOwned = verifiedResources.code === 0;
-        if (verifiedResources.code !== 0) {
-          const authorizedUpgradeResources = await execute(
-            verifyAuthorizedUpgradeResourcesScript(runId, ownershipToken),
-            { root: true },
+        const resourcesOwned = verifiedResources.code === 0;
+        if (!resourcesOwned) {
+          errors.push(
+            new Error(
+              `Refusing cleanup because Probe resources no longer match run ${runId}: ${verifiedResources.stderr}`,
+            ),
           );
-          resourcesOwned =
-            authorizedUpgradeResources.code === 0 &&
-            authorizedUpgradeResources.stdout.trim() === "owned";
-          if (!resourcesOwned) {
-            errors.push(
-              new Error(
-                `Refusing cleanup because Probe resources no longer match run ${runId}: ${verifiedResources.stderr}${authorizedUpgradeResources.stderr}`,
-              ),
-            );
-          }
         }
         if (resourcesOwned) {
-          const cleanupCommand = await attempt(() =>
-            Promise.resolve(uninstallCommand(installCommandForCleanup)),
-          );
-          if (cleanupCommand) {
-            await attempt(async () => {
-              const uninstalled = await execute(`${cleanupCommand}\n`, {
-                root: true,
-                sensitive: true,
-              });
-              if (uninstalled.code !== 0) {
-                throw new Error(
-                  `Run-owned Probe cleanup failed (${uninstalled.code}): ${uninstalled.stderr}`,
-                );
-              }
-              removedPartialInstallation = true;
-            });
-          }
           await attempt(async () => {
+            const cleaned = await execute(
+              releaseEmergencyCleanupScript(runId, ownershipToken),
+              { root: true },
+            );
+            if (cleaned.code !== 0) {
+              throw new Error(
+                `Run-owned emergency cleanup failed: ${cleaned.stderr}`,
+              );
+            }
+            removedPartialInstallation = true;
             const reloaded = await execute(daemonReloadScript(), {
               root: true,
             });
@@ -2795,6 +3274,7 @@ export function createProbeHostHarness({
           throw new Error("Run claim remains after Host cleanup");
         }
         runOwnsMutation = false;
+        readyForReinstallation = false;
       });
       if (errors.length > 0) {
         const aggregate = new AggregateError(
@@ -2905,13 +3385,15 @@ printf '{"architecture":"%s","operatingSystem":"%s","operatingSystemVersion":"%s
 }
 
 function hostInventoryScript() {
+  const group = shellSingleQuote(releaseE2EGroups[0]);
+  const user = shellSingleQuote(releaseE2EUsers[0]);
   return String.raw`# enoki-release-e2e:inventory
 set -eu
 json_bool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
 printf '{"accounts":{"group":'
-json_bool getent group enoki-probe
+json_bool getent group ${group}
 printf ',"user":'
-json_bool getent passwd enoki-probe
+json_bool getent passwd ${user}
 printf '},"files":['
 separator=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
@@ -2968,10 +3450,116 @@ set -eu
 `;
 }
 
+function installedStateScript() {
+  return String.raw`# enoki-release-e2e:installed-state
+set -eu
+binary=/usr/local/bin/enoki-probe
+metadata=/etc/enoki/probe-install.toml
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+[ -x "$binary" ]
+[ -f "$metadata" ]
+[ -f "$identity" ]
+load_state=$(systemctl show enoki-probe.service --no-pager --property=LoadState --value)
+active_state=$(systemctl show enoki-probe.service --no-pager --property=ActiveState --value)
+sub_state=$(systemctl show enoki-probe.service --no-pager --property=SubState --value)
+restart_count=$(systemctl show enoki-probe.service --no-pager --property=NRestarts --value)
+case "$restart_count" in ''|*[!0-9]*) exit 1 ;; esac
+probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$identity")
+private_key_line=$(grep -E '^probe_private_key_pem = ".+"$' "$identity")
+[ "$(grep -c '^probe_id = ' "$identity")" -eq 1 ]
+[ "$(grep -c '^probe_private_key_pem = ' "$identity")" -eq 1 ]
+probe_id=$(printf '%s\n' "$probe_id_line" | cut -d '"' -f 2)
+identity_sha256=$(printf '%s\n%s\n' "$probe_id_line" "$private_key_line" | sha256sum | cut -d ' ' -f 1)
+binary_sha256=$(sha256sum -- "$binary" | cut -d ' ' -f 1)
+metadata_sha256=$(sha256sum -- "$metadata" | cut -d ' ' -f 1)
+printf '{"binarySha256":"%s","identity":{"identitySha256":"%s","probeId":"%s"},"installMetadataSha256":"%s","restartCount":%s,"service":{"ActiveState":"%s","LoadState":"%s","SubState":"%s"}}\n' \
+  "$binary_sha256" "$identity_sha256" "$probe_id" "$metadata_sha256" "$restart_count" "$active_state" "$load_state" "$sub_state"`;
+}
+
+function permanentReportRejectionScript() {
+  return String.raw`# enoki-release-e2e:permanent-report-rejection
+set -eu
+binary=/usr/local/bin/enoki-probe
+metadata=/etc/enoki/probe-install.toml
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+read_property() {
+  systemctl show enoki-probe.service --no-pager --property="$1" --value
+}
+for attempt in $(seq 1 60); do
+  load_state=$(read_property LoadState)
+  active_state=$(read_property ActiveState)
+  sub_state=$(read_property SubState)
+  exit_status=$(read_property ExecMainStatus)
+  restart_count=$(read_property NRestarts)
+  case "$restart_count" in ''|*[!0-9]*) exit 1 ;; esac
+  if [ "$load_state" = loaded ] && [ "$active_state" = failed ] && [ "$sub_state" = failed ] && [ "$exit_status" = 78 ]; then
+    break
+  fi
+  if [ "$attempt" = 60 ]; then
+    printf 'Probe service did not reach permanent report failure: LoadState=%s ActiveState=%s SubState=%s ExecMainStatus=%s NRestarts=%s\n' "$load_state" "$active_state" "$sub_state" "$exit_status" "$restart_count" >&2
+    exit 1
+  fi
+  sleep 2
+done
+restart_count_before=$restart_count
+sleep 10
+restart_count_after=$(read_property NRestarts)
+case "$restart_count_after" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$restart_count_after" = "$restart_count_before" ] || { printf 'Probe restart counter changed after permanent report rejection\n' >&2; exit 1; }
+[ -x "$binary" ]
+[ -f "$metadata" ]
+[ -f "$identity" ]
+probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$identity")
+private_key_line=$(grep -E '^probe_private_key_pem = ".+"$' "$identity")
+[ "$(grep -c '^probe_id = ' "$identity")" -eq 1 ]
+[ "$(grep -c '^probe_private_key_pem = ' "$identity")" -eq 1 ]
+probe_id=$(printf '%s\n' "$probe_id_line" | cut -d '"' -f 2)
+identity_sha256=$(printf '%s\n%s\n' "$probe_id_line" "$private_key_line" | sha256sum | cut -d ' ' -f 1)
+binary_sha256=$(sha256sum -- "$binary" | cut -d ' ' -f 1)
+metadata_sha256=$(sha256sum -- "$metadata" | cut -d ' ' -f 1)
+printf '{"binarySha256":"%s","identity":{"identitySha256":"%s","probeId":"%s"},"installMetadataSha256":"%s","restartCountAfterObservation":%s,"restartCountBeforeObservation":%s,"service":{"ActiveState":"%s","ExecMainStatus":%s,"LoadState":"%s","SubState":"%s"}}\n' \
+  "$binary_sha256" "$identity_sha256" "$probe_id" "$metadata_sha256" "$restart_count_after" "$restart_count_before" "$active_state" "$exit_status" "$load_state" "$sub_state"`;
+}
+
+function installedDiagnosticsScript() {
+  return String.raw`# enoki-release-e2e:installed-diagnostics
+set -eu
+binary=/usr/local/bin/enoki-probe
+metadata=/etc/enoki/probe-install.toml
+identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+[ -x "$binary" ]
+[ -f "$metadata" ]
+[ -f "$identity" ]
+read_property() {
+  systemctl show enoki-probe.service --no-pager --property="$1" --value
+}
+binary_version=$("$binary" --version | sed -nE 's/.*v?([0-9]+[.][0-9]+[.][0-9]+).*/\1/p' | head -n 1)
+case "$binary_version" in ''|*[!0-9.]*|*..*) exit 1 ;; esac
+load_state=$(read_property LoadState)
+active_state=$(read_property ActiveState)
+sub_state=$(read_property SubState)
+exit_status=$(read_property ExecMainStatus)
+restart_count=$(read_property NRestarts)
+result=$(read_property Result)
+case "$exit_status" in ''|*[!0-9]*) exit 1 ;; esac
+case "$restart_count" in ''|*[!0-9]*) exit 1 ;; esac
+[ -n "$result" ]
+probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$identity")
+private_key_line=$(grep -E '^probe_private_key_pem = ".+"$' "$identity")
+[ "$(grep -c '^probe_id = ' "$identity")" -eq 1 ]
+[ "$(grep -c '^probe_private_key_pem = ' "$identity")" -eq 1 ]
+probe_id=$(printf '%s\n' "$probe_id_line" | cut -d '"' -f 2)
+identity_sha256=$(printf '%s\n%s\n' "$probe_id_line" "$private_key_line" | sha256sum | cut -d ' ' -f 1)
+binary_sha256=$(sha256sum -- "$binary" | cut -d ' ' -f 1)
+metadata_sha256=$(sha256sum -- "$metadata" | cut -d ' ' -f 1)
+printf '{"binary":{"sha256":"%s","version":"%s"},"identity":{"identitySha256":"%s","probeId":"%s"},"installMetadataSha256":"%s","service":{"ActiveState":"%s","ExecMainStatus":%s,"LoadState":"%s","NRestarts":%s,"Result":"%s","SubState":"%s"}}\n' \
+  "$binary_sha256" "$binary_version" "$identity_sha256" "$probe_id" "$metadata_sha256" "$active_state" "$exit_status" "$load_state" "$restart_count" "$result" "$sub_state"`;
+}
+
 function probeIdentityScript() {
   return String.raw`# enoki-release-e2e:probe-identity
 set -eu
-config=/etc/enoki/probe-bootstrap.toml
+config=/var/lib/enoki-probe/identity/probe-bootstrap.toml
 [ -f "$config" ]
 [ ! -L "$config" ]
 probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$config")
@@ -3009,6 +3597,13 @@ journalctl --unit=enoki-probe.service --no-pager --lines=200 --output=short-iso
 `;
 }
 
+function systemdDiagnosticsScript() {
+  return String.raw`# enoki-release-e2e:systemd-diagnostics
+set -eu
+systemctl show enoki-probe.service --no-pager --property=LoadState --property=ActiveState --property=SubState --property=Result --property=ExecMainStatus --property=NRestarts
+`;
+}
+
 function systemdEvidenceScript() {
   return String.raw`# enoki-release-e2e:systemd-evidence
 set -eu
@@ -3040,7 +3635,24 @@ printf 'stage=post-uninstall\nmanagedSudoersCount=0\n'
 `;
 }
 
+function installedSudoersDiagnosticsScript() {
+  return String.raw`# enoki-release-e2e:installed-sudoers
+set -eu
+found=false
+for candidate in /etc/sudoers.d/enoki-probe-operations /etc/sudoers.d/enoki-probe-collector-helpers /etc/sudoers.d/enoki-probe-upgrader; do
+  if [ -f "$candidate" ]; then
+    found=true
+    printf '### %s\n' "$candidate"
+    cat -- "$candidate"
+  fi
+done
+"$found"
+`;
+}
+
 function claimRunScript(runId, token) {
+  const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
+  const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
   return `# enoki-release-e2e:claim
 set -eu
 claim_root=/var/lib/enoki-release-e2e
@@ -3058,8 +3670,12 @@ residue=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then residue="$residue $candidate"; fi
 done
-if getent passwd enoki-probe >/dev/null 2>&1; then residue="$residue user:enoki-probe"; fi
-if getent group enoki-probe >/dev/null 2>&1; then residue="$residue group:enoki-probe"; fi
+for account in ${users}; do
+  if getent passwd "$account" >/dev/null 2>&1; then residue="$residue user:$account"; fi
+done
+for account in ${groups}; do
+  if getent group "$account" >/dev/null 2>&1; then residue="$residue group:$account"; fi
+done
 units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
 if [ -n "$units" ]; then residue="$residue enoki-probe-unit"; fi
 if [ -n "$residue" ]; then
@@ -3082,6 +3698,24 @@ function recordRunResourcesScript(runId, token) {
     token,
     verify: false,
   });
+}
+
+function renewRunResourcesScript(runId, token) {
+  return `# enoki-release-e2e:renew-resources
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+[ -d "$claim" ]
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
+[ -f "$claim/resources" ]
+${resourceFingerprintFunction()}
+temporary=$(mktemp "$claim/resources.renew.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+fingerprint > "$temporary"
+mv -- "$temporary" "$claim/resources"
+trap - EXIT HUP INT TERM
+printf 'renewed\\n'
+`;
 }
 
 function verifyRunResourcesScript(runId, token) {
@@ -3312,43 +3946,82 @@ printf 'owned\n'
 `;
 }
 
-function verifyAuthorizedUpgradeResourcesScript(runId, token) {
-  return `# enoki-release-e2e:verify-upgrade-ownership
-set -eu
-claim=/var/lib/enoki-release-e2e/claim
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-[ -s "$claim/upgrade-target" ]
-[ -s "$claim/upgrade-operation-id" ]
-case "$(cat "$claim/upgrade-target")" in
-  0.*.*|[1-9]*.*.*) ;;
-  *) printf 'invalid authorized Probe Upgrade target\n' >&2; exit 77 ;;
-esac
-case "$(cat "$claim/upgrade-operation-id")" in
-  ''|*[!0-9]*) printf 'invalid authorized Probe Upgrade operation\n' >&2; exit 78 ;;
-esac
-[ -f "$claim/upgrade-before-resources" ]
-cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
-${knownProbeInstallMetadataScript()}
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.transition.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-printf 'owned\n'
-`;
+function resourceFingerprintFunction() {
+  return renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources);
 }
 
-function resourceFingerprintFunction() {
-  return String.raw`fingerprint() {
-  for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
-    if [ -L "$candidate" ]; then printf 'link\t%s\t%s\n' "$candidate" "$(readlink "$candidate")"
-    elif [ -f "$candidate" ]; then printf 'file\t%s\n' "$candidate"
-    elif [ -d "$candidate" ]; then printf 'directory\t%s\n' "$candidate"
+export function renderReleaseE2EResourceFingerprint(resources) {
+  const files = resources
+    .filter((resource) => resource.kind === "file")
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const directories = resources
+    .filter((resource) => resource.kind === "directory")
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const users = resources
+    .filter((resource) => resource.kind === "user")
+    .map((resource) => shellSingleQuote(resource.name))
+    .join(" ");
+  const groups = resources
+    .filter((resource) => resource.kind === "group")
+    .map((resource) => shellSingleQuote(resource.name))
+    .join(" ");
+  return String.raw`fingerprint_path() {
+  path=$1
+  metadata=$(stat -c '%u\t%g\t%a\t%d\t%i\t%s' -- "$path") || return 1
+  path_hash=$(printf '%s' "$path" | sha256sum | awk '{print $1}') || return 1
+  if [ -L "$path" ]; then
+    type=symlink
+    content_hash=$(readlink -- "$path" | sha256sum | awk '{print $1}') || return 1
+  elif [ -f "$path" ]; then
+    type=file
+    content_hash=$(sha256sum -- "$path" | awk '{print $1}') || return 1
+  elif [ -d "$path" ]; then
+    type=directory
+    content_hash=-
+  else
+    type=$(stat -c '%F' -- "$path") || return 1
+    content_hash=-
+  fi
+  printf 'path\t%s\t%s\t%s\t%s\n' "$path_hash" "$type" "$metadata" "$content_hash"
+}
+fingerprint_directory() {
+  directory=$1
+  members=$(find -P "$directory" -xdev -print | LC_ALL=C sort) || return 1
+  printf '%s\n' "$members" | while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    fingerprint_path "$member" || exit 1
+  done
+}
+fingerprint() {
+  for candidate in ${files}; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      fingerprint_path "$candidate" || return 1
     fi
   done
-  if getent passwd enoki-probe >/dev/null 2>&1; then printf 'user\tenoki-probe\n'; fi
-  if getent group enoki-probe >/dev/null 2>&1; then printf 'group\tenoki-probe\n'; fi
+  for candidate in ${directories}; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      fingerprint_directory "$candidate" || return 1
+    fi
+  done
+  for account in ${users}; do
+    if entry=$(getent passwd "$account"); then
+      uid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
+      gid=$(printf '%s' "$entry" | cut -d: -f4) || return 1
+      entry_hash=$(printf '%s' "$entry" | sha256sum | awk '{print $1}') || return 1
+      printf 'user\t%s\t%s\t%s\t%s\n' "$account" "$uid" "$gid" "$entry_hash"
+    fi
+  done
+  for account in ${groups}; do
+    if entry=$(getent group "$account"); then
+      gid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
+      entry_hash=$(printf '%s' "$entry" | sha256sum | awk '{print $1}') || return 1
+      printf 'group\t%s\t%s\t%s\n' "$account" "$gid" "$entry_hash"
+    fi
+  done
 }`;
 }
 
@@ -3375,7 +4048,7 @@ case "$metadata_schema" in
   current)
     [ "$(stat -c %a "$metadata")" = 600 ]
     require_metadata_line 'schema_version = 1'
-    require_metadata_line 'identity_path = "/etc/enoki/probe-bootstrap.toml"'
+    require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
     require_metadata_line 'service_group = "enoki-probe"'
     require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
     ;;
@@ -3397,10 +4070,51 @@ function inspectClaimScript(runId, token) {
   return `# enoki-release-e2e:inspect-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\nif [ ! -e "$claim" ]; then printf 'absent\\n'; elif [ -d "$claim" ] && [ "$(cat "$claim/run-id" 2>/dev/null || true)" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim/token" 2>/dev/null || true)" = ${shellSingleQuote(token)} ]; then printf 'owned\\n'; else printf 'foreign\\n'; fi\n`;
 }
 
+function releaseEmergencyCleanupScript(runId, token) {
+  const pathsFor = (kind) =>
+    releaseE2EInfrastructureResources
+      .filter((resource) => resource.kind === kind)
+      .map((resource) => shellSingleQuote(resource.path))
+      .join(" ");
+  const namesFor = (kind) =>
+    releaseE2EInfrastructureResources
+      .filter((resource) => resource.kind === kind)
+      .map((resource) => shellSingleQuote(resource.name))
+      .join(" ");
+  const files = pathsFor("file");
+  const directories = pathsFor("directory");
+  const users = namesFor("user");
+  const groups = namesFor("group");
+  const services = namesFor("service");
+  return `# enoki-release-e2e:emergency-cleanup
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+[ -d "$claim" ]
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
+[ -f "$claim/resources" ]
+${resourceFingerprintFunction()}
+temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+fingerprint > "$temporary"
+cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\\n' >&2; exit 75; }
+systemctl disable --now ${services} >/dev/null 2>&1 || true
+rm -f -- ${files}
+rm -rf -- ${directories}
+for account in ${users}; do userdel -- "$account" >/dev/null 2>&1 || true; done
+for account in ${groups}; do groupdel -- "$account" >/dev/null 2>&1 || true; done
+printf 'cleaned\\n'
+`;
+}
+
 function inventoryResidue(inventory) {
   const residue = [];
-  if (inventory?.accounts?.user) residue.push("user:enoki-probe");
-  if (inventory?.accounts?.group) residue.push("group:enoki-probe");
+  if (inventory?.accounts?.user) {
+    residue.push(...releaseE2EUsers.map((account) => `user:${account}`));
+  }
+  if (inventory?.accounts?.group) {
+    residue.push(...releaseE2EGroups.map((account) => `group:${account}`));
+  }
   if (Array.isArray(inventory?.files)) residue.push(...inventory.files);
   if (Array.isArray(inventory?.units)) residue.push(...inventory.units);
   return residue.sort();
@@ -3452,11 +4166,6 @@ function parseKeyValues(value) {
     result[line.slice(0, separator)] = line.slice(separator + 1);
   }
   return result;
-}
-
-function uninstallCommand(installCommand) {
-  assertInstallCommand(installCommand);
-  return installCommand.replace(/ bash$/, " ENOKI_UNINSTALL=1 bash");
 }
 
 function commandEvidence(result) {
@@ -3637,6 +4346,51 @@ function assertPositiveInteger(value, label) {
   }
 }
 
+function assertEnrollmentTarget(target) {
+  if (target?.kind === "new_host" && Object.keys(target).length === 1) {
+    return;
+  }
+  if (
+    target?.kind === "existing_host" &&
+    Object.keys(target).sort().join(",") === "hostId,kind" &&
+    Number.isSafeInteger(target.hostId) &&
+    target.hostId > 0
+  ) {
+    return;
+  }
+  throw new Error("Enrollment target is invalid");
+}
+
+function assertEnrollmentId(value) {
+  if (!/^enr_[A-Za-z0-9_-]{16,}$/.test(value ?? "")) {
+    throw new Error("Enrollment ID is invalid");
+  }
+}
+
+function assertEnrollmentStatus(value, enrollmentId) {
+  const validRejection =
+    value?.rejection === null ||
+    (typeof value?.rejection?.code === "string" &&
+      value.rejection.code.length > 0 &&
+      value.rejection.code.length <= 64 &&
+      (value.rejection.message === null ||
+        (typeof value.rejection.message === "string" &&
+          value.rejection.message.length > 0 &&
+          value.rejection.message.length <= 512)));
+  if (
+    value?.enrollmentId !== enrollmentId ||
+    !["pending", "verifying", "ready", "rejected", "expired"].includes(
+      value?.status,
+    ) ||
+    (value.hostId !== null &&
+      (!Number.isSafeInteger(value.hostId) || value.hostId < 1)) ||
+    !validRejection
+  ) {
+    throw new Error("Hub returned an invalid Enrollment status");
+  }
+  assertEnrollmentTarget(value.target);
+}
+
 function assertProbeVersion(value, label) {
   if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(value ?? "")) {
     throw new Error(`${label} is invalid`);
@@ -3708,6 +4462,219 @@ function assertScenarioParticipants(host, hub) {
   ) {
     throw new Error("Release E2E environment returned invalid participants");
   }
+}
+
+function assertFreshInstallScenarioParticipants(host, hub) {
+  const hostMethods = [
+    "assertDisposable",
+    "assertInstalled",
+    "awaitPermanentReportRejection",
+    "captureInstallationState",
+    "cleanup",
+    "collectDiagnostics",
+    "collectEvidence",
+    "install",
+    "localUninstall",
+    "readProbeIdentity",
+    "rejectRepeatedInstall",
+  ];
+  const hubMethods = [
+    "authenticate",
+    "collectEvidence",
+    "createEnrollment",
+    "deleteHostHubOnly",
+    "getAuditLog",
+    "getEnrollment",
+    "getHost",
+    "getHostMetrics",
+    "getHostProbeConfiguration",
+    "isHostSoftDeleted",
+    "listHosts",
+    "updateHostProbeConfiguration",
+  ];
+  if (
+    hostMethods.some((method) => typeof host?.[method] !== "function") ||
+    hubMethods.some((method) => typeof hub?.[method] !== "function")
+  ) {
+    throw new Error(
+      "Release E2E environment returned invalid fresh-install participants",
+    );
+  }
+}
+
+function assertCreatedEnrollment(enrollment, expectedTarget) {
+  if (
+    !enrollment?.installCommand ||
+    enrollment?.status !== "pending" ||
+    JSON.stringify(enrollment.target) !== JSON.stringify(expectedTarget)
+  ) {
+    throw assertionError(
+      "enrollment_command_missing",
+      "Hub did not return an official pending Enrollment for the expected target",
+    );
+  }
+  assertEnrollmentId(enrollment.enrollmentId);
+  assertInstallCommand(enrollment.installCommand);
+}
+
+function compactEnrollmentEvidence(enrollment) {
+  return {
+    enrollmentId: enrollment.enrollmentId,
+    status: enrollment.status,
+    target: enrollment.target,
+  };
+}
+
+function compactEnrollmentStatusEvidence(enrollment) {
+  return {
+    enrollmentId: enrollment.enrollmentId,
+    hostId: enrollment.hostId,
+    rejection: enrollment.rejection,
+    status: enrollment.status,
+    target: enrollment.target,
+  };
+}
+
+function recordEnrollmentEvidence(enrollments, enrollment) {
+  if (typeof enrollment?.enrollmentId !== "string") return;
+  enrollments.set(enrollment.enrollmentId, {
+    enrollmentId: enrollment.enrollmentId,
+    hostId: enrollment.hostId ?? null,
+    rejection: enrollment.rejection ?? null,
+    readError: null,
+    status: enrollment.status ?? null,
+    target: enrollment.target ?? null,
+  });
+}
+
+function assertMetricsWindow(window) {
+  if (!new Set(["1m", "10m", "1h", "6h", "24h", "3d", "7d"]).has(window)) {
+    throw new Error("Hub Metrics window is invalid");
+  }
+}
+
+function assertLocalUninstallCompletion(completion) {
+  if (
+    completion?.clean !== true ||
+    completion?.journaldRetained !== true ||
+    completion?.sharedDependenciesRetained !== true
+  ) {
+    throw assertionError(
+      "local_probe_uninstall_residue",
+      "Local Probe Uninstall did not satisfy the shared no-residue boundary",
+    );
+  }
+  assertHostInventoryEvidence(completion.inventory);
+  if (inventoryResidue(completion.inventory).length > 0) {
+    throw assertionError(
+      "local_probe_uninstall_residue",
+      "Local Probe Uninstall left Enoki-managed residue",
+    );
+  }
+}
+
+function hasPortableMetricsAfter(samples, previousSamples) {
+  const previous = latestPortableMetric(previousSamples);
+  return (
+    Boolean(previous) &&
+    Array.isArray(samples) &&
+    samples.some(
+      (sample) =>
+        isPortableMetricSample(sample) &&
+        sample.collectedAtMs > previous.collectedAtMs,
+    )
+  );
+}
+
+function retainsInitialMetricSample(samples, initialSamples) {
+  const initial = compactMetricsEvidence(initialSamples)[0];
+  return (
+    Boolean(initial) &&
+    Array.isArray(samples) &&
+    samples.some(
+      (sample) =>
+        isPortableMetricSample(sample) &&
+        sample.sequence === initial.sequence &&
+        sample.collectedAtMs === initial.collectedAtMs,
+    )
+  );
+}
+
+function retainsMetricHistoryAnchors(samples, anchors) {
+  return (
+    Array.isArray(anchors) &&
+    anchors.length > 0 &&
+    anchors.every((anchor) =>
+      samples.some(
+        (sample) =>
+          isPortableMetricSample(sample) &&
+          JSON.stringify(compactMetricAnchor(sample)) ===
+            JSON.stringify(anchor),
+      ),
+    )
+  );
+}
+
+function assertFreshLifecycleAuditLog(auditLog, hostId) {
+  const required = [
+    {
+      action: "enrollment_token.create",
+      matches: (event) =>
+        isValidLifecycleAuditEvent(event) &&
+        event.actor === "owner" &&
+        event.outcome === "success" &&
+        event.details?.target?.kind === "new_host",
+    },
+    {
+      action: "enrollment.installation_rejected",
+      matches: (event) =>
+        isValidLifecycleAuditEvent(event) &&
+        event.actor === "system" &&
+        event.outcome === "success" &&
+        event.details?.code === "existing_probe_installation",
+    },
+    {
+      action: "enrollment_token.create",
+      matches: (event) =>
+        isValidLifecycleAuditEvent(event) &&
+        event.actor === "owner" &&
+        event.outcome === "success" &&
+        event.details?.target?.kind === "existing_host" &&
+        event.details.target.hostId === hostId,
+    },
+    {
+      action: "probe_configuration.host.override",
+      matches: (event) =>
+        isValidLifecycleAuditEvent(event) &&
+        event.actor === "owner" &&
+        event.outcome === "success" &&
+        event.subjectId === String(hostId),
+    },
+    {
+      action: "host.delete",
+      matches: (event) =>
+        isValidLifecycleAuditEvent(event) &&
+        event.actor === "owner" &&
+        event.outcome === "success" &&
+        event.subjectId === String(hostId) &&
+        event.subjectType === "host" &&
+        event.details?.hostId === hostId &&
+        event.details?.mode === "hub-only",
+    },
+  ];
+  const selected = required.map(({ action, matches }) =>
+    auditLog.find((event) => event?.action === action && matches(event)),
+  );
+  const missing = required
+    .filter((_, index) => !selected[index])
+    .map(({ action }) => action);
+  if (missing.length > 0) {
+    throw assertionError(
+      "fresh_lifecycle_audit_log_missing",
+      `Hub Audit Log is missing fresh lifecycle evidence: ${missing.join(", ")}`,
+    );
+  }
+  return selected;
 }
 
 function assertBaselineScenarioParticipants(host, hub) {
@@ -4105,10 +5072,19 @@ async function proveProbeConfigurationRoundTrip({ hostId, hub, poll }) {
       ),
   });
   return {
+    configuration: canonicalSemanticValue(updated.configuration),
     mode: updated.mode,
     reportedVersion: reported.reportedProbeConfigurationVersion,
     version,
   };
+}
+
+function sameEffectiveProbeConfiguration(current, expected) {
+  return (
+    current?.mode === expected?.mode &&
+    JSON.stringify(canonicalSemanticValue(current?.configuration)) ===
+      JSON.stringify(expected?.configuration)
+  );
 }
 
 function metricsAdvanceBeyond(samples, previous) {
@@ -4125,6 +5101,16 @@ function normalizedPollTiming(timing) {
     intervalMs: timing.intervalMs ?? 2_000,
     sleep: timing.sleep ?? defaultSleep,
     timeoutMs: timing.timeoutMs ?? 120_000,
+  };
+}
+
+function localUninstallOfflineObservationPoll(timing, poll) {
+  return {
+    ...poll,
+    timeoutMs: Math.max(
+      timing.offlineTimeoutMs ?? poll.timeoutMs,
+      defaultLocalUninstallOfflineObservationTimeoutMs,
+    ),
   };
 }
 
@@ -4312,6 +5298,25 @@ function compactHostEvidence(host) {
   };
 }
 
+function stableHubHostProjection(host) {
+  return {
+    hostMetadata: canonicalHostMetadata(host?.hostMetadata),
+    hostProfile: canonicalSemanticValue(host?.hostProfile),
+    id: host?.id,
+    reportedProbeConfigurationVersion:
+      host?.reportedProbeConfigurationVersion ?? null,
+  };
+}
+
+function canonicalHostMetadata(metadata) {
+  return {
+    connectAddress: metadata?.connectAddress ?? null,
+    description: metadata?.description ?? null,
+    displayName: metadata?.displayName ?? null,
+    observedIp: metadata?.observedIp ?? null,
+  };
+}
+
 function compactMetricsEvidence(samples) {
   const ordered = samples
     .filter(isPortableMetricSample)
@@ -4324,6 +5329,41 @@ function compactMetricsEvidence(samples) {
     sequence: sample.sequence,
     uptimeSeconds: sample.uptimeSeconds,
   }));
+}
+
+function metricsHistoryEvidence(samples, { retain = [] } = {}) {
+  const ordered = samples
+    .filter(isPortableMetricSample)
+    .sort((left, right) => left.sequence - right.sequence)
+    .map(compactMetricAnchor);
+  const selected = [
+    ordered[0],
+    ordered[Math.floor((ordered.length - 1) / 2)],
+    ordered.at(-1),
+    ...retain.filter((anchor) =>
+      ordered.some(
+        (sample) => JSON.stringify(sample) === JSON.stringify(anchor),
+      ),
+    ),
+  ].filter(Boolean);
+  const anchors = [
+    ...new Map(selected.map((anchor) => [anchor.sequence, anchor])).values(),
+  ].sort((left, right) => left.sequence - right.sequence);
+  return {
+    anchors,
+    sha256: createHash("sha256").update(JSON.stringify(anchors)).digest("hex"),
+  };
+}
+
+function compactMetricAnchor(sample) {
+  return {
+    collectedAtMs: sample.collectedAtMs,
+    cpuPercent: sample.cpuPercent,
+    memoryTotalBytes: sample.memoryTotalBytes,
+    memoryUsedBytes: sample.memoryUsedBytes,
+    sequence: sample.sequence,
+    uptimeSeconds: sample.uptimeSeconds,
+  };
 }
 
 function latestPortableMetric(samples) {
@@ -4347,6 +5387,9 @@ function serializedError(error) {
     code: error?.code ?? "error",
     message: error instanceof Error ? error.message : String(error),
   };
+  if (error?.installerEvidence) {
+    serialized.installerEvidence = error.installerEvidence;
+  }
   if (error instanceof AggregateError) {
     serialized.errors = error.errors.map((nested) => serializedError(nested));
   }
@@ -4356,7 +5399,7 @@ function serializedError(error) {
 function redactSensitiveEvidence(value, secrets, key = "") {
   if (
     key &&
-    /(?:authorization|cookie|enrollment.?token|headers?|owner.?password|signing.?secret)/i.test(
+    /(?:authorization|cookie|enrollment.?token|headers?|owner.?password|private.?key|signing.?secret|install.?command)/i.test(
       key,
     )
   ) {
@@ -4387,6 +5430,10 @@ function redactSensitiveText(value, secrets) {
   return redacted
     .replace(/enk_enroll_[A-Za-z0-9_-]+/g, "[REDACTED_ENROLLMENT_TOKEN]")
     .replace(
+      /-----BEGIN(?: [A-Z]+)? PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z]+)? PRIVATE KEY-----/g,
+      "[REDACTED_PRIVATE_KEY]",
+    )
+    .replace(
       /(authorization\s*[:=]\s*)(?:Bearer\s+)?[^\s,;]+/gi,
       "$1[REDACTED]",
     )
@@ -4394,6 +5441,10 @@ function redactSensitiveText(value, secrets) {
     .replace(
       /(ENOKI_ENROLLMENT_TOKEN\s*=\s*)('[^']*'|"[^"]*"|[^\s]+)/g,
       "$1[REDACTED]",
+    )
+    .replace(
+      /curl -fsSL '[^']+\/api\/probe\/install\.sh' \| sudo env [^\n]+ bash/g,
+      "[REDACTED_INSTALLER_COMMAND]",
     );
 }
 
