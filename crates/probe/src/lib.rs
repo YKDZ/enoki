@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod collectors;
 pub mod host_profile;
+pub mod local_lifecycle;
 pub mod local_privilege_boundary;
 pub mod metrics;
 pub mod privileged_collector_helpers;
@@ -9,6 +10,7 @@ pub mod protocol;
 pub mod registration;
 pub mod report;
 pub mod runtime;
+pub mod secure_file;
 pub mod upgrader;
 pub mod version;
 

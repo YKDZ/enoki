@@ -14,6 +14,9 @@ pub enum ProbeCommand {
         service_user: String,
         probe_binary: PathBuf,
     },
+    InternalLocalLifecycle {
+        candidate_binary: PathBuf,
+    },
     InternalUpgrader {
         bootstrap_config_path: PathBuf,
     },
@@ -46,6 +49,7 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
         Some("internal-render-collector-helper-sudoers") => {
             parse_internal_render_collector_helper_sudoers_command(args)
         }
+        Some("local-install") => parse_internal_local_lifecycle_command(args),
         Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
         Some("internal-upgrader") => parse_internal_upgrader_command(args),
         Some("repair") => {
@@ -60,6 +64,17 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
         Some("register") => parse_register_command(args),
         Some("run") => parse_run_command(args),
         Some("--version" | "-V") => ProbeCommand::Version,
+        _ => ProbeCommand::Help,
+    }
+}
+
+fn parse_internal_local_lifecycle_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
+    match (args.next().as_deref(), args.next()) {
+        (Some("--candidate"), Some(candidate_binary)) if args.next().is_none() => {
+            ProbeCommand::InternalLocalLifecycle {
+                candidate_binary: PathBuf::from(candidate_binary),
+            }
+        }
         _ => ProbeCommand::Help,
     }
 }
@@ -247,6 +262,10 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         }
         ProbeCommand::InternalRenderCollectorHelperSudoers { .. } => {
             "Privileged Collector Helper sudoers rendering uses compiled helper declarations.\n"
+                .to_string()
+        }
+        ProbeCommand::InternalLocalLifecycle { .. } => {
+            "Probe Local Lifecycle performs typed fresh installation and readiness verification.\n"
                 .to_string()
         }
         ProbeCommand::InternalUpgrader { .. } => {

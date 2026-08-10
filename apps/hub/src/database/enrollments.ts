@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull, lte } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lte } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
@@ -30,6 +30,14 @@ export type RegisterNewHostEnrollmentInput = {
 };
 
 export type EnrollmentRepository = {
+  resolveStartupReport: (input: {
+    enrollmentId: string | null;
+    hostId: number;
+    reportedAtMs: number;
+  }) =>
+    | { enrollment: EnrollmentTokenRow; status: "ready" }
+    | { enrollment: EnrollmentTokenRow; status: "rejected" }
+    | null;
   createPending: (input: CreatePendingEnrollmentInput) => EnrollmentTokenRow;
   registerNewHost: (
     input: RegisterNewHostEnrollmentInput,
@@ -44,6 +52,99 @@ export function createEnrollmentRepository(
   database: EnrollmentDatabase,
 ): EnrollmentRepository {
   return {
+    resolveStartupReport(input) {
+      const enrollment =
+        database
+          .select()
+          .from(enrollmentTokens)
+          .where(
+            and(
+              eq(enrollmentTokens.hostId, input.hostId),
+              input.enrollmentId
+                ? eq(enrollmentTokens.enrollmentId, input.enrollmentId)
+                : undefined,
+            ),
+          )
+          // A legacy Probe cannot identify its Enrollment. Its nearest
+          // associated Enrollment is therefore deterministic: registration
+          // time first, then creation time and row ID as stable ties.
+          .orderBy(
+            desc(enrollmentTokens.usedAtMs),
+            desc(enrollmentTokens.createdAtMs),
+            desc(enrollmentTokens.id),
+          )
+          .limit(1)
+          .get() ?? null;
+
+      if (!enrollment) {
+        return null;
+      }
+
+      if (enrollment.status === "verifying") {
+        const ready =
+          database
+            .update(enrollmentTokens)
+            .set({
+              readyAtMs: input.reportedAtMs,
+              status: "ready",
+            })
+            .where(
+              and(
+                eq(enrollmentTokens.id, enrollment.id),
+                eq(enrollmentTokens.status, "verifying"),
+                gt(
+                  enrollmentTokens.verificationDeadlineAtMs,
+                  input.reportedAtMs,
+                ),
+              ),
+            )
+            .returning()
+            .get() ?? null;
+        if (ready) {
+          return { enrollment: ready, status: "ready" };
+        }
+
+        const rejected =
+          database
+            .update(enrollmentTokens)
+            .set({
+              rejectedAtMs: input.reportedAtMs,
+              rejectionCode: "probe_startup_timeout",
+              rejectionMessage: null,
+              status: "rejected",
+            })
+            .where(
+              and(
+                eq(enrollmentTokens.id, enrollment.id),
+                eq(enrollmentTokens.status, "verifying"),
+                lte(
+                  enrollmentTokens.verificationDeadlineAtMs,
+                  input.reportedAtMs,
+                ),
+              ),
+            )
+            .returning()
+            .get() ?? null;
+        if (rejected) {
+          return { enrollment: rejected, status: "rejected" };
+        }
+      }
+
+      // An Owner status read can have persisted the deadline rejection before
+      // the Startup Report transaction begins. A legacy report observes that
+      // result only when it belongs to the latest associated Enrollment; an
+      // older timeout before a newer ready Enrollment is harmless.
+      const current =
+        database
+          .select()
+          .from(enrollmentTokens)
+          .where(eq(enrollmentTokens.id, enrollment.id))
+          .get() ?? null;
+      return current?.status === "rejected" &&
+        current.rejectionCode === "probe_startup_timeout"
+        ? { enrollment: current, status: "rejected" }
+        : null;
+    },
     createPending(input) {
       if (
         !validEnrollmentId(input.enrollmentId) ||
@@ -155,8 +256,27 @@ export function createEnrollmentRepository(
           .returning()
           .get();
 
+        const timedOut = transaction
+          .update(enrollmentTokens)
+          .set({
+            rejectedAtMs: nowMs,
+            rejectionCode: "probe_startup_timeout",
+            rejectionMessage: null,
+            status: "rejected",
+          })
+          .where(
+            and(
+              eq(enrollmentTokens.enrollmentId, enrollmentId),
+              eq(enrollmentTokens.status, "verifying"),
+              lte(enrollmentTokens.verificationDeadlineAtMs, nowMs),
+            ),
+          )
+          .returning()
+          .get();
+
         return (
           expired ??
+          timedOut ??
           transaction
             .select()
             .from(enrollmentTokens)

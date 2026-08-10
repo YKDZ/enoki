@@ -1149,7 +1149,7 @@ fn write_probe_systemd_service(
         ProbeUpgraderRunError::InvalidInstallMetadata("identity path has no parent"),
     )?;
     let contents = format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser={}\nGroup={}\nExecStart={} run --config {}\nRestart=always\nRestartSec=5s\nPrivateTmp=true\nProtectHome=true\nProtectSystem=full\nProtectControlGroups=true\nReadWritePaths={} {}\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=notify\nNotifyAccess=main\nUser={}\nGroup={}\nExecStart={} run --config {}\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nPrivateTmp=true\nProtectHome=true\nProtectSystem=full\nProtectControlGroups=true\nReadWritePaths={} {}\n\n[Install]\nWantedBy=multi-user.target\n",
         install_metadata.service_user,
         install_metadata.service_group,
         install_metadata.install_path.display(),
@@ -3978,6 +3978,27 @@ mod tests {
                 "restart enoki-probe",
             ],
         );
+    }
+
+    #[test]
+    fn reconstructed_probe_service_waits_for_hub_acknowledged_readiness_without_a_global_timeout() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let install_path = temp.path().join("usr/local/bin/enoki-probe");
+        let status_path = temp
+            .path()
+            .join("var/lib/enoki-probe/probe-operation-status.toml");
+        let mut metadata = trusted_install_metadata(&install_path, &status_path, "a".repeat(64));
+        metadata.identity_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
+        metadata.service_unit_path = temp.path().join("etc/systemd/system/enoki-probe.service");
+
+        write_probe_systemd_service(&metadata).expect("service unit renders");
+
+        let unit = fs::read_to_string(&metadata.service_unit_path).expect("service unit exists");
+        assert!(unit.contains("Type=notify"));
+        assert!(unit.contains("NotifyAccess=main"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("RestartPreventExitStatus=78"));
+        assert!(!unit.contains("TimeoutStartSec="));
     }
 
     #[test]

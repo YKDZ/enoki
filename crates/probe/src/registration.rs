@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    fmt, fs,
+    fmt,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -20,6 +20,7 @@ use crate::{
     protocol::enoki::v1::{
         ProbeRegistrationRequest, ProbeRegistrationResponse, Snapshot, snapshot,
     },
+    secure_file::{atomic_write, read_regular_file},
 };
 
 #[derive(Debug, Eq, PartialEq)]
@@ -136,6 +137,8 @@ pub fn register_probe(
                 .map(|configuration| {
                     normalize_initial_enabled_collector_ids(&configuration.enabled_collector_ids)
                 }),
+            enrollment_id: (!response.enrollment_id.is_empty())
+                .then_some(response.enrollment_id.as_str()),
             hub_url: input.hub_url,
             metrics_collection_interval_seconds: response.initial_configuration.as_ref().and_then(
                 |configuration| {
@@ -201,6 +204,7 @@ fn current_unix_time_ms_i128() -> i128 {
 
 struct BootstrapConfig<'a> {
     enabled_collector_ids: Option<Vec<String>>,
+    enrollment_id: Option<&'a str>,
     hub_url: String,
     metrics_collection_interval_seconds: Option<u32>,
     probe_configuration_version: Option<&'a str>,
@@ -222,9 +226,9 @@ struct InstallerOwnedFields {
 }
 
 fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, RegistrationError> {
-    reject_existing_symlink(path).map_err(RegistrationError::Io)?;
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let contents = match read_regular_file(path) {
+        Ok(contents) => String::from_utf8(contents)
+            .map_err(|_| RegistrationError::InvalidResponse("invalid bootstrap config TOML"))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(InstallerOwnedFields::default());
         }
@@ -245,36 +249,16 @@ fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, Regi
     })
 }
 
-#[cfg(unix)]
-fn reject_existing_symlink(path: &Path) -> Result<(), std::io::Error> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "bootstrap config must not be a symlink",
-        )),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(not(unix))]
-fn reject_existing_symlink(_path: &Path) -> Result<(), std::io::Error> {
-    Ok(())
-}
-
 fn store_bootstrap_config(
     path: &Path,
     config: &BootstrapConfig<'_>,
 ) -> Result<(), RegistrationError> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-
-    write_secret_file(path, render_bootstrap_config(config).as_bytes())?;
+    atomic_write(
+        path,
+        render_bootstrap_config(config).as_bytes(),
+        0o600,
+        None,
+    )?;
 
     Ok(())
 }
@@ -291,6 +275,7 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
         "server_time_offset_ms = {}\n",
         config.server_time_offset_ms
     ));
+    push_optional_string(&mut output, "enrollment_id", config.enrollment_id);
     push_optional_string(
         &mut output,
         "state_dir",
@@ -412,24 +397,4 @@ fn toml_string(value: &str) -> String {
         .collect::<String>();
 
     format!("\"{escaped}\"")
-}
-
-#[cfg(unix)]
-fn write_secret_file(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
-    use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
-
-    reject_existing_symlink(path)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .truncate(true)
-        .write(true)
-        .open(path)?;
-    file.write_all(contents)
-}
-
-#[cfg(not(unix))]
-fn write_secret_file(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
-    fs::write(path, contents)
 }

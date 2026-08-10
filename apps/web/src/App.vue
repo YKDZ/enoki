@@ -41,6 +41,7 @@ import { useLiveUpdates } from "./composables/useLiveUpdates";
 import { useProbeUpgradeMonitor } from "./composables/useProbeUpgradeMonitor";
 import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
 import {
+  enrollmentTerminalMessage,
   reconcileEnrollmentStatus,
   shouldCreateEnrollmentOnOpen,
 } from "./lib/enrollment-dialog-state";
@@ -52,6 +53,10 @@ import {
 } from "./lib/login-errors";
 import { configurationErrorText } from "./lib/probe-configuration";
 import { probeUpgradeToastTitle } from "./lib/probe-upgrade-toast";
+import {
+  matchesActiveReadyEnrollment,
+  readyEnrollmentCompletion,
+} from "./lib/ready-enrollment-flow";
 import type {
   EnrollmentResponse,
   EnrollmentStatusResponse,
@@ -154,19 +159,7 @@ const enrollmentStatusReconciler = createEnrollmentStatusReconciler({
     enrollment.value?.enrollmentId === enrollmentId &&
     ["pending", "verifying"].includes(enrollment.value.status),
   onStatus(status) {
-    const reconciled = reconcileEnrollmentStatus(enrollment.value, status);
-    enrollment.value = reconciled.enrollment;
-
-    if (!reconciled.shouldClose) {
-      return;
-    }
-
-    isShowingEnrollmentDialog.value = false;
-    if (status.status === "expired") {
-      toast.error("安装命令已过期", {
-        description: "请生成新的安装命令。",
-      });
-    }
+    void applyAuthoritativeEnrollmentStatus(status);
   },
   onTemporaryFailure(error) {
     handleUnauthorizedError(error);
@@ -209,6 +202,9 @@ const {
   },
   onHostProfile(hostId, hostProfile) {
     detail.applyHostProfile(hostId, hostProfile);
+  },
+  onHostReady(hint) {
+    void handleHostReadyHint(hint);
   },
   onHostRemoved(hostId) {
     if (activeHostConfigurationId.value === hostId) {
@@ -476,6 +472,75 @@ function clearEnrollmentStatusReconciliation() {
 
 async function reconcileActiveEnrollment() {
   await enrollmentStatusReconciler.reconcileNow();
+}
+
+async function handleHostReadyHint(hint: {
+  enrollmentId: string;
+  hostId: number;
+}) {
+  if (
+    !matchesActiveReadyEnrollment({
+      activeEnrollmentId: enrollment.value?.enrollmentId,
+      hintEnrollmentId: hint.enrollmentId,
+      isDialogOpen: isShowingEnrollmentDialog.value,
+    })
+  ) {
+    return;
+  }
+
+  try {
+    const status = await apiGet<EnrollmentStatusResponse>(
+      `/api/web/enrollments/${hint.enrollmentId}`,
+    );
+    if (status.status !== "ready" || status.hostId !== hint.hostId) {
+      return;
+    }
+    await applyAuthoritativeEnrollmentStatus(status);
+  } catch (error) {
+    handleUnauthorizedError(error);
+  }
+}
+
+async function applyAuthoritativeEnrollmentStatus(
+  status: EnrollmentStatusResponse,
+) {
+  const reconciled = reconcileEnrollmentStatus(enrollment.value, status);
+  enrollment.value = reconciled.enrollment;
+
+  if (!reconciled.shouldClose) {
+    return;
+  }
+
+  isShowingEnrollmentDialog.value = false;
+  clearEnrollmentStatusReconciliation();
+  if (status.status === "ready") {
+    const completion = readyEnrollmentCompletion(
+      status,
+      activeDetailHostId.value,
+    );
+    if (completion.returnToOverview) {
+      navigateToOverview();
+    }
+    if (completion.reloadHosts) {
+      await loadHosts();
+    }
+    toast.success("主机已就绪", {
+      description: "探针已完成与 Hub 的首次报告。",
+    });
+    return;
+  }
+  if (status.status === "expired") {
+    toast.error("安装命令已过期", {
+      description: "请生成新的安装命令。",
+    });
+    return;
+  }
+  const terminalMessage = enrollmentTerminalMessage(status);
+  if (terminalMessage) {
+    toast.error(terminalMessage.title, {
+      description: terminalMessage.description,
+    });
+  }
 }
 
 async function toggleGlobalConfiguration() {

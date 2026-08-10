@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { EnrollmentResponse, EnrollmentStatusResponse } from "../types";
 import {
+  enrollmentTerminalMessage,
   reconcileEnrollmentStatus,
   shouldCreateEnrollmentOnOpen,
 } from "./enrollment-dialog-state";
@@ -82,6 +83,19 @@ describe("enrollment dialog state", () => {
         status: "expired",
       }),
       shouldClose: true,
+    });
+  });
+
+  it("gives a clear, non-secret fallback when readiness is rejected without a typed reason", () => {
+    expect(
+      enrollmentTerminalMessage({
+        ...pendingStatus(existingEnrollment.enrollmentId),
+        rejectedAtMs: 1_725_000_060_000,
+        status: "rejected",
+      }),
+    ).toEqual({
+      description: "Probe 未在等待期限内完成与 Hub 的首次报告。",
+      title: "Probe 未能就绪",
     });
   });
 });

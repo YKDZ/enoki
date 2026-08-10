@@ -280,6 +280,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,
       probeOperations: options.database.probeOperations,
+      reportTransaction: options.database.reportTransaction,
       snapshotCollectors: options.database.snapshotCollectors,
       clockSkewThresholdMs: options.clockSkewThresholdMs,
       hostStatus: options.hostStatus,

@@ -265,6 +265,528 @@ describe("Probe report API", () => {
     );
   });
 
+  it("makes a legacy full sequence-one Startup Report without an Enrollment ID ready for the latest verifying Enrollment", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentResponse = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    expect(enrollmentResponse.status).toBe(201);
+    const enrollment = (await enrollmentResponse.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+    };
+    const registration = await registerProbe(app, enrollment.enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-startup-readiness",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sampleHostProfileSnapshot(),
+          },
+        ],
+      }),
+    ).finish();
+
+    const report = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(report.status).toBe(200);
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({
+        hostId: expect.any(Number),
+        readyAtMs: expect.any(Number),
+        status: "ready",
+      }),
+    );
+    const metricsCount = database.sqlite
+      .prepare("select count(*) as count from metric_samples")
+      .get() as { count: number };
+    expect(metricsCount.count).toBe(0);
+
+    database.close();
+  });
+
+  it("keeps the explicit Enrollment ID Startup Report correlation path", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollment = (await (
+      await app.request("/api/web/enrollments", {
+        headers: { cookie: ownerSession },
+        method: "POST",
+      })
+    ).json()) as { enrollmentId: string; enrollmentToken: string };
+    const registration = await registerProbe(app, enrollment.enrollmentToken);
+    const body = root.enoki.v1.ProbeReportRequest.encode(
+      root.enoki.v1.ProbeReportRequest.create({
+        bootId: "boot-explicit-enrollment-id",
+        enrollmentId: registration.enrollmentId,
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sampleHostProfileSnapshot(),
+          },
+        ],
+      }),
+    ).finish();
+
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", body),
+        )
+      ).status,
+    ).toBe(200);
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({ status: "ready" }),
+    );
+
+    database.close();
+  });
+
+  it("rejects a legacy Startup Report without an Enrollment ID after status-first startup timeout without report effects", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentResponse = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    const enrollment = (await enrollmentResponse.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+    };
+    const registration = await registerProbe(app, enrollment.enrollmentToken);
+    nowMs += 60_000;
+    const deadlineStatus = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(deadlineStatus.json()).resolves.toEqual(
+      expect.objectContaining({
+        readyAtMs: null,
+        status: "rejected",
+      }),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-startup-at-deadline",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sampleHostProfileSnapshot(),
+          },
+        ],
+      }),
+    ).finish();
+
+    const report = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(report.status).toBe(409);
+    await expect(report.json()).resolves.toEqual({
+      error: "probe_startup_timeout",
+    });
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({
+        readyAtMs: null,
+        status: "rejected",
+      }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select last_report_at_ms from managed_hosts")
+        .get(),
+    ).toEqual({ last_report_at_ms: null });
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
+  it("allows a legacy normal restart after a historical timeout when a newer Enrollment became ready", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const startup = (bootId: string, enrollmentId?: string) =>
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          enrollmentId,
+          metrics: [],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: 1,
+          sequenceStart: 1,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              hostProfile: sampleHostProfileSnapshot(),
+            },
+          ],
+        }),
+      ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(
+            registration,
+            "/api/probe/report",
+            startup("boot-current-ready", registration.enrollmentId),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    database.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+          target_kind, managed_host_id, verification_deadline_at_ms,
+          rejected_at_ms, rejection_code, status
+        ) values (?, ?, ?, ?, ?, 'new_host', ?, ?, ?, 'probe_startup_timeout', 'rejected')`,
+      )
+      .run(
+        "enr_historical_timeout",
+        "historical-token-hash",
+        nowMs - 120_000,
+        nowMs - 60_000,
+        nowMs - 120_000,
+        host.id,
+        nowMs - 90_000,
+        nowMs - 90_000,
+      );
+
+    const restart = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        startup("boot-normal-restart"),
+      ),
+    );
+
+    expect(restart.status).toBe(200);
+    database.close();
+  });
+
+  it("rolls back Enrollment readiness together with every report write when ingestion fails", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentResponse = await app.request("/api/web/enrollments", {
+      headers: { cookie: ownerSession },
+      method: "POST",
+    });
+    const enrollment = (await enrollmentResponse.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+    };
+    const registration = await registerProbe(app, enrollment.enrollmentToken);
+    database.sqlite.exec(`
+      create trigger fail_startup_observation
+      before insert on report_observations
+      begin
+        select raise(abort, 'simulated report persistence failure');
+      end;
+    `);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-startup-rollback",
+        metrics: [],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sampleHostProfileSnapshot(),
+          },
+        ],
+      }),
+    ).finish();
+
+    const report = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(report.status).toBe(500);
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({
+        readyAtMs: null,
+        status: "verifying",
+      }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select last_report_at_ms from managed_hosts")
+        .get(),
+    ).toEqual({ last_report_at_ms: null });
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
+  it("rejects a malformed operation in an otherwise valid Startup Report without consuming readiness or report effects", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollment = (await (
+      await app.request("/api/web/enrollments", {
+        headers: { cookie: ownerSession },
+        method: "POST",
+      })
+    ).json()) as { enrollmentId: string; enrollmentToken: string };
+    const registration = await registerProbe(app, enrollment.enrollmentToken);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-startup-malformed-operation",
+        enrollmentId: registration.enrollmentId,
+        operationStatuses: [{ operationId: "not-an-operation", running: {} }],
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: sampleHostProfileSnapshot(),
+          },
+        ],
+      }),
+    ).finish();
+
+    const report = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(report.status).toBe(400);
+    await expect(report.json()).resolves.toEqual({
+      error: "malformed_probe_operation_status",
+    });
+    const status = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(status.json()).resolves.toEqual(
+      expect.objectContaining({ readyAtMs: null, status: "verifying" }),
+    );
+    expect(
+      database.sqlite
+        .prepare("select last_report_at_ms from managed_hosts")
+        .get(),
+    ).toEqual({ last_report_at_ms: null });
+    expect(
+      database.sqlite
+        .prepare("select count(*) as count from report_observations")
+        .get(),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
+  it("does not broadcast Host removal or commit Probe Uninstall when later report ingestion rolls back", async () => {
+    const database = await createTemporaryDatabase();
+    const removedHostIds: number[] = [];
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      liveUpdates: {
+        broadcastDetailSample() {},
+        broadcastHostProfile() {},
+        broadcastHostReady() {},
+        broadcastHostRemoved(hostId: number) {
+          removedHostIds.push(hostId);
+        },
+        broadcastHostSummary() {},
+      } as never,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+      }).operation,
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const send = (sequence: number, operationPayload: object) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "/api/probe/report",
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-uninstall-rollback",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: sequence,
+              sequenceStart: sequence,
+              ...operationPayload,
+            }),
+          ).finish(),
+        ),
+      );
+
+    expect(
+      (
+        await send(1, {
+          operationAcknowledgements: [{ operationId: String(operation.id) }],
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await send(2, {
+          operationStatuses: [
+            { operationId: String(operation.id), running: {} },
+          ],
+        })
+      ).status,
+    ).toBe(200);
+    database.sqlite.exec(`
+      create trigger fail_uninstall_report_ingestion
+      before insert on report_observations
+      begin
+        select raise(abort, 'simulated later ingestion failure');
+      end;
+    `);
+
+    const failed = await send(3, {
+      operationStatuses: [{ operationId: String(operation.id), succeeded: {} }],
+    });
+
+    expect(failed.status).toBe(500);
+    expect(removedHostIds).toEqual([]);
+    expect(
+      database.sqlite
+        .prepare("select deleted_at_ms from managed_hosts where id = ?")
+        .get(host.id),
+    ).toEqual({ deleted_at_ms: null });
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "running" }),
+    );
+
+    database.close();
+  });
+
   it("requests the full Host Profile snapshot when a hash-only snapshot report is unknown", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -3036,6 +3558,7 @@ describe("Probe report API", () => {
       liveUpdates: {
         broadcastDetailSample() {},
         broadcastHostProfile() {},
+        broadcastHostReady() {},
         broadcastHostRemoved(hostId: number) {
           removedHostIds.push(hostId);
         },

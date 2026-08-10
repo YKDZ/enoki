@@ -31,3 +31,19 @@ export function reconcileEnrollmentStatus(
     shouldClose: ["expired", "ready", "rejected"].includes(status.status),
   };
 }
+
+export function enrollmentTerminalMessage(status: EnrollmentStatusResponse): {
+  description: string;
+  title: string;
+} | null {
+  if (status.status !== "rejected") {
+    return null;
+  }
+
+  return {
+    description:
+      status.rejection?.message ??
+      "Probe 未在等待期限内完成与 Hub 的首次报告。",
+    title: "Probe 未能就绪",
+  };
+}

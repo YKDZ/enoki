@@ -40,8 +40,25 @@ export type HubDatabase = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations: ProbeOperationRepository;
+  reportTransaction: ProbeReportTransaction;
   snapshotCollectors: SnapshotCollectorStorageRegistry;
   sqlite: DatabaseSync;
+};
+
+export type ProbeReportTransactionServices = Pick<
+  HubDatabase,
+  | "enrollments"
+  | "hosts"
+  | "metrics"
+  | "probeConfigurations"
+  | "probeOperations"
+  | "snapshotCollectors"
+>;
+
+export type ProbeReportTransaction = {
+  run: <Result>(
+    callback: (services: ProbeReportTransactionServices) => Result,
+  ) => Result;
 };
 
 export type InitializeHubDatabaseOptions = {
@@ -84,6 +101,24 @@ export function initializeHubDatabase(
     metrics: createMetricsRepository(database),
     probeConfigurations: createProbeConfigurationRepository(database),
     probeOperations: createProbeOperationRepository(database),
+    reportTransaction: {
+      run<Result>(
+        callback: (services: ProbeReportTransactionServices) => Result,
+      ) {
+        return database.transaction((transaction) => {
+          return callback({
+            enrollments: createEnrollmentRepository(transaction),
+            hosts: createHostRepository(transaction),
+            metrics: createMetricsRepository(transaction),
+            probeConfigurations:
+              createProbeConfigurationRepository(transaction),
+            probeOperations: createProbeOperationRepository(transaction),
+            snapshotCollectors:
+              createSnapshotCollectorStorageRegistry(transaction),
+          }) as never;
+        }) as Result;
+      },
+    },
     snapshotCollectors: createSnapshotCollectorStorageRegistry(database),
     sqlite,
   };

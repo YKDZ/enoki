@@ -1,12 +1,19 @@
 use enoki_probe::{
     cli::{ProbeCommand, parse_probe_command, render_probe_output},
+    local_lifecycle::{
+        LOCAL_LIFECYCLE_COMPLETE_MARKER, probe_local_install_input_from_environment,
+        run_probe_local_install,
+    },
     local_privilege_boundary::{
         CollectorHelperSudoersPlanInput, CollectorHelperSudoersPlanner,
         LocalCollectorHelperExposureEnvironment,
     },
     privileged_collector_helpers::run_compiled_privileged_collector_helper,
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
-    runtime::{ProbeRunInput, run_loop_control_from_environment, run_probe_with_loop_control},
+    runtime::{
+        ProbeRunInput, probe_run_exit_status, run_loop_control_from_environment,
+        run_probe_with_loop_control,
+    },
     upgrader::{
         HttpProbeUpgraderValidationTransport, ProbeUninstallerRunInput, ProbeUpgraderRunInput,
         format_probe_upgrader_result, run_probe_repair, run_probe_uninstaller, run_probe_upgrader,
@@ -48,6 +55,22 @@ fn main() {
             );
             if let Some(content) = plan.content {
                 print!("{content}");
+            }
+        }
+        ProbeCommand::InternalLocalLifecycle { candidate_binary } => {
+            let input = match probe_local_install_input_from_environment(candidate_binary) {
+                Ok(input) => input,
+                Err(error) => {
+                    eprintln!("Probe Local Lifecycle failed: {error}");
+                    std::process::exit(1);
+                }
+            };
+            match run_probe_local_install(&input) {
+                Ok(()) => println!("{LOCAL_LIFECYCLE_COMPLETE_MARKER}"),
+                Err(error) => {
+                    eprintln!("Probe Local Lifecycle failed: {error}");
+                    std::process::exit(1);
+                }
             }
         }
         ProbeCommand::InternalUpgrader {
@@ -165,7 +188,7 @@ fn main() {
                 loop_control,
             ) {
                 eprintln!("Probe run failed: {error}");
-                std::process::exit(1);
+                std::process::exit(probe_run_exit_status(&error));
             }
 
             print!(

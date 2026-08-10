@@ -20,6 +20,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
+        enrollment_id: String::new(),
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
@@ -112,6 +113,7 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     )
     .expect("write installer bootstrap config");
     let response = ProbeRegistrationResponse {
+        enrollment_id: String::new(),
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
@@ -162,6 +164,7 @@ fn probe_registration_does_not_persist_required_host_profile_as_configurable_col
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
+        enrollment_id: String::new(),
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: vec![
                 "official.host-profile".to_string(),
@@ -205,6 +208,7 @@ fn probe_registration_drops_unknown_initial_collector_ids_from_bootstrap_config(
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
+        enrollment_id: String::new(),
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: vec![
                 "official.memory".to_string(),
@@ -340,6 +344,7 @@ fn all_collector_ids() -> Vec<String> {
 
 fn registration_response() -> Vec<u8> {
     ProbeRegistrationResponse {
+        enrollment_id: String::new(),
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,

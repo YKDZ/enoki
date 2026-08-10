@@ -89,6 +89,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
         .join("\n"),
     );
     let response = ProbeRegistrationResponse {
+        enrollment_id: "enrollment-01".to_string(),
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
             metrics_collection_interval_seconds: 5,
@@ -150,6 +151,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     assert_eq!(report.probe_id, "probe_01");
     assert_eq!(report.sequence_start, 1);
     assert_eq!(report.sequence_end, 1);
+    assert_eq!(report.enrollment_id, "enrollment-01");
     assert!(
         report
             .snapshots

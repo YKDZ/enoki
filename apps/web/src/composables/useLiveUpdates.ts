@@ -85,6 +85,11 @@ export function useLiveUpdates(options: {
   loadHosts: () => Promise<void>;
   onDetailSample?: (sample: HostDetailSample) => void;
   onHostProfile?: (hostId: number, hostProfile: HostProfileSnapshot) => void;
+  onHostReady?: (hint: {
+    enrollmentId: string;
+    hostId: number;
+    type: "host_ready";
+  }) => void;
   onHostRemoved?: (hostId: number) => void;
   onSummary?: (summary: HostLiveSummary) => void;
   reconnectDelayMs?: number;
@@ -216,6 +221,15 @@ export function useLiveUpdates(options: {
         message.hostId,
       );
       options.onHostRemoved?.(message.hostId);
+      return;
+    }
+
+    if (message?.type === "host_ready") {
+      options.onHostReady?.({
+        enrollmentId: message.enrollmentId,
+        hostId: message.hostId,
+        type: "host_ready",
+      });
       return;
     }
 

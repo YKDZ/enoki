@@ -104,6 +104,11 @@ export type WebSocketServerMessage =
   | {
       hostId: number;
       type: "host_removed";
+    }
+  | {
+      enrollmentId: string;
+      hostId: number;
+      type: "host_ready";
     };
 
 const hostIdSchema = v.pipe(v.number(), v.integer(), v.minValue(1));
@@ -289,6 +294,11 @@ export const webSocketServerMessageSchema = v.variant("type", [
   v.strictObject({
     hostId: hostIdSchema,
     type: v.literal("host_removed"),
+  }),
+  v.strictObject({
+    enrollmentId: v.pipe(v.string(), v.regex(/^enr_[A-Za-z0-9_-]{16,}$/)),
+    hostId: hostIdSchema,
+    type: v.literal("host_ready"),
   }),
 ]);
 

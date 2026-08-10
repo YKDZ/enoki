@@ -164,6 +164,55 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retries_keep_the_body_hash_but_regenerate_nonce_and_signature_headers() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("private key");
+        let private_key_pem = private_key
+            .to_pkcs8_pem(Default::default())
+            .expect("private key pem")
+            .to_string();
+        let auth = ProbeRequestAuth {
+            probe_id: "probe_01",
+            probe_private_key_pem: &private_key_pem,
+            server_time_offset_ms: 0,
+        };
+        let first = signed_probe_request_headers(
+            "POST",
+            "https://hub.example/api/probe/report",
+            &auth,
+            b"the-same-startup-report-body",
+        )
+        .expect("first headers");
+        let second = signed_probe_request_headers(
+            "POST",
+            "https://hub.example/api/probe/report",
+            &auth,
+            b"the-same-startup-report-body",
+        )
+        .expect("second headers");
+        let header = |headers: &[(&'static str, String)], name| {
+            headers
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == name).then_some(value.as_str()))
+                .expect("header")
+                .to_string()
+        };
+
+        assert_eq!(
+            header(&first, "x-enoki-body-sha256"),
+            header(&second, "x-enoki-body-sha256")
+        );
+        assert_ne!(
+            header(&first, "x-enoki-nonce"),
+            header(&second, "x-enoki-nonce")
+        );
+        assert_ne!(
+            header(&first, "x-enoki-signature"),
+            header(&second, "x-enoki-signature")
+        );
+    }
+
     fn hex_decode(value: &str) -> Option<Vec<u8>> {
         if !value.len().is_multiple_of(2) {
             return None;

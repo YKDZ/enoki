@@ -129,6 +129,9 @@ export namespace enoki {
 
             /** ProbeRegistrationResponse initialConfiguration */
             initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
+
+            /** ProbeRegistrationResponse enrollmentId */
+            enrollmentId?: (string|null);
         }
 
         /** Represents a ProbeRegistrationResponse. */
@@ -151,6 +154,9 @@ export namespace enoki {
 
             /** ProbeRegistrationResponse initialConfiguration. */
             public initialConfiguration?: (enoki.v1.IProbeConfigurationResponse|null);
+
+            /** ProbeRegistrationResponse enrollmentId. */
+            public enrollmentId: string;
 
             /**
              * Creates a new ProbeRegistrationResponse instance using the specified properties.
@@ -262,6 +268,9 @@ export namespace enoki {
 
             /** ProbeReportRequest snapshots */
             snapshots?: (enoki.v1.ISnapshot[]|null);
+
+            /** ProbeReportRequest enrollmentId */
+            enrollmentId?: (string|null);
         }
 
         /** Represents a ProbeReportRequest. */
@@ -302,6 +311,9 @@ export namespace enoki {
 
             /** ProbeReportRequest snapshots. */
             public snapshots: enoki.v1.ISnapshot[];
+
+            /** ProbeReportRequest enrollmentId. */
+            public enrollmentId: string;
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.

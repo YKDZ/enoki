@@ -383,6 +383,36 @@ describe("live Host summaries", () => {
     expect(reloadCount).toBe(0);
   });
 
+  it("passes a non-secret matching-ready hint to Enrollment coordination without treating it as Host state", async () => {
+    const hosts = ref<HostSummary[]>([existingHost]);
+    const readyHints: unknown[] = [];
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {},
+      onHostReady(hint) {
+        readyHints.push(hint);
+      },
+    });
+
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        enrollmentId: "enr_1234567890abcdef",
+        hostId: existingHost.id,
+        type: "host_ready",
+      }),
+    );
+
+    expect(readyHints).toEqual([
+      {
+        enrollmentId: "enr_1234567890abcdef",
+        hostId: existingHost.id,
+        type: "host_ready",
+      },
+    ]);
+    expect(hosts.value).toEqual([existingHost]);
+  });
+
   it("passes Host Profile live updates to the detail handler and updates summaries", async () => {
     const hosts = ref<HostSummary[]>([existingHost]);
     const hostProfiles: unknown[] = [];

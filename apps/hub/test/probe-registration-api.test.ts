@@ -833,7 +833,8 @@ describe("Probe registration API", () => {
 
   it("commits NewHost registration, Host Profile, and verifying Enrollment association together", async () => {
     const database = await createTemporaryDatabase();
-    const registeredAtMs = 1_725_000_000_000;
+    let nowMs = 1_725_000_000_000;
+    const registeredAtMs = nowMs;
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -841,7 +842,7 @@ describe("Probe registration API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
-      now: () => registeredAtMs,
+      now: () => nowMs,
     });
     const ownerSession = await loginOwner(app);
     const created = await app.request("/api/web/enrollments", {
@@ -874,6 +875,21 @@ describe("Probe registration API", () => {
       usedAtMs: registeredAtMs,
       verificationDeadlineAtMs: registeredAtMs + 60_000,
     });
+
+    nowMs += 60_000;
+    const timedOut = await app.request(
+      `/api/web/enrollments/${enrollment.enrollmentId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(timedOut.json()).resolves.toEqual(
+      expect.objectContaining({
+        rejection: {
+          code: "probe_startup_timeout",
+          message: null,
+        },
+        status: "rejected",
+      }),
+    );
 
     database.close();
   });

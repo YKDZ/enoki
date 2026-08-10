@@ -6,6 +6,7 @@ import {
   randomBytes,
 } from "node:crypto";
 
+import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
 import { getConnInfo } from "@hono/node-server/conninfo";
@@ -21,11 +22,13 @@ import type {
   HostStatusThresholds,
   HostRepository,
 } from "../database/hosts.js";
+import type { ProbeReportTransaction } from "../database/index.js";
 import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import { hashSecret } from "../enrollment/routes.js";
 import {
+  broadcastHostReadyHint,
   broadcastHostRemovedHint,
   liveSummaryFromHost,
   type LiveUpdateBroadcaster,
@@ -63,12 +66,22 @@ const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
 
 type ProtoMessage = Record<string, any>;
 
+class ReportBusinessRejection extends Error {
+  constructor(
+    readonly code: string,
+    readonly status: 400 | 409,
+  ) {
+    super(code);
+  }
+}
+
 export type ProbeRouteServices = {
   enrollments: EnrollmentRepository;
   hosts: HostRepository;
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+  reportTransaction: ProbeReportTransaction;
   snapshotCollectors?: SnapshotCollectorStorageRegistry;
   clockSkewThresholdMs?: number;
   hostStatus?: HostStatusThresholds;
@@ -189,6 +202,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const body = RegistrationResponse.encode(
       RegistrationResponse.create({
         initialConfiguration: defaultProbeConfiguration,
+        enrollmentId: registration.enrollment.enrollmentId,
         probeId,
         serverTimeMs: registeredAtMs,
       }),
@@ -258,278 +272,384 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const reportReceivedAtMs = now();
-    const operationReportError = applyProbeOperationReports({
+    const prevalidatedOperations = planProbeOperationReportApplication({
       acknowledgements: request.operationAcknowledgements ?? [],
       hostId: host.id,
       nowMs: reportReceivedAtMs,
       services,
       statuses: request.operationStatuses ?? [],
     });
-
-    if (operationReportError) {
-      return probeJsonError(operationReportError, 400);
+    if (prevalidatedOperations.error) {
+      return probeJsonError(prevalidatedOperations.error, 400);
     }
 
-    const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    const reportedHostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
-    const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
-    const knownHostProfileSnapshot =
-      services.snapshotCollectors
-        ?.get(hostProfileCollectorId)
-        ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
-    const requestedSnapshotCollectorIds =
-      !reportedHostProfile && !knownHostProfileSnapshot
-        ? [hostProfileCollectorId]
-        : [];
-    const clockSkew = detectClockSkew(
-      request.metrics ?? [],
-      reportReceivedAtMs,
-      services.clockSkewThresholdMs ?? defaultClockSkewThresholdMs,
-    );
-
-    const observedIp = observedIpFromContext(
-      context,
-      services.trustForwardedHeaders,
-    );
-
-    services.hosts.recordReport(host.id, {
-      architecture: reportedHostProfile?.architecture || undefined,
-      clockSkewDetected: clockSkew.detected,
-      connectAddress: reportConnectAddress(
-        reportedHostProfile,
-        host,
-        observedIp,
-      ),
-      cpuCount: reportedHostProfile
-        ? reportedHostProfile.cpuCount || null
-        : undefined,
-      cpuModel: reportedHostProfile
-        ? reportedHostProfile.cpuModel?.trim() || null
-        : undefined,
-      hostname: reportedHostProfile?.hostname || undefined,
-      kernel: reportedHostProfile?.kernel || undefined,
-      lastClockSkewMs: clockSkew.lastDeltaMs,
-      lastReportAtMs: reportReceivedAtMs,
-      memoryTotalBytes: reportedHostProfile
-        ? unsignedNumber(reportedHostProfile.memoryTotalBytes) || null
-        : undefined,
-      observedIp,
-      os: reportedHostProfile?.os || undefined,
-      probeConfigurationVersion: request.probeConfigurationVersion || undefined,
-      probeConfigurationError: request.probeConfigurationError
-        ? {
-            errorCode: request.probeConfigurationError.errorCode ?? "",
-            failedVersion: request.probeConfigurationError.failedVersion ?? "",
-            message: request.probeConfigurationError.message ?? "",
+    const ingestReport = (reportServices: ProbeRouteServices) => {
+      const services = reportServices;
+      const startupEnrollment = isProbeStartupReport({
+        report: validatedReport,
+        reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
+        request,
+      })
+        ? services.enrollments.resolveStartupReport({
+            enrollmentId: nonemptyString(request.enrollmentId),
+            hostId: host.id,
             reportedAtMs: reportReceivedAtMs,
-          }
-        : null,
-      probeVersion: reportedHostProfile?.probeVersion || undefined,
-    });
-    if (reportedHostProfile && reportedHostProfileHash) {
-      const result = services.snapshotCollectors?.write({
-        collectorId: hostProfileCollectorId,
-        hostId: host.id,
-        observedIp,
-        payload: reportedHostProfile,
-        snapshotHash: reportedHostProfileHash,
-        updatedAtMs: reportReceivedAtMs,
-      });
-      if (result?.changed) {
-        services.liveUpdates?.broadcastHostProfile(host.id, result.view);
-      }
-    }
-    const storedReportedHostProfile =
-      !reportedHostProfile &&
-      hostProfileSnapshot &&
-      services.snapshotCollectors?.hostProfile.hasSnapshot(
-        host.id,
-        reportedSnapshotHash,
-      )
-        ? services.snapshotCollectors.hostProfile.read(host.id)
+          })
         : null;
-    markProbeUpgradeSucceededFromHostProfile({
-      hostId: host.id,
-      hostProfile: reportedHostProfile ?? storedReportedHostProfile,
-      nowMs: reportReceivedAtMs,
-      services,
-    });
 
-    const samplesBySequence = new Map<number, ProtoMessage>(
-      ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
-        unsignedNumber(sample.sequence),
-        sample,
-      ]),
-    );
-    const detailSamples: HostDetailSample[] = [];
-
-    for (
-      let sequence = validatedReport.sequenceStart;
-      sequence <= validatedReport.sequenceEnd;
-      sequence += 1
-    ) {
-      const sample = samplesBySequence.get(sequence);
-
-      if (sample) {
-        const inserted = services.metrics.recordObservationSample({
-          observation: {
-            bootId: request.bootId,
-            hostId: host.id,
-            probeId: host.probeId,
-            receivedAtMs: reportReceivedAtMs,
-            sequence,
-          },
-          sample: {
-            bootId: request.bootId,
-            collectedAtMs: signedNumber(sample.collectedAtMs),
-            cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map(
-              (core) => ({
-                idle: unsignedNumber(core.idle),
-                iowait: unsignedNumber(core.iowait),
-                irq: unsignedNumber(core.irq),
-                name: core.name ?? "",
-                nice: unsignedNumber(core.nice),
-                softirq: unsignedNumber(core.softirq),
-                steal: unsignedNumber(core.steal),
-                system: unsignedNumber(core.system),
-                usagePercent: core.usagePercent ?? 0,
-                user: unsignedNumber(core.user),
-              }),
-            ),
-            batteryPercent: metricUnsignedField(sample, "batteryPercent"),
-            batteryState: hasMetricField(sample, "batteryState")
-              ? sample.batteryState || null
-              : null,
-            cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
-            cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
-            cpuPercent: metricField(sample, "cpuPercent"),
-            cpuStealPercent: metricField(sample, "cpuStealPercent"),
-            cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
-            cpuUserPercent: metricField(sample, "cpuUserPercent"),
-            disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
-              availableBytes: unsignedNumber(disk.availableBytes),
-              filesystemType: disk.filesystemType ?? "",
-              ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
-              mountPoint: disk.mountPoint ?? "",
-              readAwaitMs: metricField(disk, "readAwaitMs"),
-              readBytesDelta: unsignedNumber(disk.readBytesDelta),
-              totalBytes: unsignedNumber(disk.totalBytes),
-              usedBytes: unsignedNumber(disk.usedBytes),
-              weightedIoPercent: metricField(disk, "weightedIoPercent"),
-              writeAwaitMs: metricField(disk, "writeAwaitMs"),
-              writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
-            })),
-            diskHealth: ((sample.diskHealth ?? []) as ProtoMessage[]).map(
-              (disk) => ({
-                deviceName: disk.deviceName ?? "",
-                model: disk.model || null,
-                passed: Boolean(disk.passed),
-                powerOnHours: unsignedMetricField(disk, "powerOnHours"),
-                role: disk.role || null,
-                serialNumber: disk.serialNumber || null,
-                temperatureCelsius: metricField(disk, "temperatureCelsius"),
-                totalBytes: unsignedMetricField(disk, "totalBytes"),
-                usageMountPoint: disk.usageMountPoint || null,
-                usedBytes: unsignedMetricField(disk, "usedBytes"),
-              }),
-            ),
-            diskTotalBytes: sample.disks?.length
-              ? sumUnsigned(
-                  sample.disks as ProtoMessage[],
-                  (disk: ProtoMessage) => disk.totalBytes,
-                )
-              : null,
-            diskUsedBytes: sample.disks?.length
-              ? sumUnsigned(
-                  sample.disks as ProtoMessage[],
-                  (disk: ProtoMessage) => disk.usedBytes,
-                )
-              : null,
-            load1: metricField(sample, "load_1"),
-            load5: metricField(sample, "load_5"),
-            load15: metricField(sample, "load_15"),
-            hostId: host.id,
-            memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
-            memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
-            memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
-            networkInterfaces: (
-              (sample.networkInterfaces ?? []) as ProtoMessage[]
-            ).map((networkInterface) => ({
-              name: networkInterface.name ?? "",
-              rxBytes: unsignedNumber(networkInterface.rxBytes),
-              rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
-              txBytes: unsignedNumber(networkInterface.txBytes),
-              txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
-            })),
-            networkRxBytesDelta: sample.networkInterfaces?.length
-              ? sumUnsigned(
-                  sample.networkInterfaces as ProtoMessage[],
-                  (networkInterface: ProtoMessage) =>
-                    networkInterface.rxBytesDelta,
-                )
-              : null,
-            networkTxBytesDelta: sample.networkInterfaces?.length
-              ? sumUnsigned(
-                  sample.networkInterfaces as ProtoMessage[],
-                  (networkInterface: ProtoMessage) =>
-                    networkInterface.txBytesDelta,
-                )
-              : null,
-            probeId: host.probeId,
-            receivedAtMs: reportReceivedAtMs,
-            sequence,
-            swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
-            swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
-            temperatureCelsius: metricField(sample, "temperatureCelsius"),
-            uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
-          },
-        });
-
-        if (inserted) {
-          detailSamples.push(
-            liveDetailSampleFromMetricSample(
-              host.id,
-              sample,
-              reportReceivedAtMs,
-            ),
-          );
-        }
-      } else {
-        services.metrics.recordObservationSample({
-          observation: {
-            bootId: request.bootId,
-            hostId: host.id,
-            probeId: host.probeId,
-            receivedAtMs: reportReceivedAtMs,
-            sequence,
-          },
-        });
+      if (startupEnrollment?.status === "rejected") {
+        // Commit the Enrollment's terminal timeout by itself, then reject the
+        // report after the transaction. This preserves the status transition
+        // while guaranteeing that no report effects can accompany it.
+        return {
+          detailSamples: [] as HostDetailSample[],
+          hostProfileUpdate: null,
+          hostRemovedIds: [] as number[],
+          readyEnrollment: null,
+          reportReceivedAtMs,
+          responseBody: new Uint8Array(),
+          startupRejection: new ReportBusinessRejection(
+            "probe_startup_timeout",
+            409,
+          ),
+        };
       }
+
+      const operationPlan = planProbeOperationReportApplication({
+        acknowledgements: request.operationAcknowledgements ?? [],
+        hostId: host.id,
+        nowMs: reportReceivedAtMs,
+        services,
+        statuses: request.operationStatuses ?? [],
+      });
+      if (operationPlan.error) {
+        throw new ReportBusinessRejection(operationPlan.error, 400);
+      }
+      const operationApplication = applyProbeOperationReports({
+        hostId: host.id,
+        nowMs: reportReceivedAtMs,
+        operations: operationPlan.operations,
+        services,
+      });
+
+      if (operationApplication.error) {
+        throw new ReportBusinessRejection(operationApplication.error, 400);
+      }
+
+      const reportedHostProfile = hostProfileSnapshot?.hostProfile ?? null;
+      const reportedHostProfileHash =
+        hostProfileSnapshot?.canonicalHash ?? null;
+      const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
+      const knownHostProfileSnapshot =
+        services.snapshotCollectors
+          ?.get(hostProfileCollectorId)
+          ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
+      const requestedSnapshotCollectorIds =
+        !reportedHostProfile && !knownHostProfileSnapshot
+          ? [hostProfileCollectorId]
+          : [];
+      const clockSkew = detectClockSkew(
+        request.metrics ?? [],
+        reportReceivedAtMs,
+        services.clockSkewThresholdMs ?? defaultClockSkewThresholdMs,
+      );
+
+      const observedIp = observedIpFromContext(
+        context,
+        services.trustForwardedHeaders,
+      );
+
+      services.hosts.recordReport(host.id, {
+        architecture: reportedHostProfile?.architecture || undefined,
+        clockSkewDetected: clockSkew.detected,
+        connectAddress: reportConnectAddress(
+          reportedHostProfile,
+          host,
+          observedIp,
+        ),
+        cpuCount: reportedHostProfile
+          ? reportedHostProfile.cpuCount || null
+          : undefined,
+        cpuModel: reportedHostProfile
+          ? reportedHostProfile.cpuModel?.trim() || null
+          : undefined,
+        hostname: reportedHostProfile?.hostname || undefined,
+        kernel: reportedHostProfile?.kernel || undefined,
+        lastClockSkewMs: clockSkew.lastDeltaMs,
+        lastReportAtMs: reportReceivedAtMs,
+        memoryTotalBytes: reportedHostProfile
+          ? unsignedNumber(reportedHostProfile.memoryTotalBytes) || null
+          : undefined,
+        observedIp,
+        os: reportedHostProfile?.os || undefined,
+        probeConfigurationVersion:
+          request.probeConfigurationVersion || undefined,
+        probeConfigurationError: request.probeConfigurationError
+          ? {
+              errorCode: request.probeConfigurationError.errorCode ?? "",
+              failedVersion:
+                request.probeConfigurationError.failedVersion ?? "",
+              message: request.probeConfigurationError.message ?? "",
+              reportedAtMs: reportReceivedAtMs,
+            }
+          : null,
+        probeVersion: reportedHostProfile?.probeVersion || undefined,
+      });
+      let hostProfileUpdate: HostProfileSnapshot | null = null;
+      if (reportedHostProfile && reportedHostProfileHash) {
+        const result = services.snapshotCollectors?.write({
+          collectorId: hostProfileCollectorId,
+          hostId: host.id,
+          observedIp,
+          payload: reportedHostProfile,
+          snapshotHash: reportedHostProfileHash,
+          updatedAtMs: reportReceivedAtMs,
+        });
+        if (result?.changed) {
+          hostProfileUpdate = result.view;
+        }
+      }
+      const storedReportedHostProfile =
+        !reportedHostProfile &&
+        hostProfileSnapshot &&
+        services.snapshotCollectors?.hostProfile.hasSnapshot(
+          host.id,
+          reportedSnapshotHash,
+        )
+          ? services.snapshotCollectors.hostProfile.read(host.id)
+          : null;
+      markProbeUpgradeSucceededFromHostProfile({
+        hostId: host.id,
+        hostProfile: reportedHostProfile ?? storedReportedHostProfile,
+        nowMs: reportReceivedAtMs,
+        services,
+      });
+
+      const samplesBySequence = new Map<number, ProtoMessage>(
+        ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
+          unsignedNumber(sample.sequence),
+          sample,
+        ]),
+      );
+      const detailSamples: HostDetailSample[] = [];
+
+      for (
+        let sequence = validatedReport.sequenceStart;
+        sequence <= validatedReport.sequenceEnd;
+        sequence += 1
+      ) {
+        const sample = samplesBySequence.get(sequence);
+
+        if (sample) {
+          const inserted = services.metrics.recordObservationSample({
+            observation: {
+              bootId: request.bootId,
+              hostId: host.id,
+              probeId: host.probeId,
+              receivedAtMs: reportReceivedAtMs,
+              sequence,
+            },
+            sample: {
+              bootId: request.bootId,
+              collectedAtMs: signedNumber(sample.collectedAtMs),
+              cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map(
+                (core) => ({
+                  idle: unsignedNumber(core.idle),
+                  iowait: unsignedNumber(core.iowait),
+                  irq: unsignedNumber(core.irq),
+                  name: core.name ?? "",
+                  nice: unsignedNumber(core.nice),
+                  softirq: unsignedNumber(core.softirq),
+                  steal: unsignedNumber(core.steal),
+                  system: unsignedNumber(core.system),
+                  usagePercent: core.usagePercent ?? 0,
+                  user: unsignedNumber(core.user),
+                }),
+              ),
+              batteryPercent: metricUnsignedField(sample, "batteryPercent"),
+              batteryState: hasMetricField(sample, "batteryState")
+                ? sample.batteryState || null
+                : null,
+              cpuIdlePercent: metricField(sample, "cpuIdlePercent"),
+              cpuIowaitPercent: metricField(sample, "cpuIowaitPercent"),
+              cpuPercent: metricField(sample, "cpuPercent"),
+              cpuStealPercent: metricField(sample, "cpuStealPercent"),
+              cpuSystemPercent: metricField(sample, "cpuSystemPercent"),
+              cpuUserPercent: metricField(sample, "cpuUserPercent"),
+              disks: ((sample.disks ?? []) as ProtoMessage[]).map((disk) => ({
+                availableBytes: unsignedNumber(disk.availableBytes),
+                filesystemType: disk.filesystemType ?? "",
+                ioUtilizationPercent: metricField(disk, "ioUtilizationPercent"),
+                mountPoint: disk.mountPoint ?? "",
+                readAwaitMs: metricField(disk, "readAwaitMs"),
+                readBytesDelta: unsignedNumber(disk.readBytesDelta),
+                totalBytes: unsignedNumber(disk.totalBytes),
+                usedBytes: unsignedNumber(disk.usedBytes),
+                weightedIoPercent: metricField(disk, "weightedIoPercent"),
+                writeAwaitMs: metricField(disk, "writeAwaitMs"),
+                writeBytesDelta: unsignedNumber(disk.writeBytesDelta),
+              })),
+              diskHealth: ((sample.diskHealth ?? []) as ProtoMessage[]).map(
+                (disk) => ({
+                  deviceName: disk.deviceName ?? "",
+                  model: disk.model || null,
+                  passed: Boolean(disk.passed),
+                  powerOnHours: unsignedMetricField(disk, "powerOnHours"),
+                  role: disk.role || null,
+                  serialNumber: disk.serialNumber || null,
+                  temperatureCelsius: metricField(disk, "temperatureCelsius"),
+                  totalBytes: unsignedMetricField(disk, "totalBytes"),
+                  usageMountPoint: disk.usageMountPoint || null,
+                  usedBytes: unsignedMetricField(disk, "usedBytes"),
+                }),
+              ),
+              diskTotalBytes: sample.disks?.length
+                ? sumUnsigned(
+                    sample.disks as ProtoMessage[],
+                    (disk: ProtoMessage) => disk.totalBytes,
+                  )
+                : null,
+              diskUsedBytes: sample.disks?.length
+                ? sumUnsigned(
+                    sample.disks as ProtoMessage[],
+                    (disk: ProtoMessage) => disk.usedBytes,
+                  )
+                : null,
+              load1: metricField(sample, "load_1"),
+              load5: metricField(sample, "load_5"),
+              load15: metricField(sample, "load_15"),
+              hostId: host.id,
+              memoryCacheBytes: metricUnsignedField(sample, "memoryCacheBytes"),
+              memoryTotalBytes: metricUnsignedField(sample, "memoryTotalBytes"),
+              memoryUsedBytes: metricUnsignedField(sample, "memoryUsedBytes"),
+              networkInterfaces: (
+                (sample.networkInterfaces ?? []) as ProtoMessage[]
+              ).map((networkInterface) => ({
+                name: networkInterface.name ?? "",
+                rxBytes: unsignedNumber(networkInterface.rxBytes),
+                rxBytesDelta: unsignedNumber(networkInterface.rxBytesDelta),
+                txBytes: unsignedNumber(networkInterface.txBytes),
+                txBytesDelta: unsignedNumber(networkInterface.txBytesDelta),
+              })),
+              networkRxBytesDelta: sample.networkInterfaces?.length
+                ? sumUnsigned(
+                    sample.networkInterfaces as ProtoMessage[],
+                    (networkInterface: ProtoMessage) =>
+                      networkInterface.rxBytesDelta,
+                  )
+                : null,
+              networkTxBytesDelta: sample.networkInterfaces?.length
+                ? sumUnsigned(
+                    sample.networkInterfaces as ProtoMessage[],
+                    (networkInterface: ProtoMessage) =>
+                      networkInterface.txBytesDelta,
+                  )
+                : null,
+              probeId: host.probeId,
+              receivedAtMs: reportReceivedAtMs,
+              sequence,
+              swapTotalBytes: metricUnsignedField(sample, "swapTotalBytes"),
+              swapUsedBytes: metricUnsignedField(sample, "swapUsedBytes"),
+              temperatureCelsius: metricField(sample, "temperatureCelsius"),
+              uptimeSeconds: metricUnsignedField(sample, "uptimeSeconds"),
+            },
+          });
+
+          if (inserted) {
+            detailSamples.push(
+              liveDetailSampleFromMetricSample(
+                host.id,
+                sample,
+                reportReceivedAtMs,
+              ),
+            );
+          }
+        } else {
+          services.metrics.recordObservationSample({
+            observation: {
+              bootId: request.bootId,
+              hostId: host.id,
+              probeId: host.probeId,
+              receivedAtMs: reportReceivedAtMs,
+              sequence,
+            },
+          });
+        }
+      }
+
+      const readyEnrollment =
+        startupEnrollment?.status === "ready"
+          ? startupEnrollment.enrollment
+          : null;
+
+      const responseBody = ReportResponse.encode(
+        ReportResponse.create({
+          acceptedSequenceEnd: validatedReport.sequenceEnd,
+          requestedSnapshotCollectorIds,
+          currentProbeConfigurationVersion:
+            services.probeConfigurations.getEffectiveForHost(host.id)
+              .configuration.version,
+          pendingOperation: pendingProbeOperationForHost(
+            services,
+            host.id,
+            host.probeId,
+            reportReceivedAtMs,
+          ),
+          serverTimeMs: reportReceivedAtMs,
+        }),
+      ).finish();
+
+      return {
+        detailSamples,
+        hostProfileUpdate,
+        hostRemovedIds: operationApplication.hostRemovedIds,
+        readyEnrollment,
+        reportReceivedAtMs,
+        responseBody,
+        startupRejection: null,
+      };
+    };
+
+    let ingested: ReturnType<typeof ingestReport>;
+    try {
+      ingested = services.reportTransaction.run((transactionalServices) =>
+        ingestReport({ ...services, ...transactionalServices }),
+      );
+    } catch (error) {
+      if (error instanceof ReportBusinessRejection) {
+        return probeJsonError(error.code, error.status);
+      }
+      throw error;
     }
 
-    broadcastHostSummary(services, host.id, reportReceivedAtMs);
-    for (const sample of detailSamples) {
+    if (ingested.startupRejection) {
+      return probeJsonError(
+        ingested.startupRejection.code,
+        ingested.startupRejection.status,
+      );
+    }
+
+    broadcastHostSummary(services, host.id, ingested.reportReceivedAtMs);
+    if (ingested.hostProfileUpdate) {
+      services.liveUpdates?.broadcastHostProfile(
+        host.id,
+        ingested.hostProfileUpdate,
+      );
+    }
+    for (const sample of ingested.detailSamples) {
       services.liveUpdates?.broadcastDetailSample(sample);
     }
+    if (ingested.readyEnrollment?.enrollmentId) {
+      broadcastHostReadyHint(services.liveUpdates, {
+        enrollmentId: ingested.readyEnrollment.enrollmentId,
+        hostId: host.id,
+      });
+    }
+    for (const removedHostId of ingested.hostRemovedIds) {
+      broadcastHostRemovedHint(services.liveUpdates, removedHostId);
+    }
 
-    const responseBody = ReportResponse.encode(
-      ReportResponse.create({
-        acceptedSequenceEnd: validatedReport.sequenceEnd,
-        requestedSnapshotCollectorIds,
-        currentProbeConfigurationVersion:
-          services.probeConfigurations.getEffectiveForHost(host.id)
-            .configuration.version,
-        pendingOperation: pendingProbeOperationForHost(
-          services,
-          host.id,
-          host.probeId,
-          reportReceivedAtMs,
-        ),
-        serverTimeMs: reportReceivedAtMs,
-      }),
-    ).finish();
-
-    return context.body(toArrayBuffer(responseBody), 200, {
+    return context.body(toArrayBuffer(ingested.responseBody), 200, {
       "cache-control": "no-store",
       "content-type": "application/x-protobuf",
     });
@@ -681,11 +801,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.probeOperations?.updateProbeUpgradeRequest(
         statusResult.operation,
       ) ?? statusResult.operation;
-    completeProbeUninstallIfSucceeded({
+    const removedHostId = completeProbeUninstallIfSucceeded({
       nowMs: now(),
       operation: updated,
       services,
     });
+    if (removedHostId !== null) {
+      broadcastHostRemovedHint(services.liveUpdates, removedHostId);
+    }
 
     return context.json({ accepted: true }, 200, {
       "cache-control": "no-store",
@@ -732,6 +855,23 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   });
 
   return routes;
+}
+
+function isProbeStartupReport(input: {
+  report: { sequenceEnd: number; sequenceStart: number };
+  reportedHostProfile: ProtoMessage | null;
+  request: ProtoMessage;
+}) {
+  return (
+    input.report.sequenceStart === 1 &&
+    input.report.sequenceEnd === 1 &&
+    input.reportedHostProfile !== null &&
+    (input.request.metrics ?? []).length === 0
+  );
+}
+
+function nonemptyString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function pendingProbeOperationForHost(
@@ -861,30 +1001,27 @@ function readOperationStatusBody(requestBody: Uint8Array) {
 }
 
 function applyProbeOperationReports(input: {
-  acknowledgements: ProtoMessage[];
   hostId: number;
   nowMs: number;
+  operations: ProbeUpgradeRequest[];
   services: ProbeRouteServices;
-  statuses: ProtoMessage[];
-}): string | null {
-  const plan = planProbeOperationReportApplication(input);
-
-  if (plan.error) {
-    return plan.error;
-  }
-
-  for (const operation of plan.operations) {
+}): { error: string | null; hostRemovedIds: number[] } {
+  const hostRemovedIds: number[] = [];
+  for (const operation of input.operations) {
     const updated =
       input.services.probeOperations?.updateProbeUpgradeRequest(operation) ??
       operation;
-    completeProbeUninstallIfSucceeded({
+    const removed = completeProbeUninstallIfSucceeded({
       nowMs: input.nowMs,
       operation: updated,
       services: input.services,
     });
+    if (removed !== null) {
+      hostRemovedIds.push(removed);
+    }
   }
 
-  return null;
+  return { error: null, hostRemovedIds };
 }
 
 function planProbeOperationReportApplication(input: {
@@ -1090,7 +1227,7 @@ function completeProbeUninstallIfSucceeded(input: {
     input.operation.kind !== "probe_uninstall" ||
     input.operation.state !== "succeeded"
   ) {
-    return;
+    return null;
   }
 
   const deleted = input.services.hosts.softDelete(
@@ -1098,8 +1235,9 @@ function completeProbeUninstallIfSucceeded(input: {
     input.nowMs,
   );
   if (deleted) {
-    broadcastHostRemovedHint(input.services.liveUpdates, deleted.id);
+    return deleted.id;
   }
+  return null;
 }
 
 function markProbeUpgradeSucceededFromHostProfile(input: {
@@ -1600,7 +1738,7 @@ async function readCappedRequestBody(request: Request, maxBytes: number) {
 
 function probeJsonError(
   error: string,
-  status: 400 | 401 | 403 | 404 | 413 | 415,
+  status: 400 | 401 | 403 | 404 | 409 | 413 | 415,
 ) {
   return new Response(JSON.stringify({ error }), {
     headers: {

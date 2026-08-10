@@ -572,6 +572,32 @@ describe("WebSocket live updates", () => {
     ]);
   });
 
+  it("broadcasts a post-commit Host readiness hint with only its Enrollment and Host correlation", () => {
+    const liveUpdates = createLiveUpdateBroadcaster();
+    const messages: unknown[] = [];
+    const socket = {
+      close() {},
+      readyState: 1,
+      send(message: string) {
+        messages.push(JSON.parse(message) as unknown);
+      },
+    };
+
+    liveUpdates.addClient(socket as never, { sessionId: "owner-one" });
+    liveUpdates.broadcastHostReady({
+      enrollmentId: "enr_1234567890abcdef",
+      hostId: 42,
+    });
+
+    expect(messages).toEqual([
+      {
+        enrollmentId: "enr_1234567890abcdef",
+        hostId: 42,
+        type: "host_ready",
+      },
+    ]);
+  });
+
   it("requires an Owner session for the browser WebSocket endpoint", async () => {
     const database = await createTemporaryDatabase();
     const { baseUrl, webSocketUrl } = await startHubServer({ database });

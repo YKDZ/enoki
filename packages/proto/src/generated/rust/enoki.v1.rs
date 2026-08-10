@@ -399,6 +399,11 @@ pub struct ProbeRegistrationResponse {
     pub server_time_ms: i64,
     #[prost(message, optional, tag = "4")]
     pub initial_configuration: ::core::option::Option<ProbeConfigurationResponse>,
+    /// Correlates the immediately following Probe Startup Report with the
+    /// enrollment attempt that created this Probe Identity.  Older Hubs and
+    /// Probes omit it without changing the frame shape.
+    #[prost(string, tag = "5")]
+    pub enrollment_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProbeReportRequest {
@@ -424,6 +429,8 @@ pub struct ProbeReportRequest {
     pub operation_statuses: ::prost::alloc::vec::Vec<ProbeOperationStatus>,
     #[prost(message, repeated, tag = "12")]
     pub snapshots: ::prost::alloc::vec::Vec<Snapshot>,
+    #[prost(string, tag = "13")]
+    pub enrollment_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeReportResponse {

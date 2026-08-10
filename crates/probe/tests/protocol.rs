@@ -102,6 +102,7 @@ fn generated_rust_protocol_encodes_collector_capabilities_as_host_profile() {
 fn generated_rust_protocol_encodes_repeated_metric_samples() {
     let request = ProbeReportRequest {
         boot_id: "boot-01".to_string(),
+        enrollment_id: String::new(),
         metrics: vec![
             MetricSample {
                 collected_at_ms: 1_710_000_000_000,
@@ -142,6 +143,7 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
 fn generated_rust_protocol_encodes_disk_health_metrics_and_capability() {
     let request = ProbeReportRequest {
         boot_id: "boot-01".to_string(),
+        enrollment_id: String::new(),
         metrics: vec![MetricSample {
             collected_at_ms: 1_710_000_000_000,
             disk_health: vec![DiskHealthMetric {
@@ -235,6 +237,7 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
     let request = ProbeReportRequest {
         boot_id: "boot-01".to_string(),
         metrics: Vec::new(),
+        enrollment_id: String::new(),
         operation_acknowledgements: vec![ProbeOperationAcknowledgement {
             operation_id: "operation-01".to_string(),
         }],

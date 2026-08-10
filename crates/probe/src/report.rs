@@ -26,6 +26,7 @@ pub fn startup_report(
 ) -> ProbeReportRequest {
     ProbeReportRequest {
         boot_id: boot_id.to_string(),
+        enrollment_id: String::new(),
         metrics,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
@@ -49,6 +50,7 @@ pub fn full_host_profile_report(
 ) -> ProbeReportRequest {
     ProbeReportRequest {
         boot_id: boot_id.to_string(),
+        enrollment_id: String::new(),
         metrics,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
@@ -74,6 +76,7 @@ pub fn regular_report(
 
     ProbeReportRequest {
         boot_id: boot_id.to_string(),
+        enrollment_id: String::new(),
         metrics,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),

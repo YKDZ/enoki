@@ -62,6 +62,23 @@ fn parses_probe_run_command_for_systemd_service_entrypoint() {
 }
 
 #[test]
+fn parses_the_typed_probe_local_lifecycle_entrypoint_for_a_staged_candidate_only() {
+    let command = parse_probe_command([
+        "enoki-probe".to_string(),
+        "local-install".to_string(),
+        "--candidate".to_string(),
+        "/tmp/enoki-probe-candidate".to_string(),
+    ]);
+
+    assert_eq!(
+        command,
+        ProbeCommand::InternalLocalLifecycle {
+            candidate_binary: PathBuf::from("/tmp/enoki-probe-candidate"),
+        },
+    );
+}
+
+#[test]
 fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),

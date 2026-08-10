@@ -2,19 +2,6 @@
 set -euo pipefail
 
 SERVICE_NAME="enoki-probe"
-SERVICE_UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
-DEFAULT_SERVICE_USER="enoki-probe"
-DEFAULT_SERVICE_GROUP="enoki-probe"
-SERVICE_USER="${ENOKI_SERVICE_USER-$DEFAULT_SERVICE_USER}"
-SERVICE_GROUP="${ENOKI_SERVICE_GROUP-$DEFAULT_SERVICE_GROUP}"
-INSTALL_PATH="${ENOKI_INSTALL_PATH-/usr/local/bin/enoki-probe}"
-CONFIG_PATH="${ENOKI_CONFIG_PATH-/etc/enoki/probe-bootstrap.toml}"
-INSTALL_METADATA_PATH="/etc/enoki/probe-install.toml"
-OPERATION_SUDOERS_PATH="/etc/sudoers.d/enoki-probe-operations"
-COLLECTOR_HELPER_SUDOERS_PATH="/etc/sudoers.d/enoki-probe-collector-helpers"
-LEGACY_UPGRADER_SUDOERS_PATH="/etc/sudoers.d/enoki-probe-upgrader"
-STATE_DIR="${ENOKI_STATE_DIR-/var/lib/enoki-probe}"
-LOG_LEVEL="${ENOKI_LOG_LEVEL:-info}"
 TEST_ROOT="${ENOKI_TEST_ROOT:-}"
 EMBEDDED_PUBLIC_KEY_SHA256="__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__"
 
@@ -30,20 +17,6 @@ require_value() {
   if [ -z "$value" ]; then
     fail "$name is required."
   fi
-}
-
-rooted_path() {
-  local path="$1"
-
-  if [ -n "$TEST_ROOT" ] && [[ "$path" = /* ]]; then
-    printf '%s%s\n' "$TEST_ROOT" "$path"
-  else
-    printf '%s\n' "$path"
-  fi
-}
-
-host_path() {
-  printf '%s\n' "$1"
 }
 
 detect_linux_abi() {
@@ -91,29 +64,6 @@ detect_target() {
   echo "${arch}-unknown-linux-${abi}"
 }
 
-ensure_systemd() {
-  local runtime_dir="${ENOKI_SYSTEMD_RUNTIME_DIR:-/run/systemd/system}"
-
-  command -v systemctl >/dev/null 2>&1 ||
-    fail "systemd is required, but systemctl was not found."
-  systemctl --version >/dev/null 2>&1 ||
-    fail "systemd is required, but systemctl is not usable."
-
-  if [ ! -d "$runtime_dir" ]; then
-    fail "systemd is required, but $runtime_dir does not exist."
-  fi
-}
-
-ensure_root() {
-  if [ -n "$TEST_ROOT" ]; then
-    return
-  fi
-
-  if [ "$(id -u)" != "0" ]; then
-    fail "run this installer as root, for example through sudo."
-  fi
-}
-
 download_file() {
   local url="$1"
   local output="$2"
@@ -129,6 +79,32 @@ hub_api_url() {
 }
 
 validate_hub_url() {
+  local rest
+  local authority
+
+  case "$ENOKI_HUB_URL" in
+    *\?* | *\#*)
+      fail "ENOKI_HUB_URL must not contain credentials, a query, or a fragment."
+      ;;
+  esac
+
+  case "$ENOKI_HUB_URL" in
+    https://*) rest="${ENOKI_HUB_URL#https://}" ;;
+    http://*) rest="${ENOKI_HUB_URL#http://}" ;;
+    file://*)
+      if [ -n "$TEST_ROOT" ]; then
+        return
+      fi
+      fail "ENOKI_HUB_URL must use https, except localhost development URLs."
+      ;;
+    *) fail "ENOKI_HUB_URL must use https, except localhost development URLs." ;;
+  esac
+
+  authority="${rest%%/*}"
+  if [ -z "$authority" ] || [[ "$authority" == *"@"* ]]; then
+    fail "ENOKI_HUB_URL must not contain credentials, a query, or a fragment."
+  fi
+
   case "$ENOKI_HUB_URL" in
     https://*) return ;;
     http://*)
@@ -137,10 +113,6 @@ validate_hub_url() {
       fi
       ;;
   esac
-
-  if [ -n "$TEST_ROOT" ] && [[ "$ENOKI_HUB_URL" = file://* ]]; then
-    return
-  fi
 
   fail "ENOKI_HUB_URL must use https, except localhost development URLs."
 }
@@ -237,149 +209,9 @@ verify_checksum() {
   fi
 }
 
-validate_probe_operation_sudoers_paths() {
-  local value
-
-  for value in "$INSTALL_PATH" "$CONFIG_PATH"; do
-    if [[ "$value" =~ [[:space:][:cntrl:]] ]]; then
-      fail "Probe Operation sudoers paths must not contain whitespace or control characters."
-    fi
-  done
-}
-
-validate_linux_account_name() {
-  local name="$1"
-  local value="$2"
-
-  if [ -z "$value" ]; then
-    fail "$name is required."
-  fi
-  if [[ "$value" =~ [[:space:][:cntrl:]] ]]; then
-    fail "$name must not contain whitespace or control characters."
-  fi
-  if ! [[ "$value" =~ ^[a-z_][a-z0-9_-]{0,30}\$?$ ]]; then
-    fail "$name must be a safe Linux user or group name."
-  fi
-}
-
-validate_absolute_safe_path() {
-  local name="$1"
-  local value="$2"
-
-  if [ -z "$value" ]; then
-    fail "$name is required."
-  fi
-  if [[ "$value" != /* ]]; then
-    fail "$name must be an absolute path."
-  fi
-  if [ "$value" = "/" ]; then
-    fail "$name must not be the filesystem root."
-  fi
-  if [[ "$value" =~ [[:space:][:cntrl:]] ]]; then
-    fail "$name must not contain whitespace or control characters."
-  fi
-  if [[ "$value" = */../* ]] || [[ "$value" = */.. ]] || [[ "$value" = */./* ]] || [[ "$value" = */. ]]; then
-    fail "$name must not contain . or .. path components."
-  fi
-  if ! [[ "$value" =~ ^/[A-Za-z0-9._/@+-]+$ ]]; then
-    fail "$name contains characters that are unsafe for systemd or sudoers."
-  fi
-}
-
-validate_install_settings() {
-  validate_linux_account_name "ENOKI_SERVICE_USER" "$SERVICE_USER"
-  validate_linux_account_name "ENOKI_SERVICE_GROUP" "$SERVICE_GROUP"
-  validate_absolute_safe_path "ENOKI_INSTALL_PATH" "$INSTALL_PATH"
-  validate_absolute_safe_path "ENOKI_CONFIG_PATH" "$CONFIG_PATH"
-  validate_absolute_safe_path "ENOKI_STATE_DIR" "$STATE_DIR"
-}
-
-ensure_service_user() {
-  ensure_service_group
-
-  if id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    return
-  fi
-
-  useradd \
-    --system \
-    --gid "$SERVICE_GROUP" \
-    --home-dir "$STATE_DIR" \
-    --shell /usr/sbin/nologin \
-    "$SERVICE_USER"
-}
-
-ensure_service_group() {
-  if getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
-    return
-  fi
-
-  groupadd --system "$SERVICE_GROUP"
-}
-
-remove_path() {
-  local path="$1"
-  local rooted
-
-  rooted="$(rooted_path "$path")"
-  rm -rf "$rooted"
-}
-
-remove_empty_dir() {
-  local path="$1"
-  local rooted
-
-  rooted="$(rooted_path "$path")"
-  rmdir "$rooted" >/dev/null 2>&1 || true
-}
-
-remove_service_account() {
-  if [ "$SERVICE_USER" = "$DEFAULT_SERVICE_USER" ] &&
-    id -u "$SERVICE_USER" >/dev/null 2>&1; then
-    userdel "$SERVICE_USER" >/dev/null 2>&1 || true
-  fi
-
-  if [ "$SERVICE_GROUP" = "$DEFAULT_SERVICE_GROUP" ] &&
-    getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
-    groupdel "$SERVICE_GROUP" >/dev/null 2>&1 || true
-  fi
-}
-
-uninstall_probe() {
-  local service_path_rooted
-  local config_dir
-
-  ensure_root
-  ensure_systemd
-
-  systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
-  systemctl disable "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
-
-  service_path_rooted="$(rooted_path "/etc/systemd/system/${SERVICE_NAME}.service")"
-  rm -f "$service_path_rooted"
-
-  systemctl daemon-reload
-  systemctl reset-failed "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
-
-  remove_path "$INSTALL_PATH"
-  remove_path "$OPERATION_SUDOERS_PATH"
-  remove_path "$COLLECTOR_HELPER_SUDOERS_PATH"
-  remove_path "$LEGACY_UPGRADER_SUDOERS_PATH"
-  remove_path "$INSTALL_METADATA_PATH"
-  remove_path "$CONFIG_PATH"
-  config_dir="$(dirname "$CONFIG_PATH")"
-  remove_empty_dir "$config_dir"
-  remove_path "$STATE_DIR"
-  remove_service_account
-
-  echo "Enoki Probe uninstalled."
-}
-
-install_binary() {
+stage_candidate_binary() {
   local archive="$1"
-  local work_dir="$2"
-  local install_path_rooted
-  local install_dir_rooted
+  local staged_path="$2"
   local entry_names
   local entry_count
   local entry_name
@@ -394,314 +226,35 @@ install_binary() {
   fi
   case "$entry_name" in
     enoki-probe | ./enoki-probe) ;;
-    *)
-      fail "Probe release archive did not contain an enoki-probe binary."
-      ;;
+    *) fail "Probe release archive did not contain an enoki-probe binary." ;;
   esac
   entry_type="$(tar -tvzf "$archive" "$entry_name" | head -n 1 | cut -c1)"
   if [ "$entry_type" != "-" ]; then
     fail "Probe release archive did not contain an enoki-probe binary."
   fi
 
-  install_path_rooted="$(rooted_path "$INSTALL_PATH")"
-  install_dir_rooted="$(dirname "$install_path_rooted")"
-  mkdir -p "$install_dir_rooted"
-  tar -xOf "$archive" "$entry_name" >"$install_path_rooted"
-  chmod 0755 "$install_path_rooted"
+  tar -xOf "$archive" "$entry_name" >"$staged_path"
+  chmod 0755 "$staged_path"
 }
 
-write_bootstrap_config() {
-  local config_path_rooted
-  local state_dir_rooted
-  local existing_config_path
-  local existing_probe_id
-  local existing_probe_private_key_pem
+delegate_to_probe_local_lifecycle() {
+  local candidate="$1"
+  local lifecycle_output
+  local trusted_key
 
-  config_path_rooted="$(rooted_path "$CONFIG_PATH")"
-  state_dir_rooted="$(rooted_path "$STATE_DIR")"
-  existing_config_path="$(mktemp)"
-  if [ -f "$config_path_rooted" ]; then
-    cp "$config_path_rooted" "$existing_config_path"
-  fi
-  mkdir -p "$(dirname "$config_path_rooted")" "$state_dir_rooted"
-
-  {
-    printf 'hub_url = '
-    toml_string "$ENOKI_HUB_URL"
-    printf '\n'
-
-    if can_reuse_existing_identity "$existing_config_path"; then
-      existing_probe_id="$(toml_string_value "$existing_config_path" probe_id)"
-      existing_probe_private_key_pem="$(toml_string_value "$existing_config_path" probe_private_key_pem)"
-      printf 'probe_id = "%s"\n' "$existing_probe_id"
-      printf 'probe_private_key_pem = "%s"\n' "$existing_probe_private_key_pem"
-    else
-      rm -f "$(rooted_path "${STATE_DIR}/probe-operation-status.toml")"
-      printf 'enrollment_token = '
-      toml_string "$ENOKI_ENROLLMENT_TOKEN"
-      printf '\n'
+  trusted_key="${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
+  export ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256="$trusted_key"
+  if lifecycle_output="$("$candidate" local-install --candidate "$candidate" 2>&1)"; then
+    if printf '%s\n' "$lifecycle_output" | grep -qx 'ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE'; then
+      printf '%s\n' "$lifecycle_output"
+      return 0
     fi
-
-    printf 'state_dir = '
-    toml_string "$STATE_DIR"
-    printf '\n'
-    printf 'operation_status_path = '
-    toml_string "${STATE_DIR}/probe-operation-status.toml"
-    printf '\n'
-    printf 'install_path = '
-    toml_string "$INSTALL_PATH"
-    printf '\n'
-    printf 'service_name = '
-    toml_string "$SERVICE_NAME"
-    printf '\n'
-    printf 'service_user = '
-    toml_string "$SERVICE_USER"
-    printf '\n'
-    printf 'operation_sudoers_path = '
-    toml_string "$OPERATION_SUDOERS_PATH"
-    printf '\n'
-    printf 'collector_helper_sudoers_path = '
-    toml_string "$COLLECTOR_HELPER_SUDOERS_PATH"
-    printf '\n'
-    printf 'probe_asset_public_key_sha256 = '
-    toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
-    printf '\n'
-    printf 'upgrader_launch = "systemd"\n'
-    printf 'log_level = '
-    toml_string "$LOG_LEVEL"
-    printf '\n'
-
-    if can_reuse_existing_identity "$existing_config_path"; then
-      write_preserved_optional_string "$existing_config_path" probe_configuration_version
-      write_preserved_optional_raw "$existing_config_path" metrics_collection_interval_seconds
-      write_preserved_optional_raw "$existing_config_path" enabled_collector_ids
-    fi
-  } >"$config_path_rooted"
-  rm -f "$existing_config_path"
-  chmod 0600 "$config_path_rooted"
-
-  if [ -z "$TEST_ROOT" ]; then
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$state_dir_rooted"
-    chown "$SERVICE_USER:$SERVICE_GROUP" "$config_path_rooted"
-  fi
-}
-
-write_install_metadata() {
-  local metadata_path_rooted
-
-  metadata_path_rooted="$(rooted_path "$INSTALL_METADATA_PATH")"
-  mkdir -p "$(dirname "$metadata_path_rooted")"
-
-  {
-    printf 'schema_version = 1\n'
-    printf 'hub_url = '
-    toml_string "$(normalized_url "$ENOKI_HUB_URL")"
-    printf '\n'
-    printf 'install_path = '
-    toml_string "$INSTALL_PATH"
-    printf '\n'
-    printf 'identity_path = '
-    toml_string "$CONFIG_PATH"
-    printf '\n'
-    printf 'state_dir = '
-    toml_string "$STATE_DIR"
-    printf '\n'
-    printf 'operation_status_path = '
-    toml_string "${STATE_DIR}/probe-operation-status.toml"
-    printf '\n'
-    printf 'service_name = '
-    toml_string "$SERVICE_NAME"
-    printf '\n'
-    printf 'service_user = '
-    toml_string "$SERVICE_USER"
-    printf '\n'
-    printf 'service_group = '
-    toml_string "$SERVICE_GROUP"
-    printf '\n'
-    printf 'service_unit_path = '
-    toml_string "$SERVICE_UNIT_PATH"
-    printf '\n'
-    printf 'operation_sudoers_path = '
-    toml_string "$OPERATION_SUDOERS_PATH"
-    printf '\n'
-    printf 'collector_helper_sudoers_path = '
-    toml_string "$COLLECTOR_HELPER_SUDOERS_PATH"
-    printf '\n'
-    printf 'probe_asset_public_key_sha256 = '
-    toml_string "${ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256:-$EMBEDDED_PUBLIC_KEY_SHA256}"
-    printf '\n'
-  } >"$metadata_path_rooted"
-  chmod 0600 "$metadata_path_rooted"
-}
-
-toml_string() {
-  local value="$1"
-
-  value="${value//\\/\\\\}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  value="${value//\"/\\\"}"
-
-  printf '"%s"' "$value"
-}
-
-toml_string_value() {
-  local file="$1"
-  local key="$2"
-
-  if [ ! -f "$file" ]; then
-    return 1
   fi
 
-  sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*\"\\(.*\\)\"[[:space:]]*$/\\1/p" "$file" |
-    head -n 1
-}
-
-toml_raw_value() {
-  local file="$1"
-  local key="$2"
-
-  if [ ! -f "$file" ]; then
-    return 1
+  if [ -n "$lifecycle_output" ]; then
+    printf '%s\n' "$lifecycle_output" >&2
   fi
-
-  sed -n "s/^[[:space:]]*$key[[:space:]]*=[[:space:]]*\\([^[:space:]].*\\)$/\\1/p" "$file" |
-    head -n 1
-}
-
-normalized_url() {
-  local value="$1"
-
-  printf '%s\n' "${value%/}"
-}
-
-can_reuse_existing_identity() {
-  local existing_config="$1"
-  local existing_hub_url
-  local existing_probe_id
-  local existing_probe_private_key_pem
-
-  existing_hub_url="$(toml_string_value "$existing_config" hub_url || true)"
-  existing_probe_id="$(toml_string_value "$existing_config" probe_id || true)"
-  existing_probe_private_key_pem="$(toml_string_value "$existing_config" probe_private_key_pem || true)"
-
-  if [ -z "$existing_hub_url" ] ||
-    [ -z "$existing_probe_id" ] ||
-    [ -z "$existing_probe_private_key_pem" ]; then
-    return 1
-  fi
-
-  [ "$(normalized_url "$existing_hub_url")" = "$(normalized_url "$ENOKI_HUB_URL")" ]
-}
-
-write_preserved_optional_string() {
-  local existing_config="$1"
-  local key="$2"
-  local value
-
-  value="$(toml_string_value "$existing_config" "$key" || true)"
-  if [ -n "$value" ]; then
-    printf '%s = "%s"\n' "$key" "$value"
-  fi
-}
-
-write_preserved_optional_raw() {
-  local existing_config="$1"
-  local key="$2"
-  local value
-
-  value="$(toml_raw_value "$existing_config" "$key" || true)"
-  if [ -n "$value" ]; then
-    printf '%s = %s\n' "$key" "$value"
-  fi
-}
-
-write_systemd_service() {
-  local service_dir_rooted
-  local service_path_rooted
-
-  service_dir_rooted="$(rooted_path /etc/systemd/system)"
-  service_path_rooted="$(rooted_path "$SERVICE_UNIT_PATH")"
-  mkdir -p "$service_dir_rooted"
-
-  cat >"$service_path_rooted" <<EOF
-[Unit]
-Description=Enoki Probe
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${SERVICE_USER}
-Group=${SERVICE_GROUP}
-ExecStart=$(host_path "$INSTALL_PATH") run --config $(host_path "$CONFIG_PATH")
-Restart=always
-RestartSec=5s
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
-ProtectControlGroups=true
-# Keep the Probe process eligible for its constrained sudoers entry points.
-# On systemd 249, some seccomp hardening options implicitly set NoNewPrivileges
-# for non-root services, which prevents sudo from launching the operation units.
-ReadWritePaths=$(host_path "$STATE_DIR") $(dirname "$(host_path "$CONFIG_PATH")")
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-write_operation_sudoers() {
-  local sudoers_dir_rooted
-  local sudoers_path_rooted
-  local install_path_host
-  local config_path_host
-
-  validate_probe_operation_sudoers_paths
-  sudoers_dir_rooted="$(rooted_path /etc/sudoers.d)"
-  sudoers_path_rooted="$(rooted_path "$OPERATION_SUDOERS_PATH")"
-  install_path_host="$(host_path "$INSTALL_PATH")"
-  config_path_host="$(host_path "$CONFIG_PATH")"
-  mkdir -p "$sudoers_dir_rooted"
-
-  cat >"$sudoers_path_rooted" <<EOF
-# Managed by Enoki Probe installer.
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-upgrader --property=Type=exec -- ${install_path_host} internal-upgrader --config ${config_path_host}
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit=${SERVICE_NAME}-uninstaller --property=Type=exec -- ${install_path_host} internal-uninstaller --config ${config_path_host}
-EOF
-  chmod 0440 "$sudoers_path_rooted"
-}
-
-write_collector_helper_sudoers() {
-  local sudoers_dir_rooted
-  local sudoers_path_rooted
-  local temp_sudoers
-  local install_path_rooted
-
-  sudoers_dir_rooted="$(rooted_path /etc/sudoers.d)"
-  sudoers_path_rooted="$(rooted_path "$COLLECTOR_HELPER_SUDOERS_PATH")"
-  install_path_rooted="$(rooted_path "$INSTALL_PATH")"
-  mkdir -p "$sudoers_dir_rooted"
-  temp_sudoers="$(mktemp "$sudoers_dir_rooted/enoki-probe-collector-helpers.XXXXXX")"
-
-  if ! "$install_path_rooted" internal-render-collector-helper-sudoers \
-    --service-user "$SERVICE_USER" \
-    --probe-binary "$(host_path "$INSTALL_PATH")" >"$temp_sudoers"; then
-    rm -f "$temp_sudoers"
-    fail "Probe collector-helper sudoers planner failed."
-  fi
-
-  if [ -s "$temp_sudoers" ]; then
-    mv "$temp_sudoers" "$sudoers_path_rooted"
-    chmod 0440 "$sudoers_path_rooted"
-  else
-    rm -f "$temp_sudoers" "$sudoers_path_rooted"
-  fi
-}
-
-remove_legacy_sudoers_layout() {
-  rm -f "$(rooted_path "$LEGACY_UPGRADER_SUDOERS_PATH")"
+  fail "staged Probe candidate did not complete the typed Probe Local Lifecycle."
 }
 
 main() {
@@ -714,21 +267,15 @@ main() {
   local asset_file
   local asset_sha256
   local archive_url
-
-  if [ "${ENOKI_UNINSTALL:-}" = "1" ]; then
-    uninstall_probe
-    return
-  fi
+  local staged_candidate
 
   require_value "ENOKI_HUB_URL" "${ENOKI_HUB_URL:-}"
   require_value "ENOKI_ENROLLMENT_TOKEN" "${ENOKI_ENROLLMENT_TOKEN:-}"
-  validate_install_settings
   validate_hub_url
-  ensure_root
-  ensure_systemd
   target="$(detect_target)"
   work_dir="$(mktemp -d)"
   archive="$work_dir/enoki-probe.tar.gz"
+  staged_candidate="$work_dir/enoki-probe-candidate"
   manifest_file="$work_dir/manifest.json"
   manifest_signature_file="$work_dir/manifest.json.sig"
   public_key_file="$work_dir/signing-key.pem"
@@ -754,18 +301,8 @@ main() {
   archive_url="$(hub_api_url "/api/probe/assets/$asset_file")"
   download_file "$archive_url" "$archive"
   verify_checksum "$archive" "$asset_sha256"
-  ensure_service_user
-  systemctl stop "${SERVICE_NAME}.service" >/dev/null 2>&1 || true
-  install_binary "$archive" "$work_dir"
-  write_bootstrap_config
-  write_install_metadata
-  write_systemd_service
-  remove_legacy_sudoers_layout
-  write_operation_sudoers
-  write_collector_helper_sudoers
-  systemctl daemon-reload
-  systemctl enable "${SERVICE_NAME}.service"
-  systemctl restart "${SERVICE_NAME}.service"
+  stage_candidate_binary "$archive" "$staged_candidate"
+  delegate_to_probe_local_lifecycle "$staged_candidate"
 
   echo "Enoki Probe installed as ${SERVICE_NAME}.service."
 }

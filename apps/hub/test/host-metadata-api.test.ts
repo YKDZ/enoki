@@ -741,6 +741,7 @@ describe("Host Metadata API", () => {
       liveUpdates: {
         broadcastDetailSample() {},
         broadcastHostProfile() {},
+        broadcastHostReady() {},
         broadcastHostRemoved() {
           throw new Error("socket closed");
         },
@@ -850,6 +851,7 @@ describe("Host Metadata API", () => {
       liveUpdates: {
         broadcastDetailSample() {},
         broadcastHostProfile() {},
+        broadcastHostReady() {},
         broadcastHostRemoved(hostId: number) {
           removedHostIds.push(hostId);
         },

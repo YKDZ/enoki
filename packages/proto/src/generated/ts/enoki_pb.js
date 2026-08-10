@@ -331,6 +331,7 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [probeSecret] ProbeRegistrationResponse probeSecret
              * @property {Long|null} [serverTimeMs] ProbeRegistrationResponse serverTimeMs
              * @property {enoki.v1.IProbeConfigurationResponse|null} [initialConfiguration] ProbeRegistrationResponse initialConfiguration
+             * @property {string|null} [enrollmentId] ProbeRegistrationResponse enrollmentId
              */
 
             /**
@@ -381,6 +382,14 @@ export const enoki = $root.enoki = (() => {
             ProbeRegistrationResponse.prototype.initialConfiguration = null;
 
             /**
+             * ProbeRegistrationResponse enrollmentId.
+             * @member {string} enrollmentId
+             * @memberof enoki.v1.ProbeRegistrationResponse
+             * @instance
+             */
+            ProbeRegistrationResponse.prototype.enrollmentId = "";
+
+            /**
              * Creates a new ProbeRegistrationResponse instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeRegistrationResponse
@@ -416,6 +425,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 3, wireType 0 =*/24).int64(message.serverTimeMs);
                 if (message.initialConfiguration != null && Object.hasOwnProperty.call(message, "initialConfiguration"))
                     $root.enoki.v1.ProbeConfigurationResponse.encode(message.initialConfiguration, writer.uint32(/* id 4, wireType 2 =*/34).fork(), q + 1).ldelim();
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    writer.uint32(/* id 5, wireType 2 =*/42).string(message.enrollmentId);
                 return writer;
             };
 
@@ -472,6 +483,10 @@ export const enoki = $root.enoki = (() => {
                             message.initialConfiguration = $root.enoki.v1.ProbeConfigurationResponse.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
+                    case 5: {
+                            message.enrollmentId = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -525,6 +540,9 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "initialConfiguration." + error;
                 }
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    if (!$util.isString(message.enrollmentId))
+                        return "enrollmentId: string expected";
                 return null;
             };
 
@@ -564,6 +582,8 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeRegistrationResponse.initialConfiguration: object expected");
                     message.initialConfiguration = $root.enoki.v1.ProbeConfigurationResponse.fromObject(object.initialConfiguration, long + 1);
                 }
+                if (object.enrollmentId != null)
+                    message.enrollmentId = String(object.enrollmentId);
                 return message;
             };
 
@@ -593,6 +613,7 @@ export const enoki = $root.enoki = (() => {
                     } else
                         object.serverTimeMs = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
                     object.initialConfiguration = null;
+                    object.enrollmentId = "";
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -607,6 +628,8 @@ export const enoki = $root.enoki = (() => {
                         object.serverTimeMs = options.longs === String ? $util.Long.prototype.toString.call(message.serverTimeMs) : options.longs === Number ? new $util.LongBits(message.serverTimeMs.low >>> 0, message.serverTimeMs.high >>> 0).toNumber() : message.serverTimeMs;
                 if (message.initialConfiguration != null && Object.hasOwnProperty.call(message, "initialConfiguration"))
                     object.initialConfiguration = $root.enoki.v1.ProbeConfigurationResponse.toObject(message.initialConfiguration, options, q + 1);
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    object.enrollmentId = message.enrollmentId;
                 return object;
             };
 
@@ -655,6 +678,7 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.IProbeOperationAcknowledgement>|null} [operationAcknowledgements] ProbeReportRequest operationAcknowledgements
              * @property {Array.<enoki.v1.IProbeOperationStatus>|null} [operationStatuses] ProbeReportRequest operationStatuses
              * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeReportRequest snapshots
+             * @property {string|null} [enrollmentId] ProbeReportRequest enrollmentId
              */
 
             /**
@@ -757,6 +781,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.snapshots = $util.emptyArray;
 
             /**
+             * ProbeReportRequest enrollmentId.
+             * @member {string} enrollmentId
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.enrollmentId = "";
+
+            /**
              * Creates a new ProbeReportRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportRequest
@@ -808,6 +840,8 @@ export const enoki = $root.enoki = (() => {
                 if (message.snapshots != null && message.snapshots.length)
                     for (let i = 0; i < message.snapshots.length; ++i)
                         $root.enoki.v1.Snapshot.encode(message.snapshots[i], writer.uint32(/* id 12, wireType 2 =*/98).fork(), q + 1).ldelim();
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    writer.uint32(/* id 13, wireType 2 =*/106).string(message.enrollmentId);
                 return writer;
             };
 
@@ -894,6 +928,10 @@ export const enoki = $root.enoki = (() => {
                             if (!(message.snapshots && message.snapshots.length))
                                 message.snapshots = [];
                             message.snapshots.push($root.enoki.v1.Snapshot.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 13: {
+                            message.enrollmentId = reader.string();
                             break;
                         }
                     default:
@@ -991,6 +1029,9 @@ export const enoki = $root.enoki = (() => {
                             return "snapshots." + error;
                     }
                 }
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    if (!$util.isString(message.enrollmentId))
+                        return "enrollmentId: string expected";
                 return null;
             };
 
@@ -1081,6 +1122,8 @@ export const enoki = $root.enoki = (() => {
                         message.snapshots[i] = $root.enoki.v1.Snapshot.fromObject(object.snapshots[i], long + 1);
                     }
                 }
+                if (object.enrollmentId != null)
+                    message.enrollmentId = String(object.enrollmentId);
                 return message;
             };
 
@@ -1122,6 +1165,7 @@ export const enoki = $root.enoki = (() => {
                         object.sequenceEnd = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
                     object.probeConfigurationVersion = "";
                     object.probeConfigurationError = null;
+                    object.enrollmentId = "";
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -1165,6 +1209,8 @@ export const enoki = $root.enoki = (() => {
                     for (let j = 0; j < message.snapshots.length; ++j)
                         object.snapshots[j] = $root.enoki.v1.Snapshot.toObject(message.snapshots[j], options, q + 1);
                 }
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    object.enrollmentId = message.enrollmentId;
                 return object;
             };
 

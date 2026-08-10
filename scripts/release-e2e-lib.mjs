@@ -1,16 +1,50 @@
 import { createHash, randomUUID } from "node:crypto";
 
-const managedHostPaths = Object.freeze([
-  "/usr/local/bin/enoki-probe",
-  "/etc/enoki/probe-bootstrap.toml",
-  "/etc/enoki/probe-install.toml",
-  "/etc/systemd/system/enoki-probe.service",
-  "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
-  "/var/lib/enoki-probe",
-  "/etc/sudoers.d/enoki-probe-operations",
-  "/etc/sudoers.d/enoki-probe-collector-helpers",
-  "/etc/sudoers.d/enoki-probe-upgrader",
+// Release E2E infrastructure has one narrowly scoped, run-owned resource
+// definition. It produces the preflight allowlist, recorded fingerprint, and
+// emergency-removal plan; the product installer and uninstaller are never
+// invoked by this test-only path.
+const releaseE2EInfrastructureResources = Object.freeze([
+  { kind: "file", path: "/usr/local/bin/enoki-probe" },
+  {
+    kind: "file",
+    path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+  },
+  { kind: "file", path: "/etc/enoki/probe-install.toml" },
+  { kind: "file", path: "/etc/systemd/system/enoki-probe.service" },
+  {
+    kind: "file",
+    path: "/etc/systemd/system/enoki-probe.service.d/90-enoki-release-e2e-restart-failure.conf",
+  },
+  { kind: "directory", path: "/var/lib/enoki-probe" },
+  { kind: "file", path: "/etc/sudoers.d/enoki-probe-operations" },
+  {
+    kind: "file",
+    path: "/etc/sudoers.d/enoki-probe-collector-helpers",
+  },
+  { kind: "file", path: "/etc/sudoers.d/enoki-probe-upgrader" },
+  { kind: "user", name: "enoki-probe" },
+  { kind: "group", name: "enoki-probe" },
+  { kind: "service", name: "enoki-probe.service" },
 ]);
+
+const managedHostPaths = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter((resource) => "path" in resource)
+    .map((resource) => resource.path),
+);
+
+const releaseE2EUsers = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter((resource) => resource.kind === "user")
+    .map((resource) => resource.name),
+);
+
+const releaseE2EGroups = Object.freeze(
+  releaseE2EInfrastructureResources
+    .filter((resource) => resource.kind === "group")
+    .map((resource) => resource.name),
+);
 
 const terminalProbeOperationStates = new Set([
   "succeeded",
@@ -1223,7 +1257,7 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
     "user:enoki-probe",
     "group:enoki-probe",
     "/usr/local/bin/enoki-probe",
-    "/etc/enoki/probe-bootstrap.toml",
+    "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
     "/etc/enoki/probe-install.toml",
     "/etc/systemd/system/enoki-probe.service",
     "/var/lib/enoki-probe",
@@ -2204,7 +2238,6 @@ export function createProbeHostHarness({
   }
 
   let disposableRunId = null;
-  let installCommandForCleanup = null;
   if (!/^[0-9a-f-]{36}$/.test(ownershipToken)) {
     throw new Error("Probe Host Harness ownership token is invalid");
   }
@@ -2301,7 +2334,6 @@ export function createProbeHostHarness({
         );
       }
       runOwnsMutation = true;
-      installCommandForCleanup = installCommand;
       const result = await execute(`${installCommand}\n`, {
         root: true,
         sensitive: true,
@@ -2344,7 +2376,7 @@ export function createProbeHostHarness({
         "user:enoki-probe",
         "group:enoki-probe",
         "/usr/local/bin/enoki-probe",
-        "/etc/enoki/probe-bootstrap.toml",
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
         "/etc/enoki/probe-install.toml",
         "/etc/systemd/system/enoki-probe.service",
         "/var/lib/enoki-probe",
@@ -2715,42 +2747,26 @@ export function createProbeHostHarness({
           verifyRunResourcesScript(runId, ownershipToken),
           { root: true },
         );
-        let resourcesOwned = verifiedResources.code === 0;
-        if (verifiedResources.code !== 0) {
-          const authorizedUpgradeResources = await execute(
-            verifyAuthorizedUpgradeResourcesScript(runId, ownershipToken),
-            { root: true },
+        const resourcesOwned = verifiedResources.code === 0;
+        if (!resourcesOwned) {
+          errors.push(
+            new Error(
+              `Refusing cleanup because Probe resources no longer match run ${runId}: ${verifiedResources.stderr}`,
+            ),
           );
-          resourcesOwned =
-            authorizedUpgradeResources.code === 0 &&
-            authorizedUpgradeResources.stdout.trim() === "owned";
-          if (!resourcesOwned) {
-            errors.push(
-              new Error(
-                `Refusing cleanup because Probe resources no longer match run ${runId}: ${verifiedResources.stderr}${authorizedUpgradeResources.stderr}`,
-              ),
-            );
-          }
         }
         if (resourcesOwned) {
-          const cleanupCommand = await attempt(() =>
-            Promise.resolve(uninstallCommand(installCommandForCleanup)),
-          );
-          if (cleanupCommand) {
-            await attempt(async () => {
-              const uninstalled = await execute(`${cleanupCommand}\n`, {
-                root: true,
-                sensitive: true,
-              });
-              if (uninstalled.code !== 0) {
-                throw new Error(
-                  `Run-owned Probe cleanup failed (${uninstalled.code}): ${uninstalled.stderr}`,
-                );
-              }
-              removedPartialInstallation = true;
-            });
-          }
           await attempt(async () => {
+            const cleaned = await execute(
+              releaseEmergencyCleanupScript(runId, ownershipToken),
+              { root: true },
+            );
+            if (cleaned.code !== 0) {
+              throw new Error(
+                `Run-owned emergency cleanup failed: ${cleaned.stderr}`,
+              );
+            }
+            removedPartialInstallation = true;
             const reloaded = await execute(daemonReloadScript(), {
               root: true,
             });
@@ -2905,13 +2921,15 @@ printf '{"architecture":"%s","operatingSystem":"%s","operatingSystemVersion":"%s
 }
 
 function hostInventoryScript() {
+  const group = shellSingleQuote(releaseE2EGroups[0]);
+  const user = shellSingleQuote(releaseE2EUsers[0]);
   return String.raw`# enoki-release-e2e:inventory
 set -eu
 json_bool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
 printf '{"accounts":{"group":'
-json_bool getent group enoki-probe
+json_bool getent group ${group}
 printf ',"user":'
-json_bool getent passwd enoki-probe
+json_bool getent passwd ${user}
 printf '},"files":['
 separator=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
@@ -2971,7 +2989,7 @@ set -eu
 function probeIdentityScript() {
   return String.raw`# enoki-release-e2e:probe-identity
 set -eu
-config=/etc/enoki/probe-bootstrap.toml
+config=/var/lib/enoki-probe/identity/probe-bootstrap.toml
 [ -f "$config" ]
 [ ! -L "$config" ]
 probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$config")
@@ -3041,6 +3059,8 @@ printf 'stage=post-uninstall\nmanagedSudoersCount=0\n'
 }
 
 function claimRunScript(runId, token) {
+  const users = releaseE2EUsers.map(shellSingleQuote).join(" ");
+  const groups = releaseE2EGroups.map(shellSingleQuote).join(" ");
   return `# enoki-release-e2e:claim
 set -eu
 claim_root=/var/lib/enoki-release-e2e
@@ -3058,8 +3078,12 @@ residue=
 for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")} /run/systemd/system/enoki-probe*.service; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then residue="$residue $candidate"; fi
 done
-if getent passwd enoki-probe >/dev/null 2>&1; then residue="$residue user:enoki-probe"; fi
-if getent group enoki-probe >/dev/null 2>&1; then residue="$residue group:enoki-probe"; fi
+for account in ${users}; do
+  if getent passwd "$account" >/dev/null 2>&1; then residue="$residue user:$account"; fi
+done
+for account in ${groups}; do
+  if getent group "$account" >/dev/null 2>&1; then residue="$residue group:$account"; fi
+done
 units=$(systemctl list-units --all --full --plain 'enoki-probe*.service' --no-legend --no-pager 2>/dev/null || true)
 if [ -n "$units" ]; then residue="$residue enoki-probe-unit"; fi
 if [ -n "$residue" ]; then
@@ -3312,43 +3336,82 @@ printf 'owned\n'
 `;
 }
 
-function verifyAuthorizedUpgradeResourcesScript(runId, token) {
-  return `# enoki-release-e2e:verify-upgrade-ownership
-set -eu
-claim=/var/lib/enoki-release-e2e/claim
-[ -d "$claim" ]
-[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
-[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
-[ -s "$claim/upgrade-target" ]
-[ -s "$claim/upgrade-operation-id" ]
-case "$(cat "$claim/upgrade-target")" in
-  0.*.*|[1-9]*.*.*) ;;
-  *) printf 'invalid authorized Probe Upgrade target\n' >&2; exit 77 ;;
-esac
-case "$(cat "$claim/upgrade-operation-id")" in
-  ''|*[!0-9]*) printf 'invalid authorized Probe Upgrade operation\n' >&2; exit 78 ;;
-esac
-[ -f "$claim/upgrade-before-resources" ]
-cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
-${knownProbeInstallMetadataScript()}
-${resourceFingerprintFunction()}
-temporary=$(mktemp "$claim/resources.transition.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-fingerprint > "$temporary"
-printf 'owned\n'
-`;
+function resourceFingerprintFunction() {
+  return renderReleaseE2EResourceFingerprint(releaseE2EInfrastructureResources);
 }
 
-function resourceFingerprintFunction() {
-  return String.raw`fingerprint() {
-  for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
-    if [ -L "$candidate" ]; then printf 'link\t%s\t%s\n' "$candidate" "$(readlink "$candidate")"
-    elif [ -f "$candidate" ]; then printf 'file\t%s\n' "$candidate"
-    elif [ -d "$candidate" ]; then printf 'directory\t%s\n' "$candidate"
+export function renderReleaseE2EResourceFingerprint(resources) {
+  const files = resources
+    .filter((resource) => resource.kind === "file")
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const directories = resources
+    .filter((resource) => resource.kind === "directory")
+    .map((resource) => shellSingleQuote(resource.path))
+    .join(" ");
+  const users = resources
+    .filter((resource) => resource.kind === "user")
+    .map((resource) => shellSingleQuote(resource.name))
+    .join(" ");
+  const groups = resources
+    .filter((resource) => resource.kind === "group")
+    .map((resource) => shellSingleQuote(resource.name))
+    .join(" ");
+  return String.raw`fingerprint_path() {
+  path=$1
+  metadata=$(stat -c '%u\t%g\t%a\t%d\t%i\t%s' -- "$path") || return 1
+  path_hash=$(printf '%s' "$path" | sha256sum | awk '{print $1}') || return 1
+  if [ -L "$path" ]; then
+    type=symlink
+    content_hash=$(readlink -- "$path" | sha256sum | awk '{print $1}') || return 1
+  elif [ -f "$path" ]; then
+    type=file
+    content_hash=$(sha256sum -- "$path" | awk '{print $1}') || return 1
+  elif [ -d "$path" ]; then
+    type=directory
+    content_hash=-
+  else
+    type=$(stat -c '%F' -- "$path") || return 1
+    content_hash=-
+  fi
+  printf 'path\t%s\t%s\t%s\t%s\n' "$path_hash" "$type" "$metadata" "$content_hash"
+}
+fingerprint_directory() {
+  directory=$1
+  members=$(find -P "$directory" -xdev -print | LC_ALL=C sort) || return 1
+  printf '%s\n' "$members" | while IFS= read -r member; do
+    [ -n "$member" ] || continue
+    fingerprint_path "$member" || exit 1
+  done
+}
+fingerprint() {
+  for candidate in ${files}; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      fingerprint_path "$candidate" || return 1
     fi
   done
-  if getent passwd enoki-probe >/dev/null 2>&1; then printf 'user\tenoki-probe\n'; fi
-  if getent group enoki-probe >/dev/null 2>&1; then printf 'group\tenoki-probe\n'; fi
+  for candidate in ${directories}; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then
+      [ -d "$candidate" ] && [ ! -L "$candidate" ] || return 1
+      fingerprint_directory "$candidate" || return 1
+    fi
+  done
+  for account in ${users}; do
+    if entry=$(getent passwd "$account"); then
+      uid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
+      gid=$(printf '%s' "$entry" | cut -d: -f4) || return 1
+      entry_hash=$(printf '%s' "$entry" | sha256sum | awk '{print $1}') || return 1
+      printf 'user\t%s\t%s\t%s\t%s\n' "$account" "$uid" "$gid" "$entry_hash"
+    fi
+  done
+  for account in ${groups}; do
+    if entry=$(getent group "$account"); then
+      gid=$(printf '%s' "$entry" | cut -d: -f3) || return 1
+      entry_hash=$(printf '%s' "$entry" | sha256sum | awk '{print $1}') || return 1
+      printf 'group\t%s\t%s\t%s\n' "$account" "$gid" "$entry_hash"
+    fi
+  done
 }`;
 }
 
@@ -3375,7 +3438,7 @@ case "$metadata_schema" in
   current)
     [ "$(stat -c %a "$metadata")" = 600 ]
     require_metadata_line 'schema_version = 1'
-    require_metadata_line 'identity_path = "/etc/enoki/probe-bootstrap.toml"'
+    require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
     require_metadata_line 'service_group = "enoki-probe"'
     require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
     ;;
@@ -3397,10 +3460,51 @@ function inspectClaimScript(runId, token) {
   return `# enoki-release-e2e:inspect-claim\nset -eu\nclaim=/var/lib/enoki-release-e2e/claim\nif [ ! -e "$claim" ]; then printf 'absent\\n'; elif [ -d "$claim" ] && [ "$(cat "$claim/run-id" 2>/dev/null || true)" = ${shellSingleQuote(runId)} ] && [ "$(cat "$claim/token" 2>/dev/null || true)" = ${shellSingleQuote(token)} ]; then printf 'owned\\n'; else printf 'foreign\\n'; fi\n`;
 }
 
+function releaseEmergencyCleanupScript(runId, token) {
+  const pathsFor = (kind) =>
+    releaseE2EInfrastructureResources
+      .filter((resource) => resource.kind === kind)
+      .map((resource) => shellSingleQuote(resource.path))
+      .join(" ");
+  const namesFor = (kind) =>
+    releaseE2EInfrastructureResources
+      .filter((resource) => resource.kind === kind)
+      .map((resource) => shellSingleQuote(resource.name))
+      .join(" ");
+  const files = pathsFor("file");
+  const directories = pathsFor("directory");
+  const users = namesFor("user");
+  const groups = namesFor("group");
+  const services = namesFor("service");
+  return `# enoki-release-e2e:emergency-cleanup
+set -eu
+claim=/var/lib/enoki-release-e2e/claim
+[ -d "$claim" ]
+[ "$(cat "$claim/run-id")" = ${shellSingleQuote(runId)} ]
+[ "$(cat "$claim/token")" = ${shellSingleQuote(token)} ]
+[ -f "$claim/resources" ]
+${resourceFingerprintFunction()}
+temporary=$(mktemp "$claim/resources.cleanup.XXXXXX")
+trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+fingerprint > "$temporary"
+cmp --silent "$claim/resources" "$temporary" || { printf 'run-owned resource fingerprint changed\\n' >&2; exit 75; }
+systemctl disable --now ${services} >/dev/null 2>&1 || true
+rm -f -- ${files}
+rm -rf -- ${directories}
+for account in ${users}; do userdel -- "$account" >/dev/null 2>&1 || true; done
+for account in ${groups}; do groupdel -- "$account" >/dev/null 2>&1 || true; done
+printf 'cleaned\\n'
+`;
+}
+
 function inventoryResidue(inventory) {
   const residue = [];
-  if (inventory?.accounts?.user) residue.push("user:enoki-probe");
-  if (inventory?.accounts?.group) residue.push("group:enoki-probe");
+  if (inventory?.accounts?.user) {
+    residue.push(...releaseE2EUsers.map((account) => `user:${account}`));
+  }
+  if (inventory?.accounts?.group) {
+    residue.push(...releaseE2EGroups.map((account) => `group:${account}`));
+  }
   if (Array.isArray(inventory?.files)) residue.push(...inventory.files);
   if (Array.isArray(inventory?.units)) residue.push(...inventory.units);
   return residue.sort();
@@ -3452,11 +3556,6 @@ function parseKeyValues(value) {
     result[line.slice(0, separator)] = line.slice(separator + 1);
   }
   return result;
-}
-
-function uninstallCommand(installCommand) {
-  assertInstallCommand(installCommand);
-  return installCommand.replace(/ bash$/, " ENOKI_UNINSTALL=1 bash");
 }
 
 function commandEvidence(result) {

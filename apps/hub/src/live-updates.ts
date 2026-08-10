@@ -22,6 +22,7 @@ export type LiveUpdateBroadcaster = {
     hostId: number,
     hostProfile: HostProfileSnapshot,
   ) => void;
+  broadcastHostReady: (input: { enrollmentId: string; hostId: number }) => void;
   broadcastHostRemoved: (hostId: number) => void;
   broadcastHostSummary: (summary: HostLiveSummary) => void;
   closeSession: (sessionId: string) => void;
@@ -64,6 +65,17 @@ export function createLiveUpdateBroadcaster(): LiveUpdateBroadcaster {
         if (client.detailHostId === hostId) {
           sendJson(client.socket, message);
         }
+      }
+    },
+    broadcastHostReady({ enrollmentId, hostId }) {
+      const message: WebSocketServerMessage = {
+        enrollmentId,
+        hostId,
+        type: "host_ready",
+      };
+
+      for (const client of clients.values()) {
+        sendJson(client.socket, message);
       }
     },
     broadcastHostRemoved(hostId) {
@@ -138,6 +150,17 @@ export function broadcastHostRemovedHint(
     liveUpdates?.broadcastHostRemoved(hostId);
   } catch {
     // The committed Host lifecycle transition remains authoritative.
+  }
+}
+
+export function broadcastHostReadyHint(
+  liveUpdates: LiveUpdateBroadcaster | null | undefined,
+  input: { enrollmentId: string; hostId: number },
+) {
+  try {
+    liveUpdates?.broadcastHostReady(input);
+  } catch {
+    // The committed Enrollment readiness transition remains authoritative.
   }
 }
 
