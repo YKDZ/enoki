@@ -342,6 +342,9 @@ describe("Release E2E matrix", () => {
     );
     expect(workflow).toContain("runs-on: ${{ matrix.runner }}");
     expect(workflow).toContain("fail-fast: false");
+    expect(workflow).toContain(
+      "sudo install -d -o root -g root -m 0755 /usr/local/bin",
+    );
     expect(workflow).toContain('--host-adapter "$HOST_ADAPTER"');
     expect(workflow).toContain('--matrix-cell "$MATRIX_CELL"');
     expect(workflow).toContain("github.run_attempt");
