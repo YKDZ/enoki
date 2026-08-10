@@ -1,6 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const ownerPassword = "correct horse battery staple";
+import {
+  closeFakeLiveWebSocket,
+  fakeLiveSocketGeneration,
+  fakeLiveSocketOpenGeneration,
+  installFakeLiveWebSocket,
+  openFakeLiveWebSocket,
+} from "./fake-live-websocket";
+import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
+
+const { hubUrl, ownerPassword } = releaseUiBrowserRuntime();
 
 type BrowserEnrollmentTarget =
   | { kind: "new_host" }
@@ -71,9 +80,7 @@ test("owner can generate a Hub-served probe install command", async ({
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
   await expect(command).toHaveValue(/\/api\/probe\/install\.sh/);
-  await expect(command).toHaveValue(
-    /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38200'/,
-  );
+  expect(await command.inputValue()).toContain(`ENOKI_HUB_URL='${hubUrl}'`);
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
   await expect(command).not.toHaveValue(/github\.com/);
 
@@ -99,9 +106,7 @@ test("owner can select the command with Cmd+A on a macOS browser runner", async 
     process.platform !== "darwin",
     "Cmd+A is executed only by the macOS Playwright gate.",
   );
-  await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
+  await loginOwner(page);
   await page.getByRole("button", { name: "添加探针" }).click();
 
   const command = page.getByRole("textbox", { name: "安装命令" });
@@ -133,7 +138,7 @@ test("an expired Enrollment closes the matching dialog through its status API", 
         expiresAtMs,
         expiredAtMs: null,
         hostId: null,
-        hubUrl: "http://127.0.0.1:38200",
+        hubUrl,
         installCommand: "curl expired-command",
         installPath: "/usr/local/bin/enoki-probe",
         readyAtMs: null,
@@ -175,6 +180,115 @@ test("an expired Enrollment closes the matching dialog through its status API", 
 
   await expect(page.getByText("安装命令已过期")).toBeVisible();
   await expect(page.getByRole("dialog", { name: "添加主机" })).toBeHidden();
+});
+
+test("a verifying Enrollment keeps its dialog open and withholds the install command", async ({
+  page,
+}) => {
+  const enrollmentId = "enr_verifying_browser";
+  const verifyingAtMs = Date.now();
+  let statusReads = 0;
+  await page.route("**/api/web/enrollments", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      contentType: "application/json",
+      json: pendingEnrollment(enrollmentId),
+      status: 201,
+    });
+  });
+  await page.route(`**/api/web/enrollments/${enrollmentId}`, async (route) => {
+    statusReads += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        ...pendingEnrollment(enrollmentId),
+        status: "verifying",
+        verificationDeadlineAtMs: verifyingAtMs + 60_000,
+      },
+    });
+  });
+
+  await page.goto("/");
+  await page.locator("#owner-password").fill(ownerPassword);
+  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "添加探针" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "添加主机" });
+  await expect.poll(() => statusReads).toBeGreaterThan(0);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("状态：正在验证")).toBeVisible();
+  await expect(
+    dialog.getByText("正在验证探针是否已连接到 Hub。"),
+  ).toBeVisible();
+  await expect(dialog.getByRole("textbox", { name: "安装命令" })).toBeHidden();
+});
+
+test("a reconnect reconciles a missed terminal Enrollment exactly once from authoritative HTTP status", async ({
+  page,
+}) => {
+  const enrollmentId = "enr_reconnect_expired_browser";
+  const expiresAtMs = Date.now() - 1;
+  let statusReads = 0;
+  const socketStateAtStatusRead: Array<{
+    generation: number;
+    openedGeneration: number;
+  }> = [];
+  await installFakeLiveWebSocket(page, { deferOpenFromGeneration: 2 });
+  await page.route("**/api/web/enrollments", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+
+    await route.fulfill({
+      contentType: "application/json",
+      json: pendingEnrollment(enrollmentId),
+      status: 201,
+    });
+  });
+  await page.route(`**/api/web/enrollments/${enrollmentId}`, async (route) => {
+    statusReads += 1;
+    socketStateAtStatusRead.push({
+      generation: await fakeLiveSocketGeneration(page),
+      openedGeneration: await fakeLiveSocketOpenGeneration(page),
+    });
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        ...pendingEnrollment(enrollmentId),
+        expiresAtMs,
+        expiredAtMs: expiresAtMs,
+        status: "expired",
+      },
+    });
+  });
+
+  await loginOwner(page);
+  await expect.poll(() => fakeLiveSocketGeneration(page)).toBe(1);
+  await expect.poll(() => fakeLiveSocketOpenGeneration(page)).toBe(1);
+  await page.clock.install();
+  await closeFakeLiveWebSocket(page);
+  await page.clock.fastForward(1_000);
+  await expect.poll(() => fakeLiveSocketGeneration(page)).toBe(2);
+  await expect.poll(() => fakeLiveSocketOpenGeneration(page)).toBe(1);
+
+  await page.getByRole("button", { name: "添加探针" }).click();
+  await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
+    "curl ready-command",
+  );
+  expect(statusReads).toBe(0);
+
+  await openFakeLiveWebSocket(page);
+  await expect.poll(() => statusReads).toBe(1);
+  await expect(page.getByText("安装命令已过期")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "添加主机" })).toBeHidden();
+  expect(socketStateAtStatusRead).toEqual([
+    { generation: 2, openedGeneration: 2 },
+  ]);
 });
 
 test("an authoritative ready Enrollment reveals and focuses its Host with reduced motion", async ({
@@ -493,7 +607,7 @@ for (const overviewView of ["cards", "list"] as const) {
   }) => {
     const requests = await prepareOfflineHostReenrollment(page, overviewView);
 
-    await page.goto("/");
+    await loginOwner(page);
 
     const surfaceSelector = (hostId: number) =>
       overviewView === "cards"
@@ -528,6 +642,7 @@ for (const overviewView of ["cards", "list"] as const) {
     await expect
       .poll(() => requests.targets)
       .toEqual([{ hostId: 71, kind: "existing_host" }]);
+    expect(requests.ownerSessionCookies).toHaveLength(1);
     await expect(page.getByRole("dialog", { name: "添加主机" })).toBeVisible();
     await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
       "curl existing-host-command",
@@ -656,7 +771,7 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     expiresAtMs: Date.now() + 60_000,
     expiredAtMs: null,
     hostId: null,
-    hubUrl: "http://127.0.0.1:38200",
+    hubUrl,
     installCommand: "curl ready-command",
     installPath: "/usr/local/bin/enoki-probe",
     readyAtMs: null,
@@ -668,22 +783,26 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
   };
 }
 
+async function loginOwner(page: Page) {
+  await page.goto("/");
+  await page.locator("#owner-password").fill(ownerPassword);
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.getByRole("button", { name: "添加探针" })).toBeVisible();
+}
+
 async function prepareOfflineHostReenrollment(
   page: Page,
   overviewView: "cards" | "list",
 ) {
-  const requests: { targets: BrowserEnrollmentTarget[] } = { targets: [] };
+  const requests: {
+    ownerSessionCookies: string[];
+    targets: BrowserEnrollmentTarget[];
+  } = { ownerSessionCookies: [], targets: [] };
   if (overviewView === "list") {
     await page.addInitScript(() => {
       localStorage.setItem("enoki-overview-view", "list");
     });
   }
-  await page.route("**/api/web/auth/session", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      json: { authenticated: true },
-    });
-  });
   await page.route("**/api/web/hosts", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -704,6 +823,9 @@ async function prepareOfflineHostReenrollment(
     const body = route.request().postDataJSON() as {
       target: BrowserEnrollmentTarget;
     };
+    const cookie = (await route.request().headerValue("cookie")) ?? "";
+    expect(cookie).toMatch(/(?:^|;\s*)enoki_owner_session=[^;]+/);
+    requests.ownerSessionCookies.push(cookie);
     requests.targets.push(body.target);
     await route.fulfill({
       contentType: "application/json",

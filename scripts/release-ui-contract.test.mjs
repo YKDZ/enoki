@@ -4,13 +4,32 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { releaseUiLifecycleVersions } from "../tests/e2e/release-ui-contract-fixture.ts";
+import {
+  releaseUiBrowserRuntime,
+  releaseUiLifecycleVersions,
+} from "../tests/e2e/release-ui-contract-fixture.ts";
 import {
   parseCandidateUiContractCommandLine,
   runCandidateUiContract,
 } from "./release-ui-contract-lib.mjs";
 
 describe("candidate-image UI Contract gate", () => {
+  it("shares browser runtime identity between source E2E and the candidate gate", () => {
+    expect(releaseUiBrowserRuntime({})).toEqual({
+      hubUrl: "http://127.0.0.1:38200",
+      ownerPassword: "correct horse battery staple",
+    });
+    expect(
+      releaseUiBrowserRuntime({
+        ENOKI_RELEASE_UI_BASE_URL: "http://127.0.0.1:39123/",
+        ENOKI_RELEASE_UI_OWNER_PASSWORD: "candidate-owner-password",
+      }),
+    ).toEqual({
+      hubUrl: "http://127.0.0.1:39123",
+      ownerPassword: "candidate-owner-password",
+    });
+  });
+
   it("derives lifecycle fixture versions from the Candidate Manifest version with a source default", () => {
     expect(
       releaseUiLifecycleVersions({
@@ -55,9 +74,10 @@ describe("candidate-image UI Contract gate", () => {
     expect(runtimeSetup).toContain("sudo apt-get install");
     expect(runtimeSetup).toContain("skopeo");
     expect(playwrightConfig).toContain("retries: process.env.CI ? 1 : 0");
-    expect(playwrightConfig).toContain(
-      'testMatch: "probe-lifecycle-ui-contract.spec.ts"',
+    expect(playwrightConfig).toMatch(
+      /testMatch:\s*\[\s*"hub-install-command\.spec\.ts",\s*"host-removal-live-update\.spec\.ts",\s*"probe-lifecycle-ui-contract\.spec\.ts",?\s*\],/,
     );
+    expect(playwrightConfig.match(/\btestMatch:/g)).toHaveLength(1);
   });
 
   it("uploads one bounded evidence bundle for setup, test, diagnostics, traces, and cleanup on every outcome", async () => {
