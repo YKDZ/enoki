@@ -286,6 +286,81 @@ describe("successful Probe Repair boundary evidence", () => {
     ).toBe(evidence);
   });
 
+  it("accepts Repair filesystem evidence with the declared v0.1.72 legacy identity path", () => {
+    const evidence = successfulRepairBoundaryEvidence();
+    evidence.repairHostBoundary.identityPath =
+      "/etc/enoki/probe-bootstrap.toml";
+    evidence.repairHostBoundary.inventory.files =
+      evidence.repairHostBoundary.inventory.files.map((file) =>
+        file === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
+          ? "/etc/enoki/probe-bootstrap.toml"
+          : file,
+      );
+
+    expect(
+      validateSuccessfulRepairBoundaryEvidence(
+        evidence,
+        candidateManifestWithBaseline(),
+      ),
+    ).toBe(evidence);
+  });
+
+  it.each([
+    [
+      "a missing declared identity path",
+      (boundary) => {
+        delete boundary.identityPath;
+      },
+    ],
+    [
+      "the declared identity file missing from inventory",
+      (boundary) => {
+        boundary.inventory.files = boundary.inventory.files.filter(
+          (file) =>
+            file !== "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        );
+      },
+    ],
+    [
+      "both supported identity paths in inventory",
+      (boundary) => {
+        boundary.inventory.files.push("/etc/enoki/probe-bootstrap.toml");
+      },
+    ],
+    [
+      "an identity path that disagrees with inventory",
+      (boundary) => {
+        boundary.identityPath = "/etc/enoki/probe-bootstrap.toml";
+      },
+    ],
+    [
+      "an unknown identity path",
+      (boundary) => {
+        boundary.identityPath = "/opt/enoki/probe-bootstrap.toml";
+        boundary.inventory.files = boundary.inventory.files.map((file) =>
+          file === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
+            ? "/opt/enoki/probe-bootstrap.toml"
+            : file,
+        );
+      },
+    ],
+  ])("rejects Repair filesystem evidence with %s", (_case, mutate) => {
+    const evidence = successfulRepairBoundaryEvidence();
+    mutate(evidence.repairHostBoundary);
+
+    expect(() =>
+      validateSuccessfulRepairBoundaryEvidence(
+        evidence,
+        candidateManifestWithBaseline(),
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        boundary: "filesystem",
+        code: "repair_boundary_evidence_invalid",
+      }),
+    );
+  });
+
   it.each([
     [
       "hub-api",
@@ -7336,6 +7411,7 @@ function successfulRepairBoundaryEvidence() {
     },
     repairedHost: readyHost(),
     repairHostBoundary: {
+      identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
       inventory: installedInventory,
       probeVersion: "1.2.3",
       service: {

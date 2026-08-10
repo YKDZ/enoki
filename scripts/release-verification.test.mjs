@@ -844,6 +844,119 @@ describe("verify-only release workflow", () => {
     expect(gate.outcome).toBe("succeeded");
   });
 
+  it("rejects Repair evidence without a declared Probe identity path at the final verification gate", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "post-replacement-repair-uninstall",
+      candidate,
+    );
+    delete evidence.repairHostBoundary.identityPath;
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-24.04-x86_64--post-replacement-repair-uninstall-1",
+      candidate,
+      cellId: "ubuntu-24.04-x86_64--post-replacement-repair-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.outcome).toBe("failed");
+    expect(gate.evidenceValidationErrors).toContain(
+      "Host installation boundary is invalid",
+    );
+  });
+
+  it("accepts Repair evidence with a consistent v0.1.72 legacy identity boundary at the final verification gate", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "post-replacement-repair-uninstall",
+      candidate,
+    );
+    evidence.repairHostBoundary.identityPath =
+      "/etc/enoki/probe-bootstrap.toml";
+    evidence.repairHostBoundary.inventory.files =
+      evidence.repairHostBoundary.inventory.files.map((file) =>
+        file === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
+          ? "/etc/enoki/probe-bootstrap.toml"
+          : file,
+      );
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-24.04-x86_64--post-replacement-repair-uninstall-1",
+      candidate,
+      cellId: "ubuntu-24.04-x86_64--post-replacement-repair-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.evidenceValidationErrors).toEqual([]);
+    expect(gate.outcome).toBe("succeeded");
+  });
+
+  it.each([
+    [
+      "the declared identity file missing from inventory",
+      (boundary) => {
+        boundary.inventory.files = boundary.inventory.files.filter(
+          (file) =>
+            file !== "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        );
+      },
+    ],
+    [
+      "both supported identity paths",
+      (boundary) => {
+        boundary.inventory.files.push("/etc/enoki/probe-bootstrap.toml");
+      },
+    ],
+    [
+      "an identity path that disagrees with inventory",
+      (boundary) => {
+        boundary.identityPath = "/etc/enoki/probe-bootstrap.toml";
+      },
+    ],
+    [
+      "an unknown identity path",
+      (boundary) => {
+        boundary.identityPath = "/opt/enoki/probe-bootstrap.toml";
+        boundary.inventory.files = boundary.inventory.files.map((file) =>
+          file === "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
+            ? "/opt/enoki/probe-bootstrap.toml"
+            : file,
+        );
+      },
+    ],
+  ])(
+    "rejects Repair evidence with %s at the final verification gate",
+    (_case, mutate) => {
+      const candidate = releaseCandidateManifest().candidate;
+      const evidence = successfulHostEvidence(
+        "post-replacement-repair-uninstall",
+        candidate,
+      );
+      mutate(evidence.repairHostBoundary);
+
+      const gate = createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-24.04-x86_64--post-replacement-repair-uninstall-1",
+        candidate,
+        cellId: "ubuntu-24.04-x86_64--post-replacement-repair-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+      expect(gate.outcome).toBe("failed");
+      expect(gate.evidenceValidationErrors).toContain(
+        "Host installation boundary is invalid",
+      );
+    },
+  );
+
   it("accepts a confirmed insufficient-privilege Upgrade followed by Installer Recovery", () => {
     const candidate = releaseCandidateManifest().candidate;
     const evidence = successfulHostEvidence(
@@ -1485,10 +1598,12 @@ function freshLifecycleAuditLog() {
 
 function installedHostBoundary(version) {
   return {
+    identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
     inventory: {
       accounts: { group: true, user: true },
       files: [
         "/usr/local/bin/enoki-probe",
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
         "/etc/systemd/system/enoki-probe.service",
         "/etc/sudoers.d/enoki-probe-operations",
       ],
