@@ -528,6 +528,11 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:binary-version")) {
           return successfulCommandText("enoki-probe v1.2.3\n");
         }
+        if (command.includes("# enoki-release-e2e:probe-identity-path")) {
+          return successfulCommandText(
+            "/var/lib/enoki-probe/identity/probe-bootstrap.toml\n",
+          );
+        }
         if (command.includes("# enoki-release-e2e:probe-identity")) {
           return successfulCommand({
             identitySha256: "f".repeat(64),
@@ -640,9 +645,12 @@ describe("Probe Host Harness", () => {
       ].join("\n"),
       "utf8",
     );
+    // v0.1.72 writes this bootstrap material before its first enrollment has
+    // completed.  It is a valid installation identity *path*, but not yet a
+    // formal Probe identity.  The host boundary must not race that enrollment.
     await writeFile(
       identityPath,
-      'probe_id = "probe_release_legacy"\nprobe_private_key_pem = "test-private-key"\n',
+      'enrollment_token = "enk_enroll_temporary"\n',
       "utf8",
     );
     await Promise.all([chmod(metadataPath, 0o600), chmod(identityPath, 0o600)]);
@@ -697,24 +705,40 @@ describe("Probe Host Harness", () => {
           if (command.includes("# enoki-release-e2e:binary-version")) {
             return successfulCommandText("enoki-probe v0.1.72\n");
           }
-          if (command.includes("# enoki-release-e2e:probe-identity")) {
-            const { stdout } = await execFileAsync("sh", [
-              "-c",
-              command
-                .replace(
-                  "metadata=/etc/enoki/probe-install.toml",
-                  `metadata=${metadataPath}`,
-                )
-                .replace(
-                  '[ "$(stat -c %u "$metadata")" = 0 ]',
-                  '[ "$(stat -c %u "$metadata")" = "$(id -u)" ]',
-                )
-                .replace(
-                  "v0_1_72) identity=/etc/enoki/probe-bootstrap.toml",
-                  `v0_1_72) identity=${identityPath}`,
+          if (
+            command.includes("# enoki-release-e2e:probe-identity-path") ||
+            command.includes("# enoki-release-e2e:probe-identity")
+          ) {
+            try {
+              const { stdout } = await execFileAsync("sh", [
+                "-c",
+                command
+                  .replace(
+                    "metadata=/etc/enoki/probe-install.toml",
+                    `metadata=${metadataPath}`,
+                  )
+                  .replace(
+                    '[ "$(stat -c %u "$metadata")" = 0 ]',
+                    '[ "$(stat -c %u "$metadata")" = "$(id -u)" ]',
+                  )
+                  .replace(
+                    "v0_1_72) identity=/etc/enoki/probe-bootstrap.toml",
+                    `v0_1_72) identity=${identityPath}`,
+                  ),
+              ]);
+              return successfulCommandText(
+                stdout.replaceAll(
+                  identityPath,
+                  "/etc/enoki/probe-bootstrap.toml",
                 ),
-            ]);
-            return successfulCommandText(stdout);
+              );
+            } catch (error) {
+              return {
+                code: Number.isInteger(error?.code) ? error.code : 1,
+                stderr: error?.stderr ?? "",
+                stdout: error?.stdout ?? "",
+              };
+            }
           }
           return successfulCommandText(
             command.includes("# enoki-release-e2e:record-resources")
@@ -735,8 +759,22 @@ describe("Probe Host Harness", () => {
         probeVersion: "0.1.72",
       });
 
+      await expect(harness.readProbeIdentity("run-legacy")).rejects.toThrow(
+        /Probe Identity inspection failed/,
+      );
+
+      await writeFile(
+        identityPath,
+        'probe_id = "probe_release_legacy"\nprobe_private_key_pem = "test-private-key"\n',
+        "utf8",
+      );
+      await expect(harness.readProbeIdentity("run-legacy")).resolves.toEqual({
+        identitySha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        probeId: "probe_release_legacy",
+      });
+
       const identityInspection = commands.find((command) =>
-        command.includes("# enoki-release-e2e:probe-identity"),
+        command.includes("# enoki-release-e2e:probe-identity-path"),
       );
       expect(identityInspection).toContain("identity_layout=v0_1_72");
       expect(identityInspection).toContain(
@@ -751,6 +789,8 @@ describe("Probe Host Harness", () => {
       expect(identityInspection).toContain(
         '[ "$(stat -c %a "$metadata")" = 600 ]',
       );
+      expect(identityInspection).not.toContain("probe_private_key_pem");
+      expect(identityInspection).not.toContain("probe_id = ");
       expect(
         commands.find((command) =>
           command.includes("# enoki-release-e2e:record-resources"),
@@ -1025,6 +1065,11 @@ describe("Probe Host Harness", () => {
         }
         if (command.includes("# enoki-release-e2e:binary-version")) {
           return successfulCommandText("enoki-probe 9.9.9\n");
+        }
+        if (command.includes("# enoki-release-e2e:probe-identity-path")) {
+          return successfulCommandText(
+            "/var/lib/enoki-probe/identity/probe-bootstrap.toml\n",
+          );
         }
         return successfulCommandText("");
       },
@@ -2853,6 +2898,8 @@ describe("Release E2E Orchestrator", () => {
     };
     let enrollmentCount = 0;
     let installCount = 0;
+    let formalIdentityGeneration = 0;
+    let identityGeneration = 0;
     let lifecycle = "empty";
     let newEnrollmentCalls = 0;
     let offlineObservations = 0;
@@ -2919,6 +2966,12 @@ describe("Release E2E Orchestrator", () => {
         }
         if (lifecycle === "deleted") {
           throw new Error("deleted Host must not be read");
+        }
+        if (lifecycle === "online" || lifecycle === "reenrolled") {
+          // A Host Profile is the public readiness boundary for the identity
+          // minted by this particular install.  In particular, the previous
+          // identity must not make a re-enrollment identity readable.
+          formalIdentityGeneration = identityGeneration;
         }
         return readyHost({
           reportedProbeConfigurationVersion: "host-2-1",
@@ -3036,6 +3089,8 @@ describe("Release E2E Orchestrator", () => {
       },
       async install() {
         installCount += 1;
+        identityGeneration += 1;
+        formalIdentityGeneration = 0;
         lifecycle = installCount === 1 ? "online" : "reenrolled";
         calls.push(`host.install:${installCount}`);
         return {
@@ -3059,8 +3114,13 @@ describe("Release E2E Orchestrator", () => {
         };
       },
       async readProbeIdentity() {
-        calls.push("host.readProbeIdentity");
-        return installCount === 1
+        calls.push(`host.readProbeIdentity:${identityGeneration}`);
+        if (formalIdentityGeneration !== identityGeneration) {
+          throw new Error(
+            "Probe identity is unavailable until the matching core readiness observation succeeds",
+          );
+        }
+        return identityGeneration === 1
           ? installedState.identity
           : { identitySha256: "d".repeat(64), probeId: "probe_release_02" };
       },
@@ -3178,6 +3238,8 @@ describe("Release E2E Orchestrator", () => {
     let installed = false;
     let activeHub = "baseline";
     let upgraded = false;
+    let readableIdentityGeneration = null;
+    let identityGeneration = "baseline-install";
     let configurationVersion = "default-v1";
     let metricsEpoch = 0;
     const hub = {
@@ -3195,6 +3257,12 @@ describe("Release E2E Orchestrator", () => {
       },
       async getHost() {
         calls.push(`hub.getHost:${activeHub}:${upgraded}`);
+        if (activeHub === "baseline" && !upgraded) {
+          readableIdentityGeneration = "baseline-install";
+        }
+        if (activeHub === "candidate" && upgraded) {
+          readableIdentityGeneration = "candidate-upgrade";
+        }
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
@@ -3297,6 +3365,7 @@ describe("Release E2E Orchestrator", () => {
         calls.push(`hub.waitForProbeOperation:${operation.kind}`);
         if (operation.kind === "probe_upgrade") {
           upgraded = true;
+          identityGeneration = "candidate-upgrade";
           return [
             operation,
             {
@@ -3380,7 +3449,12 @@ describe("Release E2E Orchestrator", () => {
         installed = true;
       },
       async readProbeIdentity() {
-        calls.push(`host.readProbeIdentity:${upgraded}`);
+        calls.push(`host.readProbeIdentity:${identityGeneration}`);
+        if (readableIdentityGeneration !== identityGeneration) {
+          throw new Error(
+            "Probe identity is unavailable until the matching core readiness observation succeeds",
+          );
+        }
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
@@ -3420,10 +3494,6 @@ describe("Release E2E Orchestrator", () => {
     });
 
     expect(result).toEqual({ status: "succeeded" });
-    const baselineInstallIndex = calls.indexOf("host.install:baseline");
-    expect(
-      calls.indexOf("hub.listHosts:baseline", baselineInstallIndex),
-    ).toBeLessThan(calls.indexOf("host.readProbeIdentity:false"));
     expect(
       calls.filter((call) => call.startsWith("hub.requestProbeUpgrade:")),
     ).toEqual(["hub.requestProbeUpgrade:7"]);
@@ -3464,6 +3534,8 @@ describe("Release E2E Orchestrator", () => {
     let configurationVersion = "default-v1";
     let installed = false;
     let recovered = false;
+    let readableIdentityGeneration = null;
+    let identityGeneration = "baseline-install";
     let metricsEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
@@ -3490,6 +3562,11 @@ describe("Release E2E Orchestrator", () => {
         return baselineUpgradeAuditLog();
       },
       async getHost() {
+        if (activeHub === "baseline" && !recovered) {
+          readableIdentityGeneration = "baseline-install";
+        } else if (activeHub === "candidate" && recovered) {
+          readableIdentityGeneration = "candidate-recovery";
+        }
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
@@ -3602,6 +3679,11 @@ describe("Release E2E Orchestrator", () => {
         installed = true;
       },
       async readProbeIdentity() {
+        if (readableIdentityGeneration !== identityGeneration) {
+          throw new Error(
+            "Probe identity is unavailable until the matching core readiness observation succeeds",
+          );
+        }
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
@@ -3612,6 +3694,7 @@ describe("Release E2E Orchestrator", () => {
         expect(command).toBe(officialInstallCommand);
         expect(operation).toEqual(failedUpgrade);
         recovered = true;
+        identityGeneration = "candidate-recovery";
         return {
           failedOperationId: operation.id,
           mode: "installer",
@@ -3671,6 +3754,8 @@ describe("Release E2E Orchestrator", () => {
     let activeHub = "baseline";
     let installed = false;
     let upgraded = false;
+    let readableIdentityGeneration = null;
+    let identityGeneration = "baseline-install";
     let metricsEpoch = 0;
     const snapshotDigest = `sha256:${"d".repeat(64)}`;
     const manifest = candidateManifestWithBaseline();
@@ -3722,6 +3807,13 @@ describe("Release E2E Orchestrator", () => {
       },
       async getHost() {
         calls.push(`hub.getHost:${activeHub}:${upgraded}`);
+        if (activeHub === "baseline" && !upgraded) {
+          readableIdentityGeneration = "baseline-install";
+        } else if (activeHub === "candidate" && upgraded) {
+          readableIdentityGeneration = "candidate-upgrade";
+        } else if (activeHub === "baseline" && upgraded) {
+          readableIdentityGeneration = "baseline-restored";
+        }
         const afterRestore = activeHub === "baseline" && upgraded;
         const filesystems = [
           {
@@ -3817,6 +3909,7 @@ describe("Release E2E Orchestrator", () => {
           recoveryTime: "2026-08-02T12:00:00.000Z",
         });
         activeHub = "baseline";
+        identityGeneration = "baseline-restored";
         return {
           image: {
             activeManifestDigest: manifest.releaseBaseline.hub.imageDigest,
@@ -3834,6 +3927,7 @@ describe("Release E2E Orchestrator", () => {
         calls.push(`hub.waitForProbeOperation:${requested.kind}`);
         if (requested.kind === "probe_upgrade") {
           upgraded = true;
+          identityGeneration = "candidate-upgrade";
         }
         return [
           requested,
@@ -3878,7 +3972,12 @@ describe("Release E2E Orchestrator", () => {
         calls.push("host.install:baseline");
       },
       async readProbeIdentity() {
-        calls.push(`host.readProbeIdentity:${activeHub}:${upgraded}`);
+        calls.push(`host.readProbeIdentity:${identityGeneration}`);
+        if (readableIdentityGeneration !== identityGeneration) {
+          throw new Error(
+            "Probe identity is unavailable until the matching core readiness observation succeeds",
+          );
+        }
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
@@ -4239,6 +4338,8 @@ describe("Release E2E Orchestrator", () => {
     let installed = false;
     let invalidHostEvidence = false;
     let repaired = false;
+    let readableIdentityGeneration = null;
+    let identityGeneration = "baseline-install";
     let metricsEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
@@ -4267,6 +4368,11 @@ describe("Release E2E Orchestrator", () => {
         return baselineUpgradeAuditLog();
       },
       async getHost() {
+        if (activeHub === "baseline" && !repaired) {
+          readableIdentityGeneration = "baseline-install";
+        } else if (activeHub === "candidate" && repaired) {
+          readableIdentityGeneration = "candidate-repair";
+        }
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
@@ -4427,6 +4533,11 @@ describe("Release E2E Orchestrator", () => {
         installed = true;
       },
       async readProbeIdentity() {
+        if (readableIdentityGeneration !== identityGeneration) {
+          throw new Error(
+            "Probe identity is unavailable until the matching core readiness observation succeeds",
+          );
+        }
         return {
           identitySha256: "f".repeat(64),
           probeId: "probe_release_01",
@@ -4438,6 +4549,7 @@ describe("Release E2E Orchestrator", () => {
       async repair() {
         calls.push("host.repair");
         repaired = true;
+        identityGeneration = "candidate-repair";
         return {
           output: "Probe Repair succeeded",
           probeId: "probe_release_01",
@@ -4582,6 +4694,8 @@ describe("Release E2E Orchestrator", () => {
     installed = false;
     metricsEpoch = 0;
     repaired = false;
+    readableIdentityGeneration = null;
+    identityGeneration = "baseline-install";
     await expect(
       runReleaseE2EScenario({
         candidateManifest: candidateManifestWithBaseline(),
@@ -4621,6 +4735,8 @@ describe("Release E2E Orchestrator", () => {
     invalidHostEvidence = true;
     metricsEpoch = 0;
     repaired = false;
+    readableIdentityGeneration = null;
+    identityGeneration = "baseline-install";
     await expect(
       runReleaseE2EScenario({
         candidateManifest: candidateManifestWithBaseline(),
