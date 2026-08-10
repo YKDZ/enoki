@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -602,8 +603,7 @@ describe("verify-only release workflow", () => {
       "fresh-install-uninstall",
       candidate,
     );
-    evidence.uninstall.hubSoftDeleted = false;
-    evidence.uninstall.hostCompletion.inventory.accounts.user = true;
+    evidence.finalLocalUninstall.completion.inventory.accounts.user = true;
     evidence.cleanup.environment.clean = false;
 
     const gate = createMatrixGateResult({
@@ -619,9 +619,49 @@ describe("verify-only release workflow", () => {
     expect(gate.outcome).toBe("failed");
     expect(gate.evidenceValidationErrors).toEqual(
       expect.arrayContaining([
-        "Hub Host was not soft-deleted",
-        "Host uninstall inventory contains residue",
+        "final Local Probe Uninstall evidence is invalid",
         "environment cleanup was not clean",
+      ]),
+    );
+  });
+
+  it("rejects legacy fresh-install evidence without the expanded lifecycle contract", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    for (const field of [
+      "diagnostics",
+      "finalLocalUninstall",
+      "hubOnlyDeletion",
+      "initialInstall",
+      "localUninstall",
+      "reEnrollment",
+      "repeatedAdd",
+    ]) {
+      delete evidence[field];
+    }
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.outcome).toBe("failed");
+    expect(gate.evidenceValidationErrors).toEqual(
+      expect.arrayContaining([
+        "missing repeatedAdd",
+        "missing localUninstall",
+        "missing reEnrollment",
+        "missing hubOnlyDeletion",
+        "missing finalLocalUninstall",
+        "missing diagnostics",
+        "missing initialInstall",
       ]),
     );
   });
@@ -654,10 +694,81 @@ describe("verify-only release workflow", () => {
         "fresh Host Profile is invalid",
         "fresh reporting metrics are incomplete",
         "Probe Configuration round-trip is invalid",
-        "lifecycle Audit Log is invalid",
+        "fresh lifecycle Audit Log is invalid",
         "Host installation boundary is invalid",
       ]),
     );
+  });
+
+  it.each([
+    [
+      "repeated Add Hub projection",
+      (evidence) => {
+        evidence.repeatedAdd.hostAfter.id = 8;
+      },
+      "repeated Add rejection evidence is invalid",
+    ],
+    [
+      "repeated Add Hub host metadata",
+      (evidence) => {
+        evidence.repeatedAdd.hostAfter.hostMetadata.displayName = "changed";
+      },
+      "repeated Add rejection evidence is invalid",
+    ],
+    [
+      "re-enrollment effective configuration",
+      (evidence) => {
+        evidence.reEnrollment.probeConfiguration.configuration.enabledCollectorIds =
+          ["official.cpu"];
+      },
+      "Host Re-enrollment evidence is invalid",
+    ],
+    [
+      "re-enrollment Metrics history anchors",
+      (evidence) => {
+        evidence.reEnrollment.metricsHistory.anchors =
+          evidence.reEnrollment.metricsHistory.anchors.filter(
+            (anchor) => anchor.sequence !== 1,
+          );
+        evidence.reEnrollment.metricsHistory.sha256 = createHash("sha256")
+          .update(JSON.stringify(evidence.reEnrollment.metricsHistory.anchors))
+          .digest("hex");
+      },
+      "Host Re-enrollment Metrics history is invalid",
+    ],
+    [
+      "immediate local-uninstall Host status",
+      (evidence) => {
+        evidence.localUninstall.activeHost.status = "offline";
+      },
+      "first Local Probe Uninstall evidence is invalid",
+    ],
+    [
+      "successful terminal diagnostics completeness",
+      (evidence) => {
+        evidence.diagnostics.host.systemd.available = false;
+      },
+      "redacted failure diagnostics are incomplete",
+    ],
+  ])("rejects invalid fresh %s", (_label, corrupt, expectedError) => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    corrupt(evidence);
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.evidenceValidationErrors).toContain(expectedError);
   });
 
   it.each([
@@ -985,13 +1096,94 @@ function successfulHostEvidence(scenario, candidate) {
     },
   };
   if (scenario === "fresh-install-uninstall") {
+    const initialIdentity = probeIdentityEvidence();
+    const reEnrolledIdentity = {
+      identitySha256: "e".repeat(64),
+      probeId: "probe_release_02",
+    };
     return {
       ...common,
-      auditLog: lifecycleAuditLog(),
+      auditLog: freshLifecycleAuditLog(),
+      diagnostics: {
+        host: terminalDiagnosticsEvidence(reEnrolledIdentity),
+        hub: { apiTimeline: [{ method: "DELETE", status: 200 }] },
+      },
+      finalLocalUninstall: { completion: common.uninstall.hostCompletion },
       host: evidenceHost("1.2.3"),
       hostBoundary: installedHostBoundary("1.2.3"),
+      hubOnlyDeletion: {
+        deletedHost: { deletedAtMs: 100, id: 7 },
+        permanentReportRejection: {
+          binarySha256: "a".repeat(64),
+          identity: reEnrolledIdentity,
+          installMetadataSha256: "b".repeat(64),
+          restartCountAfterObservation: 3,
+          restartCountBeforeObservation: 3,
+          service: {
+            ActiveState: "failed",
+            ExecMainStatus: 78,
+            LoadState: "loaded",
+            SubState: "failed",
+          },
+        },
+      },
+      initialInstall: installerEvidence(),
+      localUninstall: {
+        activeHost: evidenceHost("1.2.3"),
+        completion: common.uninstall.hostCompletion,
+        offlineHost: { ...evidenceHost("1.2.3"), status: "offline" },
+      },
       metrics: evidenceMetrics(1),
+      metricsHistory: metricsHistoryEvidence(evidenceMetrics(1)),
       probeConfiguration: probeConfigurationEvidence("host-7-1"),
+      reEnrollment: {
+        enrollment: {
+          enrollmentId: "enr_release_reenrollment",
+          status: "pending",
+          target: { hostId: 7, kind: "existing_host" },
+        },
+        host: evidenceHost("1.2.3"),
+        hostBoundary: installedHostBoundary("1.2.3"),
+        hostId: 7,
+        identity: { after: reEnrolledIdentity, before: initialIdentity },
+        installer: installerEvidence(),
+        metrics: evidenceMetrics(3),
+        metricsHistory: metricsHistoryEvidence(
+          [...evidenceMetrics(1), ...evidenceMetrics(3)],
+          {
+            retain: metricsHistoryEvidence(evidenceMetrics(1)).anchors,
+          },
+        ),
+        probeConfiguration: {
+          configuration: probeConfigurationValues("host-7-1"),
+          mode: "override",
+        },
+      },
+      repeatedAdd: {
+        enrollment: {
+          enrollmentId: "enr_release_repeated",
+          status: "pending",
+          target: { kind: "new_host" },
+        },
+        enrollmentStatus: {
+          enrollmentId: "enr_release_repeated",
+          hostId: null,
+          rejection: {
+            code: "existing_probe_installation",
+            message: "existing local Probe installation detected",
+          },
+          status: "rejected",
+          target: { kind: "new_host" },
+        },
+        rejection: {
+          code: "existing_probe_installation",
+          output: { code: 1, stderr: "typed rejection", stdout: "" },
+        },
+        hostAfter: evidenceHost("1.2.3"),
+        hostBefore: evidenceHost("1.2.3"),
+        stateAfter: installedStateEvidence(initialIdentity),
+        stateBefore: installedStateEvidence(initialIdentity),
+      },
     };
   }
   if (scenario === "baseline-upgrade-uninstall") {
@@ -1121,6 +1313,12 @@ function successfulHostEvidence(scenario, candidate) {
 
 function evidenceHost(version) {
   return {
+    hostMetadata: {
+      connectAddress: "release-test-host",
+      description: "Release Test Host",
+      displayName: "Release Test Host",
+      observedIp: "192.0.2.10",
+    },
     hostProfile: {
       architecture: "x86_64",
       cpuCount: 2,
@@ -1146,6 +1344,26 @@ function evidenceMetrics(firstSequence) {
     sequence,
     uptimeSeconds: 100 + sequence,
   }));
+}
+
+function metricsHistoryEvidence(samples, { retain = [] } = {}) {
+  const selected = [
+    samples[0],
+    samples[Math.floor((samples.length - 1) / 2)],
+    samples.at(-1),
+    ...retain.filter((anchor) =>
+      samples.some(
+        (sample) => JSON.stringify(sample) === JSON.stringify(anchor),
+      ),
+    ),
+  ].filter(Boolean);
+  const anchors = [
+    ...new Map(selected.map((anchor) => [anchor.sequence, anchor])).values(),
+  ].sort((left, right) => left.sequence - right.sequence);
+  return {
+    anchors,
+    sha256: createHash("sha256").update(JSON.stringify(anchors)).digest("hex"),
+  };
 }
 
 function evidenceOperationTimeline({
@@ -1211,6 +1429,60 @@ function lifecycleAuditLog({ upgrade = false, upgradeId = 81 } = {}) {
   });
 }
 
+function freshLifecycleAuditLog() {
+  return [
+    {
+      action: "enrollment_token.create",
+      actor: "owner",
+      details: { target: { kind: "new_host" } },
+      id: 1,
+      occurredAtMs: 100,
+      outcome: "success",
+      subjectId: "1",
+      subjectType: "enrollment_token",
+    },
+    {
+      action: "enrollment.installation_rejected",
+      actor: "system",
+      details: { code: "existing_probe_installation" },
+      id: 2,
+      occurredAtMs: 101,
+      outcome: "success",
+      subjectId: "2",
+      subjectType: "enrollment_token",
+    },
+    {
+      action: "enrollment_token.create",
+      actor: "owner",
+      details: { target: { hostId: 7, kind: "existing_host" } },
+      id: 3,
+      occurredAtMs: 102,
+      outcome: "success",
+      subjectId: "3",
+      subjectType: "enrollment_token",
+    },
+    {
+      action: "probe_configuration.host.override",
+      actor: "owner",
+      id: 4,
+      occurredAtMs: 103,
+      outcome: "success",
+      subjectId: "7",
+      subjectType: "host",
+    },
+    {
+      action: "host.delete",
+      actor: "owner",
+      details: { hostId: 7, mode: "hub-only" },
+      id: 5,
+      occurredAtMs: 104,
+      outcome: "success",
+      subjectId: "7",
+      subjectType: "host",
+    },
+  ];
+}
+
 function installedHostBoundary(version) {
   return {
     inventory: {
@@ -1234,13 +1506,98 @@ function installedHostBoundary(version) {
 }
 
 function probeConfigurationEvidence(version) {
-  return { mode: "override", reportedVersion: version, version };
+  return {
+    configuration: probeConfigurationValues(version),
+    mode: "override",
+    reportedVersion: version,
+    version,
+  };
+}
+
+function probeConfigurationValues(version) {
+  return {
+    enabledCollectorIds: ["official.cpu", "official.memory"],
+    metricsCollectionIntervalSeconds: 2,
+    version,
+  };
 }
 
 function probeIdentityEvidence() {
   return {
     identitySha256: "f".repeat(64),
     probeId: "probe_release_01",
+  };
+}
+
+function installedStateEvidence(identity) {
+  return {
+    binarySha256: "a".repeat(64),
+    identity,
+    installMetadataSha256: "b".repeat(64),
+    restartCount: 3,
+    service: {
+      ActiveState: "active",
+      LoadState: "loaded",
+      SubState: "running",
+    },
+  };
+}
+
+function installerEvidence() {
+  return {
+    output: {
+      code: 0,
+      stderr: "",
+      stdout:
+        "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n",
+    },
+  };
+}
+
+function terminalDiagnosticsEvidence(identity) {
+  return {
+    installation: {
+      available: true,
+      output: { code: 0, stderr: "", stdout: "installation captured\n" },
+      value: {
+        binary: { sha256: "a".repeat(64), version: "1.2.3" },
+        identity,
+        installMetadataSha256: "b".repeat(64),
+        service: {
+          ActiveState: "failed",
+          ExecMainStatus: 78,
+          LoadState: "loaded",
+          NRestarts: 3,
+          Result: "exit-code",
+          SubState: "failed",
+        },
+      },
+    },
+    inventory: {
+      available: true,
+      output: { code: 0, stderr: "", stdout: "inventory captured\n" },
+      value: {
+        accounts: { group: true, user: true },
+        files: ["/usr/local/bin/enoki-probe", "/etc/enoki/probe-install.toml"],
+        units: ["enoki-probe.service"],
+      },
+    },
+    journald: {
+      available: true,
+      output: { code: 0, stderr: "", stdout: "report rejected\n" },
+    },
+    sudoers: {
+      available: true,
+      output: { code: 0, stderr: "", stdout: "enoki-probe sudoers\n" },
+    },
+    systemd: {
+      available: true,
+      output: {
+        code: 0,
+        stderr: "",
+        stdout: "LoadState=loaded\nActiveState=failed\nExecMainStatus=78\n",
+      },
+    },
   };
 }
 

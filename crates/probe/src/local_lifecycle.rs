@@ -277,6 +277,16 @@ impl ProbeLocalLifecycleError {
     }
 }
 
+#[must_use]
+pub fn format_probe_local_lifecycle_failure(error: &ProbeLocalLifecycleError) -> String {
+    match error.installation_rejection() {
+        Some((code, _)) => {
+            format!("Probe Local Lifecycle failed: code={code} message={error}")
+        }
+        None => format!("Probe Local Lifecycle failed: {error}"),
+    }
+}
+
 impl From<std::io::Error> for ProbeLocalLifecycleError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
@@ -1213,6 +1223,37 @@ mod tests {
             state_dir: PathBuf::from("/var/lib/enoki-probe"),
             test_root: None,
             trusted_asset_public_key_sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn known_installation_rejections_render_stable_codes_without_leaking_tokens() {
+        let token = "enk_enroll_do_not_emit";
+        let cases = [
+            (
+                ProbeLocalLifecycleError::ExistingInstallationWithProbeId(token.to_string()),
+                "existing_probe_installation",
+                "pre-existing Enoki Probe installation was found",
+            ),
+            (
+                ProbeLocalLifecycleError::ExistingInstallationBoundToDifferentHub,
+                "probe_bound_to_different_hub",
+                "bound to a different Hub",
+            ),
+            (
+                ProbeLocalLifecycleError::InvalidExistingInstallation,
+                "probe_installation_metadata_invalid",
+                "metadata is unsafe or incomplete",
+            ),
+        ];
+
+        for (error, code, message) in cases {
+            let output = format_probe_local_lifecycle_failure(&error);
+
+            assert!(output.starts_with("Probe Local Lifecycle failed:"));
+            assert!(output.contains(&format!("code={code}")));
+            assert!(output.contains(message));
+            assert!(!output.contains(token));
         }
     }
 

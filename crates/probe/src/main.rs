@@ -2,7 +2,8 @@ use enoki_probe::{
     cli::{ProbeCommand, parse_probe_command, render_probe_output},
     local_lifecycle::{
         LOCAL_LIFECYCLE_COMPLETE_MARKER, confirm_probe_local_install_failure,
-        probe_local_install_input_from_environment, run_probe_local_install,
+        format_probe_local_lifecycle_failure, probe_local_install_input_from_environment,
+        run_probe_local_install,
     },
     local_privilege_boundary::{
         CollectorHelperSudoersPlanInput, CollectorHelperSudoersPlanner,
@@ -69,11 +70,10 @@ fn main() {
             match run_probe_local_install(&input) {
                 Ok(()) => println!("{LOCAL_LIFECYCLE_COMPLETE_MARKER}"),
                 Err(error) => {
+                    let failure = format_probe_local_lifecycle_failure(&error);
                     match confirm_probe_local_install_failure(&input, &error) {
-                        Ok(()) => eprintln!("Probe Local Lifecycle failed: {error}"),
-                        Err(confirmation) => {
-                            eprintln!("Probe Local Lifecycle failed: {error}; {confirmation}")
-                        }
+                        Ok(()) => eprintln!("{failure}"),
+                        Err(confirmation) => eprintln!("{failure}; {confirmation}"),
                     }
                     std::process::exit(1);
                 }
