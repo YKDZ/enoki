@@ -468,8 +468,9 @@ fn run_reporting_loop(
         }
 
         // Snapshot Replay supplements the accepted Startup Report rather than
-        // creating another Metrics time slice, so it reuses sequence one.
-        host_profile = host_profile_provider.collect_host_profile();
+        // creating another Metrics time slice, so it reuses sequence one and
+        // the exact snapshot that its compact reference identified. Recollecting
+        // here could produce a different hash for a changing local fact.
         let request = snapshot_replay_report(SnapshotReplayInput {
             boot_id: &boot_id,
             host_profile: host_profile.clone(),
@@ -555,8 +556,8 @@ fn run_reporting_loop(
             && !report_limit_reached(reports_sent, control)
         {
             // Replay supplements the accepted Observation Batch and preserves
-            // its sequence end; the next collection advances from that batch.
-            host_profile = host_profile_provider.collect_host_profile();
+            // its sequence end. It must serialize the exact snapshot whose hash
+            // the Hub requested; the next collection advances from that batch.
             let request = snapshot_replay_report(SnapshotReplayInput {
                 boot_id: &boot_id,
                 host_profile: host_profile.clone(),

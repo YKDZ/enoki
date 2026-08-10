@@ -10,6 +10,7 @@ const releaseE2EInfrastructureResources = Object.freeze([
     kind: "file",
     path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
   },
+  { kind: "file", path: "/etc/enoki/probe-bootstrap.toml" },
   { kind: "file", path: "/etc/enoki/probe-install.toml" },
   { kind: "file", path: "/etc/systemd/system/enoki-probe.service" },
   {
@@ -2716,19 +2717,24 @@ export function createProbeHostHarness({
       ) {
         throw new Error("Candidate Probe version is invalid");
       }
-      const [inspected, serviceResult, sudoersResult, binaryVersionResult] =
-        await Promise.all([
-          inventory(),
-          execute(serviceBoundaryScript()),
-          execute(sudoersBoundaryScript(), { root: true }),
-          execute(binaryVersionScript()),
-        ]);
+      const [
+        inspected,
+        serviceResult,
+        sudoersResult,
+        binaryVersionResult,
+        identityResult,
+      ] = await Promise.all([
+        inventory(),
+        execute(serviceBoundaryScript()),
+        execute(sudoersBoundaryScript(), { root: true }),
+        execute(binaryVersionScript()),
+        execute(probeIdentityScript(), { root: true }),
+      ]);
       const residue = inventoryResidue(inspected);
       const required = [
         "user:enoki-probe",
         "group:enoki-probe",
         "/usr/local/bin/enoki-probe",
-        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
         "/etc/enoki/probe-install.toml",
         "/etc/systemd/system/enoki-probe.service",
         "/var/lib/enoki-probe",
@@ -2739,6 +2745,15 @@ export function createProbeHostHarness({
       if (missing.length > 0) {
         throw new Error(
           `Probe installation is incomplete: missing ${missing.join(", ")}`,
+        );
+      }
+      const identityPaths = [
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        "/etc/enoki/probe-bootstrap.toml",
+      ].filter((path) => residue.includes(path));
+      if (identityPaths.length !== 1 || identityResult.code !== 0) {
+        throw new Error(
+          `Probe installation identity boundary is invalid: ${identityResult.stderr}`,
         );
       }
       if (serviceResult.code !== 0) {
@@ -2779,6 +2794,8 @@ export function createProbeHostHarness({
         );
       }
       return {
+        identity: parseJson(identityResult.stdout, "Probe identity"),
+        identityPath: identityPaths[0],
         inventory: inspected,
         probeVersion,
         service,
@@ -3454,11 +3471,8 @@ function installedStateScript() {
   return String.raw`# enoki-release-e2e:installed-state
 set -eu
 binary=/usr/local/bin/enoki-probe
-metadata=/etc/enoki/probe-install.toml
-identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+${knownProbeIdentityScript()}
 [ -x "$binary" ]
-[ -f "$metadata" ]
-[ -f "$identity" ]
 load_state=$(systemctl show enoki-probe.service --no-pager --property=LoadState --value)
 active_state=$(systemctl show enoki-probe.service --no-pager --property=ActiveState --value)
 sub_state=$(systemctl show enoki-probe.service --no-pager --property=SubState --value)
@@ -3480,8 +3494,7 @@ function permanentReportRejectionScript() {
   return String.raw`# enoki-release-e2e:permanent-report-rejection
 set -eu
 binary=/usr/local/bin/enoki-probe
-metadata=/etc/enoki/probe-install.toml
-identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+${knownProbeIdentityScript()}
 read_property() {
   systemctl show enoki-probe.service --no-pager --property="$1" --value
 }
@@ -3525,8 +3538,7 @@ function installedDiagnosticsScript() {
   return String.raw`# enoki-release-e2e:installed-diagnostics
 set -eu
 binary=/usr/local/bin/enoki-probe
-metadata=/etc/enoki/probe-install.toml
-identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml
+${knownProbeIdentityScript()}
 [ -x "$binary" ]
 [ -f "$metadata" ]
 [ -f "$identity" ]
@@ -3559,9 +3571,8 @@ printf '{"binary":{"sha256":"%s","version":"%s"},"identity":{"identitySha256":"%
 function probeIdentityScript() {
   return String.raw`# enoki-release-e2e:probe-identity
 set -eu
-config=/var/lib/enoki-probe/identity/probe-bootstrap.toml
-[ -f "$config" ]
-[ ! -L "$config" ]
+${knownProbeIdentityScript()}
+config="$identity"
 probe_id_line=$(grep -E '^probe_id = "[A-Za-z0-9][A-Za-z0-9._:-]{0,255}"$' "$config")
 private_key_line=$(grep -E '^probe_private_key_pem = ".+"$' "$config")
 [ "$(grep -c '^probe_id = ' "$config")" -eq 1 ]
@@ -3909,7 +3920,7 @@ claim=/var/lib/enoki-release-e2e/claim
 [ -f "$claim/upgrade-before-resources" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$metadata_schema" = current ]
+[ "$identity_layout" = current ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.recovery.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -3934,7 +3945,7 @@ claim=/var/lib/enoki-release-e2e/claim
 [ ! -e "$claim/post-replacement-fault" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$metadata_schema" = current ]
+[ "$identity_layout" = current ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.repair.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -4031,35 +4042,50 @@ function knownProbeInstallMetadataScript() {
 [ ! -L "$metadata" ]
 [ "$(stat -c %u "$metadata")" = 0 ]
 [ -z "$(find "$metadata" -prune -perm /022 -print)" ]
-require_metadata_line() { [ "$(grep -Fxc "$1" "$metadata")" -eq 1 ]; }
+require_metadata_key() { [ "$(grep -Ec "^$1 = " "$metadata")" -eq 1 ]; }
+require_metadata_line() {
+  expected=$1
+  key=$(printf '%s\n' "$expected" | sed 's/ = .*//')
+  require_metadata_key "$key" && [ "$(grep -Fxc "$expected" "$metadata")" -eq 1 ]
+}
+awk '
+  /^[[:space:]]*$/ { next }
+  $0 !~ /^(schema_version|hub_url|install_path|identity_path|state_dir|operation_status_path|service_name|service_user|service_group|service_unit_path|operation_sudoers_path|collector_helper_sudoers_path|probe_asset_public_key_sha256) = / { exit 1 }
+' "$metadata"
+require_metadata_line 'schema_version = 1'
+require_metadata_key hub_url
+grep -Eq '^hub_url = "https?://[^"[:space:]]+"$' "$metadata"
 require_metadata_line 'install_path = "/usr/local/bin/enoki-probe"'
 require_metadata_line 'state_dir = "/var/lib/enoki-probe"'
 require_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"'
 require_metadata_line 'service_name = "enoki-probe"'
 require_metadata_line 'service_user = "enoki-probe"'
+require_metadata_line 'service_group = "enoki-probe"'
+require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
 require_metadata_line 'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"'
 require_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"'
-if grep -Fxq 'schema_version = 1' "$metadata"; then
-  metadata_schema=current
+require_metadata_key probe_asset_public_key_sha256
+grep -Eq '^probe_asset_public_key_sha256 = "[0-9A-Fa-f]{64}"$' "$metadata"
+require_metadata_key identity_path
+if grep -Fxq 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"' "$metadata"; then
+  identity_layout=current
+elif grep -Fxq 'identity_path = "/etc/enoki/probe-bootstrap.toml"' "$metadata"; then
+  identity_layout=v0_1_72
 else
-  metadata_schema=legacy
+  exit 1
 fi
-case "$metadata_schema" in
-  current)
-    [ "$(stat -c %a "$metadata")" = 600 ]
-    require_metadata_line 'schema_version = 1'
-    require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
-    require_metadata_line 'service_group = "enoki-probe"'
-    require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
-    ;;
-  legacy)
-    [ "$(stat -c %a "$metadata")" = 644 ]
-    [ "$(grep -c '^schema_version = ' "$metadata")" -eq 0 ]
-    [ "$(grep -c '^identity_path = ' "$metadata")" -eq 0 ]
-    [ "$(grep -c '^service_group = ' "$metadata")" -eq 0 ]
-    [ "$(grep -c '^service_unit_path = ' "$metadata")" -eq 0 ]
-    ;;
-esac`;
+[ "$(stat -c %a "$metadata")" = 600 ]`;
+}
+
+function knownProbeIdentityScript() {
+  return `${knownProbeInstallMetadataScript()}
+case "$identity_layout" in
+  current) identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml ;;
+  v0_1_72) identity=/etc/enoki/probe-bootstrap.toml ;;
+  *) exit 1 ;;
+esac
+[ -f "$identity" ]
+[ ! -L "$identity" ]`;
 }
 
 function removeClaimScript(runId, token) {

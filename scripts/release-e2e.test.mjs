@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -605,12 +606,383 @@ describe("Probe Host Harness", () => {
     expect(completedOwnership).toContain(
       'mv -- "$temporary" "$claim/resources"',
     );
-    expect(completedOwnership).toContain("metadata_schema=legacy");
-    expect(completedOwnership).toContain("metadata_schema=current");
+    expect(completedOwnership).toContain("identity_layout=v0_1_72");
+    expect(completedOwnership).toContain("identity_layout=current");
     expect(
       commands.filter((command) => command.includes("enk_enroll_secret")),
     ).toHaveLength(1);
   });
+
+  it("recognizes the trusted v0.1.72 Probe identity layout at its legacy path", async () => {
+    let inventoryCount = 0;
+    const commands = [];
+    const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-legacy-"));
+    const metadataPath = path.join(root, "etc/enoki/probe-install.toml");
+    const identityPath = path.join(root, "etc/enoki/probe-bootstrap.toml");
+    await mkdir(path.dirname(metadataPath), { recursive: true });
+    await writeFile(
+      metadataPath,
+      [
+        "schema_version = 1",
+        'hub_url = "https://hub.example"',
+        'install_path = "/usr/local/bin/enoki-probe"',
+        'identity_path = "/etc/enoki/probe-bootstrap.toml"',
+        'state_dir = "/var/lib/enoki-probe"',
+        'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
+        'service_name = "enoki-probe"',
+        'service_user = "enoki-probe"',
+        'service_group = "enoki-probe"',
+        'service_unit_path = "/etc/systemd/system/enoki-probe.service"',
+        'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
+        'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
+        `probe_asset_public_key_sha256 = "${"a".repeat(64)}"`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      identityPath,
+      'probe_id = "probe_release_legacy"\nprobe_private_key_pem = "test-private-key"\n',
+      "utf8",
+    );
+    await Promise.all([chmod(metadataPath, 0o600), chmod(identityPath, 0o600)]);
+
+    try {
+      const harness = createProbeHostHarness({
+        execute: async (command) => {
+          commands.push(command);
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            inventoryCount += 1;
+            return successfulCommand(
+              inventoryCount === 1
+                ? {
+                    accounts: { group: false, user: false },
+                    files: [],
+                    units: [],
+                  }
+                : {
+                    accounts: { group: true, user: true },
+                    files: [
+                      "/etc/enoki/probe-bootstrap.toml",
+                      "/etc/enoki/probe-install.toml",
+                      "/etc/systemd/system/enoki-probe.service",
+                      "/etc/sudoers.d/enoki-probe-operations",
+                      "/usr/local/bin/enoki-probe",
+                      "/var/lib/enoki-probe",
+                    ],
+                    units: ["enoki-probe.service"],
+                  },
+            );
+          }
+          if (command.includes("# enoki-release-e2e:dependencies")) {
+            return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+          }
+          if (command.includes("# enoki-release-e2e:service-boundary")) {
+            return successfulCommandText(
+              [
+                "LoadState=loaded",
+                "ActiveState=active",
+                "SubState=running",
+                "User=enoki-probe",
+                "Group=enoki-probe",
+                "FragmentPath=/etc/systemd/system/enoki-probe.service",
+              ].join("\n"),
+            );
+          }
+          if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
+            return successfulCommandText(
+              "enoki-probe-uninstaller internal-uninstaller",
+            );
+          }
+          if (command.includes("# enoki-release-e2e:binary-version")) {
+            return successfulCommandText("enoki-probe v0.1.72\n");
+          }
+          if (command.includes("# enoki-release-e2e:probe-identity")) {
+            const { stdout } = await execFileAsync("sh", [
+              "-c",
+              command
+                .replace(
+                  "metadata=/etc/enoki/probe-install.toml",
+                  `metadata=${metadataPath}`,
+                )
+                .replace(
+                  '[ "$(stat -c %u "$metadata")" = 0 ]',
+                  '[ "$(stat -c %u "$metadata")" = "$(id -u)" ]',
+                )
+                .replace(
+                  "v0_1_72) identity=/etc/enoki/probe-bootstrap.toml",
+                  `v0_1_72) identity=${identityPath}`,
+                ),
+            ]);
+            return successfulCommandText(stdout);
+          }
+          return successfulCommandText(
+            command.includes("# enoki-release-e2e:record-resources")
+              ? "recorded\n"
+              : command.includes("# enoki-release-e2e:claim-run")
+                ? "claimed\n"
+                : productInstallerOutput(),
+          );
+        },
+      });
+
+      await harness.assertDisposable("run-legacy");
+      await harness.install(officialInstallCommand, "run-legacy");
+      await expect(
+        harness.assertInstalled("run-legacy", "0.1.72"),
+      ).resolves.toMatchObject({
+        identityPath: "/etc/enoki/probe-bootstrap.toml",
+        probeVersion: "0.1.72",
+      });
+
+      const identityInspection = commands.find((command) =>
+        command.includes("# enoki-release-e2e:probe-identity"),
+      );
+      expect(identityInspection).toContain("identity_layout=v0_1_72");
+      expect(identityInspection).toContain(
+        "identity=/etc/enoki/probe-bootstrap.toml",
+      );
+      expect(identityInspection).toContain(
+        '[ "$(stat -c %u "$metadata")" = 0 ]',
+      );
+      expect(identityInspection).toContain(
+        "require_metadata_line 'schema_version = 1'",
+      );
+      expect(identityInspection).toContain(
+        '[ "$(stat -c %a "$metadata")" = 600 ]',
+      );
+      expect(
+        commands.find((command) =>
+          command.includes("# enoki-release-e2e:record-resources"),
+        ),
+      ).toContain("/etc/enoki/probe-bootstrap.toml");
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it.each([
+    [
+      "current",
+      "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+      "probe_release_current",
+    ],
+    ["v0.1.72", "/etc/enoki/probe-bootstrap.toml", "probe_release_legacy"],
+  ])(
+    "executes the trusted %s metadata layout at its declared identity path",
+    async (_layout, identityPath, probeId) => {
+      const fixture = await createProbeMetadataShellFixture({
+        identityPath,
+        probeId,
+      });
+      try {
+        await expect(fixture.readIdentity()).resolves.toMatchObject({
+          probeId,
+        });
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it.skipIf(process.getuid?.() !== 0)(
+    "rejects metadata owned by a different existing user without chown",
+    async () => {
+      const fixture = await createProbeMetadataShellFixture({
+        identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        probeId: "probe_release_wrong_owner",
+      });
+      try {
+        const metadata = await readFile(fixture.metadataPath, "utf8");
+        await chmod(fixture.root, 0o755);
+        await chmod(path.dirname(fixture.metadataPath), 0o777);
+        await rm(fixture.metadataPath);
+        await execFileAsync("runuser", [
+          "-u",
+          "nobody",
+          "--",
+          "sh",
+          "-c",
+          'umask 077; printf "%s" "$1" > "$2"',
+          "sh",
+          metadata,
+          fixture.metadataPath,
+        ]);
+
+        await expect(fixture.readIdentity()).rejects.toThrow(
+          /Probe Identity inspection failed/,
+        );
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it.each([
+    [
+      "a metadata symlink",
+      async (fixture) => {
+        const target = path.join(fixture.root, "metadata-target.toml");
+        await writeFile(target, await readFile(fixture.metadataPath, "utf8"));
+        await rm(fixture.metadataPath);
+        await symlink(target, fixture.metadataPath);
+      },
+    ],
+    [
+      "group-writable metadata",
+      async (fixture) => {
+        await chmod(fixture.metadataPath, 0o620);
+      },
+    ],
+    [
+      "an unsupported schema",
+      async (fixture) => {
+        await writeFile(
+          fixture.metadataPath,
+          (await readFile(fixture.metadataPath, "utf8")).replace(
+            "schema_version = 1",
+            "schema_version = 2",
+          ),
+        );
+      },
+    ],
+    [
+      "a duplicate schema",
+      async (fixture) => {
+        await writeFile(
+          fixture.metadataPath,
+          `${await readFile(fixture.metadataPath, "utf8")}schema_version = 1\n`,
+        );
+      },
+    ],
+    [
+      "a duplicate mismatched identity path",
+      async (fixture) => {
+        await writeFile(
+          fixture.metadataPath,
+          `${await readFile(fixture.metadataPath, "utf8")}identity_path = "/etc/enoki/probe-bootstrap.toml"\n`,
+        );
+      },
+    ],
+  ])(
+    "rejects %s before trusting Probe installation metadata",
+    async (_case, mutate) => {
+      const fixture = await createProbeMetadataShellFixture({
+        identityPath: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        probeId: "probe_release_rejected",
+      });
+      try {
+        await mutate(fixture);
+        await expect(fixture.readIdentity()).rejects.toThrow(
+          /Probe Identity inspection failed/,
+        );
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["Installer Recovery", "recoverUpgradeWithInstaller"],
+    ["Repair", "completeRepairOwnershipTransition"],
+  ])(
+    "executes the current-layout ownership completion shell after %s",
+    async (_label, completion) => {
+      const fixture = await createOwnershipCompletionShellFixture();
+      const operation = failedUpgradeOperation();
+      try {
+        await fixture.harness.assertDisposable("run-completion");
+        await fixture.harness.install(officialInstallCommand, "run-completion");
+        await fixture.harness.beginUpgradeOwnershipTransition(
+          "run-completion",
+          operation.targetProbeVersion,
+        );
+        await fixture.harness.bindUpgradeOwnershipTransition(
+          "run-completion",
+          pendingUpgradeOperation(),
+        );
+
+        if (completion === "recoverUpgradeWithInstaller") {
+          await expect(
+            fixture.harness.recoverUpgradeWithInstaller(
+              officialInstallCommand,
+              "run-completion",
+              operation,
+            ),
+          ).resolves.toMatchObject({ mode: "installer", status: "succeeded" });
+        } else {
+          await fixture.harness.repair("run-completion");
+          await expect(
+            fixture.harness.completeRepairOwnershipTransition(
+              "run-completion",
+              operation,
+            ),
+          ).resolves.toMatchObject({ owned: true });
+        }
+
+        expect(fixture.executedCompletionShell).toBe(true);
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  it.each([
+    ["Installer Recovery", "recoverUpgradeWithInstaller"],
+    ["Repair", "completeRepairOwnershipTransition"],
+  ])(
+    "rejects the legacy v0.1.72 layout without rewriting claim resources after %s",
+    async (_label, completion) => {
+      const fixture = await createOwnershipCompletionShellFixture();
+      const operation = failedUpgradeOperation();
+      try {
+        await fixture.harness.assertDisposable("run-legacy-completion");
+        await fixture.harness.install(
+          officialInstallCommand,
+          "run-legacy-completion",
+        );
+        await fixture.harness.beginUpgradeOwnershipTransition(
+          "run-legacy-completion",
+          operation.targetProbeVersion,
+        );
+        await fixture.harness.bindUpgradeOwnershipTransition(
+          "run-legacy-completion",
+          pendingUpgradeOperation(),
+        );
+        const resourcesBefore = await fixture.readClaimResources();
+
+        if (completion === "recoverUpgradeWithInstaller") {
+          fixture.setInstallerIdentityPath("/etc/enoki/probe-bootstrap.toml");
+          await expect(
+            fixture.harness.recoverUpgradeWithInstaller(
+              officialInstallCommand,
+              "run-legacy-completion",
+              operation,
+            ),
+          ).rejects.toThrow(/Could not commit run-owned Probe resources/);
+        } else {
+          await fixture.materializeProbe("/etc/enoki/probe-bootstrap.toml");
+          await fixture.harness.repair("run-legacy-completion");
+          await expect(
+            fixture.harness.completeRepairOwnershipTransition(
+              "run-legacy-completion",
+              operation,
+            ),
+          ).rejects.toThrow(/Could not commit run-owned Probe resources/);
+        }
+
+        expect(fixture.executedCompletionShell).toBe(true);
+        expect(fixture.lastCompletionShell).toContain(
+          '[ "$identity_layout" = current ]',
+        );
+        await expect(fixture.readClaimResources()).resolves.toBe(
+          resourcesBefore,
+        );
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
 
   it("rejects an installed Probe binary from a different candidate version", async () => {
     let inventoryCount = 0;
@@ -1350,6 +1722,7 @@ describe("Probe Host Harness", () => {
     expect(emergency).toContain("sha256sum");
     expect(emergency).toContain("find -P");
     expect(emergency).toContain("stat -c");
+    expect(emergency).toContain("/etc/enoki/probe-bootstrap.toml");
     expect(emergency).not.toContain("expected_resource()");
     expect(emergency).not.toContain('done < "$claim/resources"');
     expect(
@@ -6688,4 +7061,269 @@ function operationPollingClient(observe) {
     },
     sleep: async () => {},
   });
+}
+
+function probeInstallMetadata(identityPath) {
+  return [
+    "schema_version = 1",
+    'hub_url = "https://hub.example"',
+    'install_path = "/usr/local/bin/enoki-probe"',
+    `identity_path = "${identityPath}"`,
+    'state_dir = "/var/lib/enoki-probe"',
+    'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"',
+    'service_name = "enoki-probe"',
+    'service_user = "enoki-probe"',
+    'service_group = "enoki-probe"',
+    'service_unit_path = "/etc/systemd/system/enoki-probe.service"',
+    'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"',
+    'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"',
+    `probe_asset_public_key_sha256 = "${"a".repeat(64)}"`,
+    "",
+  ].join("\n");
+}
+
+async function createProbeMetadataShellFixture({ identityPath, probeId }) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-metadata-"));
+  const metadataOwnerUid = fixtureOwnerUid();
+  const metadataPath = path.join(root, "etc/enoki/probe-install.toml");
+  const resolvedIdentityPath = path.join(root, identityPath);
+  await mkdir(path.dirname(metadataPath), { recursive: true });
+  await mkdir(path.dirname(resolvedIdentityPath), { recursive: true });
+  await writeFile(metadataPath, probeInstallMetadata(identityPath), "utf8");
+  await writeFile(
+    resolvedIdentityPath,
+    `probe_id = "${probeId}"\nprobe_private_key_pem = "test-private-key"\n`,
+    "utf8",
+  );
+  await Promise.all([
+    chmod(metadataPath, 0o600),
+    chmod(resolvedIdentityPath, 0o600),
+  ]);
+
+  let claimed = false;
+  const harness = createProbeHostHarness({
+    execute: async (command) => {
+      if (command.includes("# enoki-release-e2e:inventory")) {
+        return successfulCommand({
+          accounts: { group: false, user: false },
+          files: [],
+          units: [],
+        });
+      }
+      if (command.includes("# enoki-release-e2e:dependencies")) {
+        return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+      }
+      if (command.includes("# enoki-release-e2e:claim")) {
+        claimed = true;
+        return successfulCommandText("owned\n");
+      }
+      if (command.includes("# enoki-release-e2e:record-resources")) {
+        return successfulCommandText("recorded\n");
+      }
+      if (command.includes("# enoki-release-e2e:probe-identity")) {
+        return executeShell(
+          remapProbeMetadataFixtureShell(command, root, metadataOwnerUid),
+        );
+      }
+      return successfulCommandText(productInstallerOutput());
+    },
+  });
+  await harness.assertDisposable("run-metadata");
+  await harness.install(officialInstallCommand, "run-metadata");
+  if (!claimed) {
+    throw new Error("metadata fixture did not establish a harness claim");
+  }
+  return {
+    dispose: () => rm(root, { force: true, recursive: true }),
+    identityPath: resolvedIdentityPath,
+    metadataPath,
+    readIdentity: () => harness.readProbeIdentity("run-metadata"),
+    root,
+  };
+}
+
+const completionPathSuffixes = Object.freeze([
+  "/var/lib/enoki-release-e2e",
+  "/var/lib/enoki-probe",
+  "/etc/enoki",
+  "/etc/systemd/system",
+  "/etc/sudoers.d",
+  "/usr/local/bin/enoki-probe",
+]);
+
+const metadataRootOwnerCheck = '[ "$(stat -c %u "$metadata")" = 0 ]';
+
+function fixtureOwnerUid() {
+  const uid = process.getuid?.();
+  if (!Number.isSafeInteger(uid) || uid < 0) {
+    throw new Error("Release E2E shell fixture requires a numeric process UID");
+  }
+  return String(uid);
+}
+
+function remapMetadataOwnerCheck(command, metadataOwnerUid) {
+  return command
+    .split(metadataRootOwnerCheck)
+    .join(`[ "$(stat -c %u "$metadata")" = ${metadataOwnerUid} ]`);
+}
+
+function remapProbeMetadataFixtureShell(command, root, metadataOwnerUid) {
+  return remapMetadataOwnerCheck(
+    command
+      .replace(
+        "metadata=/etc/enoki/probe-install.toml",
+        `metadata=${path.join(root, "/etc/enoki/probe-install.toml")}`,
+      )
+      .replace(
+        "current) identity=/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        `current) identity=${path.join(root, "/var/lib/enoki-probe/identity/probe-bootstrap.toml")}`,
+      )
+      .replace(
+        "v0_1_72) identity=/etc/enoki/probe-bootstrap.toml",
+        `v0_1_72) identity=${path.join(root, "/etc/enoki/probe-bootstrap.toml")}`,
+      ),
+    metadataOwnerUid,
+  );
+}
+
+function remapCompletionShell(command, root) {
+  const remappedPaths = completionPathSuffixes.reduce(
+    (script, suffix) => script.split(suffix).join(path.join(root, suffix)),
+    command,
+  );
+  return remapMetadataOwnerCheck(remappedPaths, fixtureOwnerUid());
+}
+
+async function createOwnershipCompletionShellFixture({
+  installerIdentityPath = "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+} = {}) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "enoki-e2e-completion-"));
+  let executedCompletionShell = false;
+  let lastCompletionShell = null;
+  let nextInstallerIdentityPath = installerIdentityPath;
+  const materializeProbe = async (identityPath = nextInstallerIdentityPath) => {
+    const binaryPath = path.join(root, "/usr/local/bin/enoki-probe");
+    const metadataPath = path.join(root, "/etc/enoki/probe-install.toml");
+    const resolvedIdentityPath = path.join(root, identityPath);
+    const alternateIdentityPath = path.join(
+      root,
+      identityPath === "/etc/enoki/probe-bootstrap.toml"
+        ? "/var/lib/enoki-probe/identity/probe-bootstrap.toml"
+        : "/etc/enoki/probe-bootstrap.toml",
+    );
+    await Promise.all([
+      mkdir(path.dirname(binaryPath), { recursive: true }),
+      mkdir(path.dirname(metadataPath), { recursive: true }),
+      mkdir(path.dirname(resolvedIdentityPath), { recursive: true }),
+    ]);
+    await rm(alternateIdentityPath, { force: true });
+    await writeFile(binaryPath, "candidate-probe", "utf8");
+    await writeFile(
+      metadataPath,
+      remapCompletionShell(probeInstallMetadata(identityPath), root),
+      "utf8",
+    );
+    await writeFile(
+      resolvedIdentityPath,
+      'probe_id = "probe_release_completion"\nprobe_private_key_pem = "test-private-key"\n',
+      "utf8",
+    );
+    await Promise.all([
+      chmod(metadataPath, 0o600),
+      chmod(resolvedIdentityPath, 0o600),
+    ]);
+  };
+  const harness = createProbeHostHarness({
+    execute: async (command) => {
+      if (command.includes("# enoki-release-e2e:inventory")) {
+        return successfulCommand({
+          accounts: { group: false, user: false },
+          files: [],
+          units: [],
+        });
+      }
+      if (command.includes("# enoki-release-e2e:dependencies")) {
+        return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
+      }
+      if (command.includes("# enoki-release-e2e:probe-repair")) {
+        return successfulCommandText(
+          "Probe Repair succeeded: probe=probe_release_completion version=1.2.3\n",
+        );
+      }
+      if (!command.includes("# enoki-release-e2e:")) {
+        await materializeProbe();
+        return successfulCommandText(productInstallerOutput());
+      }
+      if (
+        command.includes(
+          "# enoki-release-e2e:complete-installer-recovery-ownership",
+        ) ||
+        command.includes("# enoki-release-e2e:complete-repair-ownership")
+      ) {
+        executedCompletionShell = true;
+        lastCompletionShell = remapCompletionShell(command, root);
+      }
+      return executeShell(remapCompletionShell(command, root));
+    },
+  });
+  return {
+    dispose: () => rm(root, { force: true, recursive: true }),
+    get executedCompletionShell() {
+      return executedCompletionShell;
+    },
+    harness,
+    get lastCompletionShell() {
+      return lastCompletionShell;
+    },
+    materializeProbe,
+    readClaimResources: () =>
+      readFile(
+        path.join(root, "/var/lib/enoki-release-e2e/claim/resources"),
+        "utf8",
+      ),
+    setInstallerIdentityPath(identityPath) {
+      nextInstallerIdentityPath = identityPath;
+    },
+  };
+}
+
+function pendingUpgradeOperation() {
+  return {
+    acceptedAtMs: null,
+    completedAtMs: null,
+    createdAtMs: 1,
+    failure: null,
+    hostId: 7,
+    id: 41,
+    kind: "probe_upgrade",
+    runningAtMs: null,
+    state: "pending",
+    targetProbeVersion: "1.2.3",
+    updatedAtMs: 1,
+  };
+}
+
+function failedUpgradeOperation() {
+  return {
+    ...pendingUpgradeOperation(),
+    acceptedAtMs: 2,
+    completedAtMs: 20,
+    failure: { code: "insufficient_privilege", message: "permission denied" },
+    runningAtMs: 2,
+    state: "failed",
+    updatedAtMs: 20,
+  };
+}
+
+async function executeShell(command) {
+  try {
+    const { stderr, stdout } = await execFileAsync("sh", ["-c", command]);
+    return { code: 0, stderr, stdout };
+  } catch (error) {
+    return {
+      code: typeof error.code === "number" ? error.code : 1,
+      stderr: error.stderr ?? error.message,
+      stdout: error.stdout ?? "",
+    };
+  }
 }

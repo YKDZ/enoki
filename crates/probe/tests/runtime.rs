@@ -629,6 +629,62 @@ fn probe_run_sends_full_host_profile_snapshot_when_the_hub_requests_it() {
 }
 
 #[test]
+fn probe_run_replays_the_exact_startup_host_profile_requested_by_the_hub() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response_requesting_host_profile_snapshot(1),
+            report_response(1, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+    let startup_profile = host_profile_with_disk_capability(true);
+    let mut host_profile_provider = RecordingHostProfileProvider {
+        host_profiles: vec![
+            startup_profile.clone(),
+            host_profile_with_disk_capability(false),
+        ],
+    };
+
+    run_probe_with_loop_control_and_host_profile_provider(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(2),
+        },
+        &mut host_profile_provider,
+    )
+    .expect("Snapshot Replay succeeds when startup collection facts change");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(
+        reports[0].snapshots[0].snapshot_hash,
+        reports[1].snapshots[0].snapshot_hash
+    );
+    assert_eq!(full_host_profile_payload(&reports[1]), &startup_profile);
+}
+
+#[test]
 fn probe_run_reuses_the_triggering_observation_batch_end_for_snapshot_replay() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
@@ -681,6 +737,75 @@ fn probe_run_reuses_the_triggering_observation_batch_end_for_snapshot_replay() {
         Some(enoki_probe::protocol::enoki::v1::snapshot::Payload::HostProfile(_))
     ));
     assert!(reports[2].metrics.is_empty());
+}
+
+#[test]
+fn probe_run_replays_the_exact_host_profile_referenced_by_an_observation_batch() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 1",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response(1, false),
+            report_response(4, true),
+            report_response(4, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+    let triggering_profile = host_profile_with_disk_capability(false);
+    let mut host_profile_provider = RecordingHostProfileProvider {
+        host_profiles: vec![
+            host_profile_with_disk_capability(true),
+            triggering_profile.clone(),
+            host_profile_with_disk_capability(true),
+        ],
+    };
+
+    run_probe_with_loop_control_and_host_profile_provider(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(3),
+        },
+        &mut host_profile_provider,
+    )
+    .expect("Snapshot Replay succeeds when collection facts change after its triggering batch");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    let compact = &reports[1];
+    let replay = &reports[2];
+    assert!(compact.snapshots[0].payload.is_none());
+    assert!(matches!(
+        replay.snapshots[0].payload,
+        Some(enoki_probe::protocol::enoki::v1::snapshot::Payload::HostProfile(_))
+    ));
+    assert_eq!(
+        compact.snapshots[0].snapshot_hash,
+        replay.snapshots[0].snapshot_hash
+    );
+    assert_eq!(
+        full_host_profile_payload(replay),
+        &triggering_profile,
+        "the replay must serialize the exact snapshot referenced by the compact batch",
+    );
 }
 
 #[test]
