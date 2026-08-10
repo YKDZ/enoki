@@ -642,12 +642,17 @@ fn parse_systemd_enabled_state(
     status: Option<i32>,
     stdout: &[u8],
 ) -> Result<SystemdEnabledState, &'static str> {
+    // A missing unit has no unit-file state. Ubuntu systemd releases report
+    // that as exit 1 or 4 with empty stdout; the caller accepts this only when
+    // an independent `systemctl show` also returns exact LoadState=not-found.
+    if matches!(status, Some(1) | Some(4)) && stdout.is_empty() {
+        return Ok(SystemdEnabledState::NotFound);
+    }
     let state = systemd_stdout_value(stdout)?;
     match (status, state) {
         (Some(1), "disabled") => Ok(SystemdEnabledState::Disabled),
-        // Ubuntu 24.04 returns exit 4 for an absent unit. Ubuntu 22.04-era
-        // systemd can return exit 1, but only its exact `not-found` state is
-        // accepted so a generic command failure can never look clean.
+        // Some systemd releases also emit an explicit state for an absent
+        // unit, so retain that representation alongside the empty one.
         (Some(4) | Some(1), "not-found") => Ok(SystemdEnabledState::NotFound),
         (Some(0), "enabled") => Ok(SystemdEnabledState::Enabled),
         _ => Err("unexpected systemctl is-enabled result"),
@@ -1359,10 +1364,9 @@ mod tests {
 
     #[test]
     fn ubuntu_systemd_is_enabled_contract_accepts_only_documented_disabled_and_not_found_results() {
-        // Ubuntu 22.04's systemd reports a disabled unit with exit 1, while
-        // Ubuntu 24.04 reports an absent unit with exit 4. Older systemd
-        // releases may use exit 1 for the latter, but only with the exact
-        // `not-found` stdout state.
+        // Ubuntu reports a disabled unit with exit 1. Depending on the systemd
+        // release, an absent unit uses exit 1 or 4 with either empty stdout or
+        // an explicit `not-found` value.
         assert_eq!(
             parse_systemd_enabled_state(Some(1), b"disabled\n"),
             Ok(SystemdEnabledState::Disabled),
@@ -1375,11 +1379,19 @@ mod tests {
             parse_systemd_enabled_state(Some(1), b"not-found\n"),
             Ok(SystemdEnabledState::NotFound),
         );
+        assert_eq!(
+            parse_systemd_enabled_state(Some(1), b""),
+            Ok(SystemdEnabledState::NotFound),
+        );
+        assert_eq!(
+            parse_systemd_enabled_state(Some(4), b""),
+            Ok(SystemdEnabledState::NotFound),
+        );
 
         for (status, output) in [
             (Some(0), b"disabled\n".as_slice()),
-            (Some(1), b"".as_slice()),
             (Some(1), b"not-found\nunexpected\n".as_slice()),
+            (Some(2), b"".as_slice()),
             (Some(2), b"not-found\n".as_slice()),
             (None, b"not-found\n".as_slice()),
             (Some(4), b"disabled\n".as_slice()),
