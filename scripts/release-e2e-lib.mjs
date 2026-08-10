@@ -231,13 +231,6 @@ async function runHubRestoreCompatibilityWindowScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
-    const baselineIdentity = await host.readProbeIdentity(runId);
-    evidence.identity = {
-      afterRestore: null,
-      afterUpgrade: null,
-      beforeUpgrade: baselineIdentity,
-      hostId,
-    };
     await waitForObservation({
       code: "restore_baseline_reporting_timeout",
       label: "Release Baseline core reporting before Hub State Snapshot",
@@ -247,6 +240,13 @@ async function runHubRestoreCompatibilityWindowScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
+    const baselineIdentity = await host.readProbeIdentity(runId);
+    evidence.identity = {
+      afterRestore: null,
+      afterUpgrade: null,
+      beforeUpgrade: baselineIdentity,
+      hostId,
+    };
     await waitForObservation({
       code: "restore_baseline_metrics_timeout",
       label: "Release Baseline portable Metrics before Hub State Snapshot",
@@ -303,10 +303,6 @@ async function runHubRestoreCompatibilityWindowScenario({
       evidence.migration.operationTimeline.at(-1),
     );
     await host.assertInstalled(runId, candidateManifest.probeAssetSet.version);
-    activeBoundary = "identity";
-    const upgradedIdentity = await host.readProbeIdentity(runId);
-    assertSameProbeIdentity(baselineIdentity, upgradedIdentity, "Upgrade");
-    evidence.identity.afterUpgrade = upgradedIdentity;
     activeBoundary = "reporting";
     const candidateHost = await waitForObservation({
       code: "restore_candidate_probe_reporting_timeout",
@@ -317,6 +313,11 @@ async function runHubRestoreCompatibilityWindowScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
     });
+    activeBoundary = "identity";
+    const upgradedIdentity = await host.readProbeIdentity(runId);
+    assertSameProbeIdentity(baselineIdentity, upgradedIdentity, "Upgrade");
+    evidence.identity.afterUpgrade = upgradedIdentity;
+    activeBoundary = "reporting";
     const candidateMetrics = await waitForObservation({
       code: "restore_candidate_metrics_timeout",
       label: "Candidate Probe portable Metrics before Hub Restore",
@@ -368,6 +369,7 @@ async function runHubRestoreCompatibilityWindowScenario({
         "Hub Restore did not recover the original Host",
       );
     }
+    await host.assertInstalled(runId, candidateManifest.probeAssetSet.version);
     const restoredHost = await waitForObservation({
       code: "candidate_probe_baseline_hub_compatibility_timeout",
       label: "Candidate Probe reporting to restored Release Baseline Hub",
@@ -384,7 +386,6 @@ async function runHubRestoreCompatibilityWindowScenario({
       evidence.hostProfileContinuity.candidateBeforeRestore,
       evidence.hostProfileContinuity.restoredBaseline,
     );
-    await host.assertInstalled(runId, candidateManifest.probeAssetSet.version);
     activeBoundary = "identity";
     const restoredIdentity = await host.readProbeIdentity(runId);
     assertSameProbeIdentity(baselineIdentity, restoredIdentity, "Hub Restore");
@@ -632,7 +633,6 @@ async function runPostReplacementRepairUninstallScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
-    const baselineIdentity = await host.readProbeIdentity(runId);
     await waitForObservation({
       code: "repair_baseline_reporting_timeout",
       label: "Release Baseline Probe reporting before Repair scenario Upgrade",
@@ -642,6 +642,7 @@ async function runPostReplacementRepairUninstallScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
+    const baselineIdentity = await host.readProbeIdentity(runId);
     evidence.metrics.beforeUpgrade = compactMetricsEvidence(
       await waitForObservation({
         code: "repair_baseline_metrics_timeout",
@@ -714,21 +715,6 @@ async function runPostReplacementRepairUninstallScenario({
       runId,
       candidateProbeVersion,
     );
-    const repairedIdentity = await host.readProbeIdentity(runId);
-    if (
-      repairedIdentity.probeId !== baselineIdentity.probeId ||
-      repairedIdentity.identitySha256 !== baselineIdentity.identitySha256
-    ) {
-      throw assertionError(
-        "probe_identity_changed",
-        "Probe Repair changed the Probe Identity",
-      );
-    }
-    evidence.identityContinuity = {
-      after: repairedIdentity,
-      before: baselineIdentity,
-      hostId,
-    };
     evidence.operationTimeline = await hub.waitForProbeOperation(
       requestedUpgrade,
       { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
@@ -761,6 +747,21 @@ async function runPostReplacementRepairUninstallScenario({
         isCandidateHostReady(value, candidateProbeVersion),
     });
     evidence.repairedHost = compactHostEvidence(repairedHost);
+    const repairedIdentity = await host.readProbeIdentity(runId);
+    if (
+      repairedIdentity.probeId !== baselineIdentity.probeId ||
+      repairedIdentity.identitySha256 !== baselineIdentity.identitySha256
+    ) {
+      throw assertionError(
+        "probe_identity_changed",
+        "Probe Repair changed the Probe Identity",
+      );
+    }
+    evidence.identityContinuity = {
+      after: repairedIdentity,
+      before: baselineIdentity,
+      hostId,
+    };
     evidence.metrics.afterRepair = compactMetricsEvidence(
       await waitForObservation({
         code: "candidate_probe_repair_metrics_timeout",
@@ -1567,7 +1568,6 @@ async function runBaselineUpgradeUninstallScenario({
       ready: (value) => Number.isSafeInteger(value?.id) && value.id > 0,
     });
     const hostId = hostSummary.id;
-    const baselineIdentity = await host.readProbeIdentity(runId);
     await waitForObservation({
       code: "baseline_host_core_reporting_timeout",
       label: "Release Baseline Probe reporting to the Release Baseline Hub",
@@ -1576,6 +1576,7 @@ async function runBaselineUpgradeUninstallScenario({
       ready: (value) =>
         isCandidateHostReady(value, baseline.probeAssetSet.version),
     });
+    const baselineIdentity = await host.readProbeIdentity(runId);
 
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
@@ -1664,6 +1665,10 @@ async function runBaselineUpgradeUninstallScenario({
       validateSuccessfulProbeUpgradeTimeline(evidence.upgradeOperationTimeline);
     }
 
+    evidence.hostBoundary = await host.assertInstalled(
+      runId,
+      candidateManifest.probeAssetSet.version,
+    );
     const candidateHost = await waitForObservation({
       code: "candidate_probe_reporting_timeout",
       label: "Candidate Probe Host Profile after Upgrade",
@@ -1674,10 +1679,6 @@ async function runBaselineUpgradeUninstallScenario({
         isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
     });
     evidence.candidateHost = compactHostEvidence(candidateHost);
-    evidence.hostBoundary = await host.assertInstalled(
-      runId,
-      candidateManifest.probeAssetSet.version,
-    );
     const candidateIdentity = await host.readProbeIdentity(runId);
     if (
       candidateIdentity.probeId !== baselineIdentity.probeId ||
@@ -2046,6 +2047,15 @@ async function runFreshInstallUninstallScenario({
       runId,
       candidateManifest.probeAssetSet.version,
     );
+    const renewed = await waitForObservation({
+      code: "host_reenrollment_timeout",
+      label: "re-enrolled Host with renewed readiness",
+      observe: () => hub.getHost(hostId),
+      poll,
+      ready: (value) =>
+        value?.id === hostId &&
+        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
+    });
     const reEnrollmentIdentity = await host.readProbeIdentity(runId);
     if (
       reEnrollmentIdentity.probeId === initialIdentity.probeId ||
@@ -2056,15 +2066,6 @@ async function runFreshInstallUninstallScenario({
         "Host Re-enrollment did not replace the Probe Identity",
       );
     }
-    const renewed = await waitForObservation({
-      code: "host_reenrollment_timeout",
-      label: "re-enrolled Host with renewed readiness",
-      observe: () => hub.getHost(hostId),
-      poll,
-      ready: (value) =>
-        value?.id === hostId &&
-        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
-    });
     const reEnrollmentMetrics = await waitForObservation({
       code: "reenrollment_metrics_progression_timeout",
       label: "new portable Metrics after Host Re-enrollment",
@@ -2722,13 +2723,13 @@ export function createProbeHostHarness({
         serviceResult,
         sudoersResult,
         binaryVersionResult,
-        identityResult,
+        identityPathResult,
       ] = await Promise.all([
         inventory(),
         execute(serviceBoundaryScript()),
         execute(sudoersBoundaryScript(), { root: true }),
         execute(binaryVersionScript()),
-        execute(probeIdentityScript(), { root: true }),
+        execute(probeIdentityPathScript(), { root: true }),
       ]);
       const residue = inventoryResidue(inspected);
       const required = [
@@ -2751,9 +2752,14 @@ export function createProbeHostHarness({
         "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
         "/etc/enoki/probe-bootstrap.toml",
       ].filter((path) => residue.includes(path));
-      if (identityPaths.length !== 1 || identityResult.code !== 0) {
+      const identityPath = identityPathResult.stdout.trim();
+      if (
+        identityPaths.length !== 1 ||
+        identityPathResult.code !== 0 ||
+        identityPath !== identityPaths[0]
+      ) {
         throw new Error(
-          `Probe installation identity boundary is invalid: ${identityResult.stderr}`,
+          `Probe installation identity boundary is invalid: ${identityPathResult.stderr}`,
         );
       }
       if (serviceResult.code !== 0) {
@@ -2794,8 +2800,7 @@ export function createProbeHostHarness({
         );
       }
       return {
-        identity: parseJson(identityResult.stdout, "Probe identity"),
-        identityPath: identityPaths[0],
+        identityPath,
         inventory: inspected,
         probeVersion,
         service,
@@ -3580,6 +3585,14 @@ private_key_line=$(grep -E '^probe_private_key_pem = ".+"$' "$config")
 probe_id=$(printf '%s\n' "$probe_id_line" | cut -d '"' -f 2)
 identity_sha256=$(printf '%s\n%s\n' "$probe_id_line" "$private_key_line" | sha256sum | cut -d ' ' -f 1)
 printf '{"identitySha256":"%s","probeId":"%s"}\n' "$identity_sha256" "$probe_id"
+`;
+}
+
+function probeIdentityPathScript() {
+  return String.raw`# enoki-release-e2e:probe-identity-path
+set -eu
+${knownProbeIdentityScript()}
+printf '%s\n' "$identity"
 `;
 }
 
