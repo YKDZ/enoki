@@ -491,6 +491,9 @@ jobs:
       - name: Set up the shared Release runtime
         uses: ./trusted-tool/.github/actions/setup-release-runtime
 
+      - name: Normalize the ephemeral Probe install prefix
+        run: sudo install -d -o root -g root -m 0755 /usr/local/bin
+
       - name: Download the immutable candidate
         uses: actions/download-artifact@v8
         with:
