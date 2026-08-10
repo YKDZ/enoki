@@ -104,11 +104,11 @@ pub fn probe_local_install_input_from_environment(
         Ok(value) => value,
         Err(_) => default.to_string(),
     };
-    let required = |name: &'static str| {
+    let required = |name: &str, message: &'static str| {
         env::var(name)
             .ok()
             .filter(|value| !value.is_empty())
-            .ok_or(ProbeLocalLifecycleError::InvalidInput(name))
+            .ok_or(ProbeLocalLifecycleError::InvalidInput(message))
     };
     let readiness_timeout = env::var("ENOKI_READINESS_TIMEOUT_SECONDS")
         .ok()
@@ -122,8 +122,11 @@ pub fn probe_local_install_input_from_environment(
             "ENOKI_COLLECTOR_HELPER_SUDOERS_PATH",
             "/etc/sudoers.d/enoki-probe-collector-helpers",
         )),
-        enrollment_token: required("ENOKI_ENROLLMENT_TOKEN is required")?,
-        hub_url: required("ENOKI_HUB_URL is required")?,
+        enrollment_token: required(
+            "ENOKI_ENROLLMENT_TOKEN",
+            "ENOKI_ENROLLMENT_TOKEN is required",
+        )?,
+        hub_url: required("ENOKI_HUB_URL", "ENOKI_HUB_URL is required")?,
         identity_path: PathBuf::from(value(
             "ENOKI_CONFIG_PATH",
             "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
@@ -149,6 +152,7 @@ pub fn probe_local_install_input_from_environment(
         state_dir: PathBuf::from(value("ENOKI_STATE_DIR", "/var/lib/enoki-probe")),
         test_root: env::var_os("ENOKI_TEST_ROOT").map(PathBuf::from),
         trusted_asset_public_key_sha256: required(
+            "ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256",
             "ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256 is required",
         )?,
     })
@@ -1224,6 +1228,48 @@ mod tests {
             test_root: None,
             trusted_asset_public_key_sha256: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn local_install_input_reads_the_installer_environment_contract() {
+        let _environment_lock = PATH_MUTATION_LOCK.lock().expect("environment lock");
+        let variables = [
+            ("ENOKI_ENROLLMENT_TOKEN", "enk_enroll_environment_contract"),
+            ("ENOKI_HUB_URL", "https://hub.environment.example"),
+            ("ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256", "b"),
+        ];
+        let previous = variables.map(|(name, _)| (name, env::var_os(name)));
+
+        // SAFETY: this test serializes and restores its process-wide environment mutation.
+        unsafe {
+            for (name, value) in variables {
+                env::set_var(
+                    name,
+                    if name == "ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256" {
+                        value.repeat(64)
+                    } else {
+                        value.to_string()
+                    },
+                );
+            }
+        }
+        let result =
+            probe_local_install_input_from_environment(PathBuf::from("/tmp/enoki-probe-candidate"));
+        // SAFETY: restores the process-wide environment changed for this serialized test.
+        unsafe {
+            for (name, value) in previous {
+                if let Some(value) = value {
+                    env::set_var(name, value);
+                } else {
+                    env::remove_var(name);
+                }
+            }
+        }
+
+        let input = result.expect("installer environment contract");
+        assert_eq!(input.enrollment_token, "enk_enroll_environment_contract");
+        assert_eq!(input.hub_url, "https://hub.environment.example");
+        assert_eq!(input.trusted_asset_public_key_sha256, "b".repeat(64));
     }
 
     #[test]
