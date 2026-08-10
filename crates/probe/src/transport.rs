@@ -68,12 +68,30 @@ pub fn post_protobuf(
 
 fn http_attempt_error(error: ureq::Error) -> HttpAttemptError {
     match error {
-        ureq::Error::Status(status, response) => HttpAttemptError::HttpStatus {
-            message: response.status_text().to_string(),
-            status,
-        },
+        ureq::Error::Status(status, response) => {
+            let status_text = response.status_text().to_string();
+            let mut body = String::new();
+            let _ = response.into_reader().take(256).read_to_string(&mut body);
+            let message = stable_hub_error_code(&body).map_or(status_text.clone(), |code| {
+                format!("{status_text} (code={code})")
+            });
+            HttpAttemptError::HttpStatus { message, status }
+        }
         ureq::Error::Transport(error) => HttpAttemptError::Network(error.to_string()),
     }
+}
+
+fn stable_hub_error_code(body: &str) -> Option<&str> {
+    let code = body
+        .trim()
+        .strip_prefix("{\"error\":\"")?
+        .strip_suffix("\"}")?;
+    (!code.is_empty()
+        && code.len() <= 96
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'))
+    .then_some(code)
 }
 
 #[cfg(test)]
@@ -123,5 +141,21 @@ mod tests {
 
         assert!(transient.iter().all(HttpAttemptError::is_transient));
         assert!(permanent.iter().all(|error| !error.is_transient()));
+    }
+
+    #[test]
+    fn exposes_only_bounded_stable_hub_error_codes_from_http_bodies() {
+        assert_eq!(
+            stable_hub_error_code("{\"error\":\"malformed_probe_report\"}"),
+            Some("malformed_probe_report"),
+        );
+        for body in [
+            "<html>upstream detail</html>",
+            "{\"error\":\"contains-secret: value\"}",
+            "{\"error\":\"UPPERCASE\"}",
+            "{\"error\":\"\"}",
+        ] {
+            assert_eq!(stable_hub_error_code(body), None);
+        }
     }
 }
