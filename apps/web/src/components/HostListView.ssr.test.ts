@@ -5,7 +5,11 @@ import { createSSRApp } from "vue";
 import type { HostSummary } from "../types";
 import HostListView from "./HostListView.vue";
 
-const host = (id: number, displayName: string) =>
+const host = (
+  id: number,
+  displayName: string,
+  status: HostSummary["status"] = "online",
+) =>
   ({
     clockSkew: { detected: false, lastDeltaMs: null },
     collectorCapabilities: null,
@@ -20,7 +24,7 @@ const host = (id: number, displayName: string) =>
     memory: "1 GB",
     probeConfiguration: { mode: "inherit", version: "default-v1" },
     probeVersion: "dev",
-    status: "online",
+    status,
     system: "Linux",
   }) as HostSummary;
 
@@ -40,5 +44,24 @@ describe("Host list ready reveal", () => {
     expect(html).toContain('data-enoki-host-id="7"');
     expect(html).toContain("ring-primary");
     expect(html).not.toContain('data-enoki-host-id="2"');
+  });
+
+  it("exposes the same Probe Re-enrollment action only on offline rows", async () => {
+    const html = await renderToString(
+      createSSRApp(HostListView, {
+        highlightedHostId: null,
+        hosts: [
+          host(7, "offline", "offline"),
+          host(8, "stale", "stale"),
+          host(9, "online"),
+        ],
+        page: 1,
+        pageSize: 3,
+        sortDirection: "asc",
+        sortKey: null,
+      }),
+    );
+
+    expect(html.match(/重新注册 Probe/g)).toHaveLength(1);
   });
 });

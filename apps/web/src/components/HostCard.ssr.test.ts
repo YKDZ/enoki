@@ -48,7 +48,8 @@ describe("Host overview card", () => {
       }),
     );
 
-    expect(html).toContain('role="button"');
+    expect(html).toContain('aria-label="打开主机 managed-host-01"');
+    expect(html).not.toContain('role="button"');
     expect(html).toContain("border-border");
     expect(html).not.toContain("border-slate-200");
     expect(html).toContain("CPU");
@@ -70,7 +71,7 @@ describe("Host overview card", () => {
     expect(html).not.toContain(">online<");
   });
 
-  it("marks and highlights the ready Host without changing its button contract", async () => {
+  it("marks and highlights the ready Host on its dedicated detail control", async () => {
     const html = await renderToString(
       createSSRApp(HostCard, {
         highlighted: true,
@@ -81,5 +82,21 @@ describe("Host overview card", () => {
     expect(html).toContain('data-enoki-host-id="1"');
     expect(html).toContain("ring-primary");
     expect(html).toContain('tabindex="0"');
+  });
+
+  it("exposes Probe Re-enrollment on an offline Host card only", async () => {
+    const offlineHtml = await renderToString(
+      createSSRApp(HostCard, {
+        host: { ...host, status: "offline" },
+      }),
+    );
+    const onlineHtml = await renderToString(
+      createSSRApp(HostCard, {
+        host,
+      }),
+    );
+
+    expect(offlineHtml).toContain("重新注册 Probe");
+    expect(onlineHtml).not.toContain("重新注册 Probe");
   });
 });
