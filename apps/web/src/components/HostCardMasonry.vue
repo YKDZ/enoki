@@ -16,6 +16,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "create-existing-host-enrollment": [hostId: number];
   "load-more": [];
   "open-host-detail": [hostId: number];
 }>();
@@ -48,6 +49,9 @@ useIntersectionObserver(
         <HostCard
           :host="host"
           :highlighted="host.id === highlightedHostId"
+          @create-existing-host-enrollment="
+            emit('create-existing-host-enrollment', $event)
+          "
           @open-host-detail="emit('open-host-detail', $event)"
         />
       </div>

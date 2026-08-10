@@ -61,6 +61,21 @@ async function createEnrollmentToken(
     .enrollmentToken;
 }
 
+async function createExistingHostEnrollment(
+  app: ReturnType<typeof createHubApp>,
+  ownerSession: string,
+  hostId: number,
+) {
+  return app.request("/api/web/enrollments", {
+    body: JSON.stringify({ target: { hostId, kind: "existing_host" } }),
+    headers: {
+      "content-type": "application/json",
+      cookie: ownerSession,
+    },
+    method: "POST",
+  });
+}
+
 async function registerProbe(
   app: ReturnType<typeof createHubApp>,
   enrollmentToken: string,
@@ -649,9 +664,10 @@ describe("Probe registration API", () => {
       subjectType: "host",
     });
 
-    const enrollmentResponse = await app.request(
-      `/api/web/enrollments/existing-host/${host.id}`,
-      { headers: { cookie: ownerSession }, method: "POST" },
+    const enrollmentResponse = await createExistingHostEnrollment(
+      app,
+      ownerSession,
+      host.id,
     );
     expect(enrollmentResponse.status).toBe(201);
     const enrollment = (await enrollmentResponse.json()) as {
@@ -822,9 +838,10 @@ describe("Probe registration API", () => {
       .prepare("select id from managed_hosts where probe_id = ?")
       .get(firstIdentity.probeId) as { id: number };
 
-    const enrollmentResponse = await app.request(
-      `/api/web/enrollments/existing-host/${host.id}`,
-      { headers: { cookie: ownerSession }, method: "POST" },
+    const enrollmentResponse = await createExistingHostEnrollment(
+      app,
+      ownerSession,
+      host.id,
     );
     const enrollment = (await enrollmentResponse.json()) as {
       enrollmentToken: string;
@@ -872,10 +889,7 @@ describe("Probe registration API", () => {
 
     const creations = await Promise.all(
       [0, 1].map(() =>
-        app.request(`/api/web/enrollments/existing-host/${host.id}`, {
-          headers: { cookie: ownerSession },
-          method: "POST",
-        }),
+        createExistingHostEnrollment(app, ownerSession, host.id),
       ),
     );
     expect(creations.map((response) => response.status)).toEqual([201, 201]);
