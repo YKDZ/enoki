@@ -92,10 +92,22 @@ export function createProbeTrustDelegation({
   generation,
   purpose = "probe-asset-signing",
   releasePublicKeyPem,
+  rootPrivateKey,
   rootPrivateKeyPem,
 }) {
+  const hasKeyObject = rootPrivateKey !== undefined;
+  const hasPem = rootPrivateKeyPem !== undefined;
+  if (hasKeyObject === hasPem) {
+    throw new Error("exactly one root private key representation is required");
+  }
+  if (hasKeyObject && rootPrivateKey?.type !== "private") {
+    throw new Error("root private key must be a KeyObject");
+  }
+  const signingKey = hasKeyObject
+    ? rootPrivateKey
+    : createPrivateKey(rootPrivateKeyPem);
   const rootPublicKeyPem = canonicalPublicKeyPem(
-    createPublicKey(rootPrivateKeyPem).export({ format: "pem", type: "spki" }),
+    createPublicKey(signingKey).export({ format: "pem", type: "spki" }),
   );
   const releasePublicKey = canonicalPublicKeyPem(releasePublicKeyPem);
   const delegation = validateProbeTrustDelegationDocument({
@@ -118,7 +130,7 @@ export function createProbeTrustDelegation({
     signature: sign(
       "RSA-SHA256",
       trustDelegationSigningInput(bytes),
-      rootPrivateKeyPem,
+      signingKey,
     ),
   };
 }

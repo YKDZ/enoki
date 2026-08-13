@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   createHash,
+  createPrivateKey,
   createPublicKey,
   generateKeyPairSync,
   sign as signBytes,
@@ -54,6 +55,38 @@ const testDistributionRoot = generateKeyPairSync("rsa", {
 });
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
+  it("requires exactly one root private-key representation for trust delegations", () => {
+    const root = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const release = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const input = {
+      distribution: "enoki",
+      generation: 1,
+      releasePublicKeyPem: release.publicKey,
+    };
+
+    expect(() => createProbeTrustDelegation(input)).toThrow(
+      /exactly one root private key/,
+    );
+    expect(() =>
+      createProbeTrustDelegation({
+        ...input,
+        rootPrivateKey: createPrivateKey(root.privateKey),
+        rootPrivateKeyPem: root.privateKey,
+      }),
+    ).toThrow(/exactly one root private key/);
+    expect(() =>
+      createProbeTrustDelegation({ ...input, rootPrivateKey: root.privateKey }),
+    ).toThrow(/root private key must be a KeyObject/);
+  });
+
   it("authorizes a routine signer with one root-signed, domain-separated delegated identity", () => {
     const root = generateKeyPairSync("rsa", {
       modulusLength: 2048,
