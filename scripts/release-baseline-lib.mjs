@@ -629,6 +629,7 @@ async function resolveTrustEpochMigrationBaseline({
       `${JSON.stringify(descriptor, null, 2)}\n`,
     );
     await validateTrustEpochMigrationBaselineBundle(stagingDir, {
+      candidateVersion,
       trustedRootPublicKeyPem: trustedRoot,
     });
     await rename(stagingDir, outputDir);
@@ -681,6 +682,7 @@ export async function recheckReleaseBaseline({
   trustedRootPublicKeyPem,
 }) {
   const descriptor = await validateResolvedReleaseBaseline(bundleDir, {
+    candidateVersion,
     trustedRootPublicKeyPem,
   });
   const releases = await releaseCatalog.listReleases();
@@ -737,7 +739,7 @@ export async function validateResolvedReleaseBaseline(bundleDir, options = {}) {
 
 export async function validateTrustEpochMigrationBaselineBundle(
   bundleDir,
-  { trustedRootPublicKeyPem } = {},
+  { candidateVersion, trustedRootPublicKeyPem } = {},
 ) {
   assertSameFileNames(
     (await readdir(bundleDir)).sort(),
@@ -831,7 +833,7 @@ export async function validateTrustEpochMigrationBaselineBundle(
   };
   const authorization = verifyTrustEpochMigrationAuthorization({
     bytes: authorizationBytes,
-    expectedCandidateVersion: readMigrationCandidateVersion(authorizationBytes),
+    expectedCandidateVersion: candidateVersion,
     expectedDistribution: "enoki",
     expectedLegacyRelease,
     rootPublicKeyPem: trustedRootPublicKeyPem,
@@ -907,14 +909,6 @@ export async function validateTrustEpochMigrationBaselineBundle(
       "Trust Epoch Migration Release Baseline Hub OCI archive contains a different image digest",
     );
   return descriptor;
-}
-
-function readMigrationCandidateVersion(bytes) {
-  try {
-    return JSON.parse(Buffer.from(bytes).toString("utf8"))?.candidateVersion;
-  } catch {
-    return "";
-  }
 }
 
 function validateMigrationHubDescriptor(hub, tag) {

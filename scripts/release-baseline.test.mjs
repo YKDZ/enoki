@@ -29,6 +29,7 @@ import {
   createProbeTrustDelegation,
   prepareProbeAssetSet,
   probeTargets,
+  validateReleaseCandidate,
 } from "./release-candidate-lib.mjs";
 import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 import {
@@ -172,12 +173,198 @@ describe("Release Baseline resolution", () => {
           githubRepository: "YKDZ/enoki",
           releaseCatalog: fixture.arguments_.releaseCatalog,
           trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-          trustEpochMigrationAuthorizationBytes:
-            fixture.arguments_.trustEpochMigrationAuthorizationBytes,
-          trustEpochMigrationAuthorizationSignature:
-            fixture.arguments_.trustEpochMigrationAuthorizationSignature,
         }),
       ).resolves.toMatchObject({ transition: "manual-reinstall-required" });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("rejects replaying a pinned migration bundle for another candidate", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await resolveReleaseBaseline(fixture.arguments_);
+      await expect(
+        validateResolvedReleaseBaseline(fixture.outputDir, {
+          candidateVersion: "v0.1.76",
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow("candidate");
+      await expect(
+        recheckReleaseBaseline({
+          bundleDir: fixture.outputDir,
+          candidateVersion: "v0.1.76",
+          githubRepository: "YKDZ/enoki",
+          releaseCatalog: fixture.arguments_.releaseCatalog,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow("candidate");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("candidate validation rejects a migration authorization issued for another candidate", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      const descriptor = await resolveReleaseBaseline(fixture.arguments_);
+      const candidateDir = path.join(
+        path.dirname(fixture.outputDir),
+        "candidate-replay",
+      );
+      await mkdir(candidateDir);
+      await cp(fixture.outputDir, path.join(candidateDir, "release-baseline"), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(candidateDir, "candidate-manifest.json"),
+        `${JSON.stringify({
+          bootstrap: {},
+          candidate: { commit: "4".repeat(40), version: "v0.1.76" },
+          hub: {},
+          kind: "enoki-release-candidate",
+          probeAssetSet: {},
+          releaseBaseline: descriptor,
+          schemaVersion: 3,
+        })}\n`,
+      );
+      await expect(
+        validateReleaseCandidate(candidateDir, {
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow("candidate version");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("migration recheck rejects a changed published catalog", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await resolveReleaseBaseline(fixture.arguments_);
+      fixture.releases.push(release("v0.1.73", { id: 171 }));
+      await expect(
+        recheckReleaseBaseline({
+          bundleDir: fixture.outputDir,
+          candidateVersion: "v0.1.75",
+          githubRepository: "YKDZ/enoki",
+          releaseCatalog: fixture.arguments_.releaseCatalog,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow("catalog changed");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.each(["missing", "added", "replaced"])(
+    "pinned migration bundle rejects %s assets",
+    async (mutation) => {
+      const fixture = await createLegacyTrustEpochFixture();
+      try {
+        await resolveReleaseBaseline(fixture.arguments_);
+        const assetDir = path.join(fixture.outputDir, "probe-assets");
+        const first = fixture.expectedLegacyRelease.assets[0].name;
+        if (mutation === "missing") await rm(path.join(assetDir, first));
+        if (mutation === "added")
+          await writeFile(path.join(assetDir, "unexpected-asset"), "extra");
+        if (mutation === "replaced")
+          await writeFile(path.join(assetDir, first), "replacement");
+        await expect(
+          validateResolvedReleaseBaseline(fixture.outputDir, {
+            candidateVersion: "v0.1.75",
+            trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+          }),
+        ).rejects.toThrow();
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it.each([
+    "releaseId",
+    "tagRefSha",
+    "peeledCommitSha",
+    "targetCommitish",
+    "hubDigest",
+    "descriptorSchema",
+    "authorizationSignature",
+  ])("pinned migration bundle rejects changed %s", async (field) => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await resolveReleaseBaseline(fixture.arguments_);
+      const descriptorPath = path.join(
+        fixture.outputDir,
+        "release-baseline.json",
+      );
+      const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
+      if (field === "releaseId") descriptor.githubRelease.id += 1;
+      if (field === "tagRefSha")
+        descriptor.githubRelease.tagRefSha = "3".repeat(40);
+      if (field === "peeledCommitSha")
+        descriptor.githubRelease.peeledCommitSha = "3".repeat(40);
+      if (field === "targetCommitish")
+        descriptor.githubRelease.targetCommitish = "other";
+      if (field === "hubDigest")
+        descriptor.hub.digest = `sha256:${"0".repeat(64)}`;
+      if (field === "descriptorSchema") descriptor.schemaVersion = 2;
+      if (field === "authorizationSignature") {
+        const signaturePath = path.join(
+          fixture.outputDir,
+          "trust-epoch-migration-authorization.json.sig",
+        );
+        await writeFile(signaturePath, Buffer.alloc(512));
+      } else {
+        await writeFile(
+          descriptorPath,
+          `${JSON.stringify(descriptor, null, 2)}\n`,
+        );
+      }
+      await expect(
+        validateResolvedReleaseBaseline(fixture.outputDir, {
+          candidateVersion: "v0.1.75",
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("canonicalizes nested migration release identity independent of input key order", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      const canonical = createTrustEpochMigrationAuthorization({
+        candidateVersion: "v0.1.75",
+        distribution: "enoki",
+        legacyRelease: fixture.expectedLegacyRelease,
+        rootPrivateKeyPem: fixture.probe.root.privateKey,
+      });
+      const release = fixture.expectedLegacyRelease;
+      const reordered = createTrustEpochMigrationAuthorization({
+        candidateVersion: "v0.1.75",
+        distribution: "enoki",
+        legacyRelease: {
+          legacySigningKeySha256: release.legacySigningKeySha256,
+          hub: { image: release.hub.image, digest: release.hub.digest },
+          githubRelease: {
+            targetCommitish: release.githubRelease.targetCommitish,
+            tagRefSha: release.githubRelease.tagRefSha,
+            tag: release.githubRelease.tag,
+            repository: release.githubRelease.repository,
+            peeledCommitSha: release.githubRelease.peeledCommitSha,
+            id: release.githubRelease.id,
+          },
+          assets: release.assets.map(({ name, sha256, size }) => ({
+            size,
+            name,
+            sha256,
+          })),
+        },
+        rootPrivateKeyPem: fixture.probe.root.privateKey,
+      });
+      expect(reordered.bytes).toEqual(canonical.bytes);
     } finally {
       await fixture.cleanup();
     }
@@ -191,9 +378,16 @@ describe("Release Baseline resolution", () => {
     "migrationGeneration",
     "purpose",
     "releaseId",
+    "peeledCommit",
+    "tagRef",
+    "targetCommitish",
+    "hubDigest",
     "root",
+    "schemaVersion",
     "tag",
     "targetRootKeyId",
+    "addedAsset",
+    "replacedAsset",
   ])(
     "rejects a Trust Epoch Migration Authorization with wrong %s",
     async (field) => {
@@ -213,10 +407,27 @@ describe("Release Baseline resolution", () => {
         if (field === "migrationGeneration") parsed.migrationGeneration = 2;
         if (field === "purpose") parsed.purpose = "probe-asset-signing";
         if (field === "releaseId") parsed.legacyRelease.githubRelease.id += 1;
+        if (field === "peeledCommit")
+          parsed.legacyRelease.githubRelease.peeledCommitSha = "3".repeat(40);
+        if (field === "tagRef")
+          parsed.legacyRelease.githubRelease.tagRefSha = "3".repeat(40);
+        if (field === "targetCommitish")
+          parsed.legacyRelease.githubRelease.targetCommitish = "other";
+        if (field === "hubDigest")
+          parsed.legacyRelease.hub.digest = `sha256:${"0".repeat(64)}`;
         if (field === "root") parsed.rootKeyId = "0".repeat(64);
+        if (field === "schemaVersion") parsed.schemaVersion = 2;
         if (field === "tag") parsed.legacyRelease.githubRelease.tag = "v0.1.73";
         if (field === "targetRootKeyId")
           parsed.targetRootKeyId = "0".repeat(64);
+        if (field === "addedAsset")
+          parsed.legacyRelease.assets.push({
+            name: "extra",
+            sha256: "0".repeat(64),
+            size: 1,
+          });
+        if (field === "replacedAsset")
+          parsed.legacyRelease.assets[0].sha256 = "0".repeat(64);
         const bytes = Buffer.from(`${JSON.stringify(parsed)}\n`);
         expect(() =>
           verifyTrustEpochMigrationAuthorization({
@@ -232,6 +443,45 @@ describe("Release Baseline resolution", () => {
             ),
           }),
         ).toThrow();
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it("rejects an invalid migration root signature", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      expect(() =>
+        verifyTrustEpochMigrationAuthorization({
+          bytes: fixture.arguments_.trustEpochMigrationAuthorizationBytes,
+          expectedCandidateVersion: "v0.1.75",
+          expectedDistribution: "enoki",
+          expectedLegacyRelease: fixture.expectedLegacyRelease,
+          rootPublicKeyPem: fixture.probe.root.publicKey,
+          signature: Buffer.alloc(512),
+        }),
+      ).toThrow("signature");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.each(["releaseId", "tagRefSha", "peeledCommitSha", "targetCommitish"])(
+    "resolver rejects changed published migration %s",
+    async (field) => {
+      const fixture = await createLegacyTrustEpochFixture();
+      try {
+        if (field === "releaseId") fixture.releaseIdentity.id += 1;
+        if (field === "tagRefSha")
+          fixture.releaseIdentity.tagRefSha = "3".repeat(40);
+        if (field === "peeledCommitSha")
+          fixture.releaseIdentity.peeledCommitSha = "3".repeat(40);
+        if (field === "targetCommitish")
+          fixture.releaseIdentity.targetCommitish = "other";
+        await expect(
+          resolveReleaseBaseline(fixture.arguments_),
+        ).rejects.toThrow();
       } finally {
         await fixture.cleanup();
       }

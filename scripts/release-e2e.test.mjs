@@ -41,6 +41,20 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe("Release E2E business assertions", () => {
+  it("never runs an in-place scenario for a Trust Epoch Migration baseline", async () => {
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: {
+          releaseBaseline: {
+            kind: "enoki-trust-epoch-migration-baseline",
+            transition: "manual-reinstall-required",
+          },
+        },
+        scenario: "baseline-upgrade-uninstall",
+      }),
+    ).rejects.toThrow("requires a manual reinstall");
+  });
+
   it("constructs the real Docker Hub controller with default options", () => {
     expect(createDockerHubController()).toBeDefined();
   });

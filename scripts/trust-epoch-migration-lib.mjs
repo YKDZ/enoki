@@ -65,9 +65,13 @@ export function verifyTrustEpochMigrationAuthorization({
     );
   }
   const rootKeyId = sha256(root);
+  if (authorization.candidateVersion !== expectedCandidateVersion) {
+    throw new Error(
+      "Trust Epoch Migration Authorization candidate version is invalid",
+    );
+  }
   if (
     authorization.distribution !== expectedDistribution ||
-    authorization.candidateVersion !== expectedCandidateVersion ||
     authorization.rootKeyId !== rootKeyId ||
     authorization.targetRootKeyId !== rootKeyId
   ) {
@@ -208,8 +212,18 @@ function validateLegacyRelease(value) {
     .sort((left, right) => left.name.localeCompare(right.name));
   return {
     assets,
-    githubRelease: { ...value.githubRelease },
-    hub: { ...value.hub },
+    githubRelease: {
+      id: value.githubRelease.id,
+      peeledCommitSha: value.githubRelease.peeledCommitSha,
+      repository: value.githubRelease.repository,
+      tag: value.githubRelease.tag,
+      tagRefSha: value.githubRelease.tagRefSha,
+      targetCommitish: value.githubRelease.targetCommitish,
+    },
+    hub: {
+      digest: value.hub.digest,
+      image: value.hub.image,
+    },
     legacySigningKeySha256: value.legacySigningKeySha256,
   };
 }

@@ -751,6 +751,7 @@ export async function assembleReleaseCandidate({
   const releaseBaseline = await validateResolvedReleaseBaseline(
     releaseBaselineDir,
     {
+      candidateVersion: version,
       trustedRootPublicKeyPem,
     },
   );
@@ -888,7 +889,7 @@ export async function validateReleaseCandidate(
     });
     const inspectedBaseline = await validateResolvedReleaseBaseline(
       path.join(candidateDir, "release-baseline"),
-      { trustedRootPublicKeyPem },
+      { candidateVersion: identity.version, trustedRootPublicKeyPem },
     );
     if (JSON.stringify(inspectedBaseline) !== JSON.stringify(releaseBaseline)) {
       throw new Error(
