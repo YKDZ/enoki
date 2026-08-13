@@ -176,6 +176,8 @@ jobs:
           CANDIDATE_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
           PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          TRUST_EPOCH_MIGRATION_AUTHORIZATION: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON }}
+          TRUST_EPOCH_MIGRATION_SIGNATURE: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_SIGNATURE_BASE64 }}
         run: >-
           node trusted-tool/scripts/release-baseline.mjs resolve
           --candidate-version "$CANDIDATE_VERSION"
@@ -183,6 +185,8 @@ jobs:
           --github-token-env GH_TOKEN
           --hub-image ghcr.io/ykdz/enoki-hub
           --trusted-root-public-key-env PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY
+          --trust-epoch-migration-authorization-env TRUST_EPOCH_MIGRATION_AUTHORIZATION
+          --trust-epoch-migration-signature-env TRUST_EPOCH_MIGRATION_SIGNATURE
           --output release-baseline
 
       - name: Upload one pinned baseline resolution

@@ -286,6 +286,10 @@ async function readAttemptIdentities(options) {
   try {
     releaseBaseline = await validateResolvedReleaseBaseline(
       options["--release-baseline-dir"],
+      {
+        candidateVersion: options["--requested-version"],
+        trustedRootPublicKeyPem: process.env[options["--root-public-key-env"]],
+      },
     );
   } catch (error) {
     errors.push(`Release Baseline identity unavailable: ${error.message}`);

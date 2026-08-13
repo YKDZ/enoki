@@ -146,6 +146,15 @@ export function hasSupportedProbeIdentityBoundary(boundary) {
 
 export async function runReleaseE2EScenario(options) {
   const scenario = options?.scenario;
+  if (
+    options?.candidateManifest?.releaseBaseline?.kind ===
+      "enoki-trust-epoch-migration-baseline" &&
+    scenario !== "manual-reinstall-required"
+  ) {
+    throw new Error(
+      "Trust Epoch Migration baseline requires a manual reinstall Release E2E scenario",
+    );
+  }
   const runner = releaseE2EScenarioRegistry[scenario];
   if (!runner) {
     throw new Error(`unsupported Release E2E scenario: ${scenario}`);
@@ -4641,13 +4650,19 @@ function defaultSleep(milliseconds) {
 function assertCandidateManifest(manifest) {
   const releaseBaseline = manifest?.releaseBaseline;
   const validReleaseBaseline =
-    releaseBaseline?.kind === "enoki-release-baseline" &&
+    ["enoki-release-baseline", "enoki-trust-epoch-migration-baseline"].includes(
+      releaseBaseline?.kind,
+    ) &&
     /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
       releaseBaseline.tag ?? "",
     ) &&
     /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.digest ?? "") &&
     /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.imageDigest ?? "") &&
-    releaseBaseline.probeAssetSet?.version === releaseBaseline.tag.slice(1);
+    (releaseBaseline.kind === "enoki-release-baseline"
+      ? releaseBaseline.probeAssetSet?.version
+      : releaseBaseline.legacyProbeAssets?.directory === "probe-assets"
+        ? releaseBaseline.tag.slice(1)
+        : null) === releaseBaseline.tag.slice(1);
   if (
     manifest?.schemaVersion !== 3 ||
     manifest.kind !== "enoki-release-candidate" ||

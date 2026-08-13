@@ -751,6 +751,7 @@ export async function assembleReleaseCandidate({
   const releaseBaseline = await validateResolvedReleaseBaseline(
     releaseBaselineDir,
     {
+      candidateVersion: version,
       trustedRootPublicKeyPem,
     },
   );
@@ -796,11 +797,9 @@ export async function assembleReleaseCandidate({
         path.join(stagingDir, "probe-bootstrap", file),
       );
     }
-    if (releaseBaseline.kind === "enoki-release-baseline") {
-      await cp(releaseBaselineDir, path.join(stagingDir, "release-baseline"), {
-        recursive: true,
-      });
-    }
+    await cp(releaseBaselineDir, path.join(stagingDir, "release-baseline"), {
+      recursive: true,
+    });
     await copyFile(hubOciPath, path.join(stagingDir, "hub", hubArchiveFile));
     await writeFile(
       path.join(stagingDir, "candidate-manifest.json"),
@@ -876,18 +875,21 @@ export async function validateReleaseCandidate(
     "probe-assets",
     "release-baseline",
   ];
-  if (releaseBaseline.kind === "enoki-release-baseline") {
+  if (
+    releaseBaseline.kind === "enoki-release-baseline" ||
+    releaseBaseline.kind === "enoki-trust-epoch-migration-baseline"
+  ) {
     const {
       assertReleaseBaselinePrecedesCandidate,
-      validateReleaseBaselineBundle,
+      validateResolvedReleaseBaseline,
     } = await import("./release-baseline-lib.mjs");
     assertReleaseBaselinePrecedesCandidate({
       baselineTag: releaseBaseline.tag,
       candidateVersion: identity.version,
     });
-    const inspectedBaseline = await validateReleaseBaselineBundle(
+    const inspectedBaseline = await validateResolvedReleaseBaseline(
       path.join(candidateDir, "release-baseline"),
-      { trustedRootPublicKeyPem },
+      { candidateVersion: identity.version, trustedRootPublicKeyPem },
     );
     if (JSON.stringify(inspectedBaseline) !== JSON.stringify(releaseBaseline)) {
       throw new Error(
