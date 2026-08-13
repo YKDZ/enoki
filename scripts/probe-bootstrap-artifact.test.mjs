@@ -173,6 +173,54 @@ describe("Probe Bootstrap build artifact", () => {
     });
   });
 
+  it("packages role binaries from separate relative build directories", async () => {
+    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
+      const fixtureRoot = path.join(
+        process.cwd(),
+        ".scratch-probe-bootstrap-relative-artifact",
+      );
+      await mkdir(fixtureRoot, { recursive: true });
+      const acquirerDirectory = path.join(fixtureRoot, "acquirer");
+      const activatorDirectory = path.join(fixtureRoot, "activator");
+      await mkdir(acquirerDirectory);
+      await mkdir(activatorDirectory);
+      const relativeAcquirerPath = path.join(
+        acquirerDirectory,
+        path.basename(acquirerPath),
+      );
+      const relativeActivatorPath = path.join(
+        activatorDirectory,
+        path.basename(activatorPath),
+      );
+      await writeFile(relativeAcquirerPath, await readFile(acquirerPath));
+      await writeFile(relativeActivatorPath, await readFile(activatorPath));
+      try {
+        const artifact = await packageProbeBootstrapArtifact({
+          binaries: {
+            acquirerPath: path.relative(process.cwd(), relativeAcquirerPath),
+            activatorPath: path.relative(process.cwd(), relativeActivatorPath),
+          },
+          outputDir: path.join(root, "out-relative"),
+          sourceDateEpoch: "0",
+          ...identity,
+        });
+        await expect(
+          inspectProbeBootstrapArtifact({
+            archivePath: artifact.archivePath,
+            ...identity,
+          }),
+        ).resolves.toMatchObject({
+          roles: {
+            acquirer: { identity: { ...identity, role: "acquirer" } },
+            activator: { identity: { ...identity, role: "activator" } },
+          },
+        });
+      } finally {
+        await rm(fixtureRoot, { force: true, recursive: true });
+      }
+    });
+  });
+
   it("provides only inspected role binaries in a private temporary directory and removes it afterwards", async () => {
     await withFixture(async ({ acquirerPath, activatorPath, root }) => {
       const artifact = await packageProbeBootstrapArtifact({
@@ -389,6 +437,9 @@ describe("Probe Bootstrap build artifact", () => {
     expect(bootstrapBuildScript).toContain("root.n().bits() != 4096");
     expect(bootstrapBuildScript).toContain("must be an RSA-4096 SPKI PEM");
     expect(workflow).toContain('ENOKI_BOOTSTRAP_BUILD_ROLE="$role"');
+    expect(workflow).toContain('workspace="$(pwd -P)"');
+    expect(workflow).toContain('target_dir="$workspace/$4"');
+    expect(workflow).toContain('CARGO_TARGET_DIR="$target_dir"');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_TARGET");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_VERSION");
     expect(workflow).toContain("probe-bootstrap-artifact.mjs package");

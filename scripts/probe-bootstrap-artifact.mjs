@@ -409,6 +409,13 @@ export async function packageProbeBootstrapArtifact({
   }
   const file = `enoki-probe-bootstrap-${target}.tar.gz`;
   const archivePath = path.join(outputDir, file);
+  // GNU tar applies each later --directory relative to the previous one.
+  // Resolve role paths before invoking it so packaging cannot depend on that
+  // mutable process directory state.
+  const archiveRoleBinaries = roleBinaries.map(({ binaryPath, role }) => ({
+    binaryPath: path.resolve(binaryPath),
+    role,
+  }));
   await mkdir(outputDir, { recursive: true });
   await execFileAsync(
     "tar",
@@ -425,7 +432,7 @@ export async function packageProbeBootstrapArtifact({
       "--mode=0755",
       "--file",
       archivePath,
-      ...roleBinaries.flatMap(({ binaryPath }) => [
+      ...archiveRoleBinaries.flatMap(({ binaryPath }) => [
         "--directory",
         path.dirname(binaryPath),
         path.basename(binaryPath),
