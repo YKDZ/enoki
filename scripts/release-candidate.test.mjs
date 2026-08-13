@@ -669,6 +669,24 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     );
   });
 
+  it("passes the external Probe Distribution Trust Root explicitly to every shared Hub verification step", async () => {
+    const hubWorkflow = await readFile(
+      ".github/workflows/reusable-hub-image.yml",
+      "utf8",
+    );
+    const verificationSteps = hubWorkflow
+      .split(/(?=^      - name: )/m)
+      .filter((step) => step.includes("--root-public-key-env"));
+
+    expect(verificationSteps).not.toHaveLength(0);
+    for (const step of verificationSteps) {
+      expect(step).toContain(
+        "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}",
+      );
+      expect(step).not.toContain("secrets.probe_asset_signing_key_pem");
+    }
+  });
+
   it("grants callers the read permission requested by the shared Hub workflow", async () => {
     const [ciWorkflow, hubWorkflow] = await Promise.all([
       readFile(".github/workflows/ci.yml", "utf8"),
