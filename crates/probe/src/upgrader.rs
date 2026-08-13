@@ -1570,7 +1570,28 @@ fn execute_probe_uninstall_with_install_metadata_path(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     install_metadata_path: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_cleanup(input, install_metadata, install_metadata_path)?;
+    execute_probe_uninstall_with_install_metadata_path_and_owner(
+        input,
+        install_metadata,
+        systemd,
+        install_metadata_path,
+        0,
+    )
+}
+
+fn execute_probe_uninstall_with_install_metadata_path_and_owner(
+    input: &ProbeUninstallerRunInput,
+    install_metadata: &TrustedProbeInstallMetadata,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    install_metadata_path: &Path,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    let plan = plan_probe_uninstall_cleanup(
+        input,
+        install_metadata,
+        install_metadata_path,
+        trusted_owner_uid,
+    )?;
     execute_probe_uninstall_cleanup(&plan, systemd)
 }
 
@@ -1592,7 +1613,12 @@ pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: install_metadata.identity_path.clone(),
     };
-    let plan = plan_probe_uninstall_cleanup(&input, &install_metadata, &install_metadata_path)?;
+    let plan = plan_probe_uninstall_cleanup(
+        &input,
+        &install_metadata,
+        &install_metadata_path,
+        trusted_read_only_metadata_owner_uid(test_root),
+    )?;
     let mut systemd = SystemProbeUpgraderSystemdRunner;
     execute_probe_uninstall_cleanup(&plan, &mut systemd)
 }
@@ -1632,6 +1658,7 @@ struct ProbeUninstallCleanupPlan<'a> {
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
+    trusted_owner_uid: u32,
 }
 
 /// Establishes every local deletion target before systemd or filesystem
@@ -1641,6 +1668,7 @@ fn plan_probe_uninstall_cleanup<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
+    trusted_owner_uid: u32,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     ensure_absolute_path(&input.bootstrap_config_path)?;
     for path in [
@@ -1668,14 +1696,24 @@ fn plan_probe_uninstall_cleanup<'a>(
         ensure_absolute_path(path)?;
     }
     if install_metadata.schema_version == 2 {
-        validate_owned_bootstrap_role(install_metadata.bootstrap_acquirer_path.as_deref())?;
-        validate_owned_bootstrap_role(install_metadata.bootstrap_activator_path.as_deref())?;
-        validate_owned_bootstrap_state(install_metadata.bootstrap_state_dir.as_deref())?;
+        validate_owned_bootstrap_role(
+            install_metadata.bootstrap_acquirer_path.as_deref(),
+            trusted_owner_uid,
+        )?;
+        validate_owned_bootstrap_role(
+            install_metadata.bootstrap_activator_path.as_deref(),
+            trusted_owner_uid,
+        )?;
+        validate_owned_bootstrap_state(
+            install_metadata.bootstrap_state_dir.as_deref(),
+            trusted_owner_uid,
+        )?;
     }
     Ok(ProbeUninstallCleanupPlan {
         input,
         install_metadata,
         install_metadata_path,
+        trusted_owner_uid,
     })
 }
 
@@ -1761,7 +1799,7 @@ fn execute_probe_uninstall_cleanup(
         remove_path_if_exists(path)?;
     }
     if let Some(path) = install_metadata.bootstrap_state_dir.as_deref() {
-        remove_owned_bootstrap_state(path)?;
+        remove_owned_bootstrap_state(path, plan.trusted_owner_uid)?;
     }
     remove_path_if_exists(install_metadata_path)?;
     remove_path_if_exists(&input.bootstrap_config_path)?;
@@ -1901,14 +1939,17 @@ fn probe_uninstall_cleanup_error(
     }
 }
 
-fn validate_owned_bootstrap_role(path: Option<&Path>) -> Result<(), ProbeUpgraderRunError> {
+fn validate_owned_bootstrap_role(
+    path: Option<&Path>,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
         "schema v2 metadata is missing Probe Bootstrap ownership",
     ))?;
     let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
-        || metadata.uid() != 0
+        || metadata.uid() != trusted_owner_uid
         || metadata.mode() & 0o777 != 0o755
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -1918,16 +1959,19 @@ fn validate_owned_bootstrap_role(path: Option<&Path>) -> Result<(), ProbeUpgrade
     Ok(())
 }
 
-fn validate_owned_bootstrap_state(path: Option<&Path>) -> Result<(), ProbeUpgraderRunError> {
+fn validate_owned_bootstrap_state(
+    path: Option<&Path>,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
     let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
         "schema v2 metadata is missing Probe Bootstrap ownership",
     ))?;
-    validate_owned_bootstrap_directory(path, 0o700)?;
+    validate_owned_bootstrap_directory(path, 0o700, trusted_owner_uid)?;
     for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
         let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
         match entry.file_name().to_str() {
             Some("trust") => {
-                validate_owned_bootstrap_directory(&entry.path(), 0o700)?;
+                validate_owned_bootstrap_directory(&entry.path(), 0o700, trusted_owner_uid)?;
                 for trust in fs::read_dir(entry.path()).map_err(ProbeUpgraderRunError::Io)? {
                     let trust = trust.map_err(ProbeUpgraderRunError::Io)?;
                     if !matches!(
@@ -1938,11 +1982,11 @@ fn validate_owned_bootstrap_state(path: Option<&Path>) -> Result<(), ProbeUpgrad
                             "Probe Bootstrap state contains an unexpected entry",
                         ));
                     }
-                    validate_owned_bootstrap_regular(&trust.path(), 0o600)?;
+                    validate_owned_bootstrap_regular(&trust.path(), 0o600, trusted_owner_uid)?;
                 }
             }
             Some("inbox") => {
-                validate_owned_bootstrap_directory(&entry.path(), 0o700)?;
+                validate_owned_bootstrap_directory(&entry.path(), 0o700, trusted_owner_uid)?;
                 if fs::read_dir(entry.path())
                     .map_err(ProbeUpgraderRunError::Io)?
                     .next()
@@ -1963,11 +2007,15 @@ fn validate_owned_bootstrap_state(path: Option<&Path>) -> Result<(), ProbeUpgrad
     Ok(())
 }
 
-fn validate_owned_bootstrap_directory(path: &Path, mode: u32) -> Result<(), ProbeUpgraderRunError> {
+fn validate_owned_bootstrap_directory(
+    path: &Path,
+    mode: u32,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
     let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
-        || metadata.uid() != 0
+        || metadata.uid() != trusted_owner_uid
         || metadata.mode() & 0o777 != mode
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -1976,11 +2024,15 @@ fn validate_owned_bootstrap_directory(path: &Path, mode: u32) -> Result<(), Prob
     }
     Ok(())
 }
-fn validate_owned_bootstrap_regular(path: &Path, mode: u32) -> Result<(), ProbeUpgraderRunError> {
+fn validate_owned_bootstrap_regular(
+    path: &Path,
+    mode: u32,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
     let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
-        || metadata.uid() != 0
+        || metadata.uid() != trusted_owner_uid
         || metadata.nlink() != 1
         || metadata.mode() & 0o777 != mode
     {
@@ -1990,8 +2042,11 @@ fn validate_owned_bootstrap_regular(path: &Path, mode: u32) -> Result<(), ProbeU
     }
     Ok(())
 }
-fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgraderRunError> {
-    validate_owned_bootstrap_state(Some(path))?;
+fn remove_owned_bootstrap_state(
+    path: &Path,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    validate_owned_bootstrap_state(Some(path), trusted_owner_uid)?;
     fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
 }
 
@@ -5015,11 +5070,12 @@ mod tests {
         };
         let mut systemd = RecordingSystemdRunner::default();
 
-        execute_probe_uninstall_with_install_metadata_path(
+        execute_probe_uninstall_with_install_metadata_path_and_owner(
             &input,
             &install_metadata,
             &mut systemd,
             &install_metadata_path,
+            trusted_read_only_metadata_owner_uid(Some(temp.path())),
         )
         .expect("schema two uninstall succeeds");
 
@@ -5041,6 +5097,28 @@ mod tests {
         assert!(!bootstrap_acquirer_path.exists());
         assert!(!bootstrap_activator_path.exists());
         assert!(!bootstrap_state_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_two_bootstrap_role_rejects_an_unexpected_owner() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let role = temp.path().join("enoki-probe-bootstrap-acquire");
+        fs::write(&role, "Bootstrap role").expect("role");
+        fs::set_permissions(&role, fs::Permissions::from_mode(0o755)).expect("role mode");
+        let actual_owner = fs::symlink_metadata(&role).expect("role metadata").uid();
+        let unexpected_owner = if actual_owner == u32::MAX {
+            actual_owner - 1
+        } else {
+            actual_owner + 1
+        };
+
+        assert!(matches!(
+            validate_owned_bootstrap_role(Some(&role), unexpected_owner),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap role is not a root-owned regular 0755 file"
+            ))
+        ));
     }
 
     #[cfg(unix)]
@@ -5127,7 +5205,10 @@ mod tests {
         private_directory(&outside);
         symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&symlink_state)),
+            validate_owned_bootstrap_state(
+                Some(&symlink_state),
+                trusted_read_only_metadata_owner_uid(Some(symlink_temp.path())),
+            ),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert!(outside.exists());
@@ -5140,7 +5221,10 @@ mod tests {
         fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
             .expect("unsafe hardlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&hardlink_state)),
+            validate_owned_bootstrap_state(
+                Some(&hardlink_state),
+                trusted_read_only_metadata_owner_uid(Some(hardlink_temp.path())),
+            ),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
@@ -5149,7 +5233,10 @@ mod tests {
         let extra_state = owned_state(extra_temp.path());
         fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
         assert!(matches!(
-            validate_owned_bootstrap_state(Some(&extra_state)),
+            validate_owned_bootstrap_state(
+                Some(&extra_state),
+                trusted_read_only_metadata_owner_uid(Some(extra_temp.path())),
+            ),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert!(extra_state.join("unrecognised").exists());
@@ -5585,6 +5672,7 @@ mod tests {
             },
             &install_metadata,
             &temp.path().join("etc/enoki/probe-install.toml"),
+            0,
         )
         .expect_err("unsafe cleanup targets are rejected before execution");
 
