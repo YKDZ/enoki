@@ -539,14 +539,24 @@ fn remove_static_service_identity_with_commands(
     match (user, group) {
         (Ok(()), Ok(())) => Ok(()),
         (Ok(()), Err(_)) => execute("/usr/sbin/groupdel", &[SERVICE_GROUP]),
-        (Err(_), group) => {
+        (Err(_), Ok(())) => execute("/usr/sbin/userdel", &[SERVICE_USER]),
+        (Err(_), Err(_)) => {
+            // Keep the second compensation pass in dependency order.  The
+            // first group failure may be solely because the primary user
+            // survived its first deletion attempt, so it must not spend the
+            // group's own one-retry budget.
             let user_retry = execute("/usr/sbin/userdel", &[SERVICE_USER]);
-            let group_retry = if group.is_err() {
-                Some(execute("/usr/sbin/groupdel", &[SERVICE_GROUP]))
-            } else {
-                None
-            };
-            user_retry.and(group_retry.unwrap_or(Ok(())))
+            let group_retry = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+            match user_retry {
+                Err(error) => Err(error),
+                Ok(()) => match group_retry {
+                    Ok(()) => Ok(()),
+                    // This is the group's first attempt after its dependency
+                    // has been removed.  Give only this independent transient
+                    // failure one bounded retry.
+                    Err(_) => execute("/usr/sbin/groupdel", &[SERVICE_GROUP]),
+                },
+            }
         }
     }
 }
@@ -935,6 +945,63 @@ mod tests {
     }
 
     #[test]
+    fn account_cleanup_retries_an_unblocked_groupdel_once() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(true);
+        let user_exists = Cell::new(true);
+        let fail_first_groupdel = Cell::new(true);
+        let mut calls = Vec::new();
+        let mut execute = |program: &str, _arguments: &[&str]| {
+            calls.push(program.to_string());
+            match program {
+                "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+                "/usr/sbin/groupdel"
+                    if !user_exists.get() && fail_first_groupdel.replace(false) =>
+                {
+                    Err(InstallError::Account)
+                }
+                "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
+                _ => Err(InstallError::Account),
+            }
+        };
+
+        remove_static_service_identity_with_commands(&mut execute)
+            .expect("one independent groupdel transient failure is recoverable");
+        assert_eq!(
+            calls,
+            [
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+                "/usr/sbin/groupdel"
+            ]
+        );
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
+    }
+
+    #[test]
+    fn account_cleanup_stops_after_two_dependency_blocked_rounds() {
+        let mut calls = Vec::new();
+        let error = remove_static_service_identity_with_commands(&mut |program, _arguments| {
+            calls.push(program.to_string());
+            Err(InstallError::Account)
+        })
+        .expect_err("persistent account deletion failure remains bounded");
+
+        assert_eq!(error, InstallError::Account);
+        assert_eq!(
+            calls,
+            [
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+            ]
+        );
+    }
+
+    #[test]
     fn useradd_failure_recovers_from_one_transient_groupdel_failure() {
         use std::cell::Cell;
 
@@ -966,13 +1033,14 @@ mod tests {
     }
 
     #[test]
-    fn numeric_identity_failure_recovers_from_one_transient_userdel_failure() {
+    fn numeric_identity_failure_recovers_from_combined_identity_cleanup_transients() {
         use std::cell::Cell;
 
         let group_exists = Cell::new(false);
         let user_exists = Cell::new(false);
         let fail_first_lookup = Cell::new(true);
         let fail_first_userdel = Cell::new(true);
+        let fail_first_unblocked_groupdel = Cell::new(true);
         let mut execute = |program: &str, _arguments: &[&str]| match program {
             "/usr/sbin/groupadd" if !group_exists.replace(true) => Ok(()),
             "/usr/sbin/useradd" if group_exists.get() && !user_exists.replace(true) => Ok(()),
@@ -980,6 +1048,11 @@ mod tests {
                 Err(InstallError::Account)
             }
             "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+            "/usr/sbin/groupdel"
+                if !user_exists.get() && fail_first_unblocked_groupdel.replace(false) =>
+            {
+                Err(InstallError::Account)
+            }
             "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
             _ => Err(InstallError::Account),
         };
@@ -996,8 +1069,9 @@ mod tests {
             Err(InstallError::Account)
         );
         // State, rather than merely calls, is the fresh-install contract:
-        // the first group deletion failed because the primary user remained,
-        // then bounded compensation removed both identities.
+        // the first group deletion failed because the primary user remained;
+        // once its dependency is removed, a distinct transient group failure
+        // still receives its own bounded compensation attempt.
         assert!(!user_exists.get());
         assert!(!group_exists.get());
 
@@ -1281,6 +1355,57 @@ mod tests {
                 .path()
                 .join("etc/enoki/probe-install.toml")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn later_failure_removes_the_metadata_directory_created_by_this_attempt() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        assert!(
+            !temporary.path().join("etc/enoki").exists(),
+            "this attempt, rather than setup, must create the metadata directory"
+        );
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            calls: Vec::new(),
+            fail_start: true,
+            fail_reload: false,
+            residue: false,
+        };
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::Systemd),
+            "the failure occurs only after the metadata directory is created"
+        );
+        assert_eq!(
+            systemd.calls,
+            [
+                "absent", "reload", "enable", "start", "stop", "disable", "reload"
+            ]
+        );
+        assert!(
+            !temporary.path().join("etc/enoki").exists(),
+            "rollback removes only the metadata directory this transaction created"
         );
     }
 
