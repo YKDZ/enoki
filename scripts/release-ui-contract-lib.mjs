@@ -13,6 +13,7 @@ const optionDefinitions = Object.freeze({
   "--container-engine": { default: "docker" },
   "--evidence-dir": { default: "release-ui-contract-evidence" },
   "--hub-port": { default: "38220" },
+  "--root-public-key-env": { required: true },
 });
 
 export function parseCandidateUiContractCommandLine(arguments_) {
@@ -48,6 +49,9 @@ export function parseCandidateUiContractCommandLine(arguments_) {
   if (values["--container-engine"] !== "docker") {
     throw new Error("--container-engine must be docker");
   }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(values["--root-public-key-env"])) {
+    throw new Error("--root-public-key-env must name an environment variable");
+  }
   const hubPort = Number(values["--hub-port"]);
   if (!Number.isSafeInteger(hubPort) || hubPort < 1 || hubPort > 65_535) {
     throw new Error("--hub-port must be an integer between 1 and 65535");
@@ -57,10 +61,21 @@ export function parseCandidateUiContractCommandLine(arguments_) {
     containerEngine: values["--container-engine"],
     evidenceDir: path.resolve(values["--evidence-dir"]),
     hubPort,
+    rootPublicKeyEnvironment: values["--root-public-key-env"],
   };
 }
 
 export async function runCandidateUiContract(options, dependencies = {}) {
+  const trustedRootPublicKeyPem = options.rootPublicKeyEnvironment
+    ? (dependencies.environment ?? process.env)[
+        options.rootPublicKeyEnvironment
+      ]
+    : undefined;
+  if (options.rootPublicKeyEnvironment && !trustedRootPublicKeyPem) {
+    throw new Error(
+      `Probe Distribution Trust Root environment variable ${options.rootPublicKeyEnvironment} is empty`,
+    );
+  }
   const loadCandidate = dependencies.loadCandidate ?? loadValidatedCandidate;
   const createHubController =
     dependencies.createHubController ??
@@ -86,7 +101,9 @@ export async function runCandidateUiContract(options, dependencies = {}) {
   let cleanupEvidence = null;
 
   try {
-    const loaded = await loadCandidate(options.candidateManifestPath);
+    const loaded = await loadCandidate(options.candidateManifestPath, {
+      trustedRootPublicKeyPem,
+    });
     manifest = loaded.manifest;
     failurePhase = "hub-startup";
     resources = await controller.start({

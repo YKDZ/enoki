@@ -736,10 +736,12 @@ jobs:
         env:
           CANDIDATE_MANIFEST: ${{ github.workspace }}/candidate/candidate-manifest.json
           EVIDENCE_DIR: ${{ github.workspace }}/release-ui-contract-evidence
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           pnpm run test:e2e:candidate
           --candidate-manifest "$CANDIDATE_MANIFEST"
           --evidence-dir "$EVIDENCE_DIR"
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Record every UI Contract setup and runtime outcome
         if: ${{ always() }}

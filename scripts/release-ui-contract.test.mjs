@@ -96,6 +96,40 @@ describe("candidate-image UI Contract gate", () => {
     expect(playwrightConfig.match(/\btestMatch:/g)).toHaveLength(1);
   });
 
+  it("binds the candidate UI command to exactly its public Probe Trust Root", async () => {
+    const rootPublicKeyEnvironment =
+      "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM";
+    const options = parseCandidateUiContractCommandLine([
+      "--candidate-manifest",
+      "/candidate/candidate-manifest.json",
+      "--root-public-key-env",
+      rootPublicKeyEnvironment,
+    ]);
+    const workflow = await readFile(
+      ".github/workflows/reusable-build-release-candidate.yml",
+      "utf8",
+    );
+    const gate = workflow.slice(
+      workflow.indexOf("  candidate-ui-contract:"),
+      workflow.indexOf("  finalize-verification:"),
+    );
+    const commandStep = gate
+      .split(/(?=^      - name: )/m)
+      .find((step) => step.includes("pnpm run test:e2e:candidate"));
+
+    expect(options.rootPublicKeyEnvironment).toBe(rootPublicKeyEnvironment);
+    expect(commandStep).toContain(
+      `${rootPublicKeyEnvironment}: \${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}`,
+    );
+    expect(commandStep).toContain(
+      `--root-public-key-env ${rootPublicKeyEnvironment}`,
+    );
+    expect(commandStep).not.toContain("secrets.");
+    expect(gate.replace(commandStep, "")).not.toContain(
+      rootPublicKeyEnvironment,
+    );
+  });
+
   it("uploads one bounded evidence bundle for setup, test, diagnostics, traces, and cleanup on every outcome", async () => {
     const [workflow, playwrightConfig] = await Promise.all([
       readFile(
@@ -131,12 +165,15 @@ describe("candidate-image UI Contract gate", () => {
         "/candidate/candidate-manifest.json",
         "--hub-port",
         "39123",
+        "--root-public-key-env",
+        "TEST_PROBE_DISTRIBUTION_ROOT",
       ]),
     ).toEqual({
       candidateManifestPath: "/candidate/candidate-manifest.json",
       containerEngine: "docker",
       evidenceDir: path.resolve("release-ui-contract-evidence"),
       hubPort: 39_123,
+      rootPublicKeyEnvironment: "TEST_PROBE_DISTRIBUTION_ROOT",
     });
   });
 
@@ -148,16 +185,60 @@ describe("candidate-image UI Contract gate", () => {
       parseCandidateUiContractCommandLine([
         "--candidate-manifest",
         "/candidate/not-the-manifest.json",
+        "--root-public-key-env",
+        "TEST_PROBE_DISTRIBUTION_ROOT",
       ]),
     ).toThrow("must name candidate-manifest.json");
     expect(() =>
       parseCandidateUiContractCommandLine([
         "--candidate-manifest",
         "/candidate/candidate-manifest.json",
+        "--root-public-key-env",
+        "TEST_PROBE_DISTRIBUTION_ROOT",
         "--base-url",
         "http://source-server:3000",
       ]),
     ).toThrow("unknown option");
+  });
+
+  it("passes only the selected external Probe Trust Root to candidate validation", async () => {
+    const loadCandidate = vi.fn(async () => ({
+      candidateDir: "/candidate",
+      manifest: {
+        candidate: { commit: "a".repeat(40), version: "v7.8.9" },
+        hub: { digest: `sha256:${"b".repeat(64)}` },
+        probeAssetSet: { version: "7.8.9" },
+      },
+    }));
+
+    await expect(
+      runCandidateUiContract(
+        {
+          candidateManifestPath: "/candidate/candidate-manifest.json",
+          containerEngine: "docker",
+          hubPort: 39_123,
+          rootPublicKeyEnvironment: "TEST_PROBE_DISTRIBUTION_ROOT",
+        },
+        {
+          createHubController: () => ({
+            cleanup: async () => ({ clean: true }),
+            start: async () => ({ container: "candidate-hub" }),
+          }),
+          environment: {
+            TEST_PROBE_DISTRIBUTION_ROOT: "public-root-pem",
+          },
+          loadCandidate,
+          ownerPassword: "temporary-owner-password",
+          runId: "ui-contract-test",
+          runPlaywright: async () => ({ code: 0 }),
+        },
+      ),
+    ).resolves.toEqual({ code: 0 });
+
+    expect(loadCandidate).toHaveBeenCalledWith(
+      "/candidate/candidate-manifest.json",
+      { trustedRootPublicKeyPem: "public-root-pem" },
+    );
   });
 
   it("runs Playwright against the validated candidate OCI runtime and always cleans it", async () => {
