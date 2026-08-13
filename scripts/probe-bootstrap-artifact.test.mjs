@@ -202,7 +202,57 @@ describe("Probe Bootstrap build artifact", () => {
     });
   });
 
+  it("rejects a Candidate Bootstrap archive path replaced after its manifest digest was bound", async () => {
+    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
+      const candidate = await packageProbeBootstrapArtifact({
+        binaries: { acquirerPath, activatorPath },
+        outputDir: path.join(root, "candidate"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+      await writeFile(
+        acquirerPath,
+        Buffer.concat([
+          await readFile(acquirerPath),
+          Buffer.from("replacement"),
+        ]),
+      );
+      const replacement = await packageProbeBootstrapArtifact({
+        binaries: { acquirerPath, activatorPath },
+        outputDir: path.join(root, "replacement"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+      await writeFile(
+        candidate.archivePath,
+        await readFile(replacement.archivePath),
+      );
+
+      await expect(
+        withExtractedProbeBootstrapArtifact(
+          {
+            archivePath: candidate.archivePath,
+            expectedArchive: {
+              sha256: candidate.sha256,
+              size: candidate.size,
+            },
+            ...identity,
+          },
+          () => {
+            throw new Error(
+              "replaced archive must not reach extraction callback",
+            );
+          },
+        ),
+      ).rejects.toThrow(/no longer matches validated Candidate/i);
+    });
+  });
+
   it.each([
+    ["a path-traversing member", replaceFirstTarNameWithTraversal],
+    ["a symbolic-link member", (tar) => replaceFirstTarType(tar, "2")],
+    ["a hard-link member", (tar) => replaceFirstTarType(tar, "1")],
+    ["a special device member", (tar) => replaceFirstTarType(tar, "3")],
     ["an extra regular member", addExtraRegularTarMember],
     ["a GNU long-name extension", (tar) => replaceFirstTarType(tar, "L")],
     ["a PAX extension", (tar) => replaceFirstTarType(tar, "x")],
@@ -464,6 +514,14 @@ function writeSection(binary, offset, { nameOffset, offset: contents, size }) {
 function replaceFirstTarType(archive, type) {
   const tar = Buffer.from(gunzipSync(archive));
   tar[156] = type.charCodeAt(0);
+  updateTarChecksum(tar.subarray(0, 512));
+  return gzipSync(tar);
+}
+
+function replaceFirstTarNameWithTraversal(archive) {
+  const tar = Buffer.from(gunzipSync(archive));
+  tar.fill(0, 0, 100);
+  tar.write("../root-owned-target", 0, "ascii");
   updateTarChecksum(tar.subarray(0, 512));
   return gzipSync(tar);
 }
