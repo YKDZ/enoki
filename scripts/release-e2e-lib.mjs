@@ -46,6 +46,18 @@ const managedHostPaths = Object.freeze(
     .map((resource) => resource.path),
 );
 
+const bootstrapStateInventoryPaths = Object.freeze([
+  "/var/lib/enoki-probe-bootstrap/trust/delegation-generation",
+  "/var/lib/enoki-probe-bootstrap/trust/.delegation-generation.lock",
+  "/var/lib/enoki-probe-bootstrap/trust",
+  "/var/lib/enoki-probe-bootstrap/inbox",
+]);
+
+const managedHostInventoryPaths = Object.freeze([
+  ...managedHostPaths,
+  ...bootstrapStateInventoryPaths,
+]);
+
 const releaseE2EUsers = Object.freeze(
   releaseE2EInfrastructureResources
     .filter((resource) => resource.kind === "user")
@@ -3562,7 +3574,7 @@ printf ',"user":'
 json_bool getent passwd ${user}
 printf '},"files":['
 separator=
-for candidate in ${managedHostPaths.map(shellSingleQuote).join(" ")}; do
+for candidate in ${managedHostInventoryPaths.map(shellSingleQuote).join(" ")}; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     printf '%s"%s"' "$separator" "$candidate"
     separator=,
