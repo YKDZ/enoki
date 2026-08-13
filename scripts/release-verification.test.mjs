@@ -77,7 +77,53 @@ describe("verify-only release workflow", () => {
       `name: enoki-probe-${"${{ matrix.target }}"}-${run}`,
     );
     expect(probeWorkflow).toContain("overwrite: true");
-    expect(candidateWorkflow).toContain(`pattern: enoki-probe-*-${run}`);
+    const targetNames = (workflow) =>
+      [...workflow.matchAll(/^\s+target: ([a-z0-9_-]+)$/gm)].map(
+        ([, target]) => target,
+      );
+    const artifactNames = (prefix, targets) =>
+      targets.map((target) => `${prefix}-${target}-${run}`);
+    const ordinaryProbeArtifacts = artifactNames(
+      "enoki-probe",
+      targetNames(probeWorkflow),
+    );
+    const bootstrapProbeArtifacts = artifactNames(
+      "enoki-probe-bootstrap",
+      targetNames(
+        await readFile(
+          ".github/workflows/reusable-build-probe-bootstrap.yml",
+          "utf8",
+        ),
+      ),
+    );
+    const unsignedPreparation = candidateWorkflow.slice(
+      candidateWorkflow.indexOf("  prepare-unsigned-probe-assets:"),
+      candidateWorkflow.indexOf("  sign-probe-assets:"),
+    );
+    const selectedProbeArtifacts = [
+      ...unsignedPreparation.matchAll(
+        /^\s+name: (enoki-probe-[a-z0-9_-]+-\$\{\{ github\.run_id \}\})$/gm,
+      ),
+    ].map(([, name]) => name);
+    const candidateAssembly = candidateWorkflow.slice(
+      candidateWorkflow.indexOf("  assemble-candidate:"),
+      candidateWorkflow.indexOf("  prepare-release-e2e-matrix:"),
+    );
+    const selectedBootstrapArtifacts = [
+      ...candidateAssembly.matchAll(
+        /^\s+name: (enoki-probe-bootstrap-[a-z0-9_-]+-\$\{\{ github\.run_id \}\})$/gm,
+      ),
+    ].map(([, name]) => name);
+
+    expect(ordinaryProbeArtifacts).toHaveLength(4);
+    expect(bootstrapProbeArtifacts).toHaveLength(4);
+    expect(selectedProbeArtifacts).toEqual(ordinaryProbeArtifacts);
+    expect(
+      selectedProbeArtifacts.filter((name) =>
+        bootstrapProbeArtifacts.includes(name),
+      ),
+    ).toEqual([]);
+    expect(selectedBootstrapArtifacts).toEqual(bootstrapProbeArtifacts);
     for (const name of [
       "candidate-release-baseline",
       "candidate-unsigned-probe-assets",
