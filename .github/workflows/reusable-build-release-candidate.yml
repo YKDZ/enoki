@@ -240,12 +240,31 @@ jobs:
         with:
           node-version-file: candidate-source/package.json
 
-      - name: Download all Probe target builds
+      # The four exact names are a release-boundary allowlist. The regression
+      # contract derives this list from the ordinary Probe producer matrix.
+      - name: Download x86_64 musl Probe target build
         uses: actions/download-artifact@v8
         with:
-          pattern: enoki-probe-*-${{ github.run_id }}
+          name: enoki-probe-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: probe-builds
-          merge-multiple: true
+
+      - name: Download aarch64 musl Probe target build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-musl-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download x86_64 glibc Probe target build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-builds
+
+      - name: Download aarch64 glibc Probe target build
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: probe-builds
 
       - name: Deep-validate and prepare unsigned Probe Asset Set
         env:
@@ -398,12 +417,31 @@ jobs:
           name: candidate-probe-assets-${{ github.run_id }}
           path: candidate-inputs/probe-assets
 
-      - name: Download all independent Probe Bootstrap artifacts
+      # Keep the independent Bootstrap allowlist separate from the ordinary
+      # Probe target allowlist above.
+      - name: Download x86_64 musl Probe Bootstrap artifact
         uses: actions/download-artifact@v8
         with:
-          pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-musl-${{ github.run_id }}
           path: candidate-inputs/probe-bootstrap-inputs
-          merge-multiple: true
+
+      - name: Download aarch64 musl Probe Bootstrap artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-musl-${{ github.run_id }}
+          path: candidate-inputs/probe-bootstrap-inputs
+
+      - name: Download x86_64 glibc Probe Bootstrap artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-x86_64-unknown-linux-gnu-${{ github.run_id }}
+          path: candidate-inputs/probe-bootstrap-inputs
+
+      - name: Download aarch64 glibc Probe Bootstrap artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: enoki-probe-bootstrap-aarch64-unknown-linux-gnu-${{ github.run_id }}
+          path: candidate-inputs/probe-bootstrap-inputs
 
       - name: Download Hub OCI archive
         uses: actions/download-artifact@v8

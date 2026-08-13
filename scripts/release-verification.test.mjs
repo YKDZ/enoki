@@ -16,6 +16,28 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+function workflowJob(workflow, name) {
+  const heading = `  ${name}:`;
+  const start = workflow.indexOf(heading);
+  if (start < 0) {
+    throw new Error(`workflow job ${name} is missing`);
+  }
+  const remaining = workflow.slice(start + heading.length);
+  const nextJob = remaining.search(/\n  [a-z][a-z0-9-]*:/);
+  return remaining.slice(0, nextJob < 0 ? undefined : nextJob);
+}
+
+function actionSteps(job, action) {
+  return job
+    .split(/^      - /m)
+    .slice(1)
+    .filter((step) => step.match(new RegExp(`^        uses: ${action}$`, "m")));
+}
+
+function actionInput(step, input) {
+  return step.match(new RegExp(`^          ${input}: (.+)$`, "m"))?.[1];
+}
+
 describe("verify-only release workflow", () => {
   it("qualifies the captured protected main revision without receiving a publication mode", async () => {
     const [entrypoint, candidateWorkflow] = await Promise.all([
@@ -58,26 +80,107 @@ describe("verify-only release workflow", () => {
     );
   });
 
-  it("keeps every private artifact handoff run-scoped and resumable across failed-job attempts", async () => {
-    const [candidateWorkflow, probeWorkflow, publicationWorkflow] =
-      await Promise.all([
-        readFile(
-          ".github/workflows/reusable-build-release-candidate.yml",
-          "utf8",
-        ),
-        readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
-        readFile(
-          ".github/workflows/reusable-publish-release-candidate.yml",
-          "utf8",
-        ),
-      ]);
+  it("keeps private artifact handoffs run-scoped and binds Probe consumers to their producer namespaces", async () => {
+    const [
+      candidateWorkflow,
+      probeWorkflow,
+      bootstrapWorkflow,
+      publicationWorkflow,
+    ] = await Promise.all([
+      readFile(
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "utf8",
+      ),
+      readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
+      readFile(".github/workflows/reusable-build-probe-bootstrap.yml", "utf8"),
+      readFile(
+        ".github/workflows/reusable-publish-release-candidate.yml",
+        "utf8",
+      ),
+    ]);
     const run = "${{ github.run_id }}";
 
     expect(probeWorkflow).toContain(
       `name: enoki-probe-${"${{ matrix.target }}"}-${run}`,
     );
     expect(probeWorkflow).toContain("overwrite: true");
-    expect(candidateWorkflow).toContain(`pattern: enoki-probe-*-${run}`);
+    const targetNames = (workflow) =>
+      [...workflow.matchAll(/^\s+target: ([a-z0-9_-]+)$/gm)].map(
+        ([, target]) => target,
+      );
+    const artifactNames = (prefix, targets) =>
+      targets.map((target) => `${prefix}-${target}-${run}`);
+    const ordinaryProbeArtifacts = artifactNames(
+      "enoki-probe",
+      targetNames(probeWorkflow),
+    );
+    const bootstrapProbeArtifacts = artifactNames(
+      "enoki-probe-bootstrap",
+      targetNames(bootstrapWorkflow),
+    );
+    const ordinaryDownloads = actionSteps(
+      workflowJob(candidateWorkflow, "prepare-unsigned-probe-assets"),
+      "actions/download-artifact@v8",
+    );
+    const bootstrapDownloads = actionSteps(
+      workflowJob(candidateWorkflow, "assemble-candidate"),
+      "actions/download-artifact@v8",
+    ).filter((step) =>
+      actionInput(step, "path")?.startsWith(
+        "candidate-inputs/probe-bootstrap-inputs",
+      ),
+    );
+    const ordinaryUpload = actionSteps(
+      workflowJob(probeWorkflow, "build-probe"),
+      "actions/upload-artifact@v7",
+    );
+    const bootstrapUpload = actionSteps(
+      workflowJob(bootstrapWorkflow, "build-probe-bootstrap"),
+      "actions/upload-artifact@v7",
+    );
+
+    expect(ordinaryProbeArtifacts).toHaveLength(4);
+    expect(bootstrapProbeArtifacts).toHaveLength(4);
+    expect(ordinaryUpload).toHaveLength(1);
+    expect(actionInput(ordinaryUpload[0], "name")).toBe(
+      `enoki-probe-${"${{ matrix.target }}"}-${run}`,
+    );
+    expect(bootstrapUpload).toHaveLength(1);
+    expect(actionInput(bootstrapUpload[0], "name")).toBe(
+      `enoki-probe-bootstrap-${"${{ matrix.target }}"}-${run}`,
+    );
+    expect(ordinaryDownloads).toHaveLength(4);
+    expect(ordinaryDownloads.map((step) => actionInput(step, "name"))).toEqual(
+      ordinaryProbeArtifacts,
+    );
+    expect(ordinaryDownloads.map((step) => actionInput(step, "path"))).toEqual(
+      Array(4).fill("probe-builds"),
+    );
+    for (const step of ordinaryDownloads) {
+      expect(step).not.toMatch(/^          pattern:/m);
+      expect(step).not.toMatch(/^          merge-multiple:/m);
+    }
+    expect(
+      ordinaryDownloads
+        .map((step) => actionInput(step, "name"))
+        .filter((name) => bootstrapProbeArtifacts.includes(name)),
+    ).toEqual([]);
+    expect(bootstrapDownloads).toHaveLength(4);
+    expect(bootstrapDownloads.map((step) => actionInput(step, "name"))).toEqual(
+      bootstrapProbeArtifacts,
+    );
+    expect(bootstrapDownloads.map((step) => actionInput(step, "path"))).toEqual(
+      Array(4).fill("candidate-inputs/probe-bootstrap-inputs"),
+    );
+    for (const step of bootstrapDownloads) {
+      expect(step).not.toMatch(/^          pattern:/m);
+      expect(step).not.toMatch(/^          merge-multiple:/m);
+    }
+    expect(
+      bootstrapDownloads
+        .map((step) => actionInput(step, "name"))
+        .filter((name) => ordinaryProbeArtifacts.includes(name)),
+    ).toEqual([]);
     for (const name of [
       "candidate-release-baseline",
       "candidate-unsigned-probe-assets",
