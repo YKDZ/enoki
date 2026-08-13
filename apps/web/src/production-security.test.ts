@@ -41,7 +41,7 @@ describe("production Web security boundary", () => {
         /(?:\b(?:href|src)=["']https?:|@import\s+(?:url\()?['"]?https?:|url\(\s*['"]?https?:)/i,
       );
     }
-  });
+  }, 30_000);
 });
 
 async function textAssets(directory: string): Promise<string[]> {

@@ -14,4 +14,24 @@ describe("Node check resource scheduling", () => {
     ]);
     expect(turbo.tasks["//#test:e2e"].dependsOn).toContain("//#test");
   });
+
+  it("reuses Turbo's Hub build instead of rebuilding inside the startup test", async () => {
+    const turbo = JSON.parse(await readFile("turbo.json", "utf8"));
+    const startupTest = await readFile(
+      "apps/hub/test/server-startup.test.ts",
+      "utf8",
+    );
+
+    expect(turbo.tasks.test.dependsOn).toContain("build");
+    expect(startupTest).not.toMatch(/@enoki\/hub["'],\s*["']build/);
+  });
+
+  it("gives the production Web build a local integration-test timeout", async () => {
+    const productionSecurityTest = await readFile(
+      "apps/web/src/production-security.test.ts",
+      "utf8",
+    );
+
+    expect(productionSecurityTest).toMatch(/\},\s*30_000\);/);
+  });
 });
