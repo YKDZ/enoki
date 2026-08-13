@@ -6,13 +6,14 @@ describe("Node check resource scheduling", () => {
   it("runs package tests before RSA-heavy root tests and E2E last", async () => {
     const turbo = JSON.parse(await readFile("turbo.json", "utf8"));
 
-    expect(turbo.tasks["//#test"].dependsOn).toEqual([
+    expect(turbo.tasks["//#test:ci"].dependsOn).toEqual([
       "@enoki/api-client#test",
-      "@enoki/hub#test",
+      "@enoki/hub#test:built",
       "@enoki/proto#test",
       "@enoki/web#test",
     ]);
-    expect(turbo.tasks["//#test:e2e"].dependsOn).toContain("//#test");
+    expect(turbo.tasks["test:built"].dependsOn).toContain("build");
+    expect(turbo.tasks["//#test:e2e"].dependsOn).toContain("//#test:ci");
   });
 
   it("reuses Turbo's Hub build instead of rebuilding inside the startup test", async () => {
@@ -22,7 +23,7 @@ describe("Node check resource scheduling", () => {
       "utf8",
     );
 
-    expect(turbo.tasks.test.dependsOn).toContain("build");
+    expect(turbo.tasks["test:built"].dependsOn).toContain("build");
     expect(startupTest).not.toMatch(/@enoki\/hub["'],\s*["']build/);
   });
 
