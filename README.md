@@ -57,7 +57,7 @@ Enoki **有**以下功能：
 Enoki 的安全边界尽量保持简单：
 
 - 管理界面可查看主机元数据并触发删除主机或卸载探针并删除主机，建议仅在可信网络中使用
-- 所有环境都必须显式设置 `OWNER_PASSWORD`；`ENOKI_WEB_UI_NO_PASSWORD=true` 只适合完全可信的内网、演示或临时截图环境。生产或 Docker 环境必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true` 才能启用无密码模式
+- 除显式启用无密码模式外，所有部署都必须显式设置 `OWNER_PASSWORD`；`ENOKI_WEB_UI_NO_PASSWORD=true` 只适合完全可信的内网、演示或临时截图环境。生产或 Docker 环境必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true` 才能启用无密码模式
 - 管理面和探针 API 分别使用显式 Origin；两者可按部署网络选择 HTTP 或 HTTPS。显式的非 loopback HTTP 会在 Hub 启动时记录一次结构化警告：它放弃了传输保密性和服务器身份认证，但不会放宽应用认证
 - 探针注册后会生成自己的非对称身份密钥，后续上报和操作状态使用请求签名证明身份。签名会绑定请求方法、目标地址、路径、查询参数、随机数、时间戳和请求体摘要
 - Hub 不终止 TLS、不重定向 HTTP 到 HTTPS，也不发送 HSTS；证书、协议跳转和 HSTS 由反向代理、隧道或其他网络终止层统一配置
@@ -75,7 +75,7 @@ Enoki 的安全边界尽量保持简单：
 
 部署分为 Hub 和探针两部分。Hub 推荐使用 Docker 部署；探针使用独立发布的“探针安装包”，再从 Web UI 生成一次性激活命令。
 
-所有部署都必须显式设置 `OWNER_PASSWORD`。Hub 不会为开发环境生成或输出临时密码。如果启用无密码模式，仍应仅用于完全可信的内网、演示或临时截图环境。
+除显式启用无密码模式外，所有部署都必须显式设置 `OWNER_PASSWORD`。Hub 不会为开发环境生成或输出临时密码。`ENOKI_WEB_UI_NO_PASSWORD=true` 仅适合完全可信的内网、演示或临时截图环境；生产或 Docker 环境还必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true`。
 
 本地开发时，先在一个终端显式提供密码和 Management Origin 并启动 Hub，再在另一个终端启动 Web UI：
 
@@ -107,7 +107,7 @@ sudo install -m 0755 enoki-probe-bootstrap-activate /usr/local/bin/enoki-probe-b
 
 然后在 Hub Web UI 中生成一次性安装命令并在目标主机以当前非 root 用户执行。命令只把 `ENOKI_HUB_URL` 和 `ENOKI_ENROLLMENT_TOKEN` 交给 acquirer；其输出经管道交给 `sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`。因此网络获取和验证不会以 root 运行，令牌也不会作为 root 的环境变量传递。
 
-当前 Hub 不支持 schema 2 探针自动升级；需要更新时请在目标主机手动重装探针。旧 schema 1 探针的升级仍依赖其既有 sudoers。后续 Web UI 会改进安装、更新和卸载的生命周期操作；“手动重装”只影响目标主机，不会暗示删除 Hub 中的主机记录。
+当前 Hub 不支持 schema 2 探针自动升级；需要更新时请在目标主机手动重装探针。旧 schema 1 探针的升级仍依赖其既有 sudoers。后续 Web UI 会改进安装、更新和卸载的生命周期操作；“手动重装探针”只影响目标主机，不会暗示删除 Hub 中的主机记录。
 
 Hub 只对已安装探针所需的签名安装包提供有界分发。若在主机本机执行“卸载探针”，只会移除本机探针，不会删除 Hub 中的主机；需要两侧一并清理时，请在 Hub 中选择“卸载探针并删除主机”。
 
@@ -211,30 +211,31 @@ services:
 
 ### 环境变量
 
-| 变量                                             | 默认值                               | 说明                                                                                            |
-| ------------------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `OWNER_PASSWORD`                                 | 无                                   | 管理员登录密码。所有环境必填；Hub 不会生成或输出临时密码。                                      |
-| `ENOKI_WEB_UI_NO_PASSWORD`                       | `false`                              | 开启后 Web UI 和管理 API 无需登录即可访问。仅适合完全可信的内网、演示或临时截图环境。           |
-| `PORT`                                           | `3000`                               | Web UI 和管理 API 监听端口。容器内通常不需要修改。                                              |
-| `HOST`                                           | `0.0.0.0`                            | Web UI 和管理 API 监听地址。                                                                    |
-| `ENOKI_PROBE_PORT`                               | `3001`                               | 探针 API 监听端口。容器内通常不需要修改。                                                       |
-| `ENOKI_PROBE_HOST`                               | 同 `HOST`                            | 探针 API 监听地址。                                                                             |
-| `ENOKI_DATA_ROOT`                                | `/data`                              | Hub 数据目录。Docker 部署时应挂载持久化目录到这里。                                             |
-| `ENOKI_SQLITE_PATH`                              | `/data/enoki.db`                     | SQLite 数据库文件路径。                                                                         |
-| `ENOKI_MANAGEMENT_ORIGIN`                        | 无（必填）                           | 管理面唯一 canonical Origin，仅接受 `http(s)://host[:port]`。                                   |
-| `ENOKI_PROBE_API_ORIGIN`                         | 同 `ENOKI_MANAGEMENT_ORIGIN`         | 写入探针安装命令并绑定探针签名的 Origin，仅接受 `http(s)://host[:port]`，不支持 path prefix。   |
-| `ENOKI_TRUSTED_PROXY_CIDRS`                      | 空                                   | 以逗号分隔的可信代理 IPv4/IPv6 CIDR；只决定 `X-Forwarded-For` Observed IP 审计证据。            |
-| `ENOKI_HOST_STATUS_STALE_AFTER_SECONDS`          | `30`                                 | 主机多久未上报后显示为上报延迟。                                                                |
-| `ENOKI_HOST_STATUS_OFFLINE_AFTER_SECONDS`        | `90`                                 | 主机多久未上报后显示为离线，必须大于上一个值。                                                  |
-| `ENOKI_METRICS_RETENTION_DAYS`                   | `7`                                  | 热指标保留天数；普通 Web UI / API 指标查询只读取这段热数据。                                    |
-| `ENOKI_METRICS_ARCHIVE_ENABLED`                  | `true`                               | 是否在清理热指标前进行归档。设为 `false` 后会直接按 `ENOKI_METRICS_RETENTION_DAYS` 删除热数据。 |
-| `ENOKI_METRICS_ARCHIVE_PERIOD`                   | `monthly`                            | 指标归档文件分段，可选 `daily` 或 `monthly`                                                     |
-| `ENOKI_METRICS_ARCHIVE_DIR`                      | `${ENOKI_DATA_ROOT}/metrics-archive` | 指标归档文件目录。Docker 默认是 `/data/metrics-archive`。                                       |
-| `ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS`             | `300`                                | 探针时间与 Hub 时间偏移超过此值时记录时钟偏移。                                                 |
-| `ENOKI_PROBE_ASSET_DIR`                          | `/app/probe-assets`                  | Hub 有界分发已签名探针安装包的目录；不包含 Bootstrap。                                          |
-| `ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS` | `300`                                | 探针操作已接收但未开始运行的超时时间。                                                          |
-| `ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS`  | `900`                                | 探针操作运行中的超时时间。                                                                      |
-| `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET`     | 启动时随机生成                       | 探针升级 / 卸载操作 token 签名密钥。多实例或需要跨重启保留未完成操作时应设置为稳定随机值。      |
+| 变量                                             | 默认值                               | 说明                                                                                                                                                                |
+| ------------------------------------------------ | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OWNER_PASSWORD`                                 | 无                                   | 管理员登录密码。除显式启用无密码模式外必填；Hub 不会生成或输出临时密码。                                                                                            |
+| `ENOKI_WEB_UI_NO_PASSWORD`                       | `false`                              | 设为 `true` 后 Web UI 和管理 API 无需登录。生产或 Docker 环境还必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true`。仅适合完全可信的内网、演示或临时截图环境。 |
+| `ENOKI_ALLOW_INSECURE_NO_PASSWORD`               | `false`                              | 生产或 Docker 环境启用 `ENOKI_WEB_UI_NO_PASSWORD=true` 时必须设为 `true` 的危险显式确认；它不会单独启用无密码模式。                                                 |
+| `PORT`                                           | `3000`                               | Web UI 和管理 API 监听端口。容器内通常不需要修改。                                                                                                                  |
+| `HOST`                                           | `0.0.0.0`                            | Web UI 和管理 API 监听地址。                                                                                                                                        |
+| `ENOKI_PROBE_PORT`                               | `3001`                               | 探针 API 监听端口。容器内通常不需要修改。                                                                                                                           |
+| `ENOKI_PROBE_HOST`                               | 同 `HOST`                            | 探针 API 监听地址。                                                                                                                                                 |
+| `ENOKI_DATA_ROOT`                                | `/data`                              | Hub 数据目录。Docker 部署时应挂载持久化目录到这里。                                                                                                                 |
+| `ENOKI_SQLITE_PATH`                              | `/data/enoki.db`                     | SQLite 数据库文件路径。                                                                                                                                             |
+| `ENOKI_MANAGEMENT_ORIGIN`                        | 无（必填）                           | 管理面唯一 canonical Origin，仅接受 `http(s)://host[:port]`。                                                                                                       |
+| `ENOKI_PROBE_API_ORIGIN`                         | 同 `ENOKI_MANAGEMENT_ORIGIN`         | 写入探针安装命令并绑定探针签名的 Origin，仅接受 `http(s)://host[:port]`，不支持 path prefix。                                                                       |
+| `ENOKI_TRUSTED_PROXY_CIDRS`                      | 空                                   | 以逗号分隔的可信代理 IPv4/IPv6 CIDR；只决定 `X-Forwarded-For` Observed IP 审计证据。                                                                                |
+| `ENOKI_HOST_STATUS_STALE_AFTER_SECONDS`          | `30`                                 | 主机多久未上报后显示为上报延迟。                                                                                                                                    |
+| `ENOKI_HOST_STATUS_OFFLINE_AFTER_SECONDS`        | `90`                                 | 主机多久未上报后显示为离线，必须大于上一个值。                                                                                                                      |
+| `ENOKI_METRICS_RETENTION_DAYS`                   | `7`                                  | 热指标保留天数；普通 Web UI / API 指标查询只读取这段热数据。                                                                                                        |
+| `ENOKI_METRICS_ARCHIVE_ENABLED`                  | `true`                               | 是否在清理热指标前进行归档。设为 `false` 后会直接按 `ENOKI_METRICS_RETENTION_DAYS` 删除热数据。                                                                     |
+| `ENOKI_METRICS_ARCHIVE_PERIOD`                   | `monthly`                            | 指标归档文件分段，可选 `daily` 或 `monthly`                                                                                                                         |
+| `ENOKI_METRICS_ARCHIVE_DIR`                      | `${ENOKI_DATA_ROOT}/metrics-archive` | 指标归档文件目录。Docker 默认是 `/data/metrics-archive`。                                                                                                           |
+| `ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS`             | `300`                                | 探针时间与 Hub 时间偏移超过此值时记录时钟偏移。                                                                                                                     |
+| `ENOKI_PROBE_ASSET_DIR`                          | `/app/probe-assets`                  | Hub 有界分发已签名探针安装包的目录；不包含 Bootstrap。                                                                                                              |
+| `ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS` | `300`                                | 探针操作已接收但未开始运行的超时时间。                                                                                                                              |
+| `ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS`  | `900`                                | 探针操作运行中的超时时间。                                                                                                                                          |
+| `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET`     | 启动时随机生成                       | 探针升级 / 卸载操作 token 签名密钥。多实例或需要跨重启保留未完成操作时应设置为稳定随机值。                                                                          |
 
 ### 指标归档运维
 
