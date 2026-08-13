@@ -15,6 +15,7 @@ import {
   nextTick,
   onBeforeUnmount,
   onMounted,
+  provide,
   ref,
   watch,
 } from "vue";
@@ -36,13 +37,18 @@ import LoginPanel from "./components/LoginPanel.vue";
 import OverviewPagination from "./components/OverviewPagination.vue";
 import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
-import { Toaster, toast } from "./components/ui/sonner";
 import { useHostDetail } from "./composables/useHostDetail";
 import { useLiveUpdates } from "./composables/useLiveUpdates";
 import { useProbeUpgradeMonitor } from "./composables/useProbeUpgradeMonitor";
+import { clearAuthenticatedFeedbackState } from "./feedback/auth-feedback-lifecycle";
+import {
+  createSonnerFeedbackDelivery,
+  Toaster,
+} from "./feedback/sonner-feedback-adapter";
+import { createWebFeedbackCoordinator } from "./feedback/web-feedback-coordinator";
+import { webFeedbackKey } from "./feedback/web-feedback-port";
 import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
 import {
-  enrollmentTerminalMessage,
   matchingHostAction,
   reconcileEnrollmentStatus,
   shouldCreateEnrollmentOnOpen,
@@ -54,7 +60,6 @@ import {
   type LoginErrorKind,
 } from "./lib/login-errors";
 import { configurationErrorText } from "./lib/probe-configuration";
-import { probeUpgradeToastTitle } from "./lib/probe-upgrade-toast";
 import {
   matchesActiveReadyEnrollment,
   readyEnrollmentCompletion,
@@ -75,6 +80,13 @@ import type {
 } from "./types";
 
 const isCheckingSession = ref(true);
+const webFeedback = createWebFeedbackCoordinator({
+  delivery: createSonnerFeedbackDelivery(),
+  onRetryHostEnrollment(hostId) {
+    void createExistingHostEnrollment(hostId);
+  },
+});
+provide(webFeedbackKey, webFeedback);
 const scrollBodyLock = { margin: 0, padding: 0 } as const;
 const isAuthenticated = ref(false);
 const LayoutLabPage = defineAsyncComponent(
@@ -179,16 +191,16 @@ const detail = useHostDetail(activeDetailHostIdForComposable, {
   onUnauthorized: requireLogin,
 });
 const probeUpgradeMonitor = useProbeUpgradeMonitor({
-  onFailure(host, failure) {
-    toast.error(probeUpgradeToastTitle(host, "failed"), {
-      description: failure.message || failure.code,
-    });
-  },
   onHostDetail(host) {
     detail.applyHostDetail(host);
   },
-  onSuccess(host) {
-    toast.success(probeUpgradeToastTitle(host, "succeeded"));
+  onTransition(host, status) {
+    webFeedback.submit({
+      hostId: host.id,
+      kind: "probe-upgrade-transition",
+      operationId: status.id,
+      state: status.state,
+    });
   },
   onUnauthorized: requireLogin,
 });
@@ -266,6 +278,7 @@ onBeforeUnmount(() => {
   clearHostCardLazyLoadTimer();
   clearReadyHostHighlight();
   clearEnrollmentStatusReconciliation();
+  webFeedback.clear();
 });
 
 useEventListener("popstate", syncRouteFromLocation);
@@ -329,8 +342,14 @@ async function login() {
 
 async function logout() {
   disconnectLiveUpdates();
+  clearAuthenticatedFeedbackState({
+    feedback: webFeedback,
+    monitor: probeUpgradeMonitor,
+  });
   await fetch("/api/web/auth/logout", {
+    body: JSON.stringify({}),
     credentials: "same-origin",
+    headers: { "content-type": "application/json" },
     method: "POST",
   });
 
@@ -361,6 +380,10 @@ async function logout() {
 
 function requireLogin() {
   disconnectLiveUpdates();
+  clearAuthenticatedFeedbackState({
+    feedback: webFeedback,
+    monitor: probeUpgradeMonitor,
+  });
   isAuthenticated.value = false;
   loginError.value = "";
   loginErrorKind.value = "";
@@ -423,7 +446,9 @@ async function createEnrollment() {
 
   try {
     const response = await fetch("/api/web/enrollments", {
+      body: JSON.stringify({}),
       credentials: "same-origin",
+      headers: { "content-type": "application/json" },
       method: "POST",
     });
 
@@ -533,33 +558,28 @@ async function applyAuthoritativeEnrollmentStatus(
         await revealReadyHost(status.hostId);
       }
     }
-    toast.success("主机已就绪", {
-      description: "探针已完成与 Hub 的首次报告。",
+    webFeedback.submit({
+      enrollmentId: status.enrollmentId,
+      kind: "enrollment-ready",
     });
     return;
   }
   if (status.status === "expired") {
-    toast.error("安装命令已过期", {
-      description: "请生成新的安装命令。",
+    webFeedback.submit({
+      enrollmentId: status.enrollmentId,
+      kind: "enrollment-expired",
     });
     return;
   }
-  const terminalMessage = enrollmentTerminalMessage(status);
-  if (terminalMessage) {
-    const existingHostId = matchingHostAction({
+  if (status.status === "rejected") {
+    webFeedback.submit({
+      enrollmentId: status.enrollmentId,
       hostId: status.hostId,
-      hosts: hosts.value,
-    });
-    toast.error(terminalMessage.title, {
-      description: terminalMessage.description,
-      ...(existingHostId !== null
-        ? {
-            action: {
-              label: "查看可重新注册主机",
-              onClick: () => void createExistingHostEnrollment(existingHostId),
-            },
-          }
-        : {}),
+      kind: "enrollment-rejected",
+      reason: enrollmentRejectionReason(status.rejection?.code),
+      retryHostEnrollment:
+        matchingHostAction({ hostId: status.hostId, hosts: hosts.value }) !==
+        null,
     });
   }
 }
@@ -602,27 +622,10 @@ function showExistingHostEnrollmentFailure(
   hostId: number,
   errorCode: string | null,
 ) {
-  const feedback =
-    errorCode === "existing_host_reenrollment_verifying"
-      ? {
-          description: "已有重新注册正在进行中，请刷新后重试。",
-          title: "已有重新注册进行中",
-        }
-      : errorCode === "existing_host_reenrollment_unavailable"
-        ? {
-            description: "主机状态已变化，请刷新后重试。",
-            title: "主机状态已变化",
-          }
-        : {
-            description: "请稍后重试。",
-            title: "无法创建主机重新注册命令",
-          };
-  toast.error(feedback.title, {
-    action: {
-      label: "重新尝试",
-      onClick: () => void createExistingHostEnrollment(hostId),
-    },
-    description: feedback.description,
+  webFeedback.submit({
+    hostId,
+    kind: "host-enrollment-retryable-failure",
+    reason: enrollmentRetryFailureReason(errorCode),
   });
 }
 
@@ -871,7 +874,7 @@ async function saveHostMetadata() {
     }
     void loadHosts();
   } catch {
-    hostMetadataError.value = "无法保存主机信息，请检查输入后重试。";
+    hostMetadataError.value = "无法保存主机元数据，请检查输入后重试。";
   } finally {
     isSavingHostMetadata.value = false;
   }
@@ -935,9 +938,11 @@ async function deleteHost(
       throw new Error("delete_failed");
     }
 
-    toast.success(
-      mode === "hub-only" ? "已删除服务端记录" : "已下发探针卸载请求",
-    );
+    webFeedback.submit({
+      hostId: host.id,
+      kind: "host-delete-requested",
+      mode,
+    });
 
     if (activeHostConfigurationId.value === host.id) {
       activeHostConfigurationId.value = null;
@@ -974,7 +979,36 @@ function trackProbeUpgradeRequest(
   hostId: number,
   status: NonNullable<HostDetail["probeUpgradeStatus"]>,
 ) {
+  webFeedback.trackProbeUpgrade({
+    hostId,
+    initiation: "individual",
+    operationId: status.id,
+  });
   probeUpgradeMonitor.track(hostId, status);
+}
+
+function enrollmentRejectionReason(code: string | undefined) {
+  switch (code) {
+    case "existing_probe_installation":
+      return "existing-probe-installation" as const;
+    case "probe_bound_to_different_hub":
+      return "probe-bound-to-different-hub" as const;
+    case "probe_installation_metadata_invalid":
+      return "installation-metadata-invalid" as const;
+    default:
+      return "unclassified" as const;
+  }
+}
+
+function enrollmentRetryFailureReason(errorCode: string | null) {
+  switch (errorCode) {
+    case "existing_host_reenrollment_verifying":
+      return "verifying" as const;
+    case "existing_host_reenrollment_unavailable":
+      return "unavailable" as const;
+    default:
+      return "unclassified" as const;
+  }
 }
 
 function navigateToOverview() {

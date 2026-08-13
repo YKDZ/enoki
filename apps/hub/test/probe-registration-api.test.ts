@@ -50,7 +50,9 @@ async function createEnrollmentToken(
   ownerSession: string,
 ) {
   const response = await app.request("/api/web/enrollments", {
+    body: JSON.stringify({}),
     headers: {
+      "content-type": "application/json",
       cookie: ownerSession,
     },
     method: "POST",
@@ -2221,7 +2223,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("records Observed IP from trusted forwarding headers without using it as Host Metadata", async () => {
+  it("ignores forwarding headers without trusted direct-peer evidence", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -2230,7 +2232,6 @@ describe("Probe registration API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
-      trustForwardedProbeHeaders: true,
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -2253,7 +2254,7 @@ describe("Probe registration API", () => {
     };
     expect(storedHost).toEqual({
       connect_address: "10.0.0.10",
-      observed_ip: "203.0.113.10",
+      observed_ip: null,
     });
 
     const hostsResponse = await app.request("/api/web/hosts", {

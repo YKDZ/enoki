@@ -1,85 +1,139 @@
+import { isHubConfigurationError } from "./config-error.js";
 import { createHubRuntimeConfigFromEnvironment } from "./config.js";
-import { initializeHubDatabase } from "./database/index.js";
+import { initializeHubDatabase, type HubDatabase } from "./database/index.js";
+import {
+  createDelegatingHubLogger,
+  createJsonLineHubLogger,
+  readHubLogLevel,
+} from "./hub-logger.js";
 import { createLiveUpdateBroadcaster } from "./live-updates.js";
 import { runMetricsArchiveMaintenance } from "./metrics-archive/maintenance.js";
-import { createMetricsArchiveScheduler } from "./metrics-archive/scheduler.js";
+import {
+  createMetricsArchiveScheduler,
+  type MetricsArchiveScheduler,
+} from "./metrics-archive/scheduler.js";
 import {
   createHubNodeServer,
   createProbeApiNodeServer,
   type HubNodeServer,
 } from "./node-server.js";
+import {
+  createBoundedHubShutdown,
+  installHubFatalHandlers,
+} from "./process-lifecycle.js";
 
-const port = readPort(process.env.PORT ?? "3000", "PORT");
-const hostname = process.env.HOST;
-const probePort = readPort(
-  process.env.ENOKI_PROBE_PORT ?? "3001",
-  "ENOKI_PROBE_PORT",
-);
-const probeHostname = process.env.ENOKI_PROBE_HOST ?? hostname;
-const webDistPath =
-  process.env.ENOKI_WEB_DIST ??
-  new URL("../../web/dist", import.meta.url).pathname;
-const config = createHubRuntimeConfigFromEnvironment(process.env);
-const database = initializeHubDatabase(config.database);
-const liveUpdates = createLiveUpdateBroadcaster();
+const loggerControl = createDelegatingHubLogger(createJsonLineHubLogger());
+const logger = loggerControl.logger;
 const servers: HubNodeServer[] = [];
-const metricsArchiveScheduler = createMetricsArchiveScheduler({
-  intervalMs: 60 * 60 * 1000,
-  maintain: () => {
-    runMetricsArchiveMaintenance({
-      database,
-      metrics: config.metrics,
-    });
-  },
+let database: HubDatabase | undefined;
+let metricsArchiveScheduler: MetricsArchiveScheduler | undefined;
+
+const shutdown = createBoundedHubShutdown({
+  closeDatabase: () => database?.close(),
+  closeListeners: () =>
+    Promise.all(servers.map((server) => server.close())).then(() => {}),
+  exit: (code) => process.exit(code),
+  logger,
+  stopBackground: () => metricsArchiveScheduler?.stop() ?? Promise.resolve(),
+  timeoutMs: 15_000,
 });
+const fatal = installHubFatalHandlers({ logger, process, shutdown });
 
-servers.push(
-  await createHubNodeServer({
-    auth: config.auth,
-    clockSkewThresholdMs: config.clockSkew.thresholdMs,
-    database,
-    hostname,
-    hostStatus: config.hostStatus,
-    installation: config.installation,
-    liveUpdates,
-    port,
-    probeAssets: config.probeAssets,
-    probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
-    probeOperations: config.probeOperations,
-    trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
-    webDistPath,
-  }),
-);
-console.log(`Enoki Hub listening on http://localhost:${port}`);
-
-servers.push(
-  await createProbeApiNodeServer({
-    clockSkewThresholdMs: config.clockSkew.thresholdMs,
-    database,
-    hostname: probeHostname,
-    hostStatus: config.hostStatus,
-    liveUpdates,
-    port: probePort,
-    probeAssets: config.probeAssets,
-    probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
-    trustForwardedProbeHeaders: config.network.trustForwardedProbeHeaders,
-  }),
-);
-console.log(`Enoki Probe API listening on http://localhost:${probePort}`);
-metricsArchiveScheduler.start();
+const shutdownRuntime = () => shutdown(0);
 
 process.once("SIGINT", () => {
-  void shutdown();
+  void shutdownRuntime();
 });
 process.once("SIGTERM", () => {
-  void shutdown();
+  void shutdownRuntime();
 });
 
-async function shutdown() {
-  await metricsArchiveScheduler.stop();
-  await Promise.all(servers.map((server) => server.close()));
-  database.close();
-  process.exit(0);
+try {
+  loggerControl.setLogger(
+    createJsonLineHubLogger({
+      level: readHubLogLevel(process.env.ENOKI_HUB_LOG_LEVEL),
+    }),
+  );
+  const port = readPort(process.env.PORT ?? "3000", "PORT");
+  const hostname = process.env.HOST;
+  const probePort = readPort(
+    process.env.ENOKI_PROBE_PORT ?? "3001",
+    "ENOKI_PROBE_PORT",
+  );
+  const probeHostname = process.env.ENOKI_PROBE_HOST ?? hostname;
+  const webDistPath =
+    process.env.ENOKI_WEB_DIST ??
+    new URL("../../web/dist", import.meta.url).pathname;
+  const config = createHubRuntimeConfigFromEnvironment(process.env, { logger });
+  database = initializeHubDatabase(config.database);
+  const liveUpdates = createLiveUpdateBroadcaster();
+  metricsArchiveScheduler = createMetricsArchiveScheduler({
+    intervalMs: 60 * 60 * 1000,
+    logger,
+    maintain: () => {
+      if (!database) return;
+      runMetricsArchiveMaintenance({
+        database,
+        metrics: config.metrics,
+      });
+    },
+  });
+
+  servers.push(
+    await createHubNodeServer({
+      auth: config.auth,
+      clockSkewThresholdMs: config.clockSkew.thresholdMs,
+      database,
+      hostname,
+      hostStatus: config.hostStatus,
+      installation: config.installation,
+      logger,
+      liveUpdates,
+      port,
+      probeAssets: config.probeAssets,
+      probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
+      probeOperations: config.probeOperations,
+      probeApiOrigin: config.network.probeApiOrigin,
+      trustedProxyCidrs: config.network.trustedProxyCidrs,
+      webDistPath,
+    }),
+  );
+  logger.log({
+    component: "management-listener",
+    event: "listener.started",
+    level: "info",
+    listener: "management",
+    outcome: "listening",
+  });
+
+  servers.push(
+    await createProbeApiNodeServer({
+      clockSkewThresholdMs: config.clockSkew.thresholdMs,
+      database,
+      hostname: probeHostname,
+      hostStatus: config.hostStatus,
+      liveUpdates,
+      logger,
+      port: probePort,
+      probeAssets: config.probeAssets,
+      probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
+      probeApiOrigin: config.network.probeApiOrigin,
+      trustedProxyCidrs: config.network.trustedProxyCidrs,
+    }),
+  );
+  logger.log({
+    component: "probe-listener",
+    event: "listener.started",
+    level: "info",
+    listener: "probe",
+    outcome: "listening",
+  });
+  metricsArchiveScheduler.start();
+} catch (error) {
+  fatal(
+    "startup_failure",
+    isHubConfigurationError(error) ? error.publicMessage : undefined,
+  );
 }
 
 function readPort(value: string, name: string) {

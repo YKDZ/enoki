@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createMemoryHubLogger } from "../src/hub-logger";
 import { createMetricsArchiveScheduler } from "../src/metrics-archive/scheduler";
 
 describe("Metrics Archive scheduler", () => {
@@ -28,15 +29,14 @@ describe("Metrics Archive scheduler", () => {
 
   it("continues future archive maintenance attempts after a runtime failure", async () => {
     vi.useFakeTimers();
-    const consoleError = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
+    const memory = createMemoryHubLogger();
     const maintain = vi
       .fn()
       .mockRejectedValueOnce(new Error("archive path is temporarily full"))
       .mockResolvedValue(undefined);
     const scheduler = createMetricsArchiveScheduler({
       intervalMs: 1_000,
+      logger: memory.logger,
       maintain,
     });
 
@@ -46,12 +46,14 @@ describe("Metrics Archive scheduler", () => {
     await scheduler.stop();
 
     expect(maintain).toHaveBeenCalledTimes(2);
-    expect(consoleError).toHaveBeenCalledWith(
-      "Metrics Archive maintenance failed.",
-      expect.any(Error),
+    expect(memory.events).toContainEqual(
+      expect.objectContaining({
+        component: "metrics-archive",
+        event: "background.failed",
+        level: "error",
+        outcome: "maintenance_failed",
+      }),
     );
-
-    consoleError.mockRestore();
   });
 
   it("waits for in-flight archive maintenance during shutdown", async () => {

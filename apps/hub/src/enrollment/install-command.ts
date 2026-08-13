@@ -1,12 +1,11 @@
 export type InstallationCommandConfig = {
   installPath: string;
   installScriptPath: string;
-  publicHubUrl?: string;
+  probeApiOrigin?: string;
 };
 
 export type InstallCommandInput = {
   enrollmentToken: string;
-  requestUrl: string;
 };
 
 export type InstallCommandResult = {
@@ -23,6 +22,7 @@ export function createDefaultInstallationCommandConfig(): InstallationCommandCon
   return {
     installPath: defaultInstallPath,
     installScriptPath: defaultInstallScriptPath,
+    probeApiOrigin: "http://localhost",
   };
 }
 
@@ -30,9 +30,7 @@ export function renderInstallCommand(
   config: InstallationCommandConfig,
   input: InstallCommandInput,
 ): InstallCommandResult {
-  const hubUrl = (config.publicHubUrl ?? new URL(input.requestUrl).origin)
-    .trim()
-    .replace(/\/+$/, "");
+  const hubUrl = config.probeApiOrigin ?? "http://localhost";
   const variables: Array<[string, string]> = [
     ["ENOKI_HUB_URL", hubUrl],
     ["ENOKI_ENROLLMENT_TOKEN", input.enrollmentToken],

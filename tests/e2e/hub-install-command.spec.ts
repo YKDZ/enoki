@@ -1,6 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import { type BrowserContext, type Page } from "@playwright/test";
 
-const ownerPassword = "correct horse battery staple";
+import { expect, test } from "./security-console";
 
 type BrowserEnrollmentTarget =
   | { kind: "new_host" }
@@ -51,6 +51,7 @@ type BrowserScrollCall = {
 };
 
 test("owner can generate a Hub-served probe install command", async ({
+  context,
   page,
 }) => {
   test.skip(
@@ -58,10 +59,6 @@ test("owner can generate a Hub-served probe install command", async ({
     "Control+A is a non-macOS contract.",
   );
   await page.goto("/");
-
-  await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
 
   await page.getByRole("button", { name: "添加探针" }).click();
 
@@ -72,7 +69,7 @@ test("owner can generate a Hub-served probe install command", async ({
   await expect(command).toBeFocused();
   await expect(command).toHaveValue(/\/api\/probe\/install\.sh/);
   await expect(command).toHaveValue(
-    /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38200'/,
+    /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38201'/,
   );
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
   await expect(command).not.toHaveValue(/github\.com/);
@@ -86,8 +83,7 @@ test("owner can generate a Hub-served probe install command", async ({
   await command.press("x");
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
 
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.evaluate(() => navigator.clipboard.writeText("must-not-paste"));
+  await seedSystemClipboard(context, "must-not-paste");
   await command.press("Control+V");
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
 });
@@ -100,8 +96,6 @@ test("owner can select the command with Cmd+A on a macOS browser runner", async 
     "Cmd+A is executed only by the macOS Playwright gate.",
   );
   await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "添加探针" }).click();
 
   const command = page.getByRole("textbox", { name: "安装命令" });
@@ -169,8 +163,6 @@ test("an expired Enrollment closes the matching dialog through its status API", 
   );
 
   await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "添加探针" }).click();
 
   await expect(page.getByText("安装命令已过期")).toBeVisible();
@@ -589,7 +581,7 @@ for (const scenario of [
     await page.goto("/");
     await page.getByRole("button", { name: "添加探针" }).click();
 
-    await expect(page.getByText("检测到已有 Probe 安装")).toBeVisible({
+    await expect(page.getByText("检测到已有探针安装")).toBeVisible({
       timeout: 5_000,
     });
     await expect(
@@ -783,4 +775,24 @@ async function scrollIntoViewCalls(page: Page) {
     };
     return liveWindow.__enokiScrollIntoViewCalls ?? [];
   });
+}
+
+async function seedSystemClipboard(context: BrowserContext, value: string) {
+  const origin = "https://clipboard-fixture.test";
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin,
+  });
+  const clipboardPage = await context.newPage();
+  await clipboardPage.route(`${origin}/`, (route) =>
+    route.fulfill({ body: "<!doctype html><title>Clipboard fixture</title>" }),
+  );
+  await clipboardPage.goto(origin);
+  await clipboardPage.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    value,
+  );
+  await expect
+    .poll(() => clipboardPage.evaluate(() => navigator.clipboard.readText()))
+    .toBe(value);
+  await clipboardPage.close();
 }

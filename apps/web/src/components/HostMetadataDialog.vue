@@ -40,7 +40,7 @@ function updateOpen(open: boolean) {
   <Dialog :open="activeHostMetadataId === host.id" @update:open="updateOpen">
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>主机信息</DialogTitle>
+        <DialogTitle>主机元数据</DialogTitle>
         <DialogDescription class="sr-only">
           编辑主机显示名称、描述和连接地址。
         </DialogDescription>

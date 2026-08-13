@@ -6,13 +6,11 @@ declare global {
   }
 }
 
-const ownerPassword = "correct horse battery staple";
-
 test("removes a Host from open cards immediately and tolerates unrelated or duplicate hints", async ({
   page,
 }) => {
   const state = await prepareLiveRemovalOverview(page);
-  await login(page);
+  await page.goto("/");
   await expect(page.getByText("Realtime removal host")).toBeVisible();
 
   await emitHostRemoved(page, 999);
@@ -28,7 +26,7 @@ test("removes a Host from open cards immediately and tolerates unrelated or dupl
 
 test("removes a Host from the open list immediately", async ({ page }) => {
   await prepareLiveRemovalOverview(page);
-  await login(page);
+  await page.goto("/");
   await page.getByRole("button", { name: "切换到列表" }).click();
   await expect(page.getByText("Realtime removal host")).toBeVisible();
 
@@ -41,7 +39,7 @@ test("recovers a Host removal that occurs in the reconnect window from HTTP afte
   page,
 }) => {
   const state = await prepareLiveRemovalOverview(page);
-  await login(page);
+  await page.goto("/");
   await expect(page.getByText("Realtime removal host")).toBeVisible();
 
   state.hosts = [];
@@ -114,12 +112,6 @@ async function prepareLiveRemovalOverview(page: Page) {
   });
 
   return state;
-}
-
-async function login(page: Page) {
-  await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
 }
 
 async function emitHostRemoved(page: Page, hostId: number) {

@@ -844,6 +844,9 @@ describe("GitHub and GHCR publication adapter", () => {
       );
       expect(run.arguments_).toEqual(
         expect.arrayContaining([
+          "--env",
+          "ENOKI_MANAGEMENT_ORIGIN=http://127.0.0.1:3000",
+          "ENOKI_PROBE_API_ORIGIN=http://127.0.0.1:3000",
           "--pull",
           "never",
           "enoki-release-smoke-local:unique-smoke-id",

@@ -1385,7 +1385,8 @@ export function createDockerHubController({
       envFile,
       [
         `OWNER_PASSWORD=${currentRuntimeEnvironment.ownerPassword}`,
-        `ENOKI_PUBLIC_HUB_URL=${currentRuntimeEnvironment.hubPublicUrl}`,
+        `ENOKI_MANAGEMENT_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
+        `ENOKI_PROBE_API_ORIGIN=${currentRuntimeEnvironment.hubPublicUrl}`,
         `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET=${currentRuntimeEnvironment.operationSigningSecret}`,
         ...(currentRuntimeEnvironment.probeOperationRunningTimeoutSeconds ===
         null

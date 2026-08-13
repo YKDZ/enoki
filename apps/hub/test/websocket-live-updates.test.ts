@@ -7,6 +7,8 @@ import * as root from "@enoki/proto/generated/ts/enoki_pb.js";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
+import { createHubApp } from "../src/app";
+import { createMemoryPasswordVerificationBudget } from "../src/auth/password-verification-budget";
 import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
@@ -54,6 +56,9 @@ async function startHubServer(options: {
     database: options.database,
     hostname: "127.0.0.1",
     now: options.now,
+    passwordVerificationBudget: createMemoryPasswordVerificationBudget({
+      capacity: 20,
+    }),
     port: 0,
   });
   openServers.push(server);
@@ -86,7 +91,9 @@ async function loginOwner(baseUrl: string) {
 
 async function createEnrollmentToken(baseUrl: string, ownerSession: string) {
   const response = await fetch(`${baseUrl}/api/web/enrollments`, {
+    body: JSON.stringify({}),
     headers: {
+      "content-type": "application/json",
       cookie: ownerSession,
     },
     method: "POST",
@@ -213,7 +220,7 @@ async function sendReport(
       body,
       headers: signedProbeHeaders({
         body,
-        pathAndQuery: reportUrl,
+        pathAndQuery: "/api/probe/report",
         privateKeyPem: registration.privateKeyPem,
         probeId: registration.probeId,
       }),
@@ -290,7 +297,7 @@ async function sendStartupReport(
     body,
     headers: signedProbeHeaders({
       body,
-      pathAndQuery: reportUrl,
+      pathAndQuery: "/api/probe/report",
       privateKeyPem: registration.privateKeyPem,
       probeId: registration.probeId,
     }),
@@ -357,7 +364,7 @@ async function completeProbeUninstall(
     body: reportBody,
     headers: signedProbeHeaders({
       body: reportBody,
-      pathAndQuery: reportUrl,
+      pathAndQuery: "/api/probe/report",
       privateKeyPem: registration.privateKeyPem,
       probeId: registration.probeId,
     }),
@@ -377,7 +384,7 @@ async function completeProbeUninstall(
     body: tokenBody,
     headers: signedJsonProbeHeaders({
       body: tokenBody,
-      pathAndQuery: `${baseUrl}${tokenPath}`,
+      pathAndQuery: tokenPath,
       privateKeyPem: registration.privateKeyPem,
       probeId: registration.probeId,
     }),
@@ -391,7 +398,7 @@ async function completeProbeUninstall(
     body: statusBody,
     headers: signedJsonProbeHeaders({
       body: statusBody,
-      pathAndQuery: `${baseUrl}${statusPath}`,
+      pathAndQuery: statusPath,
       privateKeyPem: registration.privateKeyPem,
       probeId: registration.probeId,
     }),
@@ -716,6 +723,80 @@ describe("WebSocket live updates", () => {
     await expect(closed).resolves.toBeUndefined();
 
     database.close();
+  });
+
+  it("closes the oldest Owner session socket when a ninth session is issued", async () => {
+    const database = await createTemporaryDatabase();
+    const { baseUrl, webSocketUrl } = await startHubServer({ database });
+    const oldestSession = await loginOwner(baseUrl);
+    const socket = await openWebSocket(webSocketUrl, {
+      cookie: oldestSession,
+    });
+
+    await Promise.all(
+      Array.from({ length: 7 }, async () => loginOwner(baseUrl)),
+    );
+    const closed = waitForSocketClose(socket);
+    await loginOwner(baseUrl);
+
+    await expect(closed).resolves.toBeUndefined();
+    const rejected = await fetch(`${baseUrl}/api/web/auth/session`, {
+      headers: { cookie: oldestSession },
+    });
+    await expect(rejected.json()).resolves.toEqual({ authenticated: false });
+
+    database.close();
+  });
+
+  it("rejects a socket whose Owner session is revoked before it opens", async () => {
+    let lifecycle: { onOpen?: (event: unknown, socket: unknown) => void } = {};
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      passwordVerificationBudget: createMemoryPasswordVerificationBudget({
+        capacity: 9,
+      }),
+      webSocket: {
+        upgradeWebSocket: ((createLifecycle: (context: unknown) => unknown) =>
+          async (context: { text: (body: string) => Response }) => {
+            lifecycle = createLifecycle(context) as typeof lifecycle;
+            return context.text("upgrade captured");
+          }) as never,
+      },
+    });
+    const login = async () => {
+      const response = await app.request("/api/web/auth/login", {
+        body: JSON.stringify({ password: "correct horse battery staple" }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      return response.headers.get("set-cookie") ?? "";
+    };
+    const oldestSession = await login();
+    for (let index = 1; index < 8; index += 1) {
+      await login();
+    }
+
+    const upgrade = await app.request("/api/web/ws", {
+      headers: { cookie: oldestSession },
+    });
+    expect(upgrade.status).toBe(200);
+    await login();
+
+    let socketClosed = false;
+    lifecycle.onOpen?.(
+      {},
+      {
+        close() {
+          socketClosed = true;
+        },
+      },
+    );
+
+    expect(socketClosed).toBe(true);
   });
 
   it("emits host_removed only after a Hub-only Host deletion commits", async () => {

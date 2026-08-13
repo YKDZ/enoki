@@ -218,4 +218,57 @@ describe("Metrics chart data", () => {
       [1_725_000_025_000, 30],
     ]);
   });
+
+  it("clips a sparkline to its inclusive window boundaries without changing in-window values", () => {
+    expect(
+      linePointsForWindow(
+        [
+          [0, 11],
+          [10, 22],
+          [20, 33],
+          [30, 44],
+          [40, 55],
+        ],
+        { windowEndMs: 30, windowStartMs: 10 },
+      ),
+    ).toEqual([
+      [10, 22],
+      [20, 33],
+      [30, 44],
+    ]);
+  });
+
+  it("keeps repeated sample times and their values in a sparkline window", () => {
+    expect(
+      linePointsForWindow(
+        [
+          [10, 10],
+          [20, 95],
+          [20, 5],
+          [30, 50],
+        ],
+        { windowEndMs: 30, windowStartMs: 10 },
+      ),
+    ).toEqual([
+      [10, 10],
+      [20, 95],
+      [20, 5],
+      [30, 50],
+    ]);
+  });
+
+  it("keeps sparse sparkline data sparse when its start gap is not continuous", () => {
+    expect(
+      linePointsForWindow(
+        [
+          [10, 20],
+          [50, 80],
+        ],
+        { maxStartGapMs: 5, windowEndMs: 60, windowStartMs: 0 },
+      ),
+    ).toEqual([
+      [10, 20],
+      [50, 80],
+    ]);
+  });
 });

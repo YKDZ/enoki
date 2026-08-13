@@ -2,6 +2,8 @@ import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
 
+import { ownerStorageStatePath } from "./tests/e2e/owner-auth-state";
+
 const baseURL = requiredEnvironment("ENOKI_RELEASE_UI_BASE_URL");
 requiredEnvironment("ENOKI_RELEASE_UI_CANDIDATE_VERSION");
 requiredEnvironment("ENOKI_RELEASE_UI_OWNER_PASSWORD");
@@ -12,10 +14,14 @@ export default defineConfig({
     timeout: 10_000,
   },
   fullyParallel: true,
+  globalSetup: "./tests/e2e/global-setup.ts",
   projects: [
     {
       name: "candidate-chromium",
-      use: { ...devices["Desktop Chrome"] },
+      use: {
+        ...devices["Desktop Chrome"],
+        storageState: ownerStorageStatePath,
+      },
     },
   ],
   reporter: process.env.CI

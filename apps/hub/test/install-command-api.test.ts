@@ -55,17 +55,22 @@ describe("Owner add-host install command", () => {
       installation: {
         installPath: "/usr/local/bin/enoki-probe",
         installScriptPath: "/api/probe/install.sh",
-        publicHubUrl: "https://hub.example",
+        probeApiOrigin: "https://hub.example",
       },
     });
     const ownerSession = await loginOwner(app);
 
-    const response = await app.request("/api/web/enrollments", {
-      headers: {
-        cookie: ownerSession,
+    const response = await app.request(
+      "https://attacker.example/api/web/enrollments",
+      {
+        body: JSON.stringify({}),
+        headers: {
+          "content-type": "application/json",
+          cookie: ownerSession,
+        },
+        method: "POST",
       },
-      method: "POST",
-    });
+    );
 
     expect(response.status).toBe(201);
     const body = (await response.json()) as {
@@ -114,13 +119,15 @@ describe("Owner add-host install command", () => {
       installation: {
         installPath: "/opt/enoki/bin/enoki-probe",
         installScriptPath: "/api/probe/install.sh",
-        publicHubUrl: "https://hub.example",
+        probeApiOrigin: "https://hub.example",
       },
     });
     const ownerSession = await loginOwner(app);
 
     const response = await app.request("/api/web/enrollments", {
+      body: JSON.stringify({}),
       headers: {
+        "content-type": "application/json",
         cookie: ownerSession,
       },
       method: "POST",
@@ -164,12 +171,13 @@ describe("Owner add-host install command", () => {
       installation: {
         installPath: "/usr/local/bin/enoki-probe",
         installScriptPath: "/api/probe/install.sh",
-        publicHubUrl: "https://hub.example",
+        probeApiOrigin: "https://hub.example",
       },
     });
     const ownerSession = await loginOwner(app);
     const newHost = await app.request("/api/web/enrollments", {
-      headers: { cookie: ownerSession },
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json", cookie: ownerSession },
       method: "POST",
     });
     const existingHost = await app.request("/api/web/enrollments", {
@@ -220,7 +228,8 @@ describe("Owner add-host install command", () => {
     });
     const ownerSession = await loginOwner(app);
     const created = await app.request("/api/web/enrollments", {
-      headers: { cookie: ownerSession },
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json", cookie: ownerSession },
       method: "POST",
     });
     const enrollment = (await created.json()) as {

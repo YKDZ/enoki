@@ -7,6 +7,7 @@
     "boundaries": "node scripts/check-boundaries.ts",
     "build": "turbo run build --output-logs=errors-only --log-order=grouped",
     "check": "pnpm run check:node && pnpm run rust:check",
+    "check:terminology": "node scripts/check-terminology.mjs",
     "check:node": "turbo run boundaries format:check lint typecheck build test test:e2e check:generated --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
     "db:reset-migrations": "pnpm --filter @enoki/hub run db:reset-migrations",
     "dev": "pnpm --filter @enoki/web dev",

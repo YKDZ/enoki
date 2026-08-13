@@ -200,6 +200,26 @@ describe("Probe systemd installer", () => {
     ).resolves.toContain("is-active --quiet enoki-probe.service");
   });
 
+  it("installs from an explicitly configured non-loopback HTTP Probe API Origin", async () => {
+    const root = await createTempRoot("enoki-install-http-origin-root-");
+    const assets = await createProbeAssets(root);
+    const commands = await createCommandMocks(root, { assetDir: assets.dir });
+
+    const result = await runInstaller({
+      ENOKI_ENROLLMENT_TOKEN: "enk_enroll_test",
+      ENOKI_HUB_URL: "http://192.0.2.20:3001",
+      ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256: assets.publicKeySha256,
+      ENOKI_SYSTEMD_RUNTIME_DIR: path.join(root, "run/systemd/system"),
+      ENOKI_TEST_ROOT: root,
+      PATH: `${commands.bin}:${process.env.PATH ?? ""}`,
+    });
+
+    expect(result.code).toBe(0);
+    await expect(
+      readFile(path.join(root, "etc/enoki/probe-install.toml"), "utf8"),
+    ).resolves.toContain('hub_url = "http://192.0.2.20:3001"');
+  });
+
   it("installs without a collector-helper sudoers file when the Probe planner exposes no helpers", async () => {
     const root = await createTempRoot("enoki-install-no-helper-root-");
     const assets = await createProbeAssets(root, {
@@ -754,9 +774,9 @@ describe("Probe systemd installer", () => {
   });
 
   it.each([
-    "http://localhost.evil",
     "http://localhost@evil.example",
     "https://owner:password@hub.example",
+    "https://hub.example/path",
     "https://hub.example/path?token=not-allowed",
     "https://hub.example/#fragment",
   ])(
@@ -1082,7 +1102,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case "$url" in
-  https://hub.example/api/probe/assets/*) printf '%s\\n' "$url" >> '${path.join(
+  https://hub.example/api/probe/assets/* | http://192.0.2.20:3001/api/probe/assets/*) printf '%s\\n' "$url" >> '${path.join(
     root,
     "tmp/curl.log",
   )}'; cp '${options.assetDir ?? root}'/"\${url##*/}" "$out" ;;

@@ -92,8 +92,7 @@ const presentation = computed(() => {
         权限运行；安装器会保留现有探针身份并完成恢复。
       </p>
       <p v-else-if="status.state === 'failed'">
-        请在受影响主机上以 root 权限运行 Probe
-        Repair，然后返回此页确认探针恢复上报。
+        请在受影响主机上以 root 权限运行探针修复，然后返回此页确认探针恢复上报。
       </p>
     </AlertDescription>
   </Alert>

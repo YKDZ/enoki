@@ -48,28 +48,28 @@ export function enrollmentTerminalMessage(status: EnrollmentStatusResponse): {
   if (code === "existing_probe_installation") {
     return {
       description:
-        "目标主机已有 Probe 安装痕迹。请先运行 sudo enoki-probe uninstall，然后重新生成安装命令。",
-      title: "检测到已有 Probe 安装",
+        "目标主机已有探针安装痕迹。请先运行 sudo enoki-probe uninstall，然后重新生成安装命令。",
+      title: "检测到已有探针安装",
     };
   }
   if (code === "probe_bound_to_different_hub") {
     return {
       description:
-        "此 Probe 已绑定到其他 Hub。请先在目标主机运行 sudo enoki-probe uninstall；即使旧 Hub 离线，也可随后重新生成安装命令。",
-      title: "Probe 已绑定到其他 Hub",
+        "此探针已绑定到其他 Hub。请先在目标主机运行 sudo enoki-probe uninstall；即使旧 Hub 离线，也可随后重新生成安装命令。",
+      title: "探针已绑定到其他 Hub",
     };
   }
   if (code === "probe_installation_metadata_invalid") {
     return {
       description:
-        "本地 Probe 安装元数据不安全或不完整。请在目标主机运行 sudo enoki-probe uninstall 后重新安装。",
-      title: "Probe 安装需要本地清理",
+        "本地探针安装元数据不安全或不完整。请在目标主机运行 sudo enoki-probe uninstall 后重新安装。",
+      title: "探针安装需要本地清理",
     };
   }
 
   return {
-    description: "Probe 未在等待期限内完成与 Hub 的首次报告。",
-    title: "Probe 未能就绪",
+    description: "探针未在等待期限内完成与 Hub 的首次报告。",
+    title: "探针未能就绪",
   };
 }
 

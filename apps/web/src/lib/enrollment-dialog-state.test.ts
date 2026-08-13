@@ -95,8 +95,8 @@ describe("enrollment dialog state", () => {
         status: "rejected",
       }),
     ).toEqual({
-      description: "Probe 未在等待期限内完成与 Hub 的首次报告。",
-      title: "Probe 未能就绪",
+      description: "探针未在等待期限内完成与 Hub 的首次报告。",
+      title: "探针未能就绪",
     });
   });
 
@@ -112,8 +112,8 @@ describe("enrollment dialog state", () => {
       }),
     ).toEqual({
       description:
-        "此 Probe 已绑定到其他 Hub。请先在目标主机运行 sudo enoki-probe uninstall；即使旧 Hub 离线，也可随后重新生成安装命令。",
-      title: "Probe 已绑定到其他 Hub",
+        "此探针已绑定到其他 Hub。请先在目标主机运行 sudo enoki-probe uninstall；即使旧 Hub 离线，也可随后重新生成安装命令。",
+      title: "探针已绑定到其他 Hub",
     });
   });
 
@@ -125,8 +125,8 @@ describe("enrollment dialog state", () => {
         status: "rejected",
       }),
     ).toEqual({
-      description: "Probe 未在等待期限内完成与 Hub 的首次报告。",
-      title: "Probe 未能就绪",
+      description: "探针未在等待期限内完成与 Hub 的首次报告。",
+      title: "探针未能就绪",
     });
   });
 

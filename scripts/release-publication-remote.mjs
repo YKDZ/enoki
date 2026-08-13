@@ -345,6 +345,10 @@ async function verifyHubRuntime({
       "127.0.0.1::3000",
       "--env",
       "OWNER_PASSWORD=enoki-release-smoke-only",
+      "--env",
+      "ENOKI_MANAGEMENT_ORIGIN=http://127.0.0.1:3000",
+      "--env",
+      "ENOKI_PROBE_API_ORIGIN=http://127.0.0.1:3000",
       localImage,
     ]);
     const portOutput = await runCommand("docker", [

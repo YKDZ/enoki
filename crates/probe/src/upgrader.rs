@@ -5655,7 +5655,7 @@ mod tests {
         fs::write(
             &bootstrap_config_path,
             [
-                "hub_url = \"http://hub.example\"".to_string(),
+                "hub_url = \"https://hub.example/base\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
                 String::new(),
@@ -5728,13 +5728,13 @@ mod tests {
     }
 
     #[test]
-    fn internal_probe_upgrader_allows_localhost_http_hub_for_development() {
+    fn internal_probe_upgrader_allows_explicit_non_loopback_http_hub() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         let install_path = temp.path().join("bin/enoki-probe");
         let status_path = temp.path().join("state/probe-operation-status.toml");
         let install_metadata = trusted_install_metadata_for_hub(
-            "http://127.0.0.1:8787/base/",
+            "http://192.0.2.20:8787",
             &install_path,
             &status_path,
             assets_public_key_sha256(),
@@ -5742,7 +5742,7 @@ mod tests {
         fs::write(
             &bootstrap_config_path,
             [
-                "hub_url = \"http://127.0.0.1:8787/base/\"".to_string(),
+                "hub_url = \"http://192.0.2.20:8787\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
                 String::new(),
@@ -5766,11 +5766,11 @@ mod tests {
 
         assert_eq!(
             transport.url,
-            "http://127.0.0.1:8787/base/api/probe/operations/42/token/validate",
+            "http://192.0.2.20:8787/api/probe/operations/42/token/validate",
         );
         assert_eq!(
             transport.downloads,
-            vec!["http://127.0.0.1:8787/base/api/probe/assets/manifest.json"],
+            vec!["http://192.0.2.20:8787/api/probe/assets/manifest.json"],
         );
         assert_eq!(result.error_code.as_deref(), Some("asset_missing"));
     }
@@ -5801,7 +5801,7 @@ mod tests {
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
         let install_metadata = trusted_install_metadata_for_hub(
-            "https://hub.example/base",
+            "https://hub.example",
             &install_path,
             &status_path,
             assets.public_key_sha256.clone(),
@@ -5809,7 +5809,7 @@ mod tests {
         fs::write(
             &bootstrap_config_path,
             [
-                "hub_url = \"https://hub.example/base\"".to_string(),
+                "hub_url = \"https://hub.example\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
                 format!(
@@ -5835,7 +5835,7 @@ mod tests {
         )
         .expect("write bootstrap config");
         let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example/base"),
+            assets: assets.for_hub("https://hub.example"),
             ..RecordingValidationTransport::default()
         };
         let mut systemd = RecordingSystemdRunner::default();
@@ -5885,11 +5885,11 @@ mod tests {
         assert_eq!(
             transport.downloads,
             vec![
-                "https://hub.example/base/api/probe/assets/manifest.json",
-                "https://hub.example/base/api/probe/assets/manifest.json.sig",
-                "https://hub.example/base/api/probe/assets/signing-key.pem",
+                "https://hub.example/api/probe/assets/manifest.json",
+                "https://hub.example/api/probe/assets/manifest.json.sig",
+                "https://hub.example/api/probe/assets/signing-key.pem",
                 &format!(
-                    "https://hub.example/base/api/probe/assets/enoki-probe-{}.tar.gz",
+                    "https://hub.example/api/probe/assets/enoki-probe-{}.tar.gz",
                     host_probe_asset_target().expect("supported test architecture"),
                 ),
             ],

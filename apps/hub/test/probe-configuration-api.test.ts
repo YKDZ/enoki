@@ -62,7 +62,9 @@ async function createEnrollmentToken(
   ownerSession: string,
 ) {
   const response = await app.request("/api/web/enrollments", {
+    body: JSON.stringify({}),
     headers: {
+      "content-type": "application/json",
       cookie: ownerSession,
     },
     method: "POST",

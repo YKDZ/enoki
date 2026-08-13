@@ -61,7 +61,9 @@ function boundedCoordinate(value: number) {
 
 <template>
   <svg
+    aria-hidden="true"
     class="bg-background h-24 w-full border"
+    focusable="false"
     viewBox="0 0 100 72"
     preserveAspectRatio="none"
   >
@@ -82,6 +84,7 @@ function boundedCoordinate(value: number) {
       stroke-linecap="round"
       stroke-linejoin="round"
       stroke-width="1.8"
+      vector-effect="non-scaling-stroke"
     />
   </svg>
 </template>
