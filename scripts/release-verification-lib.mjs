@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   hasAdvancingPortableMetrics,
+  isSupportedReleaseTestHostVirtualization,
   isCandidateHostReady,
 } from "./release-e2e-lib.mjs";
 import { createGitHubActionsMatrix } from "./release-e2e-matrix.mjs";
@@ -40,6 +41,7 @@ export function createMatrixGateResult({
   const evidenceValidationErrors = validateHostScenarioEvidence(
     evidence,
     evidenceOutcome,
+    cellId,
   );
 
   return {
@@ -63,12 +65,13 @@ export function createMatrixGateResult({
   };
 }
 
-function validateHostScenarioEvidence(evidence, outcome) {
+function validateHostScenarioEvidence(evidence, outcome, cellId) {
   if (outcome !== "succeeded") return [];
 
   const errors = [];
   if (evidence?.schemaVersion !== 2) errors.push("invalid schemaVersion");
   if (evidence?.phase !== "succeeded") errors.push("phase was not succeeded");
+  validateReleaseTestHostEvidence(evidence, cellId, errors);
   validateCleanupEvidence(evidence?.cleanup, errors);
   if (evidence?.scenario !== "fresh-install-uninstall") {
     validateUninstallEvidence(evidence?.uninstall, errors);
@@ -138,6 +141,103 @@ function validateHostScenarioEvidence(evidence, outcome) {
     errors.push("unknown Host scenario");
   }
   return [...new Set(errors)];
+}
+
+function validateReleaseTestHostEvidence(evidence, cellId, errors) {
+  if (!evidence?.releaseTestHost) {
+    errors.push("missing Release Test Host platform evidence");
+  }
+  if (!evidence?.infrastructure) {
+    errors.push("missing Release E2E infrastructure evidence");
+  }
+  const expected = /^ubuntu-(22[.]04|24[.]04)-x86_64--[a-z][a-z0-9-]*$/.exec(
+    cellId ?? "",
+  );
+  if (!expected) {
+    errors.push("matrix cell is not a supported Ubuntu x86_64 release gate");
+    return;
+  }
+  const host = evidence?.releaseTestHost;
+  const expectedHostKeys = [
+    "architecture",
+    "deviceView",
+    "journaldSocket",
+    "operatingSystem",
+    "operatingSystemVersion",
+    "pid1",
+    "rootFilesystem",
+    "systemdNotifySocket",
+    "unifiedCgroup",
+    "virtualization",
+  ];
+  if (
+    Object.keys(host ?? {})
+      .sort()
+      .join(",") !== expectedHostKeys.join(",") ||
+    host?.architecture !== "x86_64" ||
+    host?.operatingSystem !== "ubuntu" ||
+    host?.operatingSystemVersion !== expected[1] ||
+    host?.pid1 !== "systemd" ||
+    !isSupportedReleaseTestHostVirtualization(host?.virtualization) ||
+    ![
+      "deviceView",
+      "journaldSocket",
+      "rootFilesystem",
+      "systemdNotifySocket",
+      "unifiedCgroup",
+    ].every((primitive) => host?.[primitive] === true)
+  ) {
+    errors.push(
+      "Release Test Host platform evidence does not match the matrix cell",
+    );
+  }
+  const infrastructure = evidence?.infrastructure;
+  const validInfrastructure = [
+    {
+      artifactAccess: "github-actions",
+      connection: "local",
+      kind: "ci",
+      matrixCellId: cellId,
+      provisioning: "github-hosted-runner",
+    },
+    {
+      artifactAccess: "filesystem",
+      connection: "ssh",
+      kind: "ssh",
+      matrixCellId: cellId,
+      provisioning: "existing-disposable-host",
+    },
+  ].some((expectedInfrastructure) =>
+    hasExactEvidenceFields(infrastructure, expectedInfrastructure),
+  );
+  if (!validInfrastructure) {
+    errors.push(
+      "Release E2E infrastructure evidence does not match the matrix cell",
+    );
+  }
+}
+
+function hasExactEvidenceFields(record, expected) {
+  if (
+    record == null ||
+    typeof record !== "object" ||
+    Array.isArray(record) ||
+    !sameKeySet(record, expected)
+  ) {
+    return false;
+  }
+  return Object.entries(expected).every(
+    ([key, value]) => record[key] === value,
+  );
+}
+
+function sameKeySet(actual, expected) {
+  const actualKeys = Object.keys(actual).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  return (
+    actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key, index) => key === expectedKeys[index])
+  );
 }
 
 function validateFreshEvidence(evidence, errors) {

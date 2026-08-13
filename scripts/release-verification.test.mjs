@@ -570,6 +570,34 @@ describe("verify-only release workflow", () => {
   });
 
   it.each([
+    ["releaseTestHost", "missing Release Test Host platform evidence"],
+    ["infrastructure", "missing Release E2E infrastructure evidence"],
+  ])(
+    "fails closed when a succeeded Host scenario lacks %s evidence",
+    (field, error) => {
+      const candidate = releaseCandidateManifest().candidate;
+      const evidence = successfulHostEvidence(
+        "fresh-install-uninstall",
+        candidate,
+      );
+      delete evidence[field];
+
+      const gate = createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+      expect(gate.outcome).toBe("failed");
+      expect(gate.evidenceValidationErrors).toContain(error);
+    },
+  );
+
+  it.each([
     ["fresh-install-uninstall", "hostBoundary"],
     ["baseline-upgrade-uninstall", "upgradeOperationTimeline"],
     ["post-replacement-repair-uninstall", "boundaryEvidenceValidation"],
@@ -835,13 +863,171 @@ describe("verify-only release workflow", () => {
       artifactName: `release-e2e-ubuntu-24.04-x86_64--${scenario}-1`,
       candidate,
       cellId: `ubuntu-24.04-x86_64--${scenario}`,
-      evidence: successfulHostEvidence(scenario, candidate),
+      evidence: successfulHostEvidence(scenario, candidate, {
+        operatingSystemVersion: "24.04",
+      }),
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
     });
 
     expect(gate.evidenceValidationErrors).toEqual([]);
     expect(gate.outcome).toBe("succeeded");
+  });
+
+  it("fails closed when recorded Host platform or CI infrastructure does not belong to the matrix cell", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    evidence.releaseTestHost.operatingSystemVersion = "24.04";
+    evidence.infrastructure.matrixCellId =
+      "ubuntu-24.04-x86_64--fresh-install-uninstall";
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.outcome).toBe("failed");
+    expect(gate.evidenceValidationErrors).toEqual(
+      expect.arrayContaining([
+        "Release Test Host platform evidence does not match the matrix cell",
+        "Release E2E infrastructure evidence does not match the matrix cell",
+      ]),
+    );
+  });
+
+  it("accepts local SSH Host infrastructure bound to the exact matrix cell", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+      {
+        infrastructureKind: "ssh",
+      },
+    );
+    evidence.releaseTestHost.virtualization = "vmware";
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-ssh",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.evidenceValidationErrors).toEqual([]);
+    expect(gate.outcome).toBe("succeeded");
+  });
+
+  it.each(["ci", "ssh"])(
+    "accepts %s Host infrastructure with the exact fields in a different JSON key order",
+    (infrastructureKind) => {
+      const candidate = releaseCandidateManifest().candidate;
+      const evidence = successfulHostEvidence(
+        "fresh-install-uninstall",
+        candidate,
+        { infrastructureKind },
+      );
+      const infrastructure = evidence.infrastructure;
+      evidence.infrastructure = {
+        provisioning: infrastructure.provisioning,
+        matrixCellId: infrastructure.matrixCellId,
+        kind: infrastructure.kind,
+        connection: infrastructure.connection,
+        artifactAccess: infrastructure.artifactAccess,
+      };
+
+      const gate = createMatrixGateResult({
+        artifactName: `release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-${infrastructureKind}`,
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+      expect(gate.evidenceValidationErrors).toEqual([]);
+      expect(gate.outcome).toBe("succeeded");
+    },
+  );
+
+  it.each([
+    [
+      "a missing field",
+      (infrastructure) => delete infrastructure.artifactAccess,
+    ],
+    [
+      "an unexpected field",
+      (infrastructure) => (infrastructure.untrusted = true),
+    ],
+    [
+      "a mixed CI/SSH adapter",
+      (infrastructure) => (infrastructure.connection = "ssh"),
+    ],
+    [
+      "a different matrix cell",
+      (infrastructure) =>
+        (infrastructure.matrixCellId =
+          "ubuntu-24.04-x86_64--fresh-install-uninstall"),
+    ],
+  ])(
+    "fails closed when CI infrastructure has %s",
+    (_description, mutateInfrastructure) => {
+      const candidate = releaseCandidateManifest().candidate;
+      const evidence = successfulHostEvidence(
+        "fresh-install-uninstall",
+        candidate,
+      );
+      mutateInfrastructure(evidence.infrastructure);
+
+      const gate = createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+      expect(gate.evidenceValidationErrors).toContain(
+        "Release E2E infrastructure evidence does not match the matrix cell",
+      );
+      expect(gate.outcome).toBe("failed");
+    },
+  );
+
+  it("rejects unsupported Host virtualization in otherwise matching matrix evidence", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    evidence.releaseTestHost.virtualization = "docker";
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.outcome).toBe("failed");
+    expect(gate.evidenceValidationErrors).toContain(
+      "Release Test Host platform evidence does not match the matrix cell",
+    );
   });
 
   it("accepts a confirmed insufficient-privilege Upgrade followed by Installer Recovery", () => {
@@ -1062,14 +1248,48 @@ function releaseArtifactIndex(hostGates, uiGate) {
   );
 }
 
-function successfulHostEvidence(scenario, candidate) {
+function successfulHostEvidence(
+  scenario,
+  candidate,
+  { infrastructureKind = "ci", operatingSystemVersion = "22.04" } = {},
+) {
+  const matrixCellId = `ubuntu-${operatingSystemVersion}-x86_64--${scenario}`;
+  const infrastructure =
+    infrastructureKind === "ssh"
+      ? {
+          artifactAccess: "filesystem",
+          connection: "ssh",
+          kind: "ssh",
+          matrixCellId,
+          provisioning: "existing-disposable-host",
+        }
+      : {
+          artifactAccess: "github-actions",
+          connection: "local",
+          kind: "ci",
+          matrixCellId,
+          provisioning: "github-hosted-runner",
+        };
   const common = {
     candidate,
     cleanup: {
       environment: { clean: true },
       host: { clean: true },
     },
+    infrastructure,
     phase: "succeeded",
+    releaseTestHost: {
+      architecture: "x86_64",
+      deviceView: true,
+      journaldSocket: true,
+      operatingSystem: "ubuntu",
+      operatingSystemVersion,
+      pid1: "systemd",
+      rootFilesystem: true,
+      systemdNotifySocket: true,
+      unifiedCgroup: true,
+      virtualization: "kvm",
+    },
     result: { status: "succeeded" },
     scenario,
     schemaVersion: 2,

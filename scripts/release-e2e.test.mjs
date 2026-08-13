@@ -356,9 +356,14 @@ describe("Probe Host Harness", () => {
         expect(command).toContain("systemd-detect-virt --vm");
         return successfulCommand({
           architecture: "x86_64",
+          deviceView: true,
+          journaldSocket: true,
           operatingSystem: "ubuntu",
           operatingSystemVersion: "22.04",
           pid1: "systemd",
+          rootFilesystem: true,
+          systemdNotifySocket: true,
+          unifiedCgroup: true,
           virtualization: "kvm",
         });
       },
@@ -414,6 +419,41 @@ describe("Probe Host Harness", () => {
       }),
     ).rejects.toThrow(/must be a supported VM.*none/i);
   });
+
+  it.each([
+    "deviceView",
+    "journaldSocket",
+    "rootFilesystem",
+    "systemdNotifySocket",
+    "unifiedCgroup",
+  ])(
+    "rejects a VM missing the required %s host primitive",
+    async (primitive) => {
+      const harness = createProbeHostHarness({
+        execute: async () =>
+          successfulCommand({
+            architecture: "x86_64",
+            deviceView: primitive !== "deviceView",
+            journaldSocket: primitive !== "journaldSocket",
+            operatingSystem: "ubuntu",
+            operatingSystemVersion: "24.04",
+            pid1: "systemd",
+            rootFilesystem: primitive !== "rootFilesystem",
+            systemdNotifySocket: primitive !== "systemdNotifySocket",
+            unifiedCgroup: primitive !== "unifiedCgroup",
+            virtualization: "kvm",
+          }),
+      });
+
+      await expect(
+        harness.assertReleaseTestHost({
+          architecture: "x86_64",
+          operatingSystem: "ubuntu",
+          operatingSystemVersion: "24.04",
+        }),
+      ).rejects.toThrow(new RegExp(`host primitive.*${primitive}`, "i"));
+    },
+  );
 
   it("claims an empty Host atomically and refuses an existing root claim", async () => {
     const commands = [];

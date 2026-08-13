@@ -90,6 +90,10 @@ const supportedReleaseTestHostVmTypes = new Set([
   "zvm",
 ]);
 
+export function isSupportedReleaseTestHostVirtualization(value) {
+  return supportedReleaseTestHostVmTypes.has(value);
+}
+
 export const releaseE2EScenarioRegistry = Object.freeze({
   "baseline-upgrade-uninstall": runBaselineUpgradeUninstallScenario,
   "fresh-install-uninstall": runFreshInstallUninstallScenario,
@@ -2624,10 +2628,23 @@ export function createProbeHostHarness({
           `Release Test Host must use host systemd as PID 1, found ${actual.pid1 ?? "unknown"}`,
         );
       }
-      if (!supportedReleaseTestHostVmTypes.has(actual.virtualization)) {
+      if (!isSupportedReleaseTestHostVirtualization(actual.virtualization)) {
         throw new Error(
           `Release Test Host must be a supported VM, found ${actual.virtualization ?? "unknown"}`,
         );
+      }
+      for (const primitive of [
+        "deviceView",
+        "journaldSocket",
+        "rootFilesystem",
+        "systemdNotifySocket",
+        "unifiedCgroup",
+      ]) {
+        if (actual[primitive] !== true) {
+          throw new Error(
+            `Release Test Host required host primitive ${primitive} is unavailable`,
+          );
+        }
       }
       return actual;
     },
@@ -3380,8 +3397,20 @@ case "$(uname -m)" in
 esac
 pid1="$(cat /proc/1/comm)"
 virtualization="$(systemd-detect-virt --vm 2>/dev/null || printf none)"
-printf '{"architecture":"%s","operatingSystem":"%s","operatingSystemVersion":"%s","pid1":"%s","virtualization":"%s"}\n' \
-  "$architecture" "$(printf '%s' "$ID" | tr '[:upper:]' '[:lower:]')" "$VERSION_ID" "$pid1" "$virtualization"`;
+json_bool() { if "$@" >/dev/null 2>&1; then printf true; else printf false; fi; }
+printf '{"architecture":"%s","deviceView":' \
+  "$architecture"
+json_bool test -c /dev/null
+printf ',"journaldSocket":'
+json_bool test -S /run/systemd/journal/socket
+printf ',"operatingSystem":"%s","operatingSystemVersion":"%s","pid1":"%s","rootFilesystem":' \
+  "$(printf '%s' "$ID" | tr '[:upper:]' '[:lower:]')" "$VERSION_ID" "$pid1"
+json_bool sh -c 'test -d /etc && test -d /var/lib && test -w /tmp'
+printf ',"systemdNotifySocket":'
+json_bool test -S /run/systemd/notify
+printf ',"unifiedCgroup":'
+json_bool test -f /sys/fs/cgroup/cgroup.controllers
+printf ',"virtualization":"%s"}\n' "$virtualization"`;
 }
 
 function hostInventoryScript() {
