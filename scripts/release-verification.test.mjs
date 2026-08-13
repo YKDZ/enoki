@@ -16,6 +16,28 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+function workflowJob(workflow, name) {
+  const heading = `  ${name}:`;
+  const start = workflow.indexOf(heading);
+  if (start < 0) {
+    throw new Error(`workflow job ${name} is missing`);
+  }
+  const remaining = workflow.slice(start + heading.length);
+  const nextJob = remaining.search(/\n  [a-z][a-z0-9-]*:/);
+  return remaining.slice(0, nextJob < 0 ? undefined : nextJob);
+}
+
+function actionSteps(job, action) {
+  return job
+    .split(/^      - /m)
+    .slice(1)
+    .filter((step) => step.match(new RegExp(`^        uses: ${action}$`, "m")));
+}
+
+function actionInput(step, input) {
+  return step.match(new RegExp(`^          ${input}: (.+)$`, "m"))?.[1];
+}
+
 describe("verify-only release workflow", () => {
   it("qualifies the captured protected main revision without receiving a publication mode", async () => {
     const [entrypoint, candidateWorkflow] = await Promise.all([
@@ -58,19 +80,24 @@ describe("verify-only release workflow", () => {
     );
   });
 
-  it("keeps every private artifact handoff run-scoped and resumable across failed-job attempts", async () => {
-    const [candidateWorkflow, probeWorkflow, publicationWorkflow] =
-      await Promise.all([
-        readFile(
-          ".github/workflows/reusable-build-release-candidate.yml",
-          "utf8",
-        ),
-        readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
-        readFile(
-          ".github/workflows/reusable-publish-release-candidate.yml",
-          "utf8",
-        ),
-      ]);
+  it("keeps private artifact handoffs run-scoped and binds Probe consumers to their producer namespaces", async () => {
+    const [
+      candidateWorkflow,
+      probeWorkflow,
+      bootstrapWorkflow,
+      publicationWorkflow,
+    ] = await Promise.all([
+      readFile(
+        ".github/workflows/reusable-build-release-candidate.yml",
+        "utf8",
+      ),
+      readFile(".github/workflows/reusable-build-probe.yml", "utf8"),
+      readFile(".github/workflows/reusable-build-probe-bootstrap.yml", "utf8"),
+      readFile(
+        ".github/workflows/reusable-publish-release-candidate.yml",
+        "utf8",
+      ),
+    ]);
     const run = "${{ github.run_id }}";
 
     expect(probeWorkflow).toContain(
@@ -89,41 +116,71 @@ describe("verify-only release workflow", () => {
     );
     const bootstrapProbeArtifacts = artifactNames(
       "enoki-probe-bootstrap",
-      targetNames(
-        await readFile(
-          ".github/workflows/reusable-build-probe-bootstrap.yml",
-          "utf8",
-        ),
+      targetNames(bootstrapWorkflow),
+    );
+    const ordinaryDownloads = actionSteps(
+      workflowJob(candidateWorkflow, "prepare-unsigned-probe-assets"),
+      "actions/download-artifact@v8",
+    );
+    const bootstrapDownloads = actionSteps(
+      workflowJob(candidateWorkflow, "assemble-candidate"),
+      "actions/download-artifact@v8",
+    ).filter((step) =>
+      actionInput(step, "path")?.startsWith(
+        "candidate-inputs/probe-bootstrap-inputs",
       ),
     );
-    const unsignedPreparation = candidateWorkflow.slice(
-      candidateWorkflow.indexOf("  prepare-unsigned-probe-assets:"),
-      candidateWorkflow.indexOf("  sign-probe-assets:"),
+    const ordinaryUpload = actionSteps(
+      workflowJob(probeWorkflow, "build-probe"),
+      "actions/upload-artifact@v7",
     );
-    const selectedProbeArtifacts = [
-      ...unsignedPreparation.matchAll(
-        /^\s+name: (enoki-probe-[a-z0-9_-]+-\$\{\{ github\.run_id \}\})$/gm,
-      ),
-    ].map(([, name]) => name);
-    const candidateAssembly = candidateWorkflow.slice(
-      candidateWorkflow.indexOf("  assemble-candidate:"),
-      candidateWorkflow.indexOf("  prepare-release-e2e-matrix:"),
+    const bootstrapUpload = actionSteps(
+      workflowJob(bootstrapWorkflow, "build-probe-bootstrap"),
+      "actions/upload-artifact@v7",
     );
-    const selectedBootstrapArtifacts = [
-      ...candidateAssembly.matchAll(
-        /^\s+name: (enoki-probe-bootstrap-[a-z0-9_-]+-\$\{\{ github\.run_id \}\})$/gm,
-      ),
-    ].map(([, name]) => name);
 
     expect(ordinaryProbeArtifacts).toHaveLength(4);
     expect(bootstrapProbeArtifacts).toHaveLength(4);
-    expect(selectedProbeArtifacts).toEqual(ordinaryProbeArtifacts);
+    expect(ordinaryUpload).toHaveLength(1);
+    expect(actionInput(ordinaryUpload[0], "name")).toBe(
+      `enoki-probe-${"${{ matrix.target }}"}-${run}`,
+    );
+    expect(bootstrapUpload).toHaveLength(1);
+    expect(actionInput(bootstrapUpload[0], "name")).toBe(
+      `enoki-probe-bootstrap-${"${{ matrix.target }}"}-${run}`,
+    );
+    expect(ordinaryDownloads).toHaveLength(4);
+    expect(ordinaryDownloads.map((step) => actionInput(step, "name"))).toEqual(
+      ordinaryProbeArtifacts,
+    );
+    expect(ordinaryDownloads.map((step) => actionInput(step, "path"))).toEqual(
+      Array(4).fill("probe-builds"),
+    );
+    for (const step of ordinaryDownloads) {
+      expect(step).not.toMatch(/^          pattern:/m);
+      expect(step).not.toMatch(/^          merge-multiple:/m);
+    }
     expect(
-      selectedProbeArtifacts.filter((name) =>
-        bootstrapProbeArtifacts.includes(name),
-      ),
+      ordinaryDownloads
+        .map((step) => actionInput(step, "name"))
+        .filter((name) => bootstrapProbeArtifacts.includes(name)),
     ).toEqual([]);
-    expect(selectedBootstrapArtifacts).toEqual(bootstrapProbeArtifacts);
+    expect(bootstrapDownloads).toHaveLength(4);
+    expect(bootstrapDownloads.map((step) => actionInput(step, "name"))).toEqual(
+      bootstrapProbeArtifacts,
+    );
+    expect(bootstrapDownloads.map((step) => actionInput(step, "path"))).toEqual(
+      Array(4).fill("candidate-inputs/probe-bootstrap-inputs"),
+    );
+    for (const step of bootstrapDownloads) {
+      expect(step).not.toMatch(/^          pattern:/m);
+      expect(step).not.toMatch(/^          merge-multiple:/m);
+    }
+    expect(
+      bootstrapDownloads
+        .map((step) => actionInput(step, "name"))
+        .filter((name) => ordinaryProbeArtifacts.includes(name)),
+    ).toEqual([]);
     for (const name of [
       "candidate-release-baseline",
       "candidate-unsigned-probe-assets",
