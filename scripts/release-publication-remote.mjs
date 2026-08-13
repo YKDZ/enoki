@@ -292,9 +292,6 @@ async function verifyPublicCandidate({
             `Hub serves Probe ${runtimeEvidence.embeddedProbeVersion}, expected ${candidateManifest.hub.embeddedProbeVersion}`,
           );
         }
-        if (!runtimeEvidence.installerUsesHubAssets) {
-          throw new Error("Hub installer does not use Hub-served Probe assets");
-        }
       },
     );
   } finally {
@@ -361,24 +358,16 @@ async function verifyHubRuntime({
     if (!port) throw new Error("could not resolve Hub smoke port");
     const baseUrl = new URL(`http://127.0.0.1:${port}`);
     await waitForHubHealth(baseUrl, { fetchImpl, sleep });
-    const [manifestResponse, installerResponse] = await Promise.all([
-      fetchImpl(new URL("/api/probe/assets/manifest.json", baseUrl), {
-        credentials: "omit",
-      }),
-      fetchImpl(new URL("/api/probe/install.sh", baseUrl), {
-        credentials: "omit",
-      }),
-    ]);
-    if (!manifestResponse.ok || !installerResponse.ok) {
+    const manifestResponse = await fetchImpl(
+      new URL("/api/probe/assets/manifest.json", baseUrl),
+      { credentials: "omit" },
+    );
+    if (!manifestResponse.ok) {
       throw new Error("Hub did not serve its embedded Probe Asset Set");
     }
     const manifest = await manifestResponse.json();
-    const installer = await installerResponse.text();
     return {
       embeddedProbeVersion: manifest.version,
-      installerUsesHubAssets:
-        installer.includes("/api/probe/assets/manifest.json") &&
-        !installer.includes("releases/latest/download"),
     };
   } finally {
     try {

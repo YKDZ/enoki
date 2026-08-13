@@ -39,14 +39,14 @@ test("the browser sends the Owner cookie only within the management API namespac
     managementCookie = (await route.request().allHeaders()).cookie;
     await route.continue();
   });
-  await page.route("**/api/probe/install.sh", async (route) => {
+  await page.route("**/api/probe/assets/manifest.json", async (route) => {
     probeCookie = (await route.request().allHeaders()).cookie;
     await route.continue();
   });
 
   await page.evaluate(async () => {
     await fetch("/api/web/auth/session");
-    await fetch("/api/probe/install.sh");
+    await fetch("/api/probe/assets/manifest.json");
   });
 
   expect(managementCookie).toContain("enoki_owner_session=");

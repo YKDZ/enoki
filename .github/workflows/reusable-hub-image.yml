@@ -72,9 +72,12 @@ jobs:
 
       - name: Verify signed Probe Asset Set
         if: inputs.probe-assets-artifact-name != ''
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node source/scripts/release-candidate.mjs
           validate-probe-assets source/probe-assets
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Build the standard CI Hub image
         if: ${{ !inputs.package-artifact }}
@@ -92,6 +95,7 @@ jobs:
         if: inputs.package-artifact
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           SOURCE_DATE_EPOCH: "0"
         run: |
           mkdir -p hub-reproducibility-first hub-reproducibility-second
@@ -119,6 +123,7 @@ jobs:
           --first "hub-reproducibility-first/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
           --second "hub-reproducibility-second/enoki-hub-${CANDIDATE_VERSION}.oci.tar"
           --probe-assets source/probe-assets
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Upload Hub OCI archive
         if: inputs.package-artifact

@@ -33,10 +33,8 @@ FROM installer AS builder
 
 COPY --from=prepare /repo/out/full/ ./
 COPY --from=prepare /repo/tsconfig.base.json ./tsconfig.base.json
-COPY --from=prepare /repo/scripts/install-probe.sh /app/default-install-probe.sh
 COPY --from=prepare /repo/probe-assets/ /app/probe-assets/
-RUN mkdir -p /app/probe-assets && \
-  if [ ! -f /app/probe-assets/install-probe.sh ]; then cp /app/default-install-probe.sh /app/probe-assets/install-probe.sh; fi
+RUN mkdir -p /app/probe-assets
 
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \

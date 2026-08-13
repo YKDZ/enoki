@@ -193,6 +193,10 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
             "install_path = \"/usr/local/bin/enoki-probe\"",
             "service_name = \"enoki-probe\"",
             "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "probe_distribution_root_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
             "upgrader_launch = \"systemd\"",
             "log_level = \"debug\"",
             "",
@@ -243,6 +247,19 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
         "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
     ));
     assert!(bootstrap_config.contains("upgrader_launch = \"systemd\""));
+    assert!(bootstrap_config.contains(
+        "probe_distribution_root_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+    ));
+    assert!(
+        bootstrap_config
+            .contains("bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"")
+    );
+    assert!(
+        bootstrap_config.contains(
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\""
+        )
+    );
+    assert!(bootstrap_config.contains("bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\""));
     assert!(bootstrap_config.contains("log_level = \"debug\""));
     assert!(!bootstrap_config.contains("enrollment_token"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));

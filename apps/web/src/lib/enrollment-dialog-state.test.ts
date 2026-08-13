@@ -17,7 +17,6 @@ const existingEnrollment: EnrollmentResponse = {
   hostId: null,
   hubUrl: "https://hub.example",
   installCommand: "curl old",
-  installPath: "/usr/local/bin/enoki-probe",
   readyAtMs: null,
   rejectedAtMs: null,
   rejection: null,

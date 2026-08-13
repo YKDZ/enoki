@@ -40,7 +40,7 @@ try {
     "--hub-image",
     "--output",
     "--registry-token-env",
-    "--trusted-probe-public-key-env",
+    "--trusted-root-public-key-env",
     "--bundle",
   ]);
   const githubRepository = requiredOption(options, "--github-repository");
@@ -53,9 +53,9 @@ try {
       ? process.env[githubTokenEnvironment]
       : undefined,
   });
-  const trustedProbePublicKeyPem = requiredEnvironmentOption(
+  const trustedRootPublicKeyPem = requiredEnvironmentOption(
     options,
-    "--trusted-probe-public-key-env",
+    "--trusted-root-public-key-env",
   );
   if (command === "recheck") {
     const descriptor = await recheckReleaseBaseline({
@@ -63,7 +63,7 @@ try {
       candidateVersion: requiredOption(options, "--candidate-version"),
       githubRepository,
       releaseCatalog: githubClient,
-      trustedProbePublicKeyPem,
+      trustedRootPublicKeyPem,
     });
     process.stdout.write(
       `Release Baseline still matches published state: ${descriptor.tag ?? descriptor.kind}\n`,
@@ -82,7 +82,7 @@ try {
         : undefined,
     }),
     releaseCatalog: githubClient,
-    trustedProbePublicKeyPem,
+    trustedRootPublicKeyPem,
   });
   process.stdout.write(
     `resolved Release Baseline: ${descriptor.tag ?? descriptor.kind}\n`,

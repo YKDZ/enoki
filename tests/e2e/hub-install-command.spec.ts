@@ -1,7 +1,5 @@
 import { type BrowserContext, type Page } from "@playwright/test";
 
-import { expect, test } from "./security-console";
-
 import {
   closeFakeLiveWebSocket,
   fakeLiveSocketGeneration,
@@ -10,6 +8,7 @@ import {
   openFakeLiveWebSocket,
 } from "./fake-live-websocket";
 import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
+import { expect, test } from "./security-console";
 
 const { hubUrl, ownerPassword } = releaseUiBrowserRuntime();
 
@@ -35,7 +34,6 @@ type BrowserEnrollmentResponse = BrowserEnrollmentStatus & {
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
-  installPath: string;
 };
 
 type BrowserHost = {
@@ -61,7 +59,7 @@ type BrowserScrollCall = {
   block?: ScrollLogicalPosition;
 };
 
-test("owner can generate a Hub-served probe install command", async ({
+test("owner can generate a two-role probe activation command", async ({
   context,
   page,
 }) => {
@@ -78,9 +76,13 @@ test("owner can generate a Hub-served probe install command", async ({
 
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
-  await expect(command).toHaveValue(/\/api\/probe\/install\.sh/);
+  await expect(command).toHaveValue(
+    /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
+  );
   expect(await command.inputValue()).toContain(`ENOKI_HUB_URL='${hubUrl}'`);
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  await expect(command).not.toHaveValue(/sudo env/);
+  await expect(command).not.toHaveValue(/curl/);
   await expect(command).not.toHaveValue(/github\.com/);
 
   await command.press("Control+A");
@@ -138,7 +140,6 @@ test("an expired Enrollment closes the matching dialog through its status API", 
         hostId: null,
         hubUrl,
         installCommand: "curl expired-command",
-        installPath: "/usr/local/bin/enoki-probe",
         readyAtMs: null,
         rejectedAtMs: null,
         rejection: null,
@@ -769,7 +770,6 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     hostId: null,
     hubUrl,
     installCommand: "curl ready-command",
-    installPath: "/usr/local/bin/enoki-probe",
     readyAtMs: null,
     rejectedAtMs: null,
     rejection: null,

@@ -294,10 +294,10 @@ export async function resolveReleaseBaseline({
   outputDir,
   registry,
   releaseCatalog,
-  trustedProbePublicKeyPem,
+  trustedRootPublicKeyPem,
 }) {
-  const trustedPublicKey = canonicalTrustedProbePublicKey(
-    trustedProbePublicKeyPem,
+  const trustedRootPublicKey = canonicalTrustedProbePublicKey(
+    trustedRootPublicKeyPem,
   );
   const releases = await releaseCatalog.listReleases();
   const catalogSnapshot = createReleaseCatalogSnapshot(releases);
@@ -334,17 +334,10 @@ export async function resolveReleaseBaseline({
       await writeFile(path.join(probeAssetDir, name), bytes);
     }
 
-    const publishedPublicKey = await readFile(
-      path.join(probeAssetDir, "signing-key.pem"),
-    );
-    if (!publishedPublicKey.equals(trustedPublicKey)) {
-      throw new Error(
-        "Release Baseline signing-key.pem does not match the canonical production Probe public key",
-      );
-    }
     const inspectedProbe = await inspectProbeAssetSet(probeAssetDir, {
       expectedVersion: selected.tagName.slice(1),
       requireEmbeddedProbeIdentity: false,
+      trustedRootPublicKeyPem: trustedRootPublicKey,
     });
 
     const resolvedHub = await registry.downloadImage({
@@ -371,9 +364,6 @@ export async function resolveReleaseBaseline({
       );
     }
 
-    const installer = inspectedProbe.files.find(
-      ({ file }) => file === "install-probe.sh",
-    );
     const descriptor = {
       catalogSnapshot,
       githubRelease: {
@@ -396,14 +386,13 @@ export async function resolveReleaseBaseline({
         sourceManifestSize: resolvedHub.sourceManifest.bytes.byteLength,
         size: (await stat(hubArchivePath)).size,
       },
-      installer,
       kind: "enoki-release-baseline",
       probeAssetSet: {
         directory: "probe-assets",
         files: inspectedProbe.files,
         signingIdentity: inspectedProbe.signingIdentity,
         trustRoot: {
-          publicKeySha256: sha256(trustedPublicKey),
+          publicKeySha256: sha256(trustedRootPublicKey),
         },
         version: inspectedProbe.version,
       },
@@ -415,7 +404,7 @@ export async function resolveReleaseBaseline({
       `${JSON.stringify(descriptor, null, 2)}\n`,
     );
     await validateReleaseBaselineBundle(stagingDir, {
-      trustedProbePublicKeyPem: trustedPublicKey.toString("utf8"),
+      trustedRootPublicKeyPem: trustedRootPublicKey.toString("utf8"),
     });
     await rename(stagingDir, outputDir);
     return descriptor;
@@ -430,10 +419,10 @@ export async function recheckReleaseBaseline({
   candidateVersion,
   githubRepository,
   releaseCatalog,
-  trustedProbePublicKeyPem,
+  trustedRootPublicKeyPem,
 }) {
   const descriptor = await validateResolvedReleaseBaseline(bundleDir, {
-    trustedProbePublicKeyPem,
+    trustedRootPublicKeyPem,
   });
   const releases = await releaseCatalog.listReleases();
   const freshSnapshot = createReleaseCatalogSnapshot(releases);
@@ -482,7 +471,7 @@ export async function validateResolvedReleaseBaseline(bundleDir, options = {}) {
 
 export async function validateReleaseBaselineBundle(
   bundleDir,
-  { trustedProbePublicKeyPem } = {},
+  { trustedRootPublicKeyPem } = {},
 ) {
   assertSameFileNames(
     (await readdir(bundleDir)).sort(),
@@ -503,7 +492,6 @@ export async function validateReleaseBaselineBundle(
     "catalogSnapshot",
     "githubRelease",
     "hub",
-    "installer",
     "kind",
     "probeAssetSet",
     "schemaVersion",
@@ -572,17 +560,17 @@ export async function validateReleaseBaselineBundle(
   if (!/^[0-9a-f]{64}$/.test(probe.trustRoot.publicKeySha256 ?? "")) {
     throw new Error("Release Baseline Probe trust root is invalid");
   }
-  const publishedPublicKey = await readFile(
-    path.join(bundleDir, "probe-assets", "signing-key.pem"),
+  const publishedRootPublicKey = await readFile(
+    path.join(bundleDir, "probe-assets", "root-key.pem"),
   );
-  if (sha256(publishedPublicKey) !== probe.trustRoot.publicKeySha256) {
+  if (sha256(publishedRootPublicKey) !== probe.trustRoot.publicKeySha256) {
     throw new Error("Release Baseline Probe trust root does not match content");
   }
-  if (trustedProbePublicKeyPem !== undefined) {
-    const trusted = canonicalTrustedProbePublicKey(trustedProbePublicKeyPem);
-    if (!publishedPublicKey.equals(trusted)) {
+  if (trustedRootPublicKeyPem !== undefined) {
+    const trusted = canonicalTrustedProbePublicKey(trustedRootPublicKeyPem);
+    if (!publishedRootPublicKey.equals(trusted)) {
       throw new Error(
-        "Release Baseline signing-key.pem does not match the canonical production Probe public key",
+        "Release Baseline root-key.pem does not match the external Probe Distribution Trust Root",
       );
     }
   }
@@ -591,24 +579,15 @@ export async function validateReleaseBaselineBundle(
     {
       expectedVersion: probe.version,
       requireEmbeddedProbeIdentity: false,
+      trustedRootPublicKeyPem,
     },
   );
   if (
     !objectsEqual(inspectedProbe.files, probe.files) ||
-    !objectsEqual(inspectedProbe.signingIdentity, probe.signingIdentity) ||
-    inspectedProbe.signingIdentity.publicKeySha256 !==
-      probe.trustRoot.publicKeySha256
+    !objectsEqual(inspectedProbe.signingIdentity, probe.signingIdentity)
   ) {
     throw new Error(
       "Release Baseline Probe Asset Set descriptor does not match content",
-    );
-  }
-  const expectedInstaller = inspectedProbe.files.find(
-    ({ file }) => file === "install-probe.sh",
-  );
-  if (!objectsEqual(descriptor.installer, expectedInstaller)) {
-    throw new Error(
-      "Release Baseline installer descriptor does not match content",
     );
   }
 
@@ -886,10 +865,12 @@ function expectedProbeAssetNames() {
       const archive = `enoki-probe-${target}.tar.gz`;
       return [archive, `${archive}.sha256`];
     }),
-    "install-probe.sh",
     "manifest.json",
     "manifest.json.sig",
+    "root-key.pem",
     "signing-key.pem",
+    "trust-delegation.json",
+    "trust-delegation.json.sig",
   ].sort();
 }
 

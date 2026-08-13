@@ -57,27 +57,23 @@ describe("Probe-only API surface", () => {
     database.close();
   });
 
-  it("serves Probe installer assets from the probe-only API surface", async () => {
+  it("serves bounded Probe assets but no legacy installer from the probe-only API surface", async () => {
     const database = await createTemporaryDatabase();
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-probe-assets-"));
     tempRoots.push(root);
     const assetDir = path.join(root, "assets");
-    const installScriptPath = path.join(assetDir, "install-probe.sh");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(installScriptPath, "#!/usr/bin/env bash\necho install\n");
     await writeFile(path.join(assetDir, "manifest.json"), '{"assets":[]}');
 
     const app = createProbeApiApp({
       database,
       probeAssets: {
         assetDir,
-        installScriptPath,
       },
     });
 
     const installResponse = await app.request("/api/probe/install.sh");
-    expect(installResponse.status).toBe(200);
-    await expect(installResponse.text()).resolves.toContain("echo install");
+    expect(installResponse.status).toBe(404);
 
     const manifestResponse = await app.request(
       "/api/probe/assets/manifest.json",

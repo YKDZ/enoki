@@ -22,6 +22,6 @@ defineEmits<{
     @click.stop="$emit('createExistingHostEnrollment', host.id)"
     @keydown.stop
   >
-    重新注册 Probe
+    重新注册探针
   </Button>
 </template>

@@ -62,6 +62,6 @@ describe("Host list ready reveal", () => {
       }),
     );
 
-    expect(html.match(/重新注册 Probe/g)).toHaveLength(1);
+    expect(html.match(/重新注册探针/g)).toHaveLength(1);
   });
 });

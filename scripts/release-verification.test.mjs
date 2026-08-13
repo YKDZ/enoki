@@ -175,6 +175,18 @@ describe("verify-only release workflow", () => {
       expect(finalizer).toContain(dependency);
     }
     expect(finalizer).toContain("component-results.json");
+    const summaryStep = finalizer.slice(
+      finalizer.indexOf(
+        "Generate the authoritative candidate verification summary",
+      ),
+      finalizer.indexOf("Publish the summary to the workflow run"),
+    );
+    expect(summaryStep).toContain(
+      "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}",
+    );
+    expect(summaryStep).toContain(
+      "--root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM",
+    );
     expect(finalizer).toContain("--requested-commit");
     expect(finalizer).toContain("--requested-version");
     expect(finalizer).not.toContain("--requested-mode");
@@ -399,44 +411,55 @@ describe("verify-only release workflow", () => {
     );
 
     try {
-      await execFileAsync(process.execPath, [
-        "scripts/release-verification.mjs",
-        "summarize",
-        "--candidate-dir",
-        path.join(workDir, "missing-candidate"),
-        "--release-baseline-dir",
-        path.join(workDir, "missing-baseline"),
-        "--probe-assets-dir",
-        path.join(workDir, "missing-probe-assets"),
-        "--hub-oci-dir",
-        path.join(workDir, "missing-hub-oci"),
-        "--matrix",
-        "scripts/release-e2e-matrix.json",
-        "--matrix-evidence-root",
-        path.join(workDir, "missing-host-evidence"),
-        "--ui-gate",
-        path.join(workDir, "missing-ui-gate.json"),
-        "--component-results",
-        componentResultsPath,
-        "--artifact-index",
-        path.join(workDir, "missing-artifact-index.json"),
-        "--requested-commit",
-        "not-a-valid-commit",
-        "--requested-version",
-        "v1.invalid",
-        "--standard-ci",
-        path.join(workDir, "missing-standard-ci.json"),
-        "--run-id",
-        "321",
-        "--run-attempt",
-        "3",
-        "--run-url",
-        "https://github.com/YKDZ/enoki/actions/runs/321/attempts/3",
-        "--output",
-        summaryPath,
-        "--markdown",
-        markdownPath,
-      ]);
+      await execFileAsync(
+        process.execPath,
+        [
+          "scripts/release-verification.mjs",
+          "summarize",
+          "--candidate-dir",
+          path.join(workDir, "missing-candidate"),
+          "--root-public-key-env",
+          "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM",
+          "--release-baseline-dir",
+          path.join(workDir, "missing-baseline"),
+          "--probe-assets-dir",
+          path.join(workDir, "missing-probe-assets"),
+          "--hub-oci-dir",
+          path.join(workDir, "missing-hub-oci"),
+          "--matrix",
+          "scripts/release-e2e-matrix.json",
+          "--matrix-evidence-root",
+          path.join(workDir, "missing-host-evidence"),
+          "--ui-gate",
+          path.join(workDir, "missing-ui-gate.json"),
+          "--component-results",
+          componentResultsPath,
+          "--artifact-index",
+          path.join(workDir, "missing-artifact-index.json"),
+          "--requested-commit",
+          "not-a-valid-commit",
+          "--requested-version",
+          "v1.invalid",
+          "--standard-ci",
+          path.join(workDir, "missing-standard-ci.json"),
+          "--run-id",
+          "321",
+          "--run-attempt",
+          "3",
+          "--run-url",
+          "https://github.com/YKDZ/enoki/actions/runs/321/attempts/3",
+          "--output",
+          summaryPath,
+          "--markdown",
+          markdownPath,
+        ],
+        {
+          env: {
+            ...process.env,
+            ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: "test-root",
+          },
+        },
+      );
 
       const summary = JSON.parse(await readFile(summaryPath, "utf8"));
       expect(summary).toMatchObject({
@@ -1063,7 +1086,6 @@ describe("verify-only release workflow", () => {
       );
     },
   );
-
 
   it("fails closed when recorded Host platform or CI infrastructure does not belong to the matrix cell", () => {
     const candidate = releaseCandidateManifest().candidate;

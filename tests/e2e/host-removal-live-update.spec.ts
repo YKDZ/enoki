@@ -1,7 +1,5 @@
 import { type Page } from "@playwright/test";
 
-import { expect, test } from "./security-console";
-
 import {
   closeFakeLiveWebSocket,
   emitFakeLiveWebSocketMessage,
@@ -9,6 +7,7 @@ import {
   installFakeLiveWebSocket,
 } from "./fake-live-websocket";
 import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
+import { expect, test } from "./security-console";
 
 const { ownerPassword } = releaseUiBrowserRuntime();
 test("removes a Host from open cards immediately and tolerates unrelated or duplicate hints", async ({

@@ -16,7 +16,6 @@ const securityDataDir = path.join(rootDir, ".scratch/e2e-security-data");
 
 const hubEnvironment = {
   ENOKI_DATA_ROOT: dataDir,
-  ENOKI_INSTALL_SCRIPT_PATH: path.join(rootDir, "scripts/install-probe.sh"),
   ENOKI_PROBE_ASSET_DIR: path.join(rootDir, "probe-assets"),
   ENOKI_PROBE_HOST: "127.0.0.1",
   ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET: "e2e-probe-operation-secret",

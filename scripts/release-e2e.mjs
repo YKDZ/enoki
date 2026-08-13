@@ -68,6 +68,12 @@ try {
 
 async function run(options) {
   const candidateManifestPath = options["--candidate-manifest"];
+  const trustedRootPublicKeyPem = process.env[options["--root-public-key-env"]];
+  if (!trustedRootPublicKeyPem) {
+    throw new Error(
+      `Probe Distribution Trust Root environment variable ${options["--root-public-key-env"]} is empty`,
+    );
+  }
   const evidenceDir = path.resolve(options["--evidence-dir"]);
   const { ownershipToken, runId } = newRunIdentity(options["--run-id"]);
   const ssh =
@@ -121,13 +127,17 @@ async function run(options) {
     }
     const infrastructure =
       options["--host-adapter"] === "ci"
-        ? createCiReleaseInfrastructureAdapter({ candidateManifestPath })
+        ? createCiReleaseInfrastructureAdapter({
+            candidateManifestPath,
+            trustedRootPublicKeyPem,
+          })
         : createSshReleaseInfrastructureAdapter({
             candidateManifestPath,
             host: options["--ssh-host"],
             keyPath: options["--ssh-key"],
             knownHostsPath: path.join(evidenceDir, "known_hosts"),
             port: Number(options["--ssh-port"]),
+            trustedRootPublicKeyPem,
           });
     const prepared = await infrastructure.prepare({ matrixCell, runId });
     const { candidateDir, manifest } = prepared;
@@ -138,6 +148,7 @@ async function run(options) {
       phase: "candidate-prepared",
     });
     const environment = createReleaseEnvironment({
+      bootstrapProvisioner: prepared.provisionBootstrap,
       candidateDir,
       execute: prepared.execute,
       hubOwnerUrl: options["--hub-owner-url"],

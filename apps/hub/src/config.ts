@@ -8,10 +8,7 @@ import {
   type AuthEnvironment,
 } from "./auth/config.js";
 import { HubConfigurationError } from "./config-error.js";
-import {
-  createDefaultInstallationCommandConfig,
-  type InstallationCommandConfig,
-} from "./enrollment/install-command.js";
+import { type InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createNoopHubLogger, type HubLogger } from "./hub-logger.js";
 import {
   isNonLoopbackHttpOrigin,
@@ -63,7 +60,6 @@ export type NetworkConfig = {
 
 export type ProbeAssetConfig = {
   assetDir: string;
-  installScriptPath: string;
 };
 
 export type ProbeOperationConfig = {
@@ -143,12 +139,6 @@ export function createHubRuntimeConfigFromEnvironment(
     network,
     probeAssets: {
       assetDir: environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
-      installScriptPath:
-        environment.ENOKI_INSTALL_SCRIPT_PATH ??
-        path.join(
-          environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
-          "install-probe.sh",
-        ),
     },
     probeOperations: {
       acceptedTimeoutMs:
@@ -233,11 +223,7 @@ function createHostStatusConfigFromEnvironment(environment: HubEnvironment) {
 function createInstallationCommandConfigFromEnvironment(
   environment: HubEnvironment,
 ) {
-  const defaults = createDefaultInstallationCommandConfig();
-
   return {
-    installPath: environment.ENOKI_PROBE_INSTALL_PATH ?? defaults.installPath,
-    installScriptPath: defaults.installScriptPath,
     probeApiOrigin: readHttpOrigin(
       environment.ENOKI_PROBE_API_ORIGIN ?? environment.ENOKI_MANAGEMENT_ORIGIN,
       "ENOKI_PROBE_API_ORIGIN",

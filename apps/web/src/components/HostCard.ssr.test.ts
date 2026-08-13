@@ -96,7 +96,7 @@ describe("Host overview card", () => {
       }),
     );
 
-    expect(offlineHtml).toContain("重新注册 Probe");
-    expect(onlineHtml).not.toContain("重新注册 Probe");
+    expect(offlineHtml).toContain("重新注册探针");
+    expect(onlineHtml).not.toContain("重新注册探针");
   });
 });

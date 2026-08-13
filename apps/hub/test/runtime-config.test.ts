@@ -19,11 +19,11 @@ describe("Hub runtime configuration", () => {
 
     expect(config.database.dataRoot).toBe(dataRoot);
     expect(config.database.sqlitePath).toBe(path.join(dataRoot, "enoki.db"));
-    expect(config.installation.installPath).toBe("/usr/local/bin/enoki-probe");
-    expect(config.installation.installScriptPath).toBe("/api/probe/install.sh");
+    expect(config.installation).toEqual({
+      probeApiOrigin: "https://hub.example",
+    });
     expect(config.probeAssets).toEqual({
       assetDir: "/app/probe-assets",
-      installScriptPath: "/app/probe-assets/install-probe.sh",
     });
     expect(config.clockSkew.thresholdMs).toBe(300_000);
     expect(config.hostStatus).toEqual({
@@ -56,7 +56,6 @@ describe("Hub runtime configuration", () => {
 
     const config = createHubRuntimeConfigFromEnvironment({
       ENOKI_DATA_ROOT: "/var/lib/enoki",
-      ENOKI_INSTALL_SCRIPT_PATH: "/opt/enoki/assets/install.sh",
       ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS: "120",
       ENOKI_HOST_STATUS_OFFLINE_AFTER_SECONDS: "45",
       ENOKI_HOST_STATUS_STALE_AFTER_SECONDS: "10",
@@ -67,7 +66,6 @@ describe("Hub runtime configuration", () => {
       ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS: "60",
       ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS: "600",
       ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET: "stable-token-secret",
-      ENOKI_PROBE_INSTALL_PATH: "/opt/enoki/bin/enoki-probe",
       ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
       ENOKI_PROBE_API_ORIGIN: "https://probe.example",
       ENOKI_SQLITE_PATH: "/tmp/custom-enoki.db",
@@ -78,13 +76,10 @@ describe("Hub runtime configuration", () => {
     expect(config.database.dataRoot).toBe("/var/lib/enoki");
     expect(config.database.sqlitePath).toBe("/tmp/custom-enoki.db");
     expect(config.installation).toEqual({
-      installPath: "/opt/enoki/bin/enoki-probe",
-      installScriptPath: "/api/probe/install.sh",
       probeApiOrigin: "https://probe.example",
     });
     expect(config.probeAssets).toEqual({
       assetDir: "/opt/enoki/assets",
-      installScriptPath: "/opt/enoki/assets/install.sh",
     });
     expect(config.clockSkew.thresholdMs).toBe(120_000);
     expect(config.hostStatus).toEqual({

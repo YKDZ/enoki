@@ -396,10 +396,7 @@ export function hubRouteId(method: string, pathname: string): HubRouteId {
   ) {
     return "probe_operation_status";
   }
-  if (
-    (method === "GET" && pathname === "/api/probe/install.sh") ||
-    (method === "GET" && pathname.startsWith("/api/probe/assets/"))
-  ) {
+  if (method === "GET" && pathname.startsWith("/api/probe/assets/")) {
     return "probe_asset";
   }
   if (

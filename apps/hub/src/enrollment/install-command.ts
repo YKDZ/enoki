@@ -1,6 +1,4 @@
 export type InstallationCommandConfig = {
-  installPath: string;
-  installScriptPath: string;
   probeApiOrigin?: string;
 };
 
@@ -11,17 +9,13 @@ export type InstallCommandInput = {
 export type InstallCommandResult = {
   hubUrl: string;
   installCommand: string;
-  installPath: string;
-  installScriptUrl: string;
 };
 
-const defaultInstallPath = "/usr/local/bin/enoki-probe";
-const defaultInstallScriptPath = "/api/probe/install.sh";
+const probeBootstrapAcquirer = "/usr/local/bin/enoki-probe-bootstrap-acquire";
+const probeBootstrapActivator = "/usr/local/bin/enoki-probe-bootstrap-activate";
 
 export function createDefaultInstallationCommandConfig(): InstallationCommandConfig {
   return {
-    installPath: defaultInstallPath,
-    installScriptPath: defaultInstallScriptPath,
     probeApiOrigin: "http://localhost",
   };
 }
@@ -31,31 +25,17 @@ export function renderInstallCommand(
   input: InstallCommandInput,
 ): InstallCommandResult {
   const hubUrl = config.probeApiOrigin ?? "http://localhost";
-  const variables: Array<[string, string]> = [
-    ["ENOKI_HUB_URL", hubUrl],
-    ["ENOKI_ENROLLMENT_TOKEN", input.enrollmentToken],
-  ];
-
-  if (config.installPath !== defaultInstallPath) {
-    variables.push(["ENOKI_INSTALL_PATH", config.installPath]);
-  }
-
-  const installScriptUrl = `${hubUrl}${config.installScriptPath}`;
-
   return {
     hubUrl,
     installCommand: [
-      "curl",
-      "-fsSL",
-      shellQuote(installScriptUrl),
+      `ENOKI_HUB_URL=${shellQuote(hubUrl)}`,
+      `ENOKI_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}`,
+      probeBootstrapAcquirer,
       "|",
       "sudo",
-      "env",
-      ...variables.map(([name, value]) => `${name}=${shellQuote(value)}`),
-      "bash",
+      "--",
+      probeBootstrapActivator,
     ].join(" "),
-    installPath: config.installPath,
-    installScriptUrl,
   };
 }
 
