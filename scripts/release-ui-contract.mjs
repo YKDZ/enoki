@@ -10,6 +10,7 @@ import {
 const usage = `Usage:
   node scripts/release-ui-contract.mjs \\
     --candidate-manifest <candidate-dir>/candidate-manifest.json \\
+    --root-public-key-env <environment-variable> \\
     [--hub-port 38220] [--container-engine docker]`;
 
 try {
