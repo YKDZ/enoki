@@ -33,6 +33,19 @@ describe("candidate-image UI Contract gate", () => {
     });
   });
 
+  it("uses the authenticated Chromium storage state without logging in again", async () => {
+    const [playwrightConfig, candidateConfig, enrollmentSpec] =
+      await Promise.all([
+        readFile("playwright.config.ts", "utf8"),
+        readFile("playwright.candidate.config.ts", "utf8"),
+        readFile("tests/e2e/hub-install-command.spec.ts", "utf8"),
+      ]);
+
+    expect(playwrightConfig).toContain("storageState: ownerStorageStatePath");
+    expect(candidateConfig).toContain("storageState: ownerStorageStatePath");
+    expect(enrollmentSpec).not.toContain('locator("#owner-password")');
+  });
+
   it("derives lifecycle fixture versions from the Candidate Manifest version with a source default", () => {
     expect(
       releaseUiLifecycleVersions({

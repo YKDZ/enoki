@@ -14,8 +14,19 @@
     "//#lint": { "outputs": [] },
     "//#lint:fix": { "cache": false },
     "//#rust:check": { "cache": false, "outputs": [] },
-    "//#test": { "outputs": [] },
-    "//#test:e2e": { "dependsOn": ["^build"], "cache": false },
+    "//#test": {
+      "dependsOn": [
+        "@enoki/api-client#test",
+        "@enoki/hub#test",
+        "@enoki/proto#test",
+        "@enoki/web#test"
+      ],
+      "outputs": []
+    },
+    "//#test:e2e": {
+      "dependsOn": ["^build", "//#test"],
+      "cache": false
+    },
     "//#typecheck": { "outputs": [] },
     "build": {
       "dependsOn": ["^build"],

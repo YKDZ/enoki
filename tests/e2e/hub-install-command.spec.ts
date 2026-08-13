@@ -10,7 +10,7 @@ import {
 import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
 import { expect, test } from "./security-console";
 
-const { ownerPassword, probeApiUrl } = releaseUiBrowserRuntime();
+const { probeApiUrl } = releaseUiBrowserRuntime();
 
 type BrowserEnrollmentTarget =
   | { kind: "new_host" }
@@ -108,7 +108,7 @@ test("owner can select the command with Cmd+A on a macOS browser runner", async 
     process.platform !== "darwin",
     "Cmd+A is executed only by the macOS Playwright gate.",
   );
-  await loginOwner(page);
+  await page.goto("/");
   await page.getByRole("button", { name: "添加探针" }).click();
 
   const command = page.getByRole("textbox", { name: "安装命令" });
@@ -212,8 +212,6 @@ test("a verifying Enrollment keeps its dialog open and withholds the install com
   });
 
   await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "添加探针" }).click();
 
   const dialog = page.getByRole("dialog", { name: "添加主机" });
@@ -266,7 +264,7 @@ test("a reconnect reconciles a missed terminal Enrollment exactly once from auth
     });
   });
 
-  await loginOwner(page);
+  await page.goto("/");
   await expect.poll(() => fakeLiveSocketGeneration(page)).toBe(1);
   await expect.poll(() => fakeLiveSocketOpenGeneration(page)).toBe(1);
   await page.clock.install();
@@ -606,7 +604,7 @@ for (const overviewView of ["cards", "list"] as const) {
   }) => {
     const requests = await prepareOfflineHostReenrollment(page, overviewView);
 
-    await loginOwner(page);
+    await page.goto("/");
 
     const surfaceSelector = (hostId: number) =>
       overviewView === "cards"
@@ -617,19 +615,19 @@ for (const overviewView of ["cards", "list"] as const) {
       name: "打开主机 Existing host",
     });
     const reenrollmentAction = offlineHost.getByRole("button", {
-      name: "重新注册 Probe",
+      name: "重新注册探针",
     });
     await expect(detailAction).toBeVisible();
     await expect(reenrollmentAction).toBeVisible();
     await expect(
       page
         .locator(surfaceSelector(72))
-        .getByRole("button", { name: "重新注册 Probe" }),
+        .getByRole("button", { name: "重新注册探针" }),
     ).toHaveCount(0);
     await expect(
       page
         .locator(surfaceSelector(73))
-        .getByRole("button", { name: "重新注册 Probe" }),
+        .getByRole("button", { name: "重新注册探针" }),
     ).toHaveCount(0);
     await expect(page.locator(surfaceSelector(74))).toHaveCount(0);
 
@@ -779,13 +777,6 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     target: { kind: "new_host" },
     verificationDeadlineAtMs: null,
   };
-}
-
-async function loginOwner(page: Page) {
-  await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
-  await expect(page.getByRole("button", { name: "添加探针" })).toBeVisible();
 }
 
 async function prepareOfflineHostReenrollment(
