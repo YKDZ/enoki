@@ -9,6 +9,7 @@ use rsa::{
     pkcs1v15::{Signature as RsaSignature, VerifyingKey},
     pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding},
     signature::Verifier,
+    traits::PublicKeyParts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -275,6 +276,9 @@ fn trusted_root(
         std::str::from_utf8(&canonical).map_err(|_| VerificationError::RootFingerprint)?,
     )
     .map_err(|_| VerificationError::RootFingerprint)?;
+    if key.n().bits() != 4096 {
+        return Err(VerificationError::RootFingerprint);
+    }
     Ok((key, canonical))
 }
 fn verify_delegation(
@@ -309,6 +313,13 @@ fn verify_delegation(
         serde_json::from_value(parsed).map_err(|_| VerificationError::Delegation)?;
     let signing = canonical_public_key(parsed.signing_identity.public_key_pem.as_bytes())
         .ok_or(VerificationError::Delegation)?;
+    let signing_key = RsaPublicKey::from_public_key_pem(
+        std::str::from_utf8(&signing).map_err(|_| VerificationError::Delegation)?,
+    )
+    .map_err(|_| VerificationError::Delegation)?;
+    if signing_key.n().bits() != 4096 {
+        return Err(VerificationError::Delegation);
+    }
     let canonical = Delegation {
         signing_identity: SigningIdentity {
             public_key_pem: String::from_utf8(signing)
@@ -720,19 +731,28 @@ mod tests {
     use rsa::{
         RsaPrivateKey,
         pkcs1v15::SigningKey,
-        pkcs8::EncodePublicKey,
+        pkcs8::{DecodePrivateKey, EncodePublicKey},
         rand_core::OsRng,
         signature::{RandomizedSigner, SignatureEncoding},
     };
-    use std::{fs::File, io::Write};
+    use std::{fs::File, io::Write, sync::LazyLock};
     use tar::{Builder, Header};
     use tempfile::NamedTempFile;
     const TARGET: &str = "x86_64-unknown-linux-gnu";
+    static FIXTURE_KEYS: LazyLock<(RsaPrivateKey, RsaPrivateKey)> = LazyLock::new(|| {
+        (
+            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-root-private.pem"))
+                .unwrap(),
+            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-daily-private.pem"))
+                .unwrap(),
+        )
+    });
     struct Fixture {
         archive: NamedTempFile,
         daily: RsaPrivateKey,
         h: Handoff,
         root: Vec<u8>,
+        root_private: RsaPrivateKey,
         fingerprint: String,
     }
     impl Fixture {
@@ -751,8 +771,8 @@ mod tests {
     }
     fn fixture() -> Fixture {
         let mut rng = OsRng;
-        let root = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let daily = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let root = FIXTURE_KEYS.0.clone();
+        let daily = FIXTURE_KEYS.1.clone();
         let root_pem = root
             .to_public_key()
             .to_public_key_pem(LineEnding::LF)
@@ -795,7 +815,7 @@ mod tests {
         let delegation_bytes = canonical_json(&delegation).unwrap();
         let mut signed = DELEGATION_DOMAIN.to_vec();
         signed.extend_from_slice(&delegation_bytes);
-        let ds = SigningKey::<Sha256>::new(root)
+        let ds = SigningKey::<Sha256>::new(root.clone())
             .sign_with_rng(&mut rng, &signed)
             .to_vec();
         let manifest=format!("{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-{TARGET}.tar.gz\",\"sha256\":\"{}\",\"size\":{},\"target\":\"{TARGET}\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":1,\"delegationKeyId\":\"{}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",sha256_hex(&bundle),sha256_hex(&archive),archive.len(),delegation.signing_identity.key_id).into_bytes();
@@ -817,6 +837,7 @@ mod tests {
             },
             fingerprint: sha256_hex(&root_pem),
             root: root_pem,
+            root_private: root,
         }
     }
 
@@ -886,6 +907,63 @@ mod tests {
             Ok(m.bundle().clone())
         );
         assert_eq!(out, b"probe");
+    }
+    #[test]
+    fn rejects_a_weak_rsa_distribution_root_before_delegation_verification() {
+        let mut rng = OsRng;
+        let weak = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let weak_pem = weak
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let policy = VerificationPolicy {
+            distribution: "enoki",
+            expected_target: TARGET,
+            highest_accepted_delegation_generation: 0,
+            external_root_fingerprint: sha256_hex(&weak_pem),
+            external_root_pem: Some(&weak_pem),
+        };
+
+        assert!(matches!(
+            trusted_root(&policy),
+            Err(VerificationError::RootFingerprint)
+        ));
+    }
+    #[test]
+    fn rejects_a_validly_root_signed_weak_delegated_key() {
+        let mut x = fixture();
+        let mut rng = OsRng;
+        let weak = RsaPrivateKey::new(&mut rng, 1024).unwrap();
+        let weak_pem = weak
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let delegation = Delegation {
+            distribution: "enoki".into(),
+            generation: 1,
+            kind: "enoki-probe-trust-delegation".into(),
+            purpose: "probe-asset-signing".into(),
+            root_key_id: x.fingerprint.clone(),
+            schema_version: 1,
+            signing_identity: SigningIdentity {
+                algorithm: "rsa-sha256".into(),
+                key_id: sha256_hex(&weak_pem),
+                public_key_pem: String::from_utf8(weak_pem).unwrap(),
+            },
+        };
+        x.h.delegation = canonical_json(&delegation).unwrap();
+        let mut signed = DELEGATION_DOMAIN.to_vec();
+        signed.extend_from_slice(&x.h.delegation);
+        x.h.delegation_signature = SigningKey::<Sha256>::new(x.root_private.clone())
+            .sign_with_rng(&mut rng, &signed)
+            .to_vec();
+
+        assert!(matches!(
+            verify_outer_metadata(&x.h, &x.policy(0)),
+            Err(VerificationError::Delegation)
+        ));
     }
     #[test]
     fn rejects_outer_bundle_hash_and_nonpositive_component() {

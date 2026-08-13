@@ -330,13 +330,29 @@ mod tests {
     use rsa::{
         RsaPrivateKey,
         pkcs1v15::SigningKey,
-        pkcs8::{EncodePublicKey, LineEnding},
+        pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding},
         rand_core::OsRng,
         signature::{RandomizedSigner, SignatureEncoding},
     };
     use sha2::{Digest, Sha256};
-    use std::{fs, io::Cursor, os::unix::fs::PermissionsExt, sync::mpsc, thread, time::Duration};
+    use std::{
+        fs,
+        io::Cursor,
+        os::unix::fs::PermissionsExt,
+        sync::{LazyLock, mpsc},
+        thread,
+        time::Duration,
+    };
     use tempfile::tempdir;
+
+    static FIXTURE_KEYS: LazyLock<(RsaPrivateKey, RsaPrivateKey)> = LazyLock::new(|| {
+        (
+            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-root-private.pem"))
+                .unwrap(),
+            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-daily-private.pem"))
+                .unwrap(),
+        )
+    });
 
     #[test]
     fn rejects_invalid_metadata_before_creating_a_root_component() {
@@ -580,8 +596,8 @@ mod tests {
 
     fn fixture(generation: u64) -> Fixture {
         let mut rng = OsRng;
-        let root = RsaPrivateKey::new(&mut rng, 2048).unwrap();
-        let daily = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let root = FIXTURE_KEYS.0.clone();
+        let daily = FIXTURE_KEYS.1.clone();
         let root_pem = root
             .to_public_key()
             .to_public_key_pem(LineEnding::LF)

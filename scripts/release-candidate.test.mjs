@@ -49,7 +49,7 @@ const probeTargets = [
   "x86_64-unknown-linux-musl",
 ];
 const testDistributionRoot = generateKeyPairSync("rsa", {
-  modulusLength: 2048,
+  modulusLength: 4096,
   privateKeyEncoding: { format: "pem", type: "pkcs8" },
   publicKeyEncoding: { format: "pem", type: "spki" },
 });
@@ -57,12 +57,12 @@ const testDistributionRoot = generateKeyPairSync("rsa", {
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
   it("requires exactly one root private-key representation for trust delegations", () => {
     const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -89,12 +89,12 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
 
   it("authorizes a routine signer with one root-signed, domain-separated delegated identity", () => {
     const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -136,7 +136,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       "unrelated release signer",
       (input) => {
         const unrelated = generateKeyPairSync("rsa", {
-          modulusLength: 2048,
+          modulusLength: 4096,
           privateKeyEncoding: { format: "pem", type: "pkcs8" },
           publicKeyEncoding: { format: "pem", type: "spki" },
         });
@@ -147,12 +147,12 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     ],
   ])("rejects a %s delegated signing identity", (_label, mutate, expected) => {
     const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -178,12 +178,12 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
 
   it("rejects a noncanonical or invalid-root-signed Probe Trust Delegation", () => {
     const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -211,14 +211,72 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     ).toThrow(/root signature/);
   });
 
+  it("rejects a weak Probe Distribution Trust Root before delegation verification", () => {
+    const weakRoot = generateKeyPairSync("rsa", {
+      modulusLength: 1024,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+
+    expect(() =>
+      verifyProbeTrustDelegation({
+        bytes: Buffer.from("{}\n"),
+        expectedDistribution: "enoki",
+        rootPublicKeyPem: weakRoot.publicKey,
+        signature: Buffer.alloc(0),
+      }),
+    ).toThrow(/Trust Root public key must be RSA-4096/);
+  });
+
+  it("rejects a valid root-signed delegation containing a weak release key", () => {
+    const root = generateKeyPairSync("rsa", {
+      modulusLength: 4096,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const weakRelease = generateKeyPairSync("rsa", {
+      modulusLength: 1024,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const delegation = {
+      distribution: "enoki",
+      generation: 1,
+      kind: "enoki-probe-trust-delegation",
+      purpose: "probe-asset-signing",
+      rootKeyId: createHash("sha256").update(root.publicKey).digest("hex"),
+      schemaVersion: 1,
+      signingIdentity: {
+        algorithm: "rsa-sha256",
+        keyId: createHash("sha256").update(weakRelease.publicKey).digest("hex"),
+        publicKeyPem: weakRelease.publicKey,
+      },
+    };
+    const bytes = Buffer.from(`${JSON.stringify(delegation)}\n`);
+    const signature = signBytes(
+      "RSA-SHA256",
+      Buffer.concat([Buffer.from("enoki/probe-trust-delegation/v1\0"), bytes]),
+      root.privateKey,
+    );
+
+    expect(() =>
+      verifyProbeTrustDelegation({
+        bytes,
+        expectedDistribution: "enoki",
+        rootPublicKeyPem: root.publicKey,
+        signature,
+      }),
+    ).toThrow(/signing identity must be RSA-4096/);
+  });
+
   it("accepts the current delegation generation again while rejecting only rollback", () => {
     const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const release = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -240,12 +298,12 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
   });
   it("validates the configured production signing identity before candidate construction", async () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const root = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -297,14 +355,29 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     await rm(rootDir, { force: true, recursive: true });
   });
 
+  it("rejects a matching weak RSA signing pair at the shared identity boundary", () => {
+    const weak = generateKeyPairSync("rsa", {
+      modulusLength: 1024,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+
+    expect(() =>
+      validateProbeSigningIdentity({
+        privateKeyPem: weak.privateKey,
+        publicKeyPem: weak.publicKey,
+      }),
+    ).toThrow(/RSA-4096/);
+  });
+
   it("rejects a production public key that does not match the private key", async () => {
     const { privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     const { publicKey: unrelatedPublicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       privateKeyEncoding: { format: "pem", type: "pkcs8" },
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
@@ -880,7 +953,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       ).resolves.toMatchObject({ version: "1.2.3" });
 
       const attackerRoot = generateKeyPairSync("rsa", {
-        modulusLength: 2048,
+        modulusLength: 4096,
         privateKeyEncoding: { format: "pem", type: "pkcs8" },
         publicKeyEncoding: { format: "pem", type: "spki" },
       });
@@ -1768,7 +1841,7 @@ async function createProbeAssetSetFixture(
   const archivesDir = path.join(workDir, `${name}archives`);
   const outputDir = path.join(workDir, `${name}probe-assets`);
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
+    modulusLength: 4096,
     privateKeyEncoding: { format: "pem", type: "pkcs8" },
     publicKeyEncoding: { format: "pem", type: "spki" },
   });

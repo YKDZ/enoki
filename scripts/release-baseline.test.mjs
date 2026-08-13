@@ -121,7 +121,7 @@ describe("Release Baseline resolution", () => {
   it("rejects a self-signed baseline outside the canonical production trust root", async () => {
     const fixture = await createResolverFixture();
     const { publicKey: unrelatedPublicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
+      modulusLength: 4096,
       publicKeyEncoding: { format: "pem", type: "spki" },
     });
     try {
@@ -495,12 +495,12 @@ async function createProbeAssetSetFixture(
   const archivesDir = path.join(workDir, "archives");
   const outputDir = path.join(workDir, "probe-assets-source");
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
+    modulusLength: 4096,
     privateKeyEncoding: { format: "pem", type: "pkcs8" },
     publicKeyEncoding: { format: "pem", type: "spki" },
   });
   const root = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
+    modulusLength: 4096,
     privateKeyEncoding: { format: "pem", type: "pkcs8" },
     publicKeyEncoding: { format: "pem", type: "spki" },
   });

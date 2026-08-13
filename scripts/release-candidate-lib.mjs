@@ -79,6 +79,7 @@ export function validateProbeSigningIdentity({ privateKeyPem, publicKeyPem }) {
   }
 
   assertSigningKeyPair(privateKeyPem, publicKeyPem);
+  assertRsa4096PublicKey(publicKeyPem, "Probe asset signing public key");
   const publicKeyText = Buffer.from(publicKeyPem).toString("utf8");
   const normalizedPublicKey = Buffer.from(
     publicKeyText.endsWith("\n") ? publicKeyText : `${publicKeyText}\n`,
@@ -106,10 +107,14 @@ export function createProbeTrustDelegation({
   const signingKey = hasKeyObject
     ? rootPrivateKey
     : createPrivateKey(rootPrivateKeyPem);
+  assertRsa4096PrivateKey(signingKey, "Probe Distribution Trust Root");
   const rootPublicKeyPem = canonicalPublicKeyPem(
     createPublicKey(signingKey).export({ format: "pem", type: "spki" }),
   );
-  const releasePublicKey = canonicalPublicKeyPem(releasePublicKeyPem);
+  const releasePublicKey = canonicalRsa4096PublicKeyPem(
+    releasePublicKeyPem,
+    "Probe asset signing public key",
+  );
   const delegation = validateProbeTrustDelegationDocument({
     distribution,
     generation,
@@ -151,7 +156,10 @@ export function verifyProbeTrustDelegation({
       "highest accepted Probe Trust Delegation generation is invalid",
     );
   }
-  const rootPublicKey = canonicalPublicKeyPem(rootPublicKeyPem);
+  const rootPublicKey = canonicalRsa4096PublicKeyPem(
+    rootPublicKeyPem,
+    "Probe Distribution Trust Root public key",
+  );
   let parsed;
   try {
     parsed = JSON.parse(Buffer.from(bytes).toString("utf8"));
@@ -251,7 +259,10 @@ function validateProbeTrustDelegationDocument(value) {
     "keyId",
     "publicKeyPem",
   ]);
-  const publicKey = canonicalPublicKeyPem(value.signingIdentity.publicKeyPem);
+  const publicKey = canonicalRsa4096PublicKeyPem(
+    value.signingIdentity.publicKeyPem,
+    "Probe Trust Delegation signing identity",
+  );
   if (
     value.signingIdentity.algorithm !== "rsa-sha256" ||
     !/^[0-9a-f]{64}$/.test(value.signingIdentity.keyId) ||
@@ -290,6 +301,36 @@ function canonicalPublicKeyPem(publicKeyPem) {
     );
   } catch {
     throw new Error("Probe Trust Delegation public key is malformed");
+  }
+}
+
+function canonicalRsa4096PublicKeyPem(publicKeyPem, description) {
+  assertRsa4096PublicKey(publicKeyPem, description);
+  return canonicalPublicKeyPem(publicKeyPem);
+}
+
+function assertRsa4096PublicKey(publicKeyPem, description) {
+  let key;
+  try {
+    key = createPublicKey(publicKeyPem);
+  } catch {
+    throw new Error(`${description} is malformed`);
+  }
+  if (
+    key.asymmetricKeyType !== "rsa" ||
+    key.asymmetricKeyDetails?.modulusLength !== 4096
+  ) {
+    throw new Error(`${description} must be RSA-4096`);
+  }
+}
+
+function assertRsa4096PrivateKey(privateKey, description) {
+  if (
+    privateKey?.type !== "private" ||
+    privateKey.asymmetricKeyType !== "rsa" ||
+    privateKey.asymmetricKeyDetails?.modulusLength !== 4096
+  ) {
+    throw new Error(`${description} must be an RSA-4096 private key`);
   }
 }
 
@@ -565,7 +606,10 @@ export async function prepareUnsignedProbeAssetSet({
       "Probe asset signing identity is not authorized by the Probe Trust Delegation",
     );
   }
-  const rootPublicKey = canonicalPublicKeyPem(rootPublicKeyPem);
+  const rootPublicKey = canonicalRsa4096PublicKeyPem(
+    rootPublicKeyPem,
+    "Probe Distribution Trust Root public key",
+  );
   const manifest = `${JSON.stringify(
     {
       assets,
@@ -686,7 +730,12 @@ export async function assembleReleaseCandidate({
     expectedVersion: version.slice(1),
     trustedRootPublicKeyPem,
   });
-  const rootKeyId = sha256(canonicalPublicKeyPem(trustedRootPublicKeyPem));
+  const rootKeyId = sha256(
+    canonicalRsa4096PublicKeyPem(
+      trustedRootPublicKeyPem,
+      "Probe Distribution Trust Root public key",
+    ),
+  );
   const bootstrap = await inspectProbeBootstrapArtifacts(bootstrapArtifactDir, {
     distribution: "enoki",
     rootKeyId,
@@ -873,7 +922,10 @@ export async function validateReleaseCandidate(
     throw new Error("Candidate Manifest Probe Bootstrap is malformed");
   }
   const expectedRootKeyId = sha256(
-    canonicalPublicKeyPem(trustedRootPublicKeyPem),
+    canonicalRsa4096PublicKeyPem(
+      trustedRootPublicKeyPem,
+      "Probe Distribution Trust Root public key",
+    ),
   );
   if (bootstrap.rootKeyId !== expectedRootKeyId) {
     throw new Error(
@@ -1168,7 +1220,10 @@ export async function inspectProbeAssetSet(
 
   const publicKey = await readFile(path.join(assetDir, "signing-key.pem"));
   const rootPublicKey = await readFile(path.join(assetDir, "root-key.pem"));
-  const canonicalRootPublicKey = canonicalPublicKeyPem(rootPublicKey);
+  const canonicalRootPublicKey = canonicalRsa4096PublicKeyPem(
+    rootPublicKey,
+    "Probe Asset Set root public key",
+  );
   if (
     trustedRootPublicKeyPem === undefined &&
     trustedRootPublicKeySha256 === undefined
@@ -1178,7 +1233,10 @@ export async function inspectProbeAssetSet(
     );
   }
   const trustedRootPublicKey = trustedRootPublicKeyPem
-    ? canonicalPublicKeyPem(trustedRootPublicKeyPem)
+    ? canonicalRsa4096PublicKeyPem(
+        trustedRootPublicKeyPem,
+        "Probe Distribution Trust Root public key",
+      )
     : undefined;
   if (
     trustedRootPublicKey !== undefined &&
@@ -1286,11 +1344,7 @@ export async function inspectProbeAssetSet(
 }
 
 function assertSigningPublicKey(publicKeyPem) {
-  try {
-    createPublicKey(publicKeyPem);
-  } catch {
-    throw new Error("Probe asset signing public key is malformed");
-  }
+  assertRsa4096PublicKey(publicKeyPem, "Probe asset signing public key");
 }
 
 async function inspectProbeArchive(
@@ -1572,10 +1626,12 @@ function untrustedToolEnvironment() {
 }
 
 function assertSigningKeyPair(privateKeyPem, publicKeyPem) {
+  let privateKey;
   let derivedPublicKey;
   let declaredPublicKey;
   try {
-    derivedPublicKey = createPublicKey(createPrivateKey(privateKeyPem)).export({
+    privateKey = createPrivateKey(privateKeyPem);
+    derivedPublicKey = createPublicKey(privateKey).export({
       format: "der",
       type: "spki",
     });
@@ -1586,6 +1642,7 @@ function assertSigningKeyPair(privateKeyPem, publicKeyPem) {
   } catch {
     throw new Error("Probe asset signing key material is malformed");
   }
+  assertRsa4096PrivateKey(privateKey, "Probe asset signing key");
 
   if (!derivedPublicKey.equals(declaredPublicKey)) {
     throw new Error(

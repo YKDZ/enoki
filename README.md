@@ -28,7 +28,7 @@ Enoki **有**以下功能：
 - 从 Hub 分发探针二进制文件从而不依赖探针侧额外网络连通性
 - REST API
 - 主页的卡片瀑布流 / 表格视图
-- Hub 侧发起探针升级、删除主机或卸载探针并删除主机
+- Hub 侧删除主机或卸载探针并删除主机
 - 探针常态下不拥有 root 权限
 - CPU / RAM / 磁盘 / 网络接口等多种常见指标
 - 基于时钟的指标级采集 / 上报间隔
@@ -56,19 +56,19 @@ Enoki **有**以下功能：
 
 Enoki 的安全边界尽量保持简单：
 
-- 管理界面可查看主机元数据并触发探针升级、删除主机或卸载探针并删除主机，建议仅在可信网络中使用
+- 管理界面可查看主机元数据并触发删除主机或卸载探针并删除主机，建议仅在可信网络中使用
 - 所有环境都必须显式设置 `OWNER_PASSWORD`；`ENOKI_WEB_UI_NO_PASSWORD=true` 只适合完全可信的内网、演示或临时截图环境。生产或 Docker 环境必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true` 才能启用无密码模式
 - 管理面和探针 API 分别使用显式 Origin；两者可按部署网络选择 HTTP 或 HTTPS。显式的非 loopback HTTP 会在 Hub 启动时记录一次结构化警告：它放弃了传输保密性和服务器身份认证，但不会放宽应用认证
 - 探针注册后会生成自己的非对称身份密钥，后续上报和操作状态使用请求签名证明身份。签名会绑定请求方法、目标地址、路径、查询参数、随机数、时间戳和请求体摘要
 - Hub 不终止 TLS、不重定向 HTTP 到 HTTPS，也不发送 HSTS；证书、协议跳转和 HSTS 由反向代理、隧道或其他网络终止层统一配置
 - `ENOKI_TRUSTED_PROXY_CIDRS` 只用于从 `X-Forwarded-For` 取得 Observed IP 审计证据；它不影响 Origin、认证、授权、拒绝、限流或客户端网络准入，且忽略 `X-Real-IP`
 - 探针身份私钥和启动配置需要保持私密，配置文件不应允许其他用户读取
-- Hub 只在 `/api/probe/assets/*` 有界分发已签名的探针安装包；探针升级前会校验资产清单签名、受信公钥指纹、归档校验和、目标版本和本地防降级规则
-- 探针只会从最初安装时配置的 Hub 下载升级资产。安装器会把 Hub 地址写入 root-owned 安装元数据，升级和卸载入口会在令牌校验、资产下载和状态上报前校验引导地址与该元数据一致
+- Hub 只在 `/api/probe/assets/*` 有界分发已签名的探针安装包；签名 Bootstrap 会校验资产清单签名、受信根、授权代次、归档校验和、目标版本和本地防降级规则
+- 探针只会从最初安装时配置的 Hub 下载资产。安装器会把 Hub 地址写入 root-owned 安装元数据，签名 Bootstrap 会在令牌校验、资产下载和状态上报前校验引导地址与该元数据一致
 - 官方版使用本仓库配置的资产签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针安装包
-- Hub 管理员可以触发探针升级和卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界。
-- 探针常态下不以 root 运行；升级、卸载和需要本机提权的官方采集器通过受限 systemd/sudoers 入口执行内置操作，不支持下发任意系统命令
-- 探针操作所需的 sudoers 与需要特权的指标采集器 sudoers 分开写入。采集器 sudoers 只在安装或升级时按本机前置条件暴露；官方示例特权采集器是 `disk-health.smartctl`，没有匹配前置条件时不会保留采集器 sudoers 文件
+- Hub 管理员可以触发卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界。
+- 探针常态下不以 root 运行；需要本机提权的官方采集器通过受限 systemd/sudoers 入口执行内置操作，不支持下发任意系统命令
+- 旧 schema 1 安装才依赖既有操作 sudoers 完成升级。schema 2 的签名 Bootstrap 不创建也不保留该旧操作 sudoers；采集器 sudoers 独立按安装时的本机前置条件暴露。官方示例特权采集器是 `disk-health.smartctl`，没有匹配前置条件时不会保留采集器 sudoers 文件
 - 特权采集器目前只有超时和网络访问限制，不是完整执行沙箱。Hub、管理员、探针配置、主机概况或指标上报不能在运行时启用 helper 或改写 sudoers
 
 ## 部署
@@ -86,15 +86,73 @@ OWNER_PASSWORD='请替换为开发密码' \
 pnpm dev
 ```
 
-探针的可选本机 helper 前置条件只在安装和升级流程中评估。例如主机后来安装了 `smartctl`，Disk Health helper 不会被 Web UI、探针配置或运行时主机概况自动启用；需要重新安装或升级探针，安装/升级流程才会重新渲染 collector-helper sudoers。相反，移除可选前置条件后也应重新安装或升级，避免保留不再需要的 helper sudoers。
+探针的可选本机 helper 前置条件只在安装流程中评估。例如主机后来安装或移除了 `smartctl`，Disk Health helper 不会被 Web UI、探针配置或运行时主机概况自动改变；请手动重装探针，让安装流程重新渲染 collector-helper sudoers。
 
-先从独立发布渠道下载与目标 Linux 平台匹配的“探针安装包” `.tar.gz`，在目标主机解压，并以管理员权限把其中两个固定角色安装到 `/usr/local/bin/`：非特权的探针获取程序 `enoki-probe-bootstrap-acquire` 和仅用于激活的探针激活程序 `enoki-probe-bootstrap-activate`。安装包本身不由 Hub 下载、替换或升级。
+先从 GitHub Release 下载与目标 Linux 平台匹配的签名 Bootstrap 及其 SHA-256 文件，校验、解压并安装两个固定角色。以下示例以 x86-64 Linux 为例，请把版本替换为实际 Release tag：
 
-然后在 Hub Web UI 中生成一次性安装命令并在目标主机以当前非 root 用户执行。命令只把 `ENOKI_HUB_URL` 和 `ENOKI_ENROLLMENT_TOKEN` 交给 acquirer；其输出经管道交给 `sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`。因此网络获取和验证不会以 root 运行，令牌也不会作为 root 的环境变量传递。没有自动升级、旧脚本回退或替代安装路径。
+```sh
+RELEASE_TAG='v请替换为版本'
+TARGET='x86_64-unknown-linux-gnu'
+ARCHIVE="enoki-probe-bootstrap-${TARGET}.tar.gz"
+BASE_URL="https://github.com/YKDZ/enoki/releases/download/${RELEASE_TAG}"
+curl --fail --location --remote-name "${BASE_URL}/${ARCHIVE}"
+curl --fail --location --remote-name "${BASE_URL}/${ARCHIVE}.sha256"
+sha256sum -c "${ARCHIVE}.sha256"
+tar -xzf "${ARCHIVE}"
+sudo install -m 0755 enoki-probe-bootstrap-acquire /usr/local/bin/enoki-probe-bootstrap-acquire
+sudo install -m 0755 enoki-probe-bootstrap-activate /usr/local/bin/enoki-probe-bootstrap-activate
+```
+
+获取程序不提权，激活程序只负责本机激活。Bootstrap 安装包本身不由 Hub 下载、替换或升级。
+
+然后在 Hub Web UI 中生成一次性安装命令并在目标主机以当前非 root 用户执行。命令只把 `ENOKI_HUB_URL` 和 `ENOKI_ENROLLMENT_TOKEN` 交给 acquirer；其输出经管道交给 `sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`。因此网络获取和验证不会以 root 运行，令牌也不会作为 root 的环境变量传递。
+
+当前 Hub 不支持 schema 2 探针自动升级；需要更新时请在目标主机手动重装探针。旧 schema 1 探针的升级仍依赖其既有 sudoers。后续 Web UI 会改进安装、更新和卸载的生命周期操作；“手动重装”只影响目标主机，不会暗示删除 Hub 中的主机记录。
 
 Hub 只对已安装探针所需的签名安装包提供有界分发。若在主机本机执行“卸载探针”，只会移除本机探针，不会删除 Hub 中的主机；需要两侧一并清理时，请在 Hub 中选择“卸载探针并删除主机”。
 
 `ENOKI_PROBE_API_ORIGIN` 只能是 `scheme://host[:port]`，不支持路径前缀。若既有探针依赖未文档化的前缀，请调整网络路由后在 Hub 中使用“手动重新安装探针”；没有旧前缀兼容层。
+
+### 维护者发布信任初始化
+
+维护者只需执行一次根信任仪式。下面命令在 Linux 上创建权限为 `0700` 的受控目录，用 CSPRNG 生成根密钥口令，并创建 RSA-4096 根密钥、RSA-4096 日常发布密钥和 generation 1 授权：
+
+```sh
+umask 077
+CEREMONY_DIR="$PWD/.probe-trust-ceremony"
+install -d -m 0700 "$CEREMONY_DIR"
+openssl rand -base64 48 > "$CEREMONY_DIR/root-passphrase"
+chmod 0600 "$CEREMONY_DIR/root-passphrase"
+
+node scripts/probe-trust.mjs init-root \
+  --output-dir "$CEREMONY_DIR/root" \
+  --passphrase-file "$CEREMONY_DIR/root-passphrase"
+node scripts/probe-trust.mjs init-release-key \
+  --output-dir "$CEREMONY_DIR/release"
+node scripts/probe-trust.mjs authorize-release-key \
+  --root-private-key "$CEREMONY_DIR/root/root-private-key.pem" \
+  --root-passphrase-file "$CEREMONY_DIR/root-passphrase" \
+  --release-public-key "$CEREMONY_DIR/release/release-public-key.pem" \
+  --generation 1 \
+  --output-dir "$CEREMONY_DIR/delegation"
+node scripts/probe-trust.mjs verify \
+  --root-public-key "$CEREMONY_DIR/root/root-public-key.pem" \
+  --delegation "$CEREMONY_DIR/delegation/trust-delegation.json" \
+  --signature "$CEREMONY_DIR/delegation/trust-delegation.json.sig" \
+  --highest-accepted-generation 1
+```
+
+把文件内容配置到 GitHub Actions：
+
+| GitHub 类型 | 名称                                            | 值                                                       |
+| ----------- | ----------------------------------------------- | -------------------------------------------------------- |
+| Variable    | `ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM`  | `root/root-public-key.pem` 原文                          |
+| Variable    | `ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM`      | `release/release-public-key.pem` 原文                    |
+| Variable    | `ENOKI_PROBE_TRUST_DELEGATION_JSON`             | `delegation/trust-delegation.json` 原文                  |
+| Variable    | `ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64` | `base64 -w0 delegation/trust-delegation.json.sig` 的输出 |
+| Secret      | `ENOKI_PROBE_ASSET_SIGNING_KEY_PEM`             | `release/release-private-key.pem` 原文                   |
+
+根私钥 `root/root-private-key.pem` 和根口令绝不能上传到 GitHub；应离线备份并限制访问。日常发布只使用 release 私钥，不需要也不应接触根私钥。轮换日常发布密钥时才离线取出根私钥，创建更高 generation 的新授权。
 
 Hub 容器内默认监听两个端口：
 
