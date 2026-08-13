@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 
+import { createRedactingBoundedBuffer, truncateUtf8 } from "./safe-output.mjs";
+
 const defaultKillGraceMs = 1_000;
 const defaultDiagnosticLimitBytes = 4 * 1024;
 const defaultOutputLimitBytes = 8 * 1024;
@@ -22,18 +24,25 @@ export function runBoundedProcess(label, command, args, options = {}) {
     });
     const outputLimitBytes =
       options.outputLimitBytes ?? defaultOutputLimitBytes;
-    let stdout = "";
-    let stderr = "";
+    const stdout = createRedactingBoundedBuffer(
+      outputLimitBytes,
+      options.redactions,
+    );
+    const stderr = createRedactingBoundedBuffer(
+      outputLimitBytes,
+      options.redactions,
+    );
     let spawnError;
+    let settled = false;
     let timedOut = false;
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout = appendBounded(stdout, chunk, outputLimitBytes);
+      stdout.append(chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr = appendBounded(stderr, chunk, outputLimitBytes);
+      stderr.append(chunk);
     });
     child.once("error", (error) => {
       if (error.name !== "AbortError") spawnError = error;
@@ -45,19 +54,22 @@ export function runBoundedProcess(label, command, args, options = {}) {
     }, timeoutMs);
     const forceKill = setTimeout(
       () => {
-        if (!timedOut || child.exitCode !== null) return;
+        if (!timedOut || settled) return;
         killProcessTree(child.pid, "SIGKILL");
       },
       timeoutMs + (options.killGraceMs ?? defaultKillGraceMs),
     );
 
     child.once("close", (code, signal) => {
+      settled = true;
       clearTimeout(timeout);
       clearTimeout(forceKill);
-      const result = sanitizeResult(
-        { code: code ?? 1, signal, stderr, stdout },
-        options.redactions ?? [],
-      );
+      const result = {
+        code: code ?? 1,
+        signal,
+        stderr: stderr.value(),
+        stdout: stdout.value(),
+      };
       if (timedOut) {
         reject(
           processError(
@@ -114,33 +126,4 @@ function processError(message, result, diagnosticLimitBytes) {
     `stderr: ${truncateUtf8(result.stderr, streamLimit)}`,
   ].join("\n");
   return Object.assign(new Error(truncateUtf8(diagnostic, limit)), result);
-}
-
-function appendBounded(existing, chunk, limitBytes) {
-  const combined = `${existing}${chunk}`;
-  if (Buffer.byteLength(combined) <= limitBytes) return combined;
-  return Buffer.from(combined).subarray(0, limitBytes).toString("utf8");
-}
-
-function sanitizeResult(result, redactions) {
-  return {
-    ...result,
-    stderr: redact(result.stderr, redactions),
-    stdout: redact(result.stdout, redactions),
-  };
-}
-
-function redact(value, redactions) {
-  return redactions
-    .filter((secret) => typeof secret === "string" && secret.length > 0)
-    .reduce((safe, secret) => safe.split(secret).join("[REDACTED]"), value);
-}
-
-function truncateUtf8(value, limitBytes) {
-  if (Buffer.byteLength(value) <= limitBytes) return value;
-  return (
-    Buffer.from(value)
-      .subarray(0, Math.max(0, limitBytes - 3))
-      .toString("utf8") + "..."
-  );
 }
