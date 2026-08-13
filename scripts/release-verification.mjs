@@ -28,7 +28,7 @@ import {
 const usage = `Usage:
   node scripts/release-verification.mjs record-matrix-gate --candidate-manifest <path> --evidence <path> --cell-id <id> --scenario-outcome <outcome> --verify-clean-outcome <outcome> --artifact-name <name> --output <path>
   node scripts/release-verification.mjs record-ui-gate --candidate-manifest <path> --candidate-commit <commit> --candidate-version <version> --playwright-outcome <outcome> --artifact-name <name> --output <path>
-  node scripts/release-verification.mjs summarize --candidate-dir <path> --release-baseline-dir <path> --probe-assets-dir <path> --hub-oci-dir <path> --matrix <path> --matrix-evidence-root <path> --ui-gate <path> --artifact-index <path> --component-results <path> --standard-ci <path> --requested-commit <commit> --requested-version <version> --run-id <id> --run-attempt <number> --run-url <url> --output <path> --markdown <path>
+  node scripts/release-verification.mjs summarize --candidate-dir <path> --root-public-key-env <environment-variable> --release-baseline-dir <path> --probe-assets-dir <path> --hub-oci-dir <path> --matrix <path> --matrix-evidence-root <path> --ui-gate <path> --artifact-index <path> --component-results <path> --standard-ci <path> --requested-commit <commit> --requested-version <version> --run-id <id> --run-attempt <number> --run-url <url> --output <path> --markdown <path>
   node scripts/release-verification.mjs assert-verified --summary <path>`;
 
 const matrixGateOptions = new Set([
@@ -61,6 +61,7 @@ const summaryOptions = new Set([
   "--release-baseline-dir",
   "--requested-commit",
   "--requested-version",
+  "--root-public-key-env",
   "--run-attempt",
   "--run-id",
   "--run-url",
@@ -268,8 +269,16 @@ async function readAttemptIdentities(options) {
   let probeAssetSet = null;
   let releaseBaseline = null;
   try {
+    const trustedRootPublicKeyPem =
+      process.env[options["--root-public-key-env"]];
+    if (!trustedRootPublicKeyPem) {
+      throw new Error(
+        `Probe Distribution Trust Root environment variable ${options["--root-public-key-env"]} is empty`,
+      );
+    }
     candidateManifest = await validateReleaseCandidate(
       options["--candidate-dir"],
+      { trustedRootPublicKeyPem },
     );
   } catch (error) {
     errors.push(`Candidate Manifest unavailable: ${error.message}`);

@@ -108,13 +108,14 @@ watch(
                 {{ enrollment.hubUrl }}
               </dd>
             </div>
-            <div>
-              <dt class="text-muted-foreground">安装路径</dt>
-              <dd class="mt-1 break-all">
-                {{ enrollment.installPath }}
-              </dd>
-            </div>
           </dl>
+
+          <p class="text-muted-foreground text-sm leading-6">
+            请先从独立发布的探针安装包安装
+            <code>enoki-probe-bootstrap-acquire</code> 与
+            <code>enoki-probe-bootstrap-activate</code> 到
+            <code>/usr/local/bin/</code>，再执行此命令。
+          </p>
 
           <textarea
             v-if="enrollment.status === 'pending'"

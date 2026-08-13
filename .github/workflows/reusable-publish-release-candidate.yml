@@ -100,10 +100,12 @@ jobs:
         env:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
           CANDIDATE_VERSION: ${{ inputs.version }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: |
           mkdir candidate
           tar --extract --gzip --file candidate-transfer/candidate.tar.gz --directory candidate
-          node trusted-tool/scripts/release-candidate.mjs validate candidate
+          node trusted-tool/scripts/release-candidate.mjs validate candidate \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           jq --exit-status \
             --arg commit "$CANDIDATE_COMMIT" \
             --arg version "$CANDIDATE_VERSION" \
@@ -121,11 +123,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: ghcr.io/ykdz/enoki-hub
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
         run: >-
           node trusted-tool/scripts/release-publication.mjs reconcile
           --candidate-dir candidate
           --verification-summary verification/release-verification-summary.json
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           --repository "${{ github.repository }}"
           --image "$IMAGE"
           --run-id "${{ github.run_id }}"

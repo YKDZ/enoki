@@ -69,7 +69,7 @@ export async function reconcilePublication({
 
   assertNoUnexpectedAssets(release, candidateManifest);
 
-  for (const expected of candidateManifest.probeAssetSet.files) {
+  for (const expected of publicReleaseAssets(candidateManifest)) {
     const existing = release.assets[expected.file];
     if (!existing) {
       if (!release.draft) {
@@ -79,11 +79,7 @@ export async function reconcilePublication({
       }
       await remote.uploadAsset({
         ...expected,
-        filePath: path.join(
-          candidateDir,
-          candidateManifest.probeAssetSet.directory,
-          expected.file,
-        ),
+        filePath: path.join(candidateDir, expected.directory, expected.file),
         version,
       });
       actions.push({
@@ -208,7 +204,7 @@ function assertExistingPublicationState({
     );
   }
   assertNoUnexpectedAssets(release, candidateManifest);
-  for (const expected of candidateManifest.probeAssetSet.files) {
+  for (const expected of publicReleaseAssets(candidateManifest)) {
     const actual = release?.assets?.[expected.file];
     if (
       actual &&
@@ -251,7 +247,7 @@ function assertExistingPublicationState({
 
 function assertNoUnexpectedAssets(release, candidateManifest) {
   const expectedAssetNames = new Set(
-    candidateManifest.probeAssetSet.files.map(({ file }) => file),
+    publicReleaseAssets(candidateManifest).map(({ file }) => file),
   );
   for (const file of Object.keys(release?.assets ?? {})) {
     if (!expectedAssetNames.has(file)) {
@@ -263,7 +259,7 @@ function assertNoUnexpectedAssets(release, candidateManifest) {
 function assertExactReleaseAssets(release, candidateManifest, version) {
   if (!release) throw new Error(`GitHub Release ${version} disappeared`);
   assertNoUnexpectedAssets(release, candidateManifest);
-  for (const expected of candidateManifest.probeAssetSet.files) {
+  for (const expected of publicReleaseAssets(candidateManifest)) {
     const actual = release.assets[expected.file];
     if (actual?.sha256 !== expected.sha256 || actual?.size !== expected.size) {
       throw new Error(
@@ -281,7 +277,7 @@ function assertPublishAuthorization({
   const candidate = candidateManifest?.candidate;
   if (
     candidateManifest?.kind !== "enoki-release-candidate" ||
-    candidateManifest?.schemaVersion !== 2 ||
+    candidateManifest?.schemaVersion !== 3 ||
     verificationSummary?.kind !== "enoki-release-verification-evidence" ||
     verificationSummary?.schemaVersion !== 3 ||
     verificationSummary.verified !== true ||
@@ -309,12 +305,8 @@ function assertPublishAuthorization({
 }
 
 async function verifyCandidatePublicationBytes(candidateDir, manifest) {
-  for (const expected of manifest.probeAssetSet.files) {
-    const filePath = path.join(
-      candidateDir,
-      manifest.probeAssetSet.directory,
-      expected.file,
-    );
+  for (const expected of publicReleaseAssets(manifest)) {
+    const filePath = path.join(candidateDir, expected.directory, expected.file);
     const details = await stat(filePath);
     if (
       details.size !== expected.size ||
@@ -331,6 +323,23 @@ async function verifyCandidatePublicationBytes(candidateDir, manifest) {
   ) {
     throw new Error("candidate Hub OCI archive does not match its manifest");
   }
+}
+
+function publicReleaseAssets(manifest) {
+  const groups = [manifest.bootstrap, manifest.probeAssetSet];
+  const files = groups.flatMap((group) =>
+    (group?.files ?? []).map((file) => ({
+      ...file,
+      directory: group.directory,
+    })),
+  );
+  if (
+    !manifest.bootstrap ||
+    new Set(files.map(({ file }) => file)).size !== files.length
+  ) {
+    throw new Error("Candidate public Release assets are malformed");
+  }
+  return files;
 }
 
 async function fileSha256(file) {

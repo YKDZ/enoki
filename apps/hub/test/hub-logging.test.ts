@@ -165,7 +165,6 @@ describe("Hub structured logging", () => {
         "probe_operation_token_validation",
       ],
       ["POST", "/api/probe/operations/42/status", "probe_operation_status"],
-      ["GET", "/api/probe/install.sh", "probe_asset"],
       ["GET", "/api/probe/assets/probe.tar.gz", "probe_asset"],
       [
         "POST",

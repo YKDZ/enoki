@@ -1,19 +1,23 @@
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
   chmod,
+  copyFile,
   link,
   mkdir,
   mkdtemp,
   readFile,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { withExtractedProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import { validateReleaseCandidate } from "./release-candidate-lib.mjs";
 import {
   createHubLifecycleClient,
@@ -33,6 +37,7 @@ const runOptions = Object.freeze({
   "--matrix": { required: true },
   "--matrix-cell": { required: true },
   "--owner-password-env": { required: true },
+  "--root-public-key-env": { required: true },
   "--run-id": {},
   "--ssh-host": {},
   "--ssh-key": {},
@@ -122,6 +127,11 @@ export function parseReleaseE2ECommandLine(arguments_) {
         "--owner-password-env must be an environment variable name",
       );
     }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(values["--root-public-key-env"])) {
+      throw new Error(
+        "--root-public-key-env must name an environment variable",
+      );
+    }
     for (const option of ["--hub-owner-url", "--hub-public-url"]) {
       const url = new URL(values[option]);
       if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -139,14 +149,22 @@ export function parseReleaseE2ECommandLine(arguments_) {
   return { command, values };
 }
 
-export async function loadValidatedCandidate(candidateManifestPath) {
+export async function loadValidatedCandidate(
+  candidateManifestPath,
+  { trustedRootPublicKeyPem } = {},
+) {
   if (path.basename(candidateManifestPath) !== "candidate-manifest.json") {
     throw new Error(
       "Candidate Manifest path must name candidate-manifest.json",
     );
   }
   const candidateDir = path.dirname(path.resolve(candidateManifestPath));
-  const manifest = await validateReleaseCandidate(candidateDir);
+  if (!trustedRootPublicKeyPem) {
+    throw new Error("trusted Probe Distribution Trust Root is required");
+  }
+  const manifest = await validateReleaseCandidate(candidateDir, {
+    trustedRootPublicKeyPem,
+  });
   return { candidateDir, manifest };
 }
 
@@ -158,6 +176,9 @@ export function createSshReleaseInfrastructureAdapter({
   loadCandidate = loadValidatedCandidate,
   port = 22,
   runProcess = runSpawnedProcess,
+  transferFile,
+  trustedRootPublicKeyPem,
+  withExtractedBootstrapArtifact = withExtractedProbeBootstrapArtifact,
 }) {
   const execute = createSshExecutor({
     host,
@@ -174,6 +195,17 @@ export function createSshReleaseInfrastructureAdapter({
     kind: "ssh",
     loadCandidate,
     provisioning: "existing-disposable-host",
+    transferFile:
+      transferFile ??
+      createSshCandidateArchiveTransfer({
+        host,
+        keyPath,
+        knownHostsPath,
+        port,
+        runProcess,
+      }),
+    trustedRootPublicKeyPem,
+    withExtractedBootstrapArtifact,
   });
 }
 
@@ -183,6 +215,9 @@ export function createCiReleaseInfrastructureAdapter({
   loadCandidate = loadValidatedCandidate,
   runProcess = runSpawnedProcess,
   timeoutMs = 5 * 60 * 1000,
+  transferFile = copyCandidateArchive,
+  trustedRootPublicKeyPem,
+  withExtractedBootstrapArtifact = withExtractedProbeBootstrapArtifact,
 }) {
   if (
     environment.GITHUB_ACTIONS !== "true" ||
@@ -204,6 +239,9 @@ export function createCiReleaseInfrastructureAdapter({
     kind: "ci",
     loadCandidate,
     provisioning: "github-hosted-runner",
+    transferFile,
+    trustedRootPublicKeyPem,
+    withExtractedBootstrapArtifact,
   });
 }
 
@@ -233,6 +271,9 @@ function createReleaseInfrastructureAdapter({
   kind,
   loadCandidate,
   provisioning,
+  transferFile,
+  trustedRootPublicKeyPem,
+  withExtractedBootstrapArtifact,
 }) {
   let preparedRunId = null;
   return {
@@ -248,7 +289,16 @@ function createReleaseInfrastructureAdapter({
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
         throw new Error("Release E2E infrastructure run ID is invalid");
       }
-      const candidate = await loadCandidate(candidateManifestPath);
+      const candidate = await loadCandidate(candidateManifestPath, {
+        trustedRootPublicKeyPem,
+      });
+      const provisionBootstrap = createCandidateBootstrapProvisioner({
+        candidateDir: candidate.candidateDir,
+        execute,
+        manifest: candidate.manifest,
+        transferFile,
+        withExtractedBootstrapArtifact,
+      });
       preparedRunId = runId;
       return {
         candidateDir: candidate.candidateDir,
@@ -261,6 +311,7 @@ function createReleaseInfrastructureAdapter({
           provisioning,
         },
         manifest: candidate.manifest,
+        provisionBootstrap,
       };
     },
     async release({ runId }) {
@@ -270,6 +321,241 @@ function createReleaseInfrastructureAdapter({
       preparedRunId = null;
       return { clean: true };
     },
+  };
+}
+
+function createCandidateBootstrapProvisioner({
+  candidateDir,
+  execute,
+  manifest,
+  transferFile,
+  withExtractedBootstrapArtifact,
+}) {
+  const bootstrap = selectCandidateBootstrap(
+    manifest,
+    "x86_64-unknown-linux-gnu",
+  );
+  const archivePath = path.join(
+    candidateDir,
+    manifest.bootstrap.directory,
+    bootstrap.file,
+  );
+  let provisioned = false;
+  return async ({ runId }) => {
+    if (provisioned)
+      throw new Error("Candidate Probe Bootstrap is already provisioned");
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
+      throw new Error("Release E2E infrastructure run ID is invalid");
+    }
+    await verifyCandidateBootstrapSource(archivePath, bootstrap);
+    await withExtractedBootstrapArtifact(
+      {
+        archivePath,
+        distribution: manifest.bootstrap.distribution,
+        rootKeyId: manifest.bootstrap.rootKeyId,
+        target: bootstrap.target,
+        version: manifest.bootstrap.version,
+      },
+      async ({ extractedRoles }) => {
+        const staged = await execute(stageCandidateBootstrapScript(), {
+          sensitive: true,
+        });
+        if (
+          staged.code !== 0 ||
+          !/^\/tmp\/enoki-release-e2e-bootstrap\.[A-Za-z0-9]+$/.test(
+            staged.stdout.trim(),
+          )
+        ) {
+          throw new Error(
+            `Could not stage Candidate Probe Bootstrap as the non-root Host user: ${staged.stderr}`,
+          );
+        }
+        const stageDir = staged.stdout.trim();
+        try {
+          for (const role of bootstrapRoles()) {
+            await transferFile({
+              destination: path.join(stageDir, role.name),
+              source: extractedRoles[role.key].binaryPath,
+            });
+          }
+          const verified = await execute(
+            verifyCandidateBootstrapStagingScript({ extractedRoles, stageDir }),
+            { sensitive: true },
+          );
+          if (verified.code !== 0 || verified.stdout.trim() !== "verified") {
+            throw new Error(
+              `Could not verify Candidate Probe Bootstrap staging: ${verified.stderr}`,
+            );
+          }
+          const installed = await execute(
+            installCandidateBootstrapScript({ extractedRoles, stageDir }),
+            { root: true },
+          );
+          if (installed.code !== 0 || installed.stdout.trim() !== "installed") {
+            throw new Error(
+              `Could not install Candidate Probe Bootstrap roles: ${installed.stderr}`,
+            );
+          }
+        } catch (error) {
+          await execute(removeCandidateBootstrapStagingScript(stageDir), {
+            sensitive: true,
+          }).catch(() => {});
+          throw error;
+        }
+      },
+    );
+    provisioned = true;
+    return {
+      file: bootstrap.file,
+      sha256: bootstrap.sha256,
+      target: bootstrap.target,
+    };
+  };
+}
+
+function selectCandidateBootstrap(manifest, target) {
+  const bootstrap = manifest?.bootstrap;
+  const matching =
+    bootstrap?.files?.filter((file) => file?.target === target) ?? [];
+  if (
+    bootstrap?.directory !== "probe-bootstrap" ||
+    !/^[0-9a-f]{64}$/.test(bootstrap?.rootKeyId ?? "") ||
+    matching.length !== 1 ||
+    matching[0]?.file !== `enoki-probe-bootstrap-${target}.tar.gz` ||
+    !/^[0-9a-f]{64}$/.test(matching[0]?.sha256 ?? "") ||
+    !Number.isSafeInteger(matching[0]?.size) ||
+    matching[0].size <= 0
+  ) {
+    throw new Error(
+      "Validated Candidate has no exact Host Probe Bootstrap archive",
+    );
+  }
+  return matching[0];
+}
+
+function stageCandidateBootstrapScript() {
+  return `# enoki-release-e2e:candidate-bootstrap-stage\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=$(mktemp -d /tmp/enoki-release-e2e-bootstrap.XXXXXX)\nchmod 0700 "$stage_dir"\nprintf '%s\\n' "$stage_dir"\n`;
+}
+
+function verifyCandidateBootstrapStagingScript({ extractedRoles, stageDir }) {
+  const checks = bootstrapRoles()
+    .map(({ key, name }) => {
+      const expected = extractedRoles[key];
+      return `[ -f "$stage_dir/${name}" ] && [ ! -L "$stage_dir/${name}" ]\n[ "$(stat -c %a "$stage_dir/${name}")" = 755 ]\n[ "$(wc -c < "$stage_dir/${name}" | tr -d ' ')" = ${shellSingleQuote(String(expected.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(expected.sha256)} "$stage_dir/${name}" | sha256sum -c -`;
+    })
+    .join("\n");
+  return `# enoki-release-e2e:candidate-bootstrap-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n${checks}\nprintf 'verified\\n'\n`;
+}
+
+function removeCandidateBootstrapStagingScript(stageDir) {
+  return `set -eu\n[ "$(id -u)" != 0 ]\nrm -rf -- ${shellSingleQuote(stageDir)}\n`;
+}
+
+async function verifyCandidateBootstrapSource(archivePath, bootstrap) {
+  const details = await stat(archivePath);
+  if (!details.isFile() || details.size !== bootstrap.size) {
+    throw new Error(
+      "Candidate Probe Bootstrap archive no longer matches validated Candidate",
+    );
+  }
+  const digest = await sha256File(archivePath);
+  if (digest !== bootstrap.sha256) {
+    throw new Error(
+      "Candidate Probe Bootstrap archive no longer matches validated Candidate",
+    );
+  }
+}
+
+function sha256File(file) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file, { highWaterMark: 64 * 1024 });
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.once("error", reject);
+    stream.once("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function copyCandidateArchive({ source, destination }) {
+  await copyFile(source, destination);
+  await chmod(destination, 0o600);
+}
+
+function installCandidateBootstrapScript({ extractedRoles, stageDir }) {
+  const roles = bootstrapRoles();
+  const preflight = roles
+    .map(
+      ({ name }) =>
+        `[ ! -e "/usr/local/bin/${name}" ] && [ ! -L "/usr/local/bin/${name}" ]`,
+    )
+    .join("\n");
+  const takeOwnership = roles
+    .map(({ key, name }) => {
+      const expected = extractedRoles[key];
+      return `source="$stage_dir/${name}"\ntarget="$temporary/${name}"\n[ -f "$source" ] && [ ! -L "$source" ]\ninstall -o root -g root -m 0755 -- "$source" "$target"\n[ -f "$target" ] && [ ! -L "$target" ]\n[ "$(stat -c %u:%g:%a "$target")" = 0:0:755 ]\n[ "$(wc -c < "$target" | tr -d ' ')" = ${shellSingleQuote(String(expected.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(expected.sha256)} "$target" | sha256sum -c -\nrm -f -- "$source"`;
+    })
+    .join("\n");
+  const activate = roles
+    .map(({ key, name }) => {
+      const expected = extractedRoles[key];
+      return `mv -T -- "$temporary/${name}" "/usr/local/bin/${name}"\n[ -f "/usr/local/bin/${name}" ] && [ ! -L "/usr/local/bin/${name}" ]\n[ "$(stat -c %u:%g:%a "/usr/local/bin/${name}")" = 0:0:755 ]\nprintf '%s  %s\\n' ${shellSingleQuote(expected.sha256)} "/usr/local/bin/${name}" | sha256sum -c -`;
+    })
+    .join("\n");
+  return `# enoki-release-e2e:candidate-bootstrap-install\nset -eu\n[ "$(id -u)" = 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n${preflight}\ntemporary=$(mktemp -d /tmp/enoki-release-e2e-bootstrap-root.XXXXXX)\nchmod 0700 "$temporary"\ncleanup() { rm -rf -- "$temporary"; rm -f -- ${roles.map(({ name }) => shellSingleQuote(`/usr/local/bin/${name}`)).join(" ")}; rmdir -- "$stage_dir" 2>/dev/null || true; }\ntrap cleanup EXIT HUP INT TERM\n${takeOwnership}\n${activate}\ntrap - EXIT HUP INT TERM\nrmdir -- "$stage_dir"\nrm -rf -- "$temporary"\nprintf 'installed\\n'\n`;
+}
+
+function bootstrapRoles() {
+  return [
+    { key: "acquirer", name: "enoki-probe-bootstrap-acquire" },
+    { key: "activator", name: "enoki-probe-bootstrap-activate" },
+  ];
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\\"'\\\"'")}'`;
+}
+
+function createSshCandidateArchiveTransfer({
+  host,
+  keyPath,
+  knownHostsPath,
+  port,
+  runProcess,
+}) {
+  validateSshOptions({ "--ssh-host": host, "--ssh-port": String(port) });
+  return async ({ source, destination }) => {
+    if (!knownHostsPath || !source || !destination) {
+      throw new Error(
+        "SSH Candidate archive transfer is missing an exact path",
+      );
+    }
+    const arguments_ = [
+      "-q",
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=15",
+      "-o",
+      "StrictHostKeyChecking=accept-new",
+      "-o",
+      `UserKnownHostsFile=${knownHostsPath}`,
+      "-P",
+      String(port),
+    ];
+    if (keyPath) arguments_.push("-i", keyPath, "-o", "IdentitiesOnly=yes");
+    arguments_.push("--", source, `${host}:${destination}`);
+    const result = await runProcess("scp", arguments_, {
+      timeoutMs: 5 * 60 * 1000,
+    });
+    if (result.code !== 0) {
+      throw new Error(
+        `Could not transfer Candidate Probe Bootstrap archive: ${result.stderr}`,
+      );
+    }
   };
 }
 
@@ -507,6 +793,7 @@ export function createLocalSshReleaseEnvironment({
 }
 
 export function createReleaseEnvironment({
+  bootstrapProvisioner,
   candidateDir,
   docker = createDockerHubController(),
   execute,
@@ -546,7 +833,11 @@ export function createReleaseEnvironment({
       const releaseTestHost = matrixCell
         ? await host.assertReleaseTestHost(matrixCell)
         : null;
+      const bootstrap = bootstrapProvisioner
+        ? await bootstrapProvisioner({ candidateManifest, runId })
+        : null;
       return {
+        bootstrap,
         docker: dockerResources,
         host,
         hub: {
@@ -581,7 +872,10 @@ export function createReleaseEnvironment({
             return { ...api, runtime };
           },
         },
-        infrastructure: infrastructure ?? null,
+        infrastructure:
+          infrastructure && bootstrap
+            ? { ...infrastructure, bootstrap }
+            : (infrastructure ?? null),
         releaseTestHost,
       };
     },

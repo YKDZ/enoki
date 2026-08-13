@@ -105,10 +105,19 @@ jobs:
         env:
           PRODUCTION_PROBE_PRIVATE_KEY: ${{ secrets.probe_asset_signing_key_pem }}
           PRODUCTION_PROBE_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
-        run: >-
-          node trusted-tool/scripts/release-candidate.mjs validate-signing-identity
-          --private-key-env PRODUCTION_PROBE_PRIVATE_KEY
-          --public-key-env PRODUCTION_PROBE_PUBLIC_KEY
+          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          PROBE_TRUST_DELEGATION: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
+          PROBE_TRUST_DELEGATION_SIGNATURE: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
+        run: |
+          printf '%s' "$PROBE_TRUST_DELEGATION" > trust-delegation.json
+          printf '%s' "$PROBE_TRUST_DELEGATION_SIGNATURE" | base64 --decode > trust-delegation.json.sig
+          node trusted-tool/scripts/release-candidate.mjs validate-signing-identity \
+            --private-key-env PRODUCTION_PROBE_PRIVATE_KEY \
+            --public-key-env PRODUCTION_PROBE_PUBLIC_KEY \
+            --root-public-key-env PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY \
+            --distribution enoki \
+            --trust-delegation trust-delegation.json \
+            --trust-delegation-signature trust-delegation.json.sig
 
       - name: Resolve the successful standard CI run for this candidate
         env:
@@ -166,14 +175,14 @@ jobs:
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
-          PRODUCTION_PROBE_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
+          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node trusted-tool/scripts/release-baseline.mjs resolve
           --candidate-version "$CANDIDATE_VERSION"
           --github-repository YKDZ/enoki
           --github-token-env GH_TOKEN
           --hub-image ghcr.io/ykdz/enoki-hub
-          --trusted-probe-public-key-env PRODUCTION_PROBE_PUBLIC_KEY
+          --trusted-root-public-key-env PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY
           --output release-baseline
 
       - name: Upload one pinned baseline resolution
@@ -198,6 +207,15 @@ jobs:
       commit: ${{ inputs.commit }}
       package-artifacts: true
       verify-reproducible: true
+      version: ${{ inputs.version }}
+
+  build-probe-bootstrap:
+    name: Build independent Probe Bootstrap artifacts
+    needs: [validate-candidate-inputs, validate-release-configuration]
+    uses: ./.github/workflows/reusable-build-probe-bootstrap.yml
+    with:
+      commit: ${{ inputs.commit }}
+      distribution: enoki
       version: ${{ inputs.version }}
 
   prepare-unsigned-probe-assets:
@@ -229,13 +247,19 @@ jobs:
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
           ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
-        run: >-
-          node candidate-source/scripts/release-candidate.mjs prepare-unsigned-probe-assets
-          --version "$CANDIDATE_VERSION"
-          --archives-dir probe-builds
-          --installer candidate-source/scripts/install-probe.sh
-          --output unsigned-probe-assets
-          --public-key-env ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_PROBE_TRUST_DELEGATION_JSON: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
+          ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
+        run: |
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_JSON" > trust-delegation.json
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64" | base64 --decode > trust-delegation.json.sig
+          node candidate-source/scripts/release-candidate.mjs prepare-unsigned-probe-assets \
+            --version "$CANDIDATE_VERSION" --archives-dir probe-builds \
+            --output unsigned-probe-assets \
+            --public-key-env ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
+            --distribution enoki --trust-delegation trust-delegation.json \
+            --trust-delegation-signature trust-delegation.json.sig
 
       - name: Upload exact unsigned signing input
         uses: actions/upload-artifact@v7
@@ -281,16 +305,26 @@ jobs:
       - name: Sign only allowlisted, deeply validated content
         env:
           ENOKI_PROBE_ASSET_SIGNING_KEY_PEM: ${{ secrets.probe_asset_signing_key_pem }}
-        run: >-
-          node trusted-signer/scripts/release-candidate.mjs sign-probe-assets
-          --input unsigned-probe-assets
-          --output probe-assets
-          --private-key-env ENOKI_PROBE_ASSET_SIGNING_KEY_PEM
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_PROBE_TRUST_DELEGATION_JSON: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_JSON }}
+          ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64: ${{ vars.ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64 }}
+        run: |
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_JSON" > trust-delegation.json
+          printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64" | base64 --decode > trust-delegation.json.sig
+          node trusted-signer/scripts/release-candidate.mjs sign-probe-assets \
+            --input unsigned-probe-assets --output probe-assets \
+            --private-key-env ENOKI_PROBE_ASSET_SIGNING_KEY_PEM \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
+            --trust-delegation trust-delegation.json \
+            --trust-delegation-signature trust-delegation.json.sig
 
       - name: Validate exact signed output without signing credentials
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node trusted-signer/scripts/release-candidate.mjs
           validate-probe-assets probe-assets
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Upload signed Probe Asset Set
         uses: actions/upload-artifact@v7
@@ -320,6 +354,7 @@ jobs:
         validate-release-configuration,
         resolve-release-baseline,
         sign-probe-assets,
+        build-probe-bootstrap,
         build-hub-oci,
       ]
     runs-on: ubuntu-24.04
@@ -359,6 +394,13 @@ jobs:
           name: candidate-probe-assets-${{ github.run_id }}
           path: candidate-inputs/probe-assets
 
+      - name: Download all independent Probe Bootstrap artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
+          path: candidate-inputs/probe-bootstrap-inputs
+          merge-multiple: true
+
       - name: Download Hub OCI archive
         uses: actions/download-artifact@v8
         with:
@@ -375,19 +417,20 @@ jobs:
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
           GH_TOKEN: ${{ github.token }}
-          PRODUCTION_PROBE_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}
+          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node trusted-tool/scripts/release-baseline.mjs recheck
           --candidate-version "$CANDIDATE_VERSION"
           --github-repository YKDZ/enoki
           --github-token-env GH_TOKEN
-          --trusted-probe-public-key-env PRODUCTION_PROBE_PUBLIC_KEY
+          --trusted-root-public-key-env PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY
           --bundle candidate-inputs/release-baseline
 
       - name: Assemble and validate candidate
         env:
           CANDIDATE_COMMIT: ${{ inputs.commit }}
           CANDIDATE_VERSION: ${{ inputs.version }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: |
           hub_archive="$(find candidate-inputs/hub -maxdepth 1 -type f -name '*.oci.tar' -print -quit)"
           if [ -z "$hub_archive" ]; then
@@ -398,18 +441,24 @@ jobs:
             --commit "$CANDIDATE_COMMIT" \
             --source-dir candidate-source \
             --version "$CANDIDATE_VERSION" \
+            --bootstrap-artifacts candidate-inputs/probe-bootstrap-inputs \
             --probe-assets candidate-inputs/probe-assets \
             --hub-oci "$hub_archive" \
             --release-baseline candidate-inputs/release-baseline \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
             --output candidate
-          node trusted-tool/scripts/release-candidate.mjs validate candidate
+          node trusted-tool/scripts/release-candidate.mjs validate candidate \
+            --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Create deterministic candidate transfer archive
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
           node trusted-tool/scripts/release-candidate.mjs package-candidate
           --candidate candidate
           --output candidate.tar.gz
           --source-date-epoch 0
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Attest immutable candidate provenance
         uses: actions/attest-build-provenance@v3
@@ -513,6 +562,7 @@ jobs:
         env:
           HOST_ADAPTER: ${{ matrix.hostAdapter }}
           MATRIX_CELL: ${{ matrix.cellId }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           RELEASE_E2E_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cellId }}
         run: >-
           node trusted-tool/scripts/release-e2e.mjs run
@@ -523,6 +573,7 @@ jobs:
           --hub-owner-url http://127.0.0.1:33000
           --hub-public-url http://127.0.0.1:33000
           --owner-password-env ENOKI_E2E_OWNER_PASSWORD
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           --evidence-dir "release-e2e-evidence/$MATRIX_CELL"
           --run-id "$RELEASE_E2E_RUN_ID"
 
@@ -860,6 +911,7 @@ jobs:
       - name: Generate the authoritative candidate verification summary
         if: ${{ always() }}
         env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
           REQUESTED_COMMIT: ${{ inputs.commit }}
           REQUESTED_VERSION: ${{ inputs.version }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -868,6 +920,7 @@ jobs:
         run: >-
           node trusted-tool/scripts/release-verification.mjs summarize
           --candidate-dir candidate
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           --release-baseline-dir attempt-inputs/release-baseline
           --probe-assets-dir attempt-inputs/probe-assets
           --hub-oci-dir attempt-inputs/hub

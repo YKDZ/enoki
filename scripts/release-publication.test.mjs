@@ -110,6 +110,12 @@ describe("Publication Reconciler", () => {
       "ref: ${{ needs.validate-publication-invocation.outputs.trusted-workflow-sha }}",
     );
     expect(publication).not.toContain("ref: ${{ github.workflow_sha }}");
+    expect(publication).toContain(
+      "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}",
+    );
+    expect(publication).toContain(
+      "--root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM",
+    );
   });
 
   it("publishes the exact verified candidate in the controlled order", async () => {
@@ -128,7 +134,7 @@ describe("Publication Reconciler", () => {
       expect(remote.events).toEqual([
         "tag:create",
         "release:create-draft",
-        ...fixture.candidateManifest.probeAssetSet.files.map(
+        ...releaseAssetFiles(fixture.candidateManifest).map(
           ({ file }) => `asset:upload:${file}`,
         ),
         "image:publish-version",
@@ -179,7 +185,7 @@ describe("Publication Reconciler", () => {
       const stages = [
         "tag:create",
         "release:create-draft",
-        ...fixture.candidateManifest.probeAssetSet.files.map(
+        ...releaseAssetFiles(fixture.candidateManifest).map(
           ({ file }) => `asset:upload:${file}`,
         ),
         "image:publish-version",
@@ -302,7 +308,7 @@ describe("Publication Reconciler", () => {
           completeAssets: true,
           draft: false,
         });
-        const asset = fixture.candidateManifest.probeAssetSet.files[0];
+        const asset = releaseAssetFiles(fixture.candidateManifest)[0];
         remote.release.assets[asset.file] = {
           sha256: "c".repeat(64),
           size: asset.size,
@@ -758,11 +764,6 @@ describe("GitHub and GHCR publication adapter", () => {
         if (url === "http://127.0.0.1:49152/api/probe/assets/manifest.json") {
           return Response.json({ version: "1.2.3" });
         }
-        if (url === "http://127.0.0.1:49152/api/probe/install.sh") {
-          return new Response(
-            "fetch /api/probe/assets/manifest.json; fetch /api/probe/assets/archive",
-          );
-        }
         return new Response("not found", { status: 404 });
       };
       const service = createPublicationSmokeService({
@@ -780,7 +781,7 @@ describe("GitHub and GHCR publication adapter", () => {
       });
       const release = {
         assets: Object.fromEntries(
-          fixture.candidateManifest.probeAssetSet.files.map((file) => [
+          releaseAssetFiles(fixture.candidateManifest).map((file) => [
             file.file,
             {
               downloadUrl: `https://downloads.example/${file.file}`,
@@ -880,7 +881,6 @@ describe("GitHub and GHCR publication adapter", () => {
         expect.arrayContaining([
           "http://127.0.0.1:49152/api/health",
           "http://127.0.0.1:49152/api/probe/assets/manifest.json",
-          "http://127.0.0.1:49152/api/probe/install.sh",
         ]),
       );
 
@@ -1002,7 +1002,7 @@ function seedMatchingTagAndRelease(
   remote.release = {
     assets: completeAssets
       ? Object.fromEntries(
-          fixture.candidateManifest.probeAssetSet.files.map((file) => [
+          releaseAssetFiles(fixture.candidateManifest).map((file) => [
             file.file,
             { sha256: file.sha256, size: file.size },
           ]),
@@ -1011,6 +1011,10 @@ function seedMatchingTagAndRelease(
     draft,
     targetCommit: fixture.candidateManifest.candidate.commit,
   };
+}
+
+function releaseAssetFiles(manifest) {
+  return [...manifest.bootstrap.files, ...manifest.probeAssetSet.files];
 }
 
 class FakePublicationRemote {
@@ -1096,15 +1100,16 @@ class FakePublicationRemote {
 async function createPublicationFixture() {
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-publication-"));
   const candidateDir = path.join(workDir, "candidate");
+  const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
   const probeAssetDir = path.join(candidateDir, "probe-assets");
   const hubDir = path.join(candidateDir, "hub");
   await Promise.all([
     mkdir(probeAssetDir, { recursive: true }),
+    mkdir(bootstrapDir, { recursive: true }),
     mkdir(hubDir, { recursive: true }),
   ]);
   const files = [];
   for (const [file, content] of [
-    ["install-probe.sh", "#!/bin/sh\n"],
     ["manifest.json", '{"version":"1.2.3"}\n'],
     ["manifest.json.sig", "signature"],
     ["signing-key.pem", "public key"],
@@ -1114,10 +1119,29 @@ async function createPublicationFixture() {
     files.push({ file, sha256: sha256(bytes), size: bytes.length });
   }
   files.sort((left, right) => left.file.localeCompare(right.file));
+  const bootstrapFiles = [];
+  for (const target of ["x86_64-unknown-linux-gnu"]) {
+    const file = `enoki-probe-bootstrap-${target}.tar.gz`;
+    const bytes = Buffer.from(`immutable bootstrap ${target}`);
+    await writeFile(path.join(bootstrapDir, file), bytes);
+    bootstrapFiles.push({
+      file,
+      sha256: sha256(bytes),
+      size: bytes.length,
+      target,
+    });
+  }
   const hubArchive = "hub/enoki-hub-v1.2.3.oci.tar";
   const hubBytes = Buffer.from("immutable OCI archive");
   await writeFile(path.join(candidateDir, hubArchive), hubBytes);
   const candidateManifest = {
+    bootstrap: {
+      directory: "probe-bootstrap",
+      distribution: "enoki",
+      files: bootstrapFiles,
+      rootKeyId: "f".repeat(64),
+      version: "1.2.3",
+    },
     candidate: { commit: "a".repeat(40), version: "v1.2.3" },
     hub: {
       archive: hubArchive,
@@ -1144,7 +1168,7 @@ async function createPublicationFixture() {
       probeAssetSet: { version: "1.2.2" },
       tag: "v1.2.2",
     },
-    schemaVersion: 2,
+    schemaVersion: 3,
   };
   const workflowRun = { attempt: 1, id: "123", url: "https://example/run/123" };
   const verificationSummary = {

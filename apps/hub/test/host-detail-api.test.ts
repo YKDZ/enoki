@@ -266,7 +266,6 @@ async function readHostProbeUpgradeEligibility(input: {
     database,
     probeAssets: {
       assetDir,
-      installScriptPath: path.join(assetRoot, "install-probe.sh"),
     },
   });
   const ownerSession = await loginOwner(app);
@@ -1036,7 +1035,6 @@ describe("Host detail API", () => {
       database,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1085,7 +1083,6 @@ describe("Host detail API", () => {
       now: () => 1_725_000_000_000,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1253,7 +1250,6 @@ describe("Host detail API", () => {
       now: () => 1_725_000_000_000,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1335,7 +1331,6 @@ describe("Host detail API", () => {
       now: () => 1_725_000_001_000,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1446,7 +1441,6 @@ describe("Host detail API", () => {
       now: () => 1_725_000_001_000,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1532,7 +1526,6 @@ describe("Host detail API", () => {
       now: () => nowMs,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
       probeOperations: {
         acceptedTimeoutMs: 1_000,
@@ -1681,7 +1674,6 @@ describe("Host detail API", () => {
       database,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1728,7 +1720,6 @@ describe("Host detail API", () => {
       now: () => 1_725_000_000_000,
       probeAssets: {
         assetDir,
-        installScriptPath: path.join(assetRoot, "install-probe.sh"),
       },
     });
     const ownerSession = await loginOwner(app);

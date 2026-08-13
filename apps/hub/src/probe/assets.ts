@@ -1,47 +1,55 @@
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 import { Hono } from "hono";
 
 export type ProbeAssetRouteOptions = {
   assetDir?: string;
-  installScriptPath?: string;
+  maxConcurrentPackageStreams?: number;
+  maxPackageBytes?: number;
+  maxPackageStreamDurationMs?: number;
+  maxMetadataBytes?: number;
+  packageStreamHighWaterMark?: number;
 };
 
 const defaultAssetDir = "/app/probe-assets";
-const defaultInstallScriptPath = "/app/probe-assets/install-probe.sh";
 const assetFileNamePattern = /^[A-Za-z0-9._-]+$/;
+const defaultMaxConcurrentPackageStreams = 4;
+const defaultMaxPackageBytes = 512 * 1024 * 1024;
+const defaultMaxPackageStreamDurationMs = 5 * 60 * 1000;
+const defaultMaxMetadataBytes = 256 * 1024;
 
 export function createProbeAssetRoutes(options: ProbeAssetRouteOptions = {}) {
   const app = new Hono();
   const assetDir = path.resolve(options.assetDir ?? defaultAssetDir);
-  const installScriptPath = path.resolve(
-    options.installScriptPath ?? defaultInstallScriptPath,
+  const packageStreams = createPackageStreamGate(
+    options.maxConcurrentPackageStreams ?? defaultMaxConcurrentPackageStreams,
   );
-  const canServeInstallScript = isPathInsideDirectory(
-    installScriptPath,
-    assetDir,
+  const packageStreamDurationMs = positiveSafeInteger(
+    options.maxPackageStreamDurationMs ?? defaultMaxPackageStreamDurationMs,
+    "maxPackageStreamDurationMs",
   );
-
-  app.get("/install.sh", async (context) => {
-    if (!canServeInstallScript) {
-      return context.text("Probe installer is not available.", 404);
-    }
-
-    const file = await readExistingFile(installScriptPath);
-    if (!file) {
-      return context.text("Probe installer is not available.", 404);
-    }
-
-    return new Response(file, {
-      headers: {
-        "cache-control": "no-store",
-        "content-type": "text/x-shellscript; charset=utf-8",
-      },
-    });
-  });
+  const maxPackageBytes = positiveSafeInteger(
+    options.maxPackageBytes ?? defaultMaxPackageBytes,
+    "maxPackageBytes",
+  );
+  const packageStreamHighWaterMark = options.packageStreamHighWaterMark
+    ? positiveSafeInteger(
+        options.packageStreamHighWaterMark,
+        "packageStreamHighWaterMark",
+      )
+    : undefined;
+  const maxMetadataBytes = positiveSafeInteger(
+    options.maxMetadataBytes ?? defaultMaxMetadataBytes,
+    "maxMetadataBytes",
+  );
 
   app.get("/assets/:file", async (context) => {
+    if (context.req.header("range")) {
+      return context.text("Probe assets do not support Range requests.", 416);
+    }
     const fileName = context.req.param("file");
 
     if (!assetFileNamePattern.test(fileName)) {
@@ -53,11 +61,40 @@ export function createProbeAssetRoutes(options: ProbeAssetRouteOptions = {}) {
       return context.text("Probe asset not found.", 404);
     }
 
-    const file = await readExistingFile(assetPath);
-    if (!file) {
-      return context.text("Probe asset not found.", 404);
+    if (isProbePackage(fileName)) {
+      const lease = packageStreams.tryAcquire();
+      if (!lease) {
+        return context.text(
+          "Probe package stream capacity is unavailable.",
+          503,
+          {
+            "retry-after": "1",
+          },
+        );
+      }
+      const streamed = await openPackageStream({
+        filePath: assetPath,
+        highWaterMark: packageStreamHighWaterMark,
+        lease,
+        maxBytes: maxPackageBytes,
+        maxDurationMs: packageStreamDurationMs,
+      });
+      if (!streamed) {
+        lease.release();
+        return context.text("Probe asset not found.", 404);
+      }
+      return new Response(streamed.body, {
+        headers: {
+          "accept-ranges": "none",
+          "cache-control": "public, max-age=31536000, immutable",
+          "content-length": String(streamed.size),
+          "content-type": contentTypeForProbeAsset(fileName),
+        },
+      });
     }
 
+    const file = await readExistingSmallFile(assetPath, maxMetadataBytes);
+    if (!file) return context.text("Probe asset not found.", 404);
     return new Response(file, {
       headers: {
         "cache-control":
@@ -82,24 +119,173 @@ function isPathInsideDirectory(filePath: string, directoryPath: string) {
   );
 }
 
-async function readExistingFile(filePath: string) {
+async function readExistingSmallFile(filePath: string, maxBytes: number) {
+  const opened = await openRegularFile(filePath, maxBytes);
+  if (!opened) return null;
+
   try {
-    const details = await lstat(filePath);
-    if (!details.isFile()) {
-      return null;
-    }
-
-    return await readFile(filePath);
+    return await readBoundedFile(opened.file, opened.size);
   } catch (error) {
-    if (error instanceof Error && "code" in error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR") {
-        return null;
-      }
-    }
+    if (isUnavailable(error)) return null;
+    throw error;
+  } finally {
+    await opened.file.close().catch(() => undefined);
+  }
+}
 
+async function openRegularFile(filePath: string, maxBytes: number) {
+  let file: FileHandle;
+  try {
+    file = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isUnavailable(error)) return null;
     throw error;
   }
+
+  try {
+    const details = await file.stat();
+    if (!details.isFile() || details.size > maxBytes) {
+      await file.close();
+      return null;
+    }
+    return { file, size: details.size };
+  } catch (error) {
+    await file.close().catch(() => undefined);
+    if (isUnavailable(error)) return null;
+    throw error;
+  }
+}
+
+async function readBoundedFile(file: FileHandle, size: number) {
+  const contents = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < contents.byteLength) {
+    const { bytesRead } = await file.read(
+      contents,
+      offset,
+      contents.byteLength - offset,
+      offset,
+    );
+    if (bytesRead === 0) return null;
+    offset += bytesRead;
+  }
+  return contents;
+}
+
+function isProbePackage(fileName: string) {
+  return fileName.endsWith(".tar.gz");
+}
+
+function createPackageStreamGate(limit: number) {
+  const validatedLimit = positiveSafeInteger(
+    limit,
+    "maxConcurrentPackageStreams",
+  );
+  let active = 0;
+  return {
+    tryAcquire() {
+      if (active >= validatedLimit) return null;
+      active += 1;
+      let released = false;
+      return {
+        release() {
+          if (!released) {
+            released = true;
+            active -= 1;
+          }
+        },
+      };
+    },
+  };
+}
+
+async function openPackageStream({
+  filePath,
+  highWaterMark,
+  lease,
+  maxBytes,
+  maxDurationMs,
+}: {
+  filePath: string;
+  highWaterMark: number | undefined;
+  lease: { release: () => void };
+  maxBytes: number;
+  maxDurationMs: number;
+}) {
+  const opened = await openRegularFile(filePath, maxBytes);
+  if (!opened || opened.size === 0) {
+    await opened?.file.close();
+    return null;
+  }
+  const { file, size } = opened;
+
+  const stream = file.createReadStream({
+    autoClose: false,
+    end: size - 1,
+    highWaterMark,
+  });
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let closed = false;
+  const release = () => {
+    if (timeout) clearTimeout(timeout);
+    if (!closed) {
+      closed = true;
+      void file.close().catch(() => undefined);
+    }
+    lease.release();
+  };
+  stream.once("close", release);
+  stream.once("error", release);
+  timeout = setTimeout(() => {
+    stream.destroy(new Error("Probe package stream duration exceeded"));
+  }, maxDurationMs);
+  timeout.unref();
+
+  const source = Readable.toWeb(stream) as ReadableStream<Uint8Array>;
+  const reader = source.getReader();
+  return {
+    body: new ReadableStream<Uint8Array>({
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          release();
+        }
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            release();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          controller.error(error);
+          release();
+        }
+      },
+    }),
+    size,
+  };
+}
+
+function positiveSafeInteger(value: number, name: string) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function isUnavailable(error: unknown) {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    ((error as NodeJS.ErrnoException).code === "ENOENT" ||
+      (error as NodeJS.ErrnoException).code === "ENOTDIR" ||
+      (error as NodeJS.ErrnoException).code === "ELOOP")
+  );
 }
 
 function contentTypeForProbeAsset(fileName: string) {

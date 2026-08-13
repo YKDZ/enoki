@@ -6,10 +6,13 @@ import { createHash, randomUUID } from "node:crypto";
 // invoked by this test-only path.
 const releaseE2EInfrastructureResources = Object.freeze([
   { kind: "file", path: "/usr/local/bin/enoki-probe" },
+  { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-acquire" },
+  { kind: "file", path: "/usr/local/bin/enoki-probe-bootstrap-activate" },
   {
     kind: "file",
     path: "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
   },
+  { kind: "directory", path: "/var/lib/enoki-probe-bootstrap" },
   { kind: "file", path: "/etc/enoki/probe-install.toml" },
   { kind: "file", path: "/etc/systemd/system/enoki-probe.service" },
   {
@@ -1268,6 +1271,7 @@ function validateRepairFilesystemEvidence(evidence, candidateManifest) {
     "group:enoki-probe",
     "/usr/local/bin/enoki-probe",
     "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    "/var/lib/enoki-probe-bootstrap",
     "/etc/enoki/probe-install.toml",
     "/etc/systemd/system/enoki-probe.service",
     "/var/lib/enoki-probe",
@@ -2694,10 +2698,13 @@ export function createProbeHostHarness({
         }
         runOwnsMutation = true;
       }
-      const result = await execute(`${installCommand}\n`, {
-        root: true,
-        sensitive: true,
-      });
+      const result = await execute(
+        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
+        {
+          root: false,
+          sensitive: true,
+        },
+      );
       const recorded = await execute(
         reinstallation
           ? renewRunResourcesScript(runId, ownershipToken)
@@ -2733,23 +2740,29 @@ export function createProbeHostHarness({
       ) {
         throw new Error("Candidate Probe version is invalid");
       }
-      const [inspected, serviceResult, sudoersResult, binaryVersionResult] =
-        await Promise.all([
-          inventory(),
-          execute(serviceBoundaryScript()),
-          execute(sudoersBoundaryScript(), { root: true }),
-          execute(binaryVersionScript()),
-        ]);
+      const [
+        inspected,
+        serviceResult,
+        sudoersResult,
+        binaryVersionResult,
+        generationResult,
+      ] = await Promise.all([
+        inventory(),
+        execute(serviceBoundaryScript()),
+        execute(sudoersBoundaryScript(), { root: true }),
+        execute(binaryVersionScript()),
+        execute(bootstrapGenerationStateScript(), { root: true }),
+      ]);
       const residue = inventoryResidue(inspected);
       const required = [
         "user:enoki-probe",
         "group:enoki-probe",
         "/usr/local/bin/enoki-probe",
         "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+        "/var/lib/enoki-probe-bootstrap",
         "/etc/enoki/probe-install.toml",
         "/etc/systemd/system/enoki-probe.service",
         "/var/lib/enoki-probe",
-        "/etc/sudoers.d/enoki-probe-operations",
         "enoki-probe.service",
       ];
       const missing = required.filter((entry) => !residue.includes(entry));
@@ -2775,13 +2788,15 @@ export function createProbeHostHarness({
           `Probe service does not satisfy the non-root installation contract: ${JSON.stringify(service)}`,
         );
       }
-      if (
-        sudoersResult.code !== 0 ||
-        !sudoersResult.stdout.includes("enoki-probe-uninstaller") ||
-        !sudoersResult.stdout.includes("internal-uninstaller")
-      ) {
+      if (sudoersResult.code !== 0 || sudoersResult.stdout.trim() !== "") {
         throw new Error(
-          "Probe operation sudoers boundary is missing or invalid",
+          "Probe Bootstrap schema 2 installation must not retain Probe sudoers",
+        );
+      }
+      const generation = generationResult.stdout.trim();
+      if (generationResult.code !== 0 || !/^[1-9]\d*$/.test(generation)) {
+        throw new Error(
+          "Probe Bootstrap delegation generation state is missing or invalid",
         );
       }
       const probeVersion =
@@ -2800,6 +2815,7 @@ export function createProbeHostHarness({
         probeVersion,
         service,
         sudoers: sudoersResult.stdout,
+        delegationGeneration: Number(generation),
       };
     },
 
@@ -2819,10 +2835,13 @@ export function createProbeHostHarness({
     async rejectRepeatedInstall(installCommand, runId) {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
       assertInstallCommand(installCommand);
-      const result = await execute(`${installCommand}\n`, {
-        root: true,
-        sensitive: true,
-      });
+      const result = await execute(
+        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
+        {
+          root: false,
+          sensitive: true,
+        },
+      );
       const rejection = `${result.stdout}\n${result.stderr}`.match(
         /\bcode=([a-z0-9_]+)\b/,
       )?.[1];
@@ -3026,10 +3045,13 @@ export function createProbeHostHarness({
           "Installer recovery requires a terminal insufficient-privilege Probe Upgrade",
         );
       }
-      const result = await execute(`${installCommand}\n`, {
-        root: true,
-        sensitive: true,
-      });
+      const result = await execute(
+        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
+        {
+          root: false,
+          sensitive: true,
+        },
+      );
       if (result.code !== 0) {
         throw new Error(
           `Manual Probe installer recovery failed (${result.code}): ${result.stderr}`,
@@ -3465,10 +3487,9 @@ systemctl show enoki-probe.service --no-pager \
 function sudoersBoundaryScript() {
   return String.raw`# enoki-release-e2e:sudoers-boundary
 set -eu
-cat /etc/sudoers.d/enoki-probe-operations
-if [ -e /etc/sudoers.d/enoki-probe-collector-helpers ]; then
-  cat /etc/sudoers.d/enoki-probe-collector-helpers
-fi
+for candidate in /etc/sudoers.d/enoki-probe-operations /etc/sudoers.d/enoki-probe-collector-helpers /etc/sudoers.d/enoki-probe-upgrader; do
+  [ ! -e "$candidate" ]
+done
 `;
 }
 
@@ -3476,6 +3497,20 @@ function binaryVersionScript() {
   return String.raw`# enoki-release-e2e:binary-version
 set -eu
 /usr/local/bin/enoki-probe --version
+`;
+}
+
+function bootstrapGenerationStateScript() {
+  return String.raw`# enoki-release-e2e:bootstrap-generation
+set -eu
+generation=/var/lib/enoki-probe/trust/delegation-generation
+[ -f "$generation" ] && [ ! -L "$generation" ]
+[ "$(stat -c %u "$generation")" = 0 ]
+[ "$(stat -c %a "$generation")" = 600 ]
+value=$(cat -- "$generation")
+case "$value" in [1-9]* ) ;; *) exit 1 ;; esac
+case "$value" in *[!0-9]* ) exit 1 ;; esac
+printf '%s\n' "$value"
 `;
 }
 
@@ -3938,7 +3973,7 @@ claim=/var/lib/enoki-release-e2e/claim
 [ -f "$claim/upgrade-before-resources" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$metadata_schema" = current ]
+[ "$metadata_schema" = bootstrap-v2 ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.recovery.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -3963,7 +3998,7 @@ claim=/var/lib/enoki-release-e2e/claim
 [ ! -e "$claim/post-replacement-fault" ]
 cmp --silent "$claim/resources" "$claim/upgrade-before-resources"
 ${knownProbeInstallMetadataScript()}
-[ "$metadata_schema" = current ]
+[ "$metadata_schema" = bootstrap-v2 ]
 ${resourceFingerprintFunction()}
 temporary=$(mktemp "$claim/resources.repair.XXXXXX")
 trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
@@ -4059,36 +4094,20 @@ function knownProbeInstallMetadataScript() {
 [ -f "$metadata" ]
 [ ! -L "$metadata" ]
 [ "$(stat -c %u "$metadata")" = 0 ]
-[ -z "$(find "$metadata" -prune -perm /022 -print)" ]
+[ "$(stat -c %a "$metadata")" = 600 ]
 require_metadata_line() { [ "$(grep -Fxc "$1" "$metadata")" -eq 1 ]; }
+require_metadata_line 'schema_version = 2'
 require_metadata_line 'install_path = "/usr/local/bin/enoki-probe"'
 require_metadata_line 'state_dir = "/var/lib/enoki-probe"'
 require_metadata_line 'operation_status_path = "/var/lib/enoki-probe/probe-operation-status.toml"'
 require_metadata_line 'service_name = "enoki-probe"'
 require_metadata_line 'service_user = "enoki-probe"'
-require_metadata_line 'operation_sudoers_path = "/etc/sudoers.d/enoki-probe-operations"'
-require_metadata_line 'collector_helper_sudoers_path = "/etc/sudoers.d/enoki-probe-collector-helpers"'
-if grep -Fxq 'schema_version = 1' "$metadata"; then
-  metadata_schema=current
-else
-  metadata_schema=legacy
-fi
-case "$metadata_schema" in
-  current)
-    [ "$(stat -c %a "$metadata")" = 600 ]
-    require_metadata_line 'schema_version = 1'
-    require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
-    require_metadata_line 'service_group = "enoki-probe"'
-    require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
-    ;;
-  legacy)
-    [ "$(stat -c %a "$metadata")" = 644 ]
-    [ "$(grep -c '^schema_version = ' "$metadata")" -eq 0 ]
-    [ "$(grep -c '^identity_path = ' "$metadata")" -eq 0 ]
-    [ "$(grep -c '^service_group = ' "$metadata")" -eq 0 ]
-    [ "$(grep -c '^service_unit_path = ' "$metadata")" -eq 0 ]
-    ;;
-esac`;
+require_metadata_line 'identity_path = "/var/lib/enoki-probe/identity/probe-bootstrap.toml"'
+require_metadata_line 'service_group = "enoki-probe"'
+require_metadata_line 'service_unit_path = "/etc/systemd/system/enoki-probe.service"'
+[ "$(grep -c '^schema_version = ' "$metadata")" -eq 1 ]
+! grep -Eq 'sudoers|upgrader' "$metadata"
+metadata_schema=bootstrap-v2`;
 }
 
 function removeClaimScript(runId, token) {
@@ -4175,12 +4194,10 @@ function assertInstallCommand(command) {
     typeof command !== "string" ||
     command.length > 16_384 ||
     command.includes("\n") ||
-    !/^curl -fsSL '[^']+\/api\/probe\/install\.sh' \| sudo env /.test(
+    /\b(?:curl|wget|bash|sh)\b/.test(command) ||
+    !/^ENOKI_HUB_URL='[^']*' ENOKI_ENROLLMENT_TOKEN='[^']+' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/.test(
       command,
-    ) ||
-    !command.includes("ENOKI_HUB_URL=") ||
-    !command.includes("ENOKI_ENROLLMENT_TOKEN=") ||
-    !command.endsWith(" bash")
+    )
   ) {
     throw new Error("Hub returned an invalid Probe install command");
   }
@@ -4448,7 +4465,7 @@ function assertCandidateManifest(manifest) {
     /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub?.imageDigest ?? "") &&
     releaseBaseline.probeAssetSet?.version === releaseBaseline.tag.slice(1);
   if (
-    manifest?.schemaVersion !== 2 ||
+    manifest?.schemaVersion !== 3 ||
     manifest.kind !== "enoki-release-candidate" ||
     !/^[0-9a-f]{40}$/.test(manifest.candidate?.commit ?? "") ||
     !/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
@@ -4457,6 +4474,19 @@ function assertCandidateManifest(manifest) {
     !/^sha256:[0-9a-f]{64}$/.test(manifest.hub?.digest ?? "") ||
     manifest.hub?.embeddedProbeVersion !== manifest.probeAssetSet?.version ||
     manifest.probeAssetSet?.version !== manifest.candidate.version.slice(1) ||
+    manifest.bootstrap?.directory !== "probe-bootstrap" ||
+    manifest.bootstrap?.distribution !== "enoki" ||
+    manifest.bootstrap?.version !== manifest.probeAssetSet?.version ||
+    !/^[0-9a-f]{64}$/.test(manifest.bootstrap?.rootKeyId ?? "") ||
+    !Array.isArray(manifest.bootstrap?.files) ||
+    !manifest.bootstrap.files.some(
+      (file) =>
+        file?.target === "x86_64-unknown-linux-gnu" &&
+        file.file === "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz" &&
+        /^[0-9a-f]{64}$/.test(file.sha256 ?? "") &&
+        Number.isSafeInteger(file.size) &&
+        file.size > 0,
+    ) ||
     !validReleaseBaseline
   ) {
     throw new Error("Candidate Manifest is invalid or internally inconsistent");
@@ -5456,6 +5486,10 @@ function redactSensitiveText(value, secrets) {
   for (const secret of secrets) {
     if (secret) redacted = redacted.replaceAll(secret, "[REDACTED]");
   }
+  redacted = redacted.replace(
+    /ENOKI_HUB_URL='[^']*' ENOKI_ENROLLMENT_TOKEN='[^']+' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/g,
+    "[REDACTED_INSTALLER_COMMAND]",
+  );
   return redacted
     .replace(/enk_enroll_[A-Za-z0-9_-]+/g, "[REDACTED_ENROLLMENT_TOKEN]")
     .replace(
@@ -5470,10 +5504,6 @@ function redactSensitiveText(value, secrets) {
     .replace(
       /(ENOKI_ENROLLMENT_TOKEN\s*=\s*)('[^']*'|"[^"]*"|[^\s]+)/g,
       "$1[REDACTED]",
-    )
-    .replace(
-      /curl -fsSL '[^']+\/api\/probe\/install\.sh' \| sudo env [^\n]+ bash/g,
-      "[REDACTED_INSTALLER_COMMAND]",
     );
 }
 

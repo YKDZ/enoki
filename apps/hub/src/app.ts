@@ -149,13 +149,7 @@ export function createHubApp(options: HubAppOptions = {}) {
     ...options,
     liveUpdates: liveUpdates ?? undefined,
   });
-  app.route(
-    "/api/probe",
-    createProbeAssetRoutes({
-      assetDir: options.probeAssets?.assetDir,
-      installScriptPath: options.probeAssets?.installScriptPath,
-    }),
-  );
+  app.route("/api/probe", createProbeAssetRoutes(options.probeAssets));
 
   if (auth) {
     app.route("/api/web/auth", auth.routes);
@@ -322,13 +316,7 @@ export function createProbeApiApp(options: ProbeApiAppOptions = {}) {
   );
 
   mountProbeApiSurface(app, options);
-  app.route(
-    "/api/probe",
-    createProbeAssetRoutes({
-      assetDir: options.probeAssets?.assetDir,
-      installScriptPath: options.probeAssets?.installScriptPath,
-    }),
-  );
+  app.route("/api/probe", createProbeAssetRoutes(options.probeAssets));
 
   return app;
 }

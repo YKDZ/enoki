@@ -15,8 +15,8 @@ const pendingEnrollment: EnrollmentResponse = {
   expiresAtMs: 1_725_000_900_000,
   hostId: null,
   hubUrl: "https://hub.example.test",
-  installCommand: "curl https://hub.example.test/api/probe/install.sh | sh",
-  installPath: "/usr/local/bin/enoki-probe",
+  installCommand:
+    "ENOKI_HUB_URL='https://hub.example.test' ENOKI_ENROLLMENT_TOKEN='enk_enroll_test' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
   readyAtMs: null,
   rejectedAtMs: null,
   rejection: null,
