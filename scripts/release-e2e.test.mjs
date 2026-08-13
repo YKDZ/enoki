@@ -6061,6 +6061,7 @@ describe("Release E2E command", () => {
     await writeFile(path.join(bootstrapDir, file), archive);
     const commands = [];
     const transfers = [];
+    let extractionInput;
     try {
       const adapter = createCiReleaseInfrastructureAdapter({
         candidateManifestPath: path.join(
@@ -6092,8 +6093,10 @@ describe("Release E2E command", () => {
           },
         }),
         transferFile: async (transfer) => transfers.push(transfer),
-        withExtractedBootstrapArtifact: async (_input, callback) =>
-          callback({ extractedRoles }),
+        withExtractedBootstrapArtifact: async (input, callback) => {
+          extractionInput = input;
+          return callback({ extractedRoles });
+        },
         runProcess: async (command, arguments_, options) => {
           commands.push({ command, arguments_, options });
           return successfulCommandText(
@@ -6115,6 +6118,11 @@ describe("Release E2E command", () => {
       await expect(
         prepared.provisionBootstrap({ runId: "run-bootstrap" }),
       ).resolves.toEqual({ file, sha256, target: "x86_64-unknown-linux-gnu" });
+
+      expect(extractionInput.expectedArchive).toEqual({
+        sha256,
+        size: archive.byteLength,
+      });
 
       const staging = commands.find(({ command }) => command === "sh");
       expect(staging.options.input).toContain(

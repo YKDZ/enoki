@@ -1,6 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -10,7 +9,6 @@ import {
   readFile,
   rename,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -347,11 +345,11 @@ function createCandidateBootstrapProvisioner({
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
       throw new Error("Release E2E infrastructure run ID is invalid");
     }
-    await verifyCandidateBootstrapSource(archivePath, bootstrap);
     await withExtractedBootstrapArtifact(
       {
         archivePath,
         distribution: manifest.bootstrap.distribution,
+        expectedArchive: { sha256: bootstrap.sha256, size: bootstrap.size },
         rootKeyId: manifest.bootstrap.rootKeyId,
         target: bootstrap.target,
         version: manifest.bootstrap.version,
@@ -451,31 +449,6 @@ function removeCandidateBootstrapStagingScript(stageDir) {
   return `set -eu\n[ "$(id -u)" != 0 ]\nrm -rf -- ${shellSingleQuote(stageDir)}\n`;
 }
 
-async function verifyCandidateBootstrapSource(archivePath, bootstrap) {
-  const details = await stat(archivePath);
-  if (!details.isFile() || details.size !== bootstrap.size) {
-    throw new Error(
-      "Candidate Probe Bootstrap archive no longer matches validated Candidate",
-    );
-  }
-  const digest = await sha256File(archivePath);
-  if (digest !== bootstrap.sha256) {
-    throw new Error(
-      "Candidate Probe Bootstrap archive no longer matches validated Candidate",
-    );
-  }
-}
-
-function sha256File(file) {
-  return new Promise((resolve, reject) => {
-    const hash = createHash("sha256");
-    const stream = createReadStream(file, { highWaterMark: 64 * 1024 });
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.once("error", reject);
-    stream.once("end", () => resolve(hash.digest("hex")));
-  });
-}
-
 async function copyCandidateArchive({ source, destination }) {
   await copyFile(source, destination);
   await chmod(destination, 0o600);
@@ -509,10 +482,6 @@ function bootstrapRoles() {
     { key: "acquirer", name: "enoki-probe-bootstrap-acquire" },
     { key: "activator", name: "enoki-probe-bootstrap-activate" },
   ];
-}
-
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function shellSingleQuote(value) {

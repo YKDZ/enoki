@@ -80,6 +80,7 @@ export async function inspectProbeBootstrapArtifact({
 async function inspectProbeBootstrapArchiveInput({
   archivePath,
   distribution,
+  expectedArchive,
   rootKeyId,
   target,
   version,
@@ -89,6 +90,7 @@ async function inspectProbeBootstrapArchiveInput({
     throw new Error("Probe Bootstrap archive path is invalid");
   }
   const archive = await readBoundedArchive(archivePath);
+  assertExpectedArchive(archive, expectedArchive);
   const archiveRoles = parseExactProbeBootstrapArchive(archive);
   const [acquirer, activator] = await Promise.all(
     expectedProbeBootstrapRoles.map(async ({ name, role }) => {
@@ -116,6 +118,23 @@ async function inspectProbeBootstrapArchiveInput({
     },
     roleBytes: { acquirer: acquirer.binary, activator: activator.binary },
   };
+}
+
+function assertExpectedArchive(archive, expectedArchive) {
+  if (expectedArchive === undefined) return;
+  if (
+    !isPlainObject(expectedArchive) ||
+    Object.keys(expectedArchive).sort().join(",") !== "sha256,size" ||
+    !/^[0-9a-f]{64}$/.test(expectedArchive.sha256 ?? "") ||
+    !Number.isSafeInteger(expectedArchive.size) ||
+    expectedArchive.size <= 0 ||
+    archive.byteLength !== expectedArchive.size ||
+    sha256(archive) !== expectedArchive.sha256
+  ) {
+    throw new Error(
+      "Candidate Probe Bootstrap archive no longer matches validated Candidate",
+    );
+  }
 }
 
 // Keeps archive parsing outside elevated authority. The callback receives only
