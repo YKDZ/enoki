@@ -7,10 +7,15 @@ import {
   type AuthConfig,
   type AuthEnvironment,
 } from "./auth/config.js";
+import { HubConfigurationError } from "./config-error.js";
+import { type InstallationCommandConfig } from "./enrollment/install-command.js";
+import { createNoopHubLogger, type HubLogger } from "./hub-logger.js";
 import {
-  createDefaultInstallationCommandConfig,
-  type InstallationCommandConfig,
-} from "./enrollment/install-command.js";
+  isNonLoopbackHttpOrigin,
+  parseTrustedProxyCidrs,
+  readHttpOrigin,
+  type TrustedProxyCidr,
+} from "./network.js";
 
 export type HubEnvironment = AuthEnvironment;
 
@@ -48,12 +53,13 @@ export type HostStatusConfig = {
 };
 
 export type NetworkConfig = {
-  trustForwardedProbeHeaders: boolean;
+  managementOrigin: string;
+  probeApiOrigin: string;
+  trustedProxyCidrs: TrustedProxyCidr[];
 };
 
 export type ProbeAssetConfig = {
   assetDir: string;
-  installScriptPath: string;
 };
 
 export type ProbeOperationConfig = {
@@ -87,7 +93,11 @@ const defaultProbeOperationRunningTimeoutSeconds = 15 * 60;
 
 export function createHubRuntimeConfigFromEnvironment(
   environment: HubEnvironment,
+  options: { logger?: HubLogger } = {},
 ): HubRuntimeConfig {
+  const logger = options.logger ?? createNoopHubLogger();
+  rejectLegacyEnvironment(environment);
+  const network = createNetworkConfigFromEnvironment(environment, logger);
   const persistentState =
     createHubPersistentStateConfigFromEnvironment(environment);
   const dataRoot = persistentState.dataRoot;
@@ -96,7 +106,11 @@ export function createHubRuntimeConfigFromEnvironment(
   const hostStatus = createHostStatusConfigFromEnvironment(environment);
 
   return {
-    auth: createAuthConfigFromEnvironment(environment),
+    auth: {
+      ...createAuthConfigFromEnvironment(environment, { logger }),
+      managementOrigin: network.managementOrigin,
+      trustedProxyCidrs: network.trustedProxyCidrs,
+    },
     clockSkew: {
       thresholdMs:
         readPositiveInteger(
@@ -122,18 +136,9 @@ export function createHubRuntimeConfigFromEnvironment(
         "ENOKI_METRICS_RETENTION_DAYS",
       ),
     },
-    network: {
-      trustForwardedProbeHeaders:
-        environment.ENOKI_TRUSTED_PROXY_HEADERS === "true",
-    },
+    network,
     probeAssets: {
       assetDir: environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
-      installScriptPath:
-        environment.ENOKI_INSTALL_SCRIPT_PATH ??
-        path.join(
-          environment.ENOKI_PROBE_ASSET_DIR ?? defaultProbeAssetDir,
-          "install-probe.sh",
-        ),
     },
     probeOperations: {
       acceptedTimeoutMs:
@@ -218,13 +223,71 @@ function createHostStatusConfigFromEnvironment(environment: HubEnvironment) {
 function createInstallationCommandConfigFromEnvironment(
   environment: HubEnvironment,
 ) {
-  const defaults = createDefaultInstallationCommandConfig();
+  return {
+    probeApiOrigin: readHttpOrigin(
+      environment.ENOKI_PROBE_API_ORIGIN ?? environment.ENOKI_MANAGEMENT_ORIGIN,
+      "ENOKI_PROBE_API_ORIGIN",
+    ),
+  };
+}
+
+function createNetworkConfigFromEnvironment(
+  environment: HubEnvironment,
+  logger: HubLogger,
+): NetworkConfig {
+  const managementOrigin = readHttpOrigin(
+    environment.ENOKI_MANAGEMENT_ORIGIN,
+    "ENOKI_MANAGEMENT_ORIGIN",
+  );
+  const probeApiOrigin = readHttpOrigin(
+    environment.ENOKI_PROBE_API_ORIGIN ?? managementOrigin,
+    "ENOKI_PROBE_API_ORIGIN",
+  );
+
+  const insecureOrigins: Array<[string, string]> =
+    managementOrigin === probeApiOrigin
+      ? [[managementOrigin, "insecure_management_and_probe_api_origin"]]
+      : [
+          [managementOrigin, "insecure_management_origin"],
+          [probeApiOrigin, "insecure_probe_api_origin"],
+        ];
+
+  for (const [origin, outcome] of insecureOrigins) {
+    if (!isNonLoopbackHttpOrigin(origin)) continue;
+    logger.log({
+      component: "hub",
+      event: "configuration.warning",
+      level: "warn",
+      outcome,
+    });
+  }
 
   return {
-    installPath: environment.ENOKI_PROBE_INSTALL_PATH ?? defaults.installPath,
-    installScriptPath: defaults.installScriptPath,
-    publicHubUrl: environment.ENOKI_PUBLIC_HUB_URL,
+    managementOrigin,
+    probeApiOrigin,
+    trustedProxyCidrs: parseTrustedProxyCidrs(
+      environment.ENOKI_TRUSTED_PROXY_CIDRS,
+    ),
   };
+}
+
+function rejectLegacyEnvironment(environment: HubEnvironment) {
+  const migrations: Record<string, string> = {
+    ENOKI_PUBLIC_HUB_URL:
+      "Set ENOKI_MANAGEMENT_ORIGIN and, when the Probe API differs, ENOKI_PROBE_API_ORIGIN.",
+    ENOKI_PUBLIC_HTTPS:
+      "Choose http:// or https:// in ENOKI_MANAGEMENT_ORIGIN and ENOKI_PROBE_API_ORIGIN.",
+    ENOKI_TRUST_PROXY_HEADERS:
+      "Set ENOKI_TRUSTED_PROXY_CIDRS only for forwarded client-address evidence; forwarded host and protocol are ignored.",
+    ENOKI_TRUSTED_PROXY_HEADERS:
+      "Set ENOKI_TRUSTED_PROXY_CIDRS only for forwarded client-address evidence.",
+  };
+
+  for (const [name, migration] of Object.entries(migrations)) {
+    if (environment[name] !== undefined) {
+      throw new HubConfigurationError(`${name} has been removed. ${migration}`);
+    }
+  }
 }
 
 function readMetricsArchiveEnabled(value: string | undefined) {

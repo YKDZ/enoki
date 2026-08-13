@@ -2,7 +2,14 @@ import type {
   HostDetailSample,
   HostLiveSummary,
 } from "@enoki/api-client/websocket";
-import { computed, onScopeDispose, ref, unref, type MaybeRef } from "vue";
+import {
+  computed,
+  onScopeDispose,
+  ref,
+  unref,
+  watch,
+  type MaybeRef,
+} from "vue";
 
 import { apiGet, apiMutate, isUnauthorizedError } from "@/lib/api";
 import { hostProfileBackedFields } from "@/lib/host-profile-live";
@@ -33,6 +40,12 @@ type MutateJson = <T>(
 ) => Promise<T>;
 type ProbeUpgradeEligibility = HostDetail["probeUpgradeEligibility"];
 type ProbeUpgradeStatus = HostDetail["probeUpgradeStatus"];
+type MetricsRequestIntent = {
+  activationEpoch: number;
+  hostId: number;
+  window: MetricsWindow;
+  windowIntentVersion: number;
+};
 
 const metricsWindowDurationsMs: Record<MetricsWindow, number> = {
   "1m": 60 * 1000,
@@ -83,18 +96,53 @@ export function useHostDetail(
   });
   let livePlaybackTimer: ReturnType<typeof setTimeout> | null = null;
   let metricsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let isRefreshingMetrics = false;
+  let activeMetricsRefreshToken: {
+    activationEpoch: number;
+    token: symbol;
+  } | null = null;
+  let metricsWindowIntentVersion = 0;
+  let hostActivationEpoch = 0;
   let activeLoad: Promise<void> | null = null;
   let activeLoadHostId: number | null = null;
+  let activeLoadActivationEpoch: number | null = null;
+  let isDisposed = false;
   let pendingMetricSamples: HostMetricSample[] = [];
 
+  watch(
+    () => currentHostId(),
+    (nextHostId, previousHostId) => {
+      if (nextHostId === previousHostId) {
+        return;
+      }
+
+      hostActivationEpoch += 1;
+      resetDetailState();
+    },
+    { flush: "sync" },
+  );
+
   onScopeDispose(() => {
+    isDisposed = true;
+    metricsWindowIntentVersion += 1;
+    hostActivationEpoch += 1;
     clearLivePlayback();
     clearMetricsRefreshTimer();
   }, true);
 
   async function load() {
+    if (isDisposed) {
+      return;
+    }
+
     const targetHostId = currentHostId();
+    if (
+      activeLoad &&
+      activeLoadHostId === targetHostId &&
+      activeLoadActivationEpoch === hostActivationEpoch
+    ) {
+      return activeLoad;
+    }
+
     if (!targetHostId) {
       resetDetailState();
       return;
@@ -104,46 +152,41 @@ export function useHostDetail(
       resetDetailState();
     }
 
-    if (activeLoad && activeLoadHostId === targetHostId) {
-      return activeLoad;
-    }
-
-    const loadPromise = loadHostDetail(targetHostId).finally(() => {
+    const intent = currentMetricsRequestIntent();
+    const loadPromise = loadHostDetail(intent).finally(() => {
       if (activeLoad === loadPromise) {
         activeLoad = null;
         activeLoadHostId = null;
+        activeLoadActivationEpoch = null;
       }
     });
     activeLoad = loadPromise;
     activeLoadHostId = targetHostId;
+    activeLoadActivationEpoch = intent.activationEpoch;
 
     return activeLoad;
   }
 
-  async function loadHostDetail(targetHostId: number) {
-    if (!targetHostId || currentHostId() !== targetHostId) {
+  async function loadHostDetail(intent: MetricsRequestIntent) {
+    if (!isCurrentMetricsRequestIntent(intent)) {
       return;
     }
 
     error.value = "";
     isLoading.value = true;
 
-    const detailRequest = refreshHostDetail(targetHostId);
-    const metricsRequest = loadMetrics(
-      selectedWindow.value,
-      { mode: "replace" },
-      targetHostId,
-    );
+    const detailRequest = refreshHostDetail(intent);
+    const metricsRequest = loadMetrics(intent, { mode: "replace" });
     const [detailResult, metricsResult] = await Promise.allSettled([
       detailRequest,
       metricsRequest,
     ]);
 
-    if (detailResult.status === "rejected") {
-      if (currentHostId() !== targetHostId) {
-        return;
-      }
+    if (!isCurrentMetricsRequestIntent(intent)) {
+      return;
+    }
 
+    if (detailResult.status === "rejected") {
       if (handleUnauthorized(detailResult.reason)) {
         isLoading.value = false;
         return;
@@ -154,13 +197,10 @@ export function useHostDetail(
       return;
     }
 
-    let shouldRefreshMetrics = true;
+    let shouldRefreshMetrics =
+      metricsResult.status === "rejected" || metricsResult.value;
 
     if (metricsResult.status === "rejected") {
-      if (currentHostId() !== targetHostId) {
-        return;
-      }
-
       if (handleUnauthorized(metricsResult.reason)) {
         shouldRefreshMetrics = false;
         isLoading.value = false;
@@ -175,53 +215,70 @@ export function useHostDetail(
     if (shouldRefreshMetrics) {
       startMetricsRefreshLoop();
     }
-    if (currentHostId() === targetHostId) {
+    if (isCurrentMetricsRequestIntent(intent)) {
       isLoading.value = false;
     }
   }
 
   async function loadMetrics(
-    window: MetricsWindow,
+    intent: MetricsRequestIntent,
     options: { mode: "enqueue-new" | "replace" },
-    targetHostId = currentHostId(),
   ) {
-    const response = await fetchMetrics(window, targetHostId);
-    if (currentHostId() !== targetHostId) {
-      return;
+    const response = await fetchMetrics(intent);
+    if (!response) {
+      return false;
+    }
+    if (!isCurrentMetricsRequestIntent(intent)) {
+      return false;
     }
 
-    selectedWindow.value = response.metrics.window;
+    if (response.metrics.window !== intent.window) {
+      throw new Error("Metrics response window does not match the request.");
+    }
+
     metricsError.value = "";
     if (options.mode === "replace") {
       samples.value = response.metrics.samples;
       clearLivePlayback();
       updateHostLatestMetricsFromSamples(samples.value);
-      return;
+      return true;
     }
 
     enqueueMetricSamples(newMetricSamples(response.metrics.samples));
+    return true;
   }
 
   async function switchWindow(window: MetricsWindow) {
+    const intent: MetricsRequestIntent = {
+      ...currentMetricsRequestIntent(),
+      window,
+      windowIntentVersion: ++metricsWindowIntentVersion,
+    };
     error.value = "";
     isLoading.value = true;
-    const previousWindow = selectedWindow.value;
     selectedWindow.value = window;
     clearMetricsRefreshTimer();
 
     try {
-      await loadMetrics(window, { mode: "replace" });
-      startMetricsRefreshLoop();
+      const applied = await loadMetrics(intent, { mode: "replace" });
+      if (applied) {
+        startMetricsRefreshLoop();
+      }
     } catch (caught) {
+      if (!isCurrentMetricsRequestIntent(intent)) {
+        return;
+      }
+
       if (handleUnauthorized(caught)) {
         return;
       }
 
-      selectedWindow.value = previousWindow;
       metricsError.value = "无法读取历史指标，稍后会自动重试。";
       startMetricsRefreshLoop();
     } finally {
-      isLoading.value = false;
+      if (isCurrentMetricsRequestIntent(intent)) {
+        isLoading.value = false;
+      }
     }
   }
 
@@ -346,27 +403,44 @@ export function useHostDetail(
   }
 
   function scheduleMetricsRefresh() {
-    if (!currentHostId()) {
+    if (isDisposed || !currentHostId()) {
       return;
     }
 
+    clearMetricsRefreshTimer();
     metricsRefreshTimer = setTimeout(() => {
       void refreshMetrics();
     }, livePlaybackIntervalMs());
   }
 
   async function refreshMetrics() {
-    if (isRefreshingMetrics || !currentHostId()) {
+    if (
+      (activeMetricsRefreshToken &&
+        activeMetricsRefreshToken.activationEpoch === hostActivationEpoch) ||
+      !currentHostId()
+    ) {
       scheduleMetricsRefresh();
       return;
     }
 
-    isRefreshingMetrics = true;
+    const refreshToken = Symbol("metrics-refresh");
+    const intent = currentMetricsRequestIntent();
+    activeMetricsRefreshToken = {
+      activationEpoch: intent.activationEpoch,
+      token: refreshToken,
+    };
     let shouldScheduleNextRefresh = true;
     try {
-      await loadMetrics(selectedWindow.value, { mode: "enqueue-new" });
-      await refreshHostDetailIfProbeUpgradeActive();
+      const applied = await loadMetrics(intent, { mode: "enqueue-new" });
+      if (!applied) {
+        return;
+      }
+      await refreshHostDetailIfProbeUpgradeActive(intent);
     } catch (caught) {
+      if (!isCurrentMetricsRequestIntent(intent)) {
+        return;
+      }
+
       if (handleUnauthorized(caught)) {
         shouldScheduleNextRefresh = false;
         return;
@@ -375,8 +449,10 @@ export function useHostDetail(
       metricsError.value = "无法刷新历史指标，稍后会自动重试。";
       // The live socket can still recover state; keep the observation loop alive.
     } finally {
-      isRefreshingMetrics = false;
-      if (shouldScheduleNextRefresh) {
+      if (activeMetricsRefreshToken?.token === refreshToken) {
+        activeMetricsRefreshToken = null;
+      }
+      if (shouldScheduleNextRefresh && isCurrentMetricsRequestIntent(intent)) {
         scheduleMetricsRefresh();
       }
     }
@@ -409,8 +485,8 @@ export function useHostDetail(
     }
   }
 
-  async function fetchMetrics(window: MetricsWindow, targetHostId: number) {
-    const path = `/api/web/hosts/${targetHostId}/metrics?window=${window}`;
+  async function fetchMetrics(intent: MetricsRequestIntent) {
+    const path = `/api/web/hosts/${intent.hostId}/metrics?window=${intent.window}`;
 
     try {
       return await fetchJson<HostMetricsResponse>(path);
@@ -420,27 +496,42 @@ export function useHostDetail(
       }
 
       await sleep(150);
+      if (!isCurrentMetricsRequestIntent(intent)) {
+        return null;
+      }
       return await fetchJson<HostMetricsResponse>(path);
     }
   }
 
-  async function refreshHostDetail(targetHostId = currentHostId()) {
+  async function refreshHostDetail(
+    intent: MetricsRequestIntent = currentMetricsRequestIntent(),
+  ) {
+    if (!isCurrentMetricsRequestIntent(intent)) {
+      return;
+    }
+
     const detailResponse = await fetchJson<HostDetailResponse>(
-      `/api/web/hosts/${targetHostId}`,
+      `/api/web/hosts/${intent.hostId}`,
     );
-    if (currentHostId() !== targetHostId) {
+    if (!isCurrentMetricsRequestIntent(intent)) {
       return;
     }
 
     host.value = detailResponse.host;
   }
 
-  async function refreshHostDetailIfProbeUpgradeActive() {
+  async function refreshHostDetailIfProbeUpgradeActive(
+    intent: MetricsRequestIntent,
+  ) {
+    if (!isCurrentMetricsRequestIntent(intent)) {
+      return;
+    }
+
     if (!isProbeUpgradeActive(host.value?.probeUpgradeStatus ?? null)) {
       return;
     }
 
-    await refreshHostDetail();
+    await refreshHostDetail(intent);
   }
 
   function applyLiveSummary(summary: HostLiveSummary) {
@@ -524,12 +615,31 @@ export function useHostDetail(
     return unref(hostId);
   }
 
+  function currentMetricsRequestIntent(): MetricsRequestIntent {
+    return {
+      activationEpoch: hostActivationEpoch,
+      hostId: currentHostId(),
+      window: selectedWindow.value,
+      windowIntentVersion: metricsWindowIntentVersion,
+    };
+  }
+
+  function isCurrentMetricsRequestIntent(intent: MetricsRequestIntent) {
+    return (
+      !isDisposed &&
+      currentHostId() === intent.hostId &&
+      selectedWindow.value === intent.window &&
+      metricsWindowIntentVersion === intent.windowIntentVersion &&
+      hostActivationEpoch === intent.activationEpoch
+    );
+  }
+
   function resetDetailState() {
+    metricsWindowIntentVersion += 1;
     host.value = null;
     samples.value = [];
     error.value = "";
     metricsError.value = "";
-    isRefreshingMetrics = false;
     clearLivePlayback();
     clearMetricsRefreshTimer();
   }

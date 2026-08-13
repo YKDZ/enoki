@@ -44,7 +44,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
         ProbeRegistrationInput {
             bootstrap_config_path: bootstrap_config_path.clone(),
             enrollment_token: "enk_enroll_secret".to_string(),
-            hub_url: "https://hub.example/base/".to_string(),
+            hub_url: "https://hub.example".to_string(),
         },
         &mut transport,
     )
@@ -53,7 +53,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     assert_eq!(outcome.probe_id, "probe_01");
     assert_eq!(
         transport.observed_url,
-        "https://hub.example/base/api/probe/register",
+        "https://hub.example/api/probe/register",
     );
     assert!(!transport.observed_url.contains("enk_enroll_secret"));
     let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
@@ -83,7 +83,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
 
     let bootstrap_config =
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
-    assert!(bootstrap_config.contains("hub_url = \"https://hub.example/base/\""));
+    assert!(bootstrap_config.contains("hub_url = \"https://hub.example\""));
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
     assert!(bootstrap_config.contains("probe_private_key_pem = \"-----BEGIN PRIVATE KEY-----"));
     assert!(bootstrap_config.contains("server_time_offset_ms = "));
@@ -121,7 +121,7 @@ fn installation_inspection_uses_registration_without_generating_an_identity() {
     let target = inspect_probe_installation(
         ProbeInstallationInspectionInput {
             enrollment_token: "enk_enroll_secret".to_string(),
-            hub_url: "https://hub.example/base".to_string(),
+            hub_url: "https://hub.example".to_string(),
         },
         &mut transport,
     )
@@ -130,7 +130,7 @@ fn installation_inspection_uses_registration_without_generating_an_identity() {
     assert_eq!(target, ProbeInstallationTarget::ExistingHost);
     assert_eq!(
         transport.observed_url,
-        "https://hub.example/base/api/probe/register",
+        "https://hub.example/api/probe/register",
     );
     let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
         .expect("inspection request decodes");
@@ -154,7 +154,7 @@ fn installation_rejection_uses_the_registration_endpoint_without_generating_or_s
             code: "probe_bound_to_different_hub".to_string(),
             existing_probe_id: "probe_existing_01".to_string(),
             enrollment_token: "enk_enroll_secret".to_string(),
-            hub_url: "https://hub.example/base".to_string(),
+            hub_url: "https://hub.example".to_string(),
             message: "local Probe installation is bound to a different Hub".to_string(),
         },
         &mut transport,
@@ -163,7 +163,7 @@ fn installation_rejection_uses_the_registration_endpoint_without_generating_or_s
 
     assert_eq!(
         transport.observed_url,
-        "https://hub.example/base/api/probe/register",
+        "https://hub.example/api/probe/register",
     );
     let request = ProbeRegistrationRequest::decode(transport.observed_body.as_slice())
         .expect("rejection request decodes");
@@ -193,6 +193,10 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
             "install_path = \"/usr/local/bin/enoki-probe\"",
             "service_name = \"enoki-probe\"",
             "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "probe_distribution_root_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
             "upgrader_launch = \"systemd\"",
             "log_level = \"debug\"",
             "",
@@ -243,6 +247,19 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
         "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
     ));
     assert!(bootstrap_config.contains("upgrader_launch = \"systemd\""));
+    assert!(bootstrap_config.contains(
+        "probe_distribution_root_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+    ));
+    assert!(
+        bootstrap_config
+            .contains("bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"")
+    );
+    assert!(
+        bootstrap_config.contains(
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\""
+        )
+    );
+    assert!(bootstrap_config.contains("bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\""));
     assert!(bootstrap_config.contains("log_level = \"debug\""));
     assert!(!bootstrap_config.contains("enrollment_token"));
     assert!(!bootstrap_config.contains("enk_enroll_secret"));
@@ -338,8 +355,13 @@ fn probe_registration_drops_unknown_initial_collector_ids_from_bootstrap_config(
 #[test]
 fn probe_registration_rejects_unsafe_hub_urls_before_posting() {
     for hub_url in [
-        "http://hub.example",
+        "ftp://hub.example",
         "https://user:pass@hub.example",
+        "https://hub.example/base",
+        "https://hub.example/",
+        "https://hub.example/%2e",
+        "https://hub.example?",
+        "https://hub.example#",
         "https://hub.example/#fragment",
     ] {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -370,6 +392,32 @@ fn probe_registration_rejects_unsafe_hub_urls_before_posting() {
 }
 
 #[test]
+fn probe_registration_allows_explicit_non_loopback_http_hub() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response: registration_response(),
+    };
+
+    register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path,
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "http://192.0.2.20:8787".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("explicit HTTP Hub is accepted");
+
+    assert_eq!(
+        transport.observed_url,
+        "http://192.0.2.20:8787/api/probe/register",
+    );
+}
+
+#[test]
 fn probe_registration_allows_localhost_http_hub_for_development() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
@@ -383,7 +431,7 @@ fn probe_registration_allows_localhost_http_hub_for_development() {
         ProbeRegistrationInput {
             bootstrap_config_path,
             enrollment_token: "enk_enroll_secret".to_string(),
-            hub_url: "http://127.0.0.1:8787/base/".to_string(),
+            hub_url: "http://127.0.0.1:8787".to_string(),
         },
         &mut transport,
     )
@@ -391,7 +439,7 @@ fn probe_registration_allows_localhost_http_hub_for_development() {
 
     assert_eq!(
         transport.observed_url,
-        "http://127.0.0.1:8787/base/api/probe/register",
+        "http://127.0.0.1:8787/api/probe/register",
     );
 }
 

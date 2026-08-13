@@ -328,6 +328,10 @@ struct InstallerOwnedFields {
     log_level: Option<String>,
     operation_status_path: Option<String>,
     probe_asset_public_key_sha256: Option<String>,
+    probe_distribution_root_sha256: Option<String>,
+    bootstrap_acquirer_path: Option<String>,
+    bootstrap_activator_path: Option<String>,
+    bootstrap_state_dir: Option<String>,
     service_name: Option<String>,
     state_dir: Option<String>,
     upgrader_launch: Option<String>,
@@ -351,6 +355,10 @@ fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, Regi
         log_level: string_value(&value, "log_level")?,
         operation_status_path: string_value(&value, "operation_status_path")?,
         probe_asset_public_key_sha256: string_value(&value, "probe_asset_public_key_sha256")?,
+        probe_distribution_root_sha256: string_value(&value, "probe_distribution_root_sha256")?,
+        bootstrap_acquirer_path: string_value(&value, "bootstrap_acquirer_path")?,
+        bootstrap_activator_path: string_value(&value, "bootstrap_activator_path")?,
+        bootstrap_state_dir: string_value(&value, "bootstrap_state_dir")?,
         service_name: string_value(&value, "service_name")?,
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
@@ -414,6 +422,35 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
             .installer_owned_fields
             .probe_asset_public_key_sha256
             .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "probe_distribution_root_sha256",
+        config
+            .installer_owned_fields
+            .probe_distribution_root_sha256
+            .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "bootstrap_acquirer_path",
+        config
+            .installer_owned_fields
+            .bootstrap_acquirer_path
+            .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "bootstrap_activator_path",
+        config
+            .installer_owned_fields
+            .bootstrap_activator_path
+            .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "bootstrap_state_dir",
+        config.installer_owned_fields.bootstrap_state_dir.as_deref(),
     );
     push_optional_string(
         &mut output,

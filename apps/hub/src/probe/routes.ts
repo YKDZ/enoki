@@ -40,6 +40,7 @@ import {
   liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
+import { deriveObservedIp, type TrustedProxyCidr } from "../network.js";
 import { defaultProbeConfiguration } from "./configuration.js";
 import { permitsLegacyFullHostProfileObservation } from "./legacy-report-compatibility.js";
 import {
@@ -97,7 +98,8 @@ export type ProbeRouteServices = {
   liveUpdates?: LiveUpdateBroadcaster | null;
   now?: () => number;
   probeOperationTokenSecret?: string;
-  trustForwardedHeaders?: boolean;
+  probeApiOrigin?: string;
+  trustedProxyCidrs?: TrustedProxyCidr[];
 };
 
 export function createProbeRoutes(services: ProbeRouteServices) {
@@ -227,7 +229,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const hostProfileHash = hostProfileSnapshot.canonicalHash;
     const observedIp = observedIpFromContext(
       context,
-      services.trustForwardedHeaders,
+      services.trustedProxyCidrs,
     );
     const displayName =
       hostProfile.hostname?.trim() || fallbackDisplayName(probeId);
@@ -306,7 +308,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
-      services.trustForwardedHeaders,
+      services.probeApiOrigin,
     );
 
     if (!host) {
@@ -583,7 +585,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
       const observedIp = observedIpFromContext(
         context,
-        services.trustForwardedHeaders,
+        services.trustedProxyCidrs,
       );
 
       services.hosts.recordReport(host.id, {
@@ -910,7 +912,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
-      services.trustForwardedHeaders,
+      services.probeApiOrigin,
     );
 
     if (!host) {
@@ -982,7 +984,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
-      services.trustForwardedHeaders,
+      services.probeApiOrigin,
     );
 
     if (!host) {
@@ -1070,7 +1072,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       services.hosts,
       context.req.raw,
       requestBody,
-      services.trustForwardedHeaders,
+      services.probeApiOrigin,
     );
 
     if (!host) {
@@ -1797,13 +1799,13 @@ function authenticateProbe(
   hosts: HostRepository,
   request: Request,
   body: Uint8Array,
-  trustForwardedHeaders = false,
+  probeApiOrigin = "http://localhost",
 ) {
   const signedAuthentication = authenticateSignedProbeRequest(
     hosts,
     request,
     body,
-    trustForwardedHeaders,
+    probeApiOrigin,
   );
   if (signedAuthentication.kind === "authenticated") {
     return signedAuthentication.host;
@@ -1816,7 +1818,7 @@ function authenticateSignedProbeRequest(
   hosts: HostRepository,
   request: Request,
   body: Uint8Array,
-  trustForwardedHeaders = false,
+  probeApiOrigin = "http://localhost",
 ): SignedProbeAuthentication {
   const headers = request.headers;
   const probeId = headers.get("x-enoki-probe-id")?.trim() ?? "";
@@ -1862,7 +1864,7 @@ function authenticateSignedProbeRequest(
     nonce,
     canonicalOriginPathAndQuery: canonicalOriginPathAndQuery(
       request,
-      trustForwardedHeaders,
+      probeApiOrigin,
     ),
     timestampMs: timestamp,
   });
@@ -1904,57 +1906,9 @@ function probeRequestSignaturePayload(input: {
   ].join("\n");
 }
 
-function canonicalOriginPathAndQuery(
-  request: Request,
-  trustForwardedHeaders = false,
-) {
+function canonicalOriginPathAndQuery(request: Request, probeApiOrigin: string) {
   const url = new URL(request.url);
-  if (!trustForwardedHeaders) {
-    return `${url.protocol}//${url.host}${url.pathname}${url.search}`;
-  }
-
-  const protocol = trustedForwardedProtocol(request.headers, url);
-  const host = trustedForwardedHost(request.headers, url);
-
-  return `${protocol}://${host}${url.pathname}${url.search}`;
-}
-
-function trustedForwardedProtocol(headers: Headers, url: URL) {
-  const forwardedProto = firstHeaderValue(headers.get("x-forwarded-proto"));
-  if (forwardedProto && /^(?:http|https)$/i.test(forwardedProto)) {
-    return forwardedProto.toLowerCase();
-  }
-
-  return url.protocol.slice(0, -1);
-}
-
-function trustedForwardedHost(headers: Headers, url: URL) {
-  const forwardedHost =
-    firstHeaderValue(headers.get("x-forwarded-host")) ??
-    firstHeaderValue(headers.get("host"));
-
-  if (forwardedHost && isValidHttpHostHeader(forwardedHost)) {
-    return forwardedHost.toLowerCase();
-  }
-
-  return url.host;
-}
-
-function firstHeaderValue(value: string | null) {
-  return value?.split(",")[0]?.trim() || null;
-}
-
-function isValidHttpHostHeader(host: string) {
-  if (!host || /[\s/@\\]/.test(host)) {
-    return false;
-  }
-
-  try {
-    new URL(`http://${host}/`);
-    return true;
-  } catch {
-    return false;
-  }
+  return `${probeApiOrigin}${url.pathname}${url.search}`;
 }
 
 function verifyProbeRequestSignature(
@@ -2368,17 +2322,14 @@ function fallbackDisplayName(probeId: string) {
 
 function observedIpFromContext(
   context: Context,
-  trustForwardedHeaders = false,
+  trustedProxyCidrs: TrustedProxyCidr[] | undefined,
 ) {
   const request = context.req.raw;
-
-  const forwardedAddress = trustForwardedHeaders
-    ? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      request.headers.get("x-real-ip")?.trim() ||
-      null
-    : null;
-
-  return forwardedAddress || directRemoteAddress(context);
+  return deriveObservedIp({
+    directPeer: directRemoteAddress(context),
+    trustedProxyCidrs: trustedProxyCidrs ?? [],
+    xForwardedFor: request.headers.get("x-forwarded-for"),
+  });
 }
 
 function directRemoteAddress(context: Context) {

@@ -29,6 +29,7 @@ export async function createHubNodeServer(
   createHubApp({
     ...options,
     app,
+    listener: "management",
     webSocket: {
       upgradeWebSocket: webSocket.upgradeWebSocket,
     },

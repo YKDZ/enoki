@@ -26,11 +26,13 @@ export async function apiMutate<T>(
   path: string,
   options: { body?: unknown; method: "DELETE" | "POST" | "PUT" },
 ): Promise<T> {
+  const jsonBody =
+    options.body === undefined && options.method === "POST" ? {} : options.body;
   const response = await fetch(path, {
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    body: jsonBody === undefined ? undefined : JSON.stringify(jsonBody),
     credentials: "same-origin",
     headers:
-      options.body === undefined
+      jsonBody === undefined
         ? undefined
         : {
             "content-type": "application/json",

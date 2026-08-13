@@ -188,6 +188,9 @@ impl From<ProbeUpgraderRunError> for ProbeRepairRunError {
 
 const PRODUCTION_INSTALL_METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 const PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-upgrader";
+const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
+const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
+const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderResult {
@@ -211,6 +214,7 @@ pub enum ProbeUpgraderRunError {
     Io(std::io::Error),
     LocalUninstallRootRequired,
     MissingToken,
+    ManualProbeReinstallRequired,
     PostReplacementRestartFailure(String),
     PostReplacementStatusWriteFailure(String),
     RestartFailure(String),
@@ -236,6 +240,7 @@ impl ProbeUpgraderRunError {
             Self::LocalUninstallRootRequired => "probe_uninstall_root_required",
             Self::InvalidInstallMetadata(_) => "probe_uninstall_metadata_invalid",
             Self::UninstallCleanupFailure { code, .. } => code,
+            Self::ManualProbeReinstallRequired => "probe_manual_reinstall_required",
             _ => "probe_uninstall_failed",
         }
     }
@@ -276,6 +281,10 @@ impl fmt::Display for ProbeUpgraderRunError {
                 write!(formatter, "Local Probe Uninstall must run as root")
             }
             Self::MissingToken => write!(formatter, "missing Probe Operation Token on stdin"),
+            Self::ManualProbeReinstallRequired => write!(
+                formatter,
+                "this Probe uses the signed Probe installation package; manually reinstall the Probe instead of using the legacy updater"
+            ),
             Self::PostReplacementRestartFailure(message) => write!(
                 formatter,
                 "Probe binary was replaced, but restarting the Probe service failed: {message}"
@@ -341,6 +350,7 @@ impl Error for ProbeUpgraderRunError {
             | Self::IdentityValidation(_)
             | Self::LocalUninstallRootRequired
             | Self::MissingToken
+            | Self::ManualProbeReinstallRequired
             | Self::PostReplacementRestartFailure(_)
             | Self::PostReplacementStatusWriteFailure(_)
             | Self::RestartFailure(_)
@@ -952,6 +962,9 @@ pub fn run_probe_repair(
     }
     let install_metadata =
         read_trusted_probe_install_metadata(Path::new(PRODUCTION_INSTALL_METADATA_PATH), None)?;
+    if install_metadata.schema_version == 2 {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+    }
     let installed_version = read_installed_probe_version(&install_metadata.install_path)?;
     let mut systemd = SystemProbeUpgraderSystemdRunner;
     run_probe_repair_with_current_version_and_systemd_runner(
@@ -1365,6 +1378,9 @@ pub fn run_probe_upgrader_with_systemd_runner(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Some(&input.bootstrap_config_path),
     )?;
+    if install_metadata.schema_version == 2 {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired);
+    }
     run_probe_upgrader_with_systemd_runner_and_install_metadata(
         input,
         stdin,
@@ -1554,7 +1570,28 @@ fn execute_probe_uninstall_with_install_metadata_path(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     install_metadata_path: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
-    let plan = plan_probe_uninstall_cleanup(input, install_metadata, install_metadata_path)?;
+    execute_probe_uninstall_with_install_metadata_path_and_owner(
+        input,
+        install_metadata,
+        systemd,
+        install_metadata_path,
+        0,
+    )
+}
+
+fn execute_probe_uninstall_with_install_metadata_path_and_owner(
+    input: &ProbeUninstallerRunInput,
+    install_metadata: &TrustedProbeInstallMetadata,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    install_metadata_path: &Path,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    let plan = plan_probe_uninstall_cleanup(
+        input,
+        install_metadata,
+        install_metadata_path,
+        trusted_owner_uid,
+    )?;
     execute_probe_uninstall_cleanup(&plan, systemd)
 }
 
@@ -1576,7 +1613,12 @@ pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
     let input = ProbeUninstallerRunInput {
         bootstrap_config_path: install_metadata.identity_path.clone(),
     };
-    let plan = plan_probe_uninstall_cleanup(&input, &install_metadata, &install_metadata_path)?;
+    let plan = plan_probe_uninstall_cleanup(
+        &input,
+        &install_metadata,
+        &install_metadata_path,
+        trusted_read_only_metadata_owner_uid(test_root),
+    )?;
     let mut systemd = SystemProbeUpgraderSystemdRunner;
     execute_probe_uninstall_cleanup(&plan, &mut systemd)
 }
@@ -1591,9 +1633,19 @@ fn rebase_trusted_install_metadata_paths(
         &mut metadata.operation_status_path,
         &mut metadata.service_unit_path,
         &mut metadata.state_dir,
+    ] {
+        *path = preflight_rooted_path(test_root, path);
+    }
+    for path in [
         &mut metadata.operation_sudoers_path,
         &mut metadata.collector_helper_sudoers_path,
-    ] {
+        &mut metadata.bootstrap_acquirer_path,
+        &mut metadata.bootstrap_activator_path,
+        &mut metadata.bootstrap_state_dir,
+    ]
+    .into_iter()
+    .flatten()
+    {
         *path = preflight_rooted_path(test_root, path);
     }
     for path in &mut metadata.old_sudoers_paths {
@@ -1606,6 +1658,7 @@ struct ProbeUninstallCleanupPlan<'a> {
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
+    trusted_owner_uid: u32,
 }
 
 /// Establishes every local deletion target before systemd or filesystem
@@ -1615,26 +1668,52 @@ fn plan_probe_uninstall_cleanup<'a>(
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
     install_metadata_path: &'a Path,
+    trusted_owner_uid: u32,
 ) -> Result<ProbeUninstallCleanupPlan<'a>, ProbeUpgraderRunError> {
     ensure_absolute_path(&input.bootstrap_config_path)?;
     for path in [
         install_metadata_path,
         &install_metadata.identity_path,
         &install_metadata.install_path,
-        &install_metadata.operation_sudoers_path,
-        &install_metadata.collector_helper_sudoers_path,
         &install_metadata.service_unit_path,
         &install_metadata.state_dir,
     ] {
         ensure_absolute_path(path)?;
     }
+    for path in [
+        install_metadata.operation_sudoers_path.as_deref(),
+        install_metadata.collector_helper_sudoers_path.as_deref(),
+        install_metadata.bootstrap_acquirer_path.as_deref(),
+        install_metadata.bootstrap_activator_path.as_deref(),
+        install_metadata.bootstrap_state_dir.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        ensure_absolute_path(path)?;
+    }
     for path in &install_metadata.old_sudoers_paths {
         ensure_absolute_path(path)?;
+    }
+    if install_metadata.schema_version == 2 {
+        validate_owned_bootstrap_role(
+            install_metadata.bootstrap_acquirer_path.as_deref(),
+            trusted_owner_uid,
+        )?;
+        validate_owned_bootstrap_role(
+            install_metadata.bootstrap_activator_path.as_deref(),
+            trusted_owner_uid,
+        )?;
+        validate_owned_bootstrap_state(
+            install_metadata.bootstrap_state_dir.as_deref(),
+            trusted_owner_uid,
+        )?;
     }
     Ok(ProbeUninstallCleanupPlan {
         input,
         install_metadata,
         install_metadata_path,
+        trusted_owner_uid,
     })
 }
 
@@ -1701,10 +1780,26 @@ fn execute_probe_uninstall_cleanup(
             )
         })?;
     remove_path_if_exists(&install_metadata.install_path)?;
-    remove_path_if_exists(&install_metadata.operation_sudoers_path)?;
-    remove_path_if_exists(&install_metadata.collector_helper_sudoers_path)?;
+    if let Some(path) = &install_metadata.operation_sudoers_path {
+        remove_path_if_exists(path)?;
+    }
+    if let Some(path) = &install_metadata.collector_helper_sudoers_path {
+        remove_path_if_exists(path)?;
+    }
     for path in &install_metadata.old_sudoers_paths {
         remove_path_if_exists(path)?;
+    }
+    for path in [
+        install_metadata.bootstrap_acquirer_path.as_deref(),
+        install_metadata.bootstrap_activator_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        remove_path_if_exists(path)?;
+    }
+    if let Some(path) = install_metadata.bootstrap_state_dir.as_deref() {
+        remove_owned_bootstrap_state(path, plan.trusted_owner_uid)?;
     }
     remove_path_if_exists(install_metadata_path)?;
     remove_path_if_exists(&input.bootstrap_config_path)?;
@@ -1758,16 +1853,6 @@ fn verify_probe_uninstall_cleanup(
             "verifying Probe state is absent",
         ),
         (
-            metadata.operation_sudoers_path.as_path(),
-            "probe_uninstall_operation_sudoers_residue",
-            "verifying operation sudoers is absent",
-        ),
-        (
-            metadata.collector_helper_sudoers_path.as_path(),
-            "probe_uninstall_collector_sudoers_residue",
-            "verifying collector sudoers is absent",
-        ),
-        (
             metadata.service_unit_path.as_path(),
             "probe_uninstall_service_unit_residue",
             "verifying the service unit is absent",
@@ -1775,11 +1860,50 @@ fn verify_probe_uninstall_cleanup(
     ] {
         verify_path_absent(path, code, action)?;
     }
+    for (path, code, action) in [
+        (
+            metadata.operation_sudoers_path.as_deref(),
+            "probe_uninstall_operation_sudoers_residue",
+            "verifying operation sudoers is absent",
+        ),
+        (
+            metadata.collector_helper_sudoers_path.as_deref(),
+            "probe_uninstall_collector_sudoers_residue",
+            "verifying collector sudoers is absent",
+        ),
+    ] {
+        if let Some(path) = path {
+            verify_path_absent(path, code, action)?;
+        }
+    }
     for path in &metadata.old_sudoers_paths {
         verify_path_absent(
             path,
             "probe_uninstall_legacy_sudoers_residue",
             "verifying legacy sudoers is absent",
+        )?;
+    }
+    for (path, code, action) in [
+        (
+            metadata.bootstrap_acquirer_path.as_deref(),
+            "probe_uninstall_bootstrap_acquirer_residue",
+            "verifying Probe Bootstrap acquirer is absent",
+        ),
+        (
+            metadata.bootstrap_activator_path.as_deref(),
+            "probe_uninstall_bootstrap_activator_residue",
+            "verifying Probe Bootstrap activator is absent",
+        ),
+    ] {
+        if let Some(path) = path {
+            verify_path_absent(path, code, action)?;
+        }
+    }
+    if let Some(path) = metadata.bootstrap_state_dir.as_deref() {
+        verify_path_absent(
+            path,
+            "probe_uninstall_bootstrap_state_residue",
+            "verifying Probe Bootstrap state is absent",
         )?;
     }
     systemd
@@ -1813,6 +1937,117 @@ fn probe_uninstall_cleanup_error(
             message: error.to_string(),
         },
     }
+}
+
+fn validate_owned_bootstrap_role(
+    path: Option<&Path>,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+        "schema v2 metadata is missing Probe Bootstrap ownership",
+    ))?;
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != trusted_owner_uid
+        || metadata.mode() & 0o777 != 0o755
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap role is not a root-owned regular 0755 file",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_owned_bootstrap_state(
+    path: Option<&Path>,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    let path = path.ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+        "schema v2 metadata is missing Probe Bootstrap ownership",
+    ))?;
+    validate_owned_bootstrap_directory(path, 0o700, trusted_owner_uid)?;
+    for entry in fs::read_dir(path).map_err(ProbeUpgraderRunError::Io)? {
+        let entry = entry.map_err(ProbeUpgraderRunError::Io)?;
+        match entry.file_name().to_str() {
+            Some("trust") => {
+                validate_owned_bootstrap_directory(&entry.path(), 0o700, trusted_owner_uid)?;
+                for trust in fs::read_dir(entry.path()).map_err(ProbeUpgraderRunError::Io)? {
+                    let trust = trust.map_err(ProbeUpgraderRunError::Io)?;
+                    if !matches!(
+                        trust.file_name().to_str(),
+                        Some("delegation-generation" | ".delegation-generation.lock")
+                    ) {
+                        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                            "Probe Bootstrap state contains an unexpected entry",
+                        ));
+                    }
+                    validate_owned_bootstrap_regular(&trust.path(), 0o600, trusted_owner_uid)?;
+                }
+            }
+            Some("inbox") => {
+                validate_owned_bootstrap_directory(&entry.path(), 0o700, trusted_owner_uid)?;
+                if fs::read_dir(entry.path())
+                    .map_err(ProbeUpgraderRunError::Io)?
+                    .next()
+                    .is_some()
+                {
+                    return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "Probe Bootstrap inbox is not empty",
+                    ));
+                }
+            }
+            _ => {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe Bootstrap state contains an unexpected entry",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_owned_bootstrap_directory(
+    path: &Path,
+    mode: u32,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != trusted_owner_uid
+        || metadata.mode() & 0o777 != mode
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap state is not a root-owned private directory",
+        ));
+    }
+    Ok(())
+}
+fn validate_owned_bootstrap_regular(
+    path: &Path,
+    mode: u32,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != trusted_owner_uid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != mode
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap state contains an unsafe entry",
+        ));
+    }
+    Ok(())
+}
+fn remove_owned_bootstrap_state(
+    path: &Path,
+    trusted_owner_uid: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    validate_owned_bootstrap_state(Some(path), trusted_owner_uid)?;
+    fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<(), ProbeUpgraderRunError> {
@@ -1980,6 +2215,7 @@ struct ProbeUpgraderBootstrapConfig {
     install_path: Option<String>,
     operation_status_path: Option<String>,
     probe_asset_public_key_sha256: Option<String>,
+    probe_distribution_root_sha256: Option<String>,
     probe_id: Option<String>,
     probe_private_key_pem: Option<String>,
     server_time_offset_ms: Option<i64>,
@@ -1995,13 +2231,17 @@ struct TrustedProbeInstallMetadata {
     install_path: PathBuf,
     operation_status_path: PathBuf,
     probe_asset_public_key_sha256: String,
+    probe_distribution_root_sha256: Option<String>,
+    bootstrap_acquirer_path: Option<PathBuf>,
+    bootstrap_activator_path: Option<PathBuf>,
+    bootstrap_state_dir: Option<PathBuf>,
     service_name: String,
     service_group: String,
     service_unit_path: PathBuf,
     service_user: String,
     state_dir: PathBuf,
-    operation_sudoers_path: PathBuf,
-    collector_helper_sudoers_path: PathBuf,
+    operation_sudoers_path: Option<PathBuf>,
+    collector_helper_sudoers_path: Option<PathBuf>,
     old_sudoers_paths: Vec<PathBuf>,
 }
 
@@ -2108,6 +2348,7 @@ fn read_upgrader_bootstrap_config(
         install_path: string_value(&value, "install_path")?,
         operation_status_path: string_value(&value, "operation_status_path")?,
         probe_asset_public_key_sha256: string_value(&value, "probe_asset_public_key_sha256")?,
+        probe_distribution_root_sha256: string_value(&value, "probe_distribution_root_sha256")?,
         probe_id: string_value(&value, "probe_id")?,
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
         server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
@@ -2215,6 +2456,12 @@ fn read_trusted_probe_install_metadata_read_only_with_file_metadata_and_expected
                 "schema v1 metadata mode must be 0600",
             ));
         }
+    } else if metadata.schema_version == 2 {
+        if file_metadata.mode != 0o600 {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "schema v2 metadata mode must be 0600",
+            ));
+        }
     } else {
         if !matches!(file_metadata.mode, 0o600 | 0o644) {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -2242,6 +2489,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
     let schema_version = match value.get("schema_version") {
         None => 0,
         Some(toml::Value::Integer(1)) => 1,
+        Some(toml::Value::Integer(2)) => 2,
         Some(toml::Value::Integer(_)) => {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "unsupported schema version",
@@ -2262,31 +2510,94 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "old sudoers_path metadata is not supported",
         ));
     }
-    let operation_sudoers_path = required_install_metadata_path(&value, "operation_sudoers_path")?;
-    let collector_helper_sudoers_path =
-        required_install_metadata_path(&value, "collector_helper_sudoers_path")?;
+    let (operation_sudoers_path, collector_helper_sudoers_path) = if schema_version == 2 {
+        if value.get("operation_sudoers_path").is_some()
+            || value.get("collector_helper_sudoers_path").is_some()
+            || value.get("probe_asset_public_key_sha256").is_some()
+        {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "signed package metadata must not carry legacy sudoers or daily signing trust",
+            ));
+        }
+        (None, None)
+    } else {
+        (
+            Some(required_install_metadata_path(
+                &value,
+                "operation_sudoers_path",
+            )?),
+            Some(required_install_metadata_path(
+                &value,
+                "collector_helper_sudoers_path",
+            )?),
+        )
+    };
     let service_name = required_install_metadata_string(&value, "service_name")?;
     let service_user = optional_install_metadata_string(&value, "service_user")?
         .unwrap_or_else(|| "enoki-probe".to_string());
-    let identity_path = if schema_version == 1 {
+    let identity_path = if matches!(schema_version, 1 | 2) {
         required_install_metadata_path(&value, "identity_path")?
     } else {
         legacy_identity_path
             .unwrap_or_else(|| Path::new("/etc/enoki/probe-bootstrap.toml"))
             .to_path_buf()
     };
-    let service_group = if schema_version == 1 {
+    let service_group = if matches!(schema_version, 1 | 2) {
         required_install_metadata_string(&value, "service_group")?
     } else {
         service_user.clone()
     };
-    let service_unit_path = if schema_version == 1 {
+    let service_unit_path = if matches!(schema_version, 1 | 2) {
         required_install_metadata_path(&value, "service_unit_path")?
     } else {
         PathBuf::from("/etc/systemd/system/enoki-probe.service")
     };
-    let probe_asset_public_key_sha256 =
-        required_install_metadata_string(&value, "probe_asset_public_key_sha256")?;
+    let (probe_asset_public_key_sha256, probe_distribution_root_sha256) = if schema_version == 2 {
+        let root = required_install_metadata_string(&value, "probe_distribution_root_sha256")?;
+        if !is_sha256_hex(&root) {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe distribution root fingerprint is not a valid sha256 value",
+            ));
+        }
+        // Legacy helpers retain a private field so their cleanup plan keeps
+        // fixed paths. It is never serialized or used as daily signing trust.
+        (root.clone(), Some(root))
+    } else {
+        (
+            required_install_metadata_string(&value, "probe_asset_public_key_sha256")?,
+            None,
+        )
+    };
+    let (bootstrap_acquirer_path, bootstrap_activator_path, bootstrap_state_dir) =
+        if schema_version == 2 {
+            (
+                required_fixed_install_metadata_path(
+                    &value,
+                    "bootstrap_acquirer_path",
+                    PRODUCTION_BOOTSTRAP_ACQUIRER_PATH,
+                )?,
+                required_fixed_install_metadata_path(
+                    &value,
+                    "bootstrap_activator_path",
+                    PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH,
+                )?,
+                required_fixed_install_metadata_path(
+                    &value,
+                    "bootstrap_state_dir",
+                    PRODUCTION_BOOTSTRAP_STATE_DIR,
+                )?,
+            )
+        } else {
+            if value.get("bootstrap_acquirer_path").is_some()
+                || value.get("bootstrap_activator_path").is_some()
+                || value.get("bootstrap_state_dir").is_some()
+            {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "legacy metadata must not carry Probe Bootstrap ownership",
+                ));
+            }
+            (None, None, None)
+        };
 
     if service_name != "enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -2303,7 +2614,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "service group is not safe",
         ));
     }
-    if !is_sha256_hex(&probe_asset_public_key_sha256) {
+    if schema_version != 2 && !is_sha256_hex(&probe_asset_public_key_sha256) {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "trusted Probe asset signing key fingerprint is not a valid sha256 value",
         ));
@@ -2319,6 +2630,10 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         install_path,
         operation_status_path,
         probe_asset_public_key_sha256,
+        probe_distribution_root_sha256,
+        bootstrap_acquirer_path,
+        bootstrap_activator_path,
+        bootstrap_state_dir,
         service_name,
         service_group,
         service_unit_path,
@@ -2326,8 +2641,26 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         state_dir,
         operation_sudoers_path,
         collector_helper_sudoers_path,
-        old_sudoers_paths: vec![PathBuf::from(PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH)],
+        old_sudoers_paths: if schema_version == 2 {
+            Vec::new()
+        } else {
+            vec![PathBuf::from(PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH)]
+        },
     })
+}
+
+fn required_fixed_install_metadata_path(
+    value: &toml::Value,
+    key: &'static str,
+    expected: &'static str,
+) -> Result<Option<PathBuf>, ProbeUpgraderRunError> {
+    let path = required_install_metadata_path(value, key)?;
+    if path != Path::new(expected) {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Probe Bootstrap role path is not the fixed production path",
+        ));
+    }
+    Ok(Some(path))
 }
 
 fn validate_identity_path(
@@ -2386,11 +2719,25 @@ fn write_trusted_probe_install_metadata(
         ),
         format!(
             "operation_sudoers_path = {}",
-            toml_string(&metadata.operation_sudoers_path.display().to_string())
+            toml_string(
+                &metadata
+                    .operation_sudoers_path
+                    .as_ref()
+                    .expect("schema v0 migration has operation sudoers")
+                    .display()
+                    .to_string()
+            )
         ),
         format!(
             "collector_helper_sudoers_path = {}",
-            toml_string(&metadata.collector_helper_sudoers_path.display().to_string())
+            toml_string(
+                &metadata
+                    .collector_helper_sudoers_path
+                    .as_ref()
+                    .expect("schema v0 migration has collector sudoers")
+                    .display()
+                    .to_string()
+            )
         ),
         format!(
             "probe_asset_public_key_sha256 = {}",
@@ -2612,10 +2959,12 @@ fn write_probe_operation_sudoers(
     install_metadata: &TrustedProbeInstallMetadata,
     bootstrap_config_path: &Path,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let Some(sudoers_path) = &install_metadata.operation_sudoers_path else {
+        return Ok(());
+    };
     ensure_absolute_path(bootstrap_config_path)?;
     let lines = render_probe_operation_sudoers_lines(install_metadata, bootstrap_config_path)?;
 
-    let sudoers_path = &install_metadata.operation_sudoers_path;
     if let Some(parent) = sudoers_path.parent() {
         fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
     }
@@ -2630,13 +2979,15 @@ fn write_collector_helper_sudoers(
     install_metadata: &TrustedProbeInstallMetadata,
     collector_helper_environment: &dyn CollectorHelperExposureEnvironment,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {
+        return Ok(());
+    };
     let plan = CollectorHelperSudoersPlanner::new(collector_helper_environment).plan(
         CollectorHelperSudoersPlanInput {
             service_user: install_metadata.service_user.clone(),
             probe_binary: install_metadata.install_path.clone(),
         },
     );
-    let sudoers_path = &install_metadata.collector_helper_sudoers_path;
     if let Some(parent) = sudoers_path.parent() {
         fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
     }
@@ -2653,6 +3004,9 @@ fn write_collector_helper_sudoers(
 fn write_collector_helper_sudoers_from_installed_probe(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
+    let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {
+        return Ok(());
+    };
     let output = Command::new(&install_metadata.install_path)
         .arg("internal-render-collector-helper-sudoers")
         .arg("--service-user")
@@ -2673,7 +3027,6 @@ fn write_collector_helper_sudoers_from_installed_probe(
             "collector-helper sudoers planner output is not UTF-8",
         )
     })?;
-    let sudoers_path = &install_metadata.collector_helper_sudoers_path;
     if content.is_empty() {
         return remove_path_if_exists(sudoers_path);
     }
@@ -2691,8 +3044,8 @@ fn remove_old_sudoers_paths(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
     for path in &install_metadata.old_sudoers_paths {
-        if path != &install_metadata.operation_sudoers_path
-            && path != &install_metadata.collector_helper_sudoers_path
+        if Some(path) != install_metadata.operation_sudoers_path.as_ref()
+            && Some(path) != install_metadata.collector_helper_sudoers_path.as_ref()
         {
             remove_path_if_exists(path)?;
         }
@@ -2834,6 +3187,14 @@ fn validate_bootstrap_config_matches_trusted_install_metadata(
     {
         return Err(ProbeUpgraderRunError::InvalidConfig(
             "trusted signing key does not match install metadata",
+        ));
+    }
+    if install_metadata.schema_version == 2
+        && bootstrap_config.probe_distribution_root_sha256.as_deref()
+            != install_metadata.probe_distribution_root_sha256.as_deref()
+    {
+        return Err(ProbeUpgraderRunError::InvalidConfig(
+            "Probe distribution root does not match install metadata",
         ));
     }
 
@@ -3245,6 +3606,7 @@ fn probe_upgrader_error_code(error: &ProbeUpgraderRunError) -> &'static str {
         ProbeUpgraderRunError::UninstallStatusReportFailure(_) => "uninstall_status_report_failure",
         ProbeUpgraderRunError::UnsafeArchive(_) => "unsafe_archive",
         ProbeUpgraderRunError::UnsupportedArchitecture(_) => "unsupported_architecture",
+        ProbeUpgraderRunError::ManualProbeReinstallRequired => "manual_probe_reinstall_required",
         ProbeUpgraderRunError::InvalidConfig(_)
         | ProbeUpgraderRunError::InvalidInstallMetadata(_)
         | ProbeUpgraderRunError::InvalidManifest(_)
@@ -4566,8 +4928,9 @@ mod tests {
         .expect("bootstrap config");
         let mut install_metadata =
             trusted_install_metadata(&install_path, &status_path, "a".repeat(64));
-        install_metadata.operation_sudoers_path = operation_sudoers_path.clone();
-        install_metadata.collector_helper_sudoers_path = collector_helper_sudoers_path.clone();
+        install_metadata.operation_sudoers_path = Some(operation_sudoers_path.clone());
+        install_metadata.collector_helper_sudoers_path =
+            Some(collector_helper_sudoers_path.clone());
         install_metadata.old_sudoers_paths = vec![legacy_sudoers_path.clone()];
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
@@ -4619,6 +4982,264 @@ mod tests {
             transport.status_body,
             "{\"status\":\"succeeded\",\"token\":\"probe-operation-token\"}"
         );
+    }
+
+    #[test]
+    fn schema_two_uninstall_keeps_preexisting_legacy_sudoers_untouched() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
+        let install_metadata_path = temp.path().join("etc/enoki/probe-install.toml");
+        let install_path = temp.path().join("usr/local/bin/enoki-probe");
+        let state_dir = temp.path().join("var/lib/enoki-probe");
+        let status_path = state_dir.join("probe-operation-status.toml");
+        let service_unit_path = temp.path().join("etc/systemd/system/enoki-probe.service");
+        let bootstrap_acquirer_path = temp
+            .path()
+            .join("usr/local/bin/enoki-probe-bootstrap-acquire");
+        let bootstrap_activator_path = temp
+            .path()
+            .join("usr/local/bin/enoki-probe-bootstrap-activate");
+        let bootstrap_state_dir = temp.path().join("var/lib/enoki-probe-bootstrap");
+        let legacy_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-upgrader");
+        for path in [
+            bootstrap_config_path.parent().expect("config parent"),
+            install_metadata_path.parent().expect("metadata parent"),
+            install_path.parent().expect("binary parent"),
+            service_unit_path.parent().expect("unit parent"),
+            legacy_sudoers_path.parent().expect("sudoers parent"),
+            &state_dir,
+            &bootstrap_state_dir,
+        ] {
+            fs::create_dir_all(path).expect("owned parent");
+        }
+        fs::write(&bootstrap_config_path, "owned bootstrap config").expect("config");
+        fs::write(&install_metadata_path, "owned metadata").expect("metadata");
+        fs::write(&install_path, "owned probe binary").expect("binary");
+        fs::write(&service_unit_path, "owned service unit").expect("unit");
+        fs::write(&bootstrap_acquirer_path, "owned Bootstrap acquirer").expect("acquirer");
+        fs::write(&bootstrap_activator_path, "owned Bootstrap activator").expect("activator");
+        fs::set_permissions(&bootstrap_acquirer_path, fs::Permissions::from_mode(0o755))
+            .expect("acquirer mode");
+        fs::set_permissions(&bootstrap_activator_path, fs::Permissions::from_mode(0o755))
+            .expect("activator mode");
+        fs::set_permissions(&bootstrap_state_dir, fs::Permissions::from_mode(0o700))
+            .expect("Bootstrap state mode");
+        let bootstrap_trust_dir = bootstrap_state_dir.join("trust");
+        let bootstrap_inbox_dir = bootstrap_state_dir.join("inbox");
+        fs::create_dir(&bootstrap_trust_dir).expect("Bootstrap trust directory");
+        fs::create_dir(&bootstrap_inbox_dir).expect("Bootstrap inbox directory");
+        fs::set_permissions(&bootstrap_trust_dir, fs::Permissions::from_mode(0o700))
+            .expect("Bootstrap trust mode");
+        fs::set_permissions(&bootstrap_inbox_dir, fs::Permissions::from_mode(0o700))
+            .expect("Bootstrap inbox mode");
+        for name in ["delegation-generation", ".delegation-generation.lock"] {
+            let entry = bootstrap_trust_dir.join(name);
+            fs::write(&entry, "owned Bootstrap state").expect("Bootstrap state entry");
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o600))
+                .expect("Bootstrap state entry mode");
+        }
+        fs::write(state_dir.join("state"), "owned state").expect("state");
+        fs::write(&legacy_sudoers_path, "preexisting legacy sudoers").expect("legacy sudoers");
+        fs::set_permissions(&legacy_sudoers_path, fs::Permissions::from_mode(0o440))
+            .expect("legacy mode");
+        let before_bytes = fs::read(&legacy_sudoers_path).expect("legacy bytes");
+        let before_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy metadata");
+
+        let install_metadata = TrustedProbeInstallMetadata {
+            schema_version: 2,
+            hub_url: "https://hub.example".to_string(),
+            identity_path: bootstrap_config_path.clone(),
+            install_path: install_path.clone(),
+            operation_status_path: status_path,
+            probe_asset_public_key_sha256: "a".repeat(64),
+            probe_distribution_root_sha256: Some("a".repeat(64)),
+            bootstrap_acquirer_path: Some(bootstrap_acquirer_path.clone()),
+            bootstrap_activator_path: Some(bootstrap_activator_path.clone()),
+            bootstrap_state_dir: Some(bootstrap_state_dir.clone()),
+            service_name: "enoki-probe".to_string(),
+            service_group: "enoki-probe".to_string(),
+            service_unit_path: service_unit_path.clone(),
+            service_user: "enoki-probe".to_string(),
+            state_dir: state_dir.clone(),
+            operation_sudoers_path: None,
+            collector_helper_sudoers_path: None,
+            old_sudoers_paths: Vec::new(),
+        };
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: bootstrap_config_path.clone(),
+        };
+        let mut systemd = RecordingSystemdRunner::default();
+
+        execute_probe_uninstall_with_install_metadata_path_and_owner(
+            &input,
+            &install_metadata,
+            &mut systemd,
+            &install_metadata_path,
+            trusted_read_only_metadata_owner_uid(Some(temp.path())),
+        )
+        .expect("schema two uninstall succeeds");
+
+        let after_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy remains");
+        assert_eq!(
+            fs::read(&legacy_sudoers_path).expect("legacy bytes"),
+            before_bytes
+        );
+        assert_eq!(
+            after_metadata.mode() & 0o777,
+            before_metadata.mode() & 0o777
+        );
+        assert_eq!(after_metadata.ino(), before_metadata.ino());
+        assert!(!install_path.exists());
+        assert!(!bootstrap_config_path.exists());
+        assert!(!install_metadata_path.exists());
+        assert!(!service_unit_path.exists());
+        assert!(!state_dir.exists());
+        assert!(!bootstrap_acquirer_path.exists());
+        assert!(!bootstrap_activator_path.exists());
+        assert!(!bootstrap_state_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_two_bootstrap_role_rejects_an_unexpected_owner() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let role = temp.path().join("enoki-probe-bootstrap-acquire");
+        fs::write(&role, "Bootstrap role").expect("role");
+        fs::set_permissions(&role, fs::Permissions::from_mode(0o755)).expect("role mode");
+        let actual_owner = fs::symlink_metadata(&role).expect("role metadata").uid();
+        let unexpected_owner = if actual_owner == u32::MAX {
+            actual_owner - 1
+        } else {
+            actual_owner + 1
+        };
+
+        assert!(matches!(
+            validate_owned_bootstrap_role(Some(&role), unexpected_owner),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap role is not a root-owned regular 0755 file"
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema_two_uninstall_rejects_a_bootstrap_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("temp dir");
+        let target = temp.path().join("outside-bootstrap");
+        let acquirer = temp.path().join("bootstrap-acquire");
+        let activator = temp.path().join("bootstrap-activate");
+        fs::write(&target, "outside").expect("target");
+        symlink(&target, &acquirer).expect("symlink");
+        fs::write(&activator, "owned activator").expect("activator");
+        fs::set_permissions(&activator, fs::Permissions::from_mode(0o755)).expect("activator mode");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).expect("state");
+        let bootstrap_state_dir = temp.path().join("bootstrap-state");
+        fs::create_dir(&bootstrap_state_dir).expect("Bootstrap state");
+        fs::set_permissions(&bootstrap_state_dir, fs::Permissions::from_mode(0o700))
+            .expect("Bootstrap state mode");
+        let metadata = TrustedProbeInstallMetadata {
+            schema_version: 2,
+            hub_url: "https://hub.example".to_string(),
+            identity_path: temp.path().join("identity"),
+            install_path: temp.path().join("probe"),
+            operation_status_path: state_dir.join("status"),
+            probe_asset_public_key_sha256: "a".repeat(64),
+            probe_distribution_root_sha256: Some("a".repeat(64)),
+            bootstrap_acquirer_path: Some(acquirer.clone()),
+            bootstrap_activator_path: Some(activator.clone()),
+            bootstrap_state_dir: Some(bootstrap_state_dir),
+            service_name: "enoki-probe".to_string(),
+            service_group: "enoki-probe".to_string(),
+            service_unit_path: temp.path().join("unit"),
+            service_user: "enoki-probe".to_string(),
+            state_dir,
+            operation_sudoers_path: None,
+            collector_helper_sudoers_path: None,
+            old_sudoers_paths: Vec::new(),
+        };
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let mut systemd = RecordingSystemdRunner::default();
+        let error = execute_probe_uninstall_with_install_metadata_path(
+            &input,
+            &metadata,
+            &mut systemd,
+            &temp.path().join("metadata"),
+        )
+        .expect_err("symlinked Bootstrap role fails closed");
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap role is not a root-owned regular 0755 file"
+            )
+        ));
+        assert_eq!(fs::read(&target).expect("outside target"), b"outside");
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_state_validation_rejects_symlinks_hardlinks_and_extra_entries() {
+        use std::os::unix::fs::symlink;
+
+        fn private_directory(path: &Path) {
+            fs::create_dir(path).expect("private directory");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .expect("private directory mode");
+        }
+        fn owned_state(root: &Path) -> PathBuf {
+            let state = root.join("bootstrap-state");
+            private_directory(&state);
+            private_directory(&state.join("trust"));
+            private_directory(&state.join("inbox"));
+            state
+        }
+
+        let symlink_temp = tempfile::tempdir().expect("symlink temp");
+        let symlink_state = owned_state(symlink_temp.path());
+        fs::remove_dir(symlink_state.join("inbox")).expect("remove inbox");
+        let outside = symlink_temp.path().join("outside");
+        private_directory(&outside);
+        symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
+        assert!(matches!(
+            validate_owned_bootstrap_state(
+                Some(&symlink_state),
+                trusted_read_only_metadata_owner_uid(Some(symlink_temp.path())),
+            ),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert!(outside.exists());
+
+        let hardlink_temp = tempfile::tempdir().expect("hardlink temp");
+        let hardlink_state = owned_state(hardlink_temp.path());
+        let outside = hardlink_temp.path().join("outside-generation");
+        fs::write(&outside, "outside").expect("outside state");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).expect("outside mode");
+        fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
+            .expect("unsafe hardlink");
+        assert!(matches!(
+            validate_owned_bootstrap_state(
+                Some(&hardlink_state),
+                trusted_read_only_metadata_owner_uid(Some(hardlink_temp.path())),
+            ),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
+
+        let extra_temp = tempfile::tempdir().expect("extra entry temp");
+        let extra_state = owned_state(extra_temp.path());
+        fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
+        assert!(matches!(
+            validate_owned_bootstrap_state(
+                Some(&extra_state),
+                trusted_read_only_metadata_owner_uid(Some(extra_temp.path())),
+            ),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert!(extra_state.join("unrecognised").exists());
     }
 
     #[test]
@@ -4993,8 +5614,9 @@ mod tests {
         fs::write(state_dir.join("state"), "state").expect("state");
         let mut install_metadata =
             trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        install_metadata.operation_sudoers_path = operation_sudoers_path.clone();
-        install_metadata.collector_helper_sudoers_path = collector_helper_sudoers_path.clone();
+        install_metadata.operation_sudoers_path = Some(operation_sudoers_path.clone());
+        install_metadata.collector_helper_sudoers_path =
+            Some(collector_helper_sudoers_path.clone());
         install_metadata.old_sudoers_paths = vec![old_sudoers_path.clone()];
         let mut systemd = RecordingSystemdRunner::default();
 
@@ -5050,6 +5672,7 @@ mod tests {
             },
             &install_metadata,
             &temp.path().join("etc/enoki/probe-install.toml"),
+            0,
         )
         .expect_err("unsafe cleanup targets are rejected before execution");
 
@@ -5179,13 +5802,16 @@ mod tests {
 
         assert_eq!(
             install_metadata.operation_sudoers_path,
-            operation_sudoers_path
+            Some(operation_sudoers_path)
         );
         assert_eq!(
             install_metadata.collector_helper_sudoers_path,
-            collector_helper_sudoers_path
+            Some(collector_helper_sudoers_path)
         );
-        assert_ne!(install_metadata.operation_sudoers_path, legacy_sudoers_path);
+        assert_ne!(
+            install_metadata.operation_sudoers_path,
+            Some(legacy_sudoers_path)
+        );
     }
 
     #[test]
@@ -5419,7 +6045,7 @@ mod tests {
     #[test]
     fn install_metadata_rejects_unsupported_schema_version_with_stable_repair_code() {
         let contents = [
-            "schema_version = 2",
+            "schema_version = 3",
             "hub_url = \"https://hub.example\"",
             "",
         ]
@@ -5430,6 +6056,174 @@ mod tests {
         let repair_error = ProbeRepairRunError::from(error);
 
         assert_eq!(repair_error.code(), "probe_repair_metadata_unsupported");
+    }
+
+    #[test]
+    fn signed_package_metadata_uses_root_trust_without_legacy_sudoers_or_daily_key() {
+        let root = "a".repeat(64);
+        let contents = [
+            "schema_version = 2".to_string(),
+            "hub_url = \"https://hub.example\"".to_string(),
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"".to_string(),
+            "install_path = \"/usr/local/bin/enoki-probe\"".to_string(),
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\""
+                .to_string(),
+            "state_dir = \"/var/lib/enoki-probe\"".to_string(),
+            format!("probe_distribution_root_sha256 = \"{root}\""),
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\""
+                .to_string(),
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\""
+                .to_string(),
+            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"".to_string(),
+            "service_name = \"enoki-probe\"".to_string(),
+            "service_user = \"enoki-probe\"".to_string(),
+            "service_group = \"enoki-probe\"".to_string(),
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"".to_string(),
+            String::new(),
+        ]
+        .join("\n");
+        let metadata = parse_trusted_probe_install_metadata(&contents).expect("schema v2 parses");
+        assert_eq!(metadata.schema_version, 2);
+        assert_eq!(
+            metadata.probe_distribution_root_sha256.as_deref(),
+            Some(root.as_str())
+        );
+        assert_eq!(metadata.operation_sudoers_path, None);
+        assert_eq!(metadata.collector_helper_sudoers_path, None);
+        assert_eq!(
+            metadata.bootstrap_acquirer_path.as_deref(),
+            Some(Path::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH))
+        );
+        assert_eq!(
+            metadata.bootstrap_activator_path.as_deref(),
+            Some(Path::new(PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH))
+        );
+        assert_eq!(
+            metadata.bootstrap_state_dir.as_deref(),
+            Some(Path::new(PRODUCTION_BOOTSTRAP_STATE_DIR))
+        );
+        assert!(metadata.old_sudoers_paths.is_empty());
+        assert!(!contents.contains("sudoers_path"));
+        assert!(!contents.contains("probe_asset_public_key_sha256"));
+    }
+
+    #[test]
+    fn signed_package_metadata_requires_all_fixed_bootstrap_owned_paths() {
+        let contents = [
+            "schema_version = 2",
+            "hub_url = \"https://hub.example\"",
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "service_name = \"enoki-probe\"",
+            "service_user = \"enoki-probe\"",
+            "service_group = \"enoki-probe\"",
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+            "",
+        ]
+        .join("\n");
+        assert!(matches!(
+            parse_trusted_probe_install_metadata(&contents),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "missing required field"
+            ))
+        ));
+    }
+
+    #[test]
+    fn signed_package_metadata_rejects_legacy_authority_fields() {
+        let contents = [
+            "schema_version = 2",
+            "hub_url = \"https://hub.example\"",
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "service_name = \"enoki-probe\"",
+            "service_group = \"enoki-probe\"",
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+            "",
+        ].join("\n");
+        assert!(matches!(
+            parse_trusted_probe_install_metadata(&contents),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "signed package metadata must not carry legacy sudoers or daily signing trust"
+            ))
+        ));
+    }
+
+    #[test]
+    fn signed_package_metadata_rejects_a_nonfixed_bootstrap_role_path() {
+        let contents = [
+            "schema_version = 2",
+            "hub_url = \"https://hub.example\"",
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "bootstrap_acquirer_path = \"/tmp/attacker-bootstrap\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
+            "service_name = \"enoki-probe\"",
+            "service_group = \"enoki-probe\"",
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+            "",
+        ]
+        .join("\n");
+        assert!(matches!(
+            parse_trusted_probe_install_metadata(&contents),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap role path is not the fixed production path"
+            ))
+        ));
+    }
+
+    #[test]
+    fn legacy_schema_cannot_claim_bootstrap_role_ownership() {
+        let mut contents = version_one_install_metadata_contents(Path::new("/"));
+        contents.push_str(
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"\n",
+        );
+        assert!(matches!(
+            parse_trusted_probe_install_metadata(&contents),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "legacy metadata must not carry Probe Bootstrap ownership"
+            ))
+        ));
+    }
+
+    #[test]
+    fn signed_package_metadata_rejects_a_nonfixed_bootstrap_state_path() {
+        let contents = [
+            "schema_version = 2",
+            "hub_url = \"https://hub.example\"",
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "bootstrap_state_dir = \"/tmp/attacker-bootstrap-state\"",
+            "service_name = \"enoki-probe\"",
+            "service_group = \"enoki-probe\"",
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+            "",
+        ]
+        .join("\n");
+        assert!(matches!(
+            parse_trusted_probe_install_metadata(&contents),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap role path is not the fixed production path"
+            ))
+        ));
     }
 
     #[test]
@@ -5550,8 +6344,13 @@ mod tests {
         write_collector_helper_sudoers(&install_metadata, &SmartctlCollectorHelperExposure)
             .expect("collector-helper sudoers render");
 
-        let sudoers = fs::read_to_string(&install_metadata.collector_helper_sudoers_path)
-            .expect("collector-helper sudoers");
+        let sudoers = fs::read_to_string(
+            install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
+        )
+        .expect("collector-helper sudoers");
         assert!(
             sudoers.contains("internal-privileged-collector-helper --helper disk-health.smartctl")
         );
@@ -5576,12 +6375,17 @@ mod tests {
         fs::create_dir_all(
             install_metadata
                 .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers")
                 .parent()
                 .expect("sudoers parent"),
         )
         .expect("sudoers parent");
         fs::write(
-            &install_metadata.collector_helper_sudoers_path,
+            install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
             "stale collector helper sudoers",
         )
         .expect("stale helper sudoers");
@@ -5589,7 +6393,13 @@ mod tests {
         write_collector_helper_sudoers(&install_metadata, &NoCollectorHelperExposure)
             .expect("collector-helper sudoers omitted");
 
-        assert!(!install_metadata.collector_helper_sudoers_path.exists());
+        assert!(
+            !install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers")
+                .exists()
+        );
     }
 
     struct NoCollectorHelperExposure;
@@ -5683,7 +6493,7 @@ mod tests {
         fs::write(
             &bootstrap_config_path,
             [
-                "hub_url = \"http://hub.example\"".to_string(),
+                "hub_url = \"https://hub.example/base\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
                 String::new(),
@@ -5756,13 +6566,13 @@ mod tests {
     }
 
     #[test]
-    fn internal_probe_upgrader_allows_localhost_http_hub_for_development() {
+    fn internal_probe_upgrader_allows_explicit_non_loopback_http_hub() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         let install_path = temp.path().join("bin/enoki-probe");
         let status_path = temp.path().join("state/probe-operation-status.toml");
         let install_metadata = trusted_install_metadata_for_hub(
-            "http://127.0.0.1:8787/base/",
+            "http://192.0.2.20:8787",
             &install_path,
             &status_path,
             assets_public_key_sha256(),
@@ -5770,7 +6580,7 @@ mod tests {
         fs::write(
             &bootstrap_config_path,
             [
-                "hub_url = \"http://127.0.0.1:8787/base/\"".to_string(),
+                "hub_url = \"http://192.0.2.20:8787\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
                 String::new(),
@@ -5794,11 +6604,11 @@ mod tests {
 
         assert_eq!(
             transport.url,
-            "http://127.0.0.1:8787/base/api/probe/operations/42/token/validate",
+            "http://192.0.2.20:8787/api/probe/operations/42/token/validate",
         );
         assert_eq!(
             transport.downloads,
-            vec!["http://127.0.0.1:8787/base/api/probe/assets/manifest.json"],
+            vec!["http://192.0.2.20:8787/api/probe/assets/manifest.json"],
         );
         assert_eq!(result.error_code.as_deref(), Some("asset_missing"));
     }
@@ -5829,7 +6639,7 @@ mod tests {
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
         let install_metadata = trusted_install_metadata_for_hub(
-            "https://hub.example/base",
+            "https://hub.example",
             &install_path,
             &status_path,
             assets.public_key_sha256.clone(),
@@ -5837,7 +6647,7 @@ mod tests {
         fs::write(
             &bootstrap_config_path,
             [
-                "hub_url = \"https://hub.example/base\"".to_string(),
+                "hub_url = \"https://hub.example\"".to_string(),
                 "probe_id = \"probe_01\"".to_string(),
                 "probe_private_key_pem = \"test-private-key\"".to_string(),
                 format!(
@@ -5863,7 +6673,7 @@ mod tests {
         )
         .expect("write bootstrap config");
         let mut transport = RecordingValidationTransport {
-            assets: assets.for_hub("https://hub.example/base"),
+            assets: assets.for_hub("https://hub.example"),
             ..RecordingValidationTransport::default()
         };
         let mut systemd = RecordingSystemdRunner::default();
@@ -5913,11 +6723,11 @@ mod tests {
         assert_eq!(
             transport.downloads,
             vec![
-                "https://hub.example/base/api/probe/assets/manifest.json",
-                "https://hub.example/base/api/probe/assets/manifest.json.sig",
-                "https://hub.example/base/api/probe/assets/signing-key.pem",
+                "https://hub.example/api/probe/assets/manifest.json",
+                "https://hub.example/api/probe/assets/manifest.json.sig",
+                "https://hub.example/api/probe/assets/signing-key.pem",
                 &format!(
-                    "https://hub.example/base/api/probe/assets/enoki-probe-{}.tar.gz",
+                    "https://hub.example/api/probe/assets/enoki-probe-{}.tar.gz",
                     host_probe_asset_target().expect("supported test architecture"),
                 ),
             ],
@@ -5964,12 +6774,17 @@ echo replacement probe
         fs::create_dir_all(
             install_metadata
                 .operation_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers")
                 .parent()
                 .expect("operation sudoers parent"),
         )
         .expect("operation sudoers parent");
         fs::write(
-            &install_metadata.operation_sudoers_path,
+            install_metadata
+                .operation_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
             "stale operation sudoers",
         )
         .expect("stale operation sudoers");
@@ -6000,11 +6815,20 @@ echo replacement probe
         )
         .expect("upgrade succeeds");
 
-        let operation_sudoers = fs::read_to_string(&install_metadata.operation_sudoers_path)
-            .expect("operation sudoers");
-        let collector_helper_sudoers =
-            fs::read_to_string(&install_metadata.collector_helper_sudoers_path)
-                .expect("collector-helper sudoers");
+        let operation_sudoers = fs::read_to_string(
+            install_metadata
+                .operation_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
+        )
+        .expect("operation sudoers");
+        let collector_helper_sudoers = fs::read_to_string(
+            install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
+        )
+        .expect("collector-helper sudoers");
         assert!(operation_sudoers.contains("internal-upgrader --config"));
         assert!(operation_sudoers.contains("internal-uninstaller --config"));
         assert!(!operation_sudoers.contains("internal-privileged-collector-helper"));
@@ -6048,12 +6872,17 @@ echo replacement probe
         fs::create_dir_all(
             install_metadata
                 .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers")
                 .parent()
                 .expect("collector-helper sudoers parent"),
         )
         .expect("collector-helper sudoers parent");
         fs::write(
-            &install_metadata.collector_helper_sudoers_path,
+            install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
             "stale collector helper sudoers",
         )
         .expect("stale collector-helper sudoers");
@@ -6083,12 +6912,23 @@ echo replacement probe
         )
         .expect("upgrade succeeds");
 
-        let operation_sudoers = fs::read_to_string(&install_metadata.operation_sudoers_path)
-            .expect("operation sudoers");
+        let operation_sudoers = fs::read_to_string(
+            install_metadata
+                .operation_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers"),
+        )
+        .expect("operation sudoers");
         assert!(operation_sudoers.contains("internal-upgrader --config"));
         assert!(operation_sudoers.contains("internal-uninstaller --config"));
         assert!(!operation_sudoers.contains("internal-privileged-collector-helper"));
-        assert!(!install_metadata.collector_helper_sudoers_path.exists());
+        assert!(
+            !install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers")
+                .exists()
+        );
         assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
     }
 
@@ -6894,7 +7734,9 @@ printf '%s\n' '{}'
             let blocker = temp.path().join(format!("blocked-{blocked_write}"));
             fs::write(&blocker, "not a directory").expect("write blocker");
             match blocked_write {
-                "sudoers" => install_metadata.operation_sudoers_path = blocker.join("sudoers"),
+                "sudoers" => {
+                    install_metadata.operation_sudoers_path = Some(blocker.join("sudoers"))
+                }
                 "service-unit" => {
                     install_metadata.service_unit_path = blocker.join("enoki-probe.service")
                 }
@@ -6937,6 +7779,10 @@ printf '%s\n' '{}'
             install_path: install_path.to_path_buf(),
             operation_status_path: operation_status_path.to_path_buf(),
             probe_asset_public_key_sha256,
+            probe_distribution_root_sha256: None,
+            bootstrap_acquirer_path: None,
+            bootstrap_activator_path: None,
+            bootstrap_state_dir: None,
             service_name: "enoki-probe".to_string(),
             service_group: "enoki-probe".to_string(),
             service_unit_path: operation_status_path
@@ -6948,14 +7794,18 @@ printf '%s\n' '{}'
                 .parent()
                 .expect("status parent")
                 .to_path_buf(),
-            operation_sudoers_path: operation_status_path
-                .parent()
-                .expect("status parent")
-                .join("enoki-probe-operations.sudoers"),
-            collector_helper_sudoers_path: operation_status_path
-                .parent()
-                .expect("status parent")
-                .join("enoki-probe-collector-helpers.sudoers"),
+            operation_sudoers_path: Some(
+                operation_status_path
+                    .parent()
+                    .expect("status parent")
+                    .join("enoki-probe-operations.sudoers"),
+            ),
+            collector_helper_sudoers_path: Some(
+                operation_status_path
+                    .parent()
+                    .expect("status parent")
+                    .join("enoki-probe-collector-helpers.sudoers"),
+            ),
             old_sudoers_paths: Vec::new(),
         }
     }

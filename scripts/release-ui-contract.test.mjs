@@ -18,16 +18,32 @@ describe("candidate-image UI Contract gate", () => {
     expect(releaseUiBrowserRuntime({})).toEqual({
       hubUrl: "http://127.0.0.1:38200",
       ownerPassword: "correct horse battery staple",
+      probeApiUrl: "http://127.0.0.1:38201",
     });
     expect(
       releaseUiBrowserRuntime({
         ENOKI_RELEASE_UI_BASE_URL: "http://127.0.0.1:39123/",
         ENOKI_RELEASE_UI_OWNER_PASSWORD: "candidate-owner-password",
+        ENOKI_RELEASE_UI_PROBE_API_URL: "http://127.0.0.1:39124/",
       }),
     ).toEqual({
       hubUrl: "http://127.0.0.1:39123",
       ownerPassword: "candidate-owner-password",
+      probeApiUrl: "http://127.0.0.1:39124",
     });
+  });
+
+  it("uses the authenticated Chromium storage state without logging in again", async () => {
+    const [playwrightConfig, candidateConfig, enrollmentSpec] =
+      await Promise.all([
+        readFile("playwright.config.ts", "utf8"),
+        readFile("playwright.candidate.config.ts", "utf8"),
+        readFile("tests/e2e/hub-install-command.spec.ts", "utf8"),
+      ]);
+
+    expect(playwrightConfig).toContain("storageState: ownerStorageStatePath");
+    expect(candidateConfig).toContain("storageState: ownerStorageStatePath");
+    expect(enrollmentSpec).not.toContain('locator("#owner-password")');
   });
 
   it("derives lifecycle fixture versions from the Candidate Manifest version with a source default", () => {

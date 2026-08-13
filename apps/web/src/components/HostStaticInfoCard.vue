@@ -45,7 +45,7 @@ function probeVersionText(value: string | null | undefined) {
 <template>
   <Card>
     <CardHeader class="flex flex-row items-center justify-between gap-3 pb-2">
-      <CardTitle class="text-base">主机资料</CardTitle>
+      <CardTitle class="text-base">主机概况</CardTitle>
       <Button
         variant="outline"
         size="sm"
@@ -122,7 +122,7 @@ function probeVersionText(value: string | null | undefined) {
         </p>
       </div>
       <div class="min-w-0 rounded-md border p-3">
-        <p class="text-muted-foreground text-xs">Hub 当前探针资产版本</p>
+        <p class="text-muted-foreground text-xs">Hub 当前探针安装包版本</p>
         <p class="mt-1 min-w-0 font-medium wrap-break-word whitespace-normal">
           {{
             probeVersionText(

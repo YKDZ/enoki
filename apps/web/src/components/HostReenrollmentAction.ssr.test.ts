@@ -19,7 +19,7 @@ describe("Host Re-enrollment action", () => {
         }),
       );
 
-      expect(html.includes("重新注册 Probe")).toBe(visible);
+      expect(html.includes("重新注册探针")).toBe(visible);
     },
   );
 });

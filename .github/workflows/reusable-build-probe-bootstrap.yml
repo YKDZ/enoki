@@ -1,0 +1,166 @@
+name: Reusable Build Probe Bootstrap
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Exact source commit to build.
+        required: true
+        type: string
+      distribution:
+        description: Build-fixed Probe distribution identifier.
+        required: false
+        type: string
+        default: enoki
+      version:
+        description: Stable Bootstrap SemVer tag, for example v0.1.0.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-probe-bootstrap:
+    name: Probe Bootstrap (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            musl_tools_version: 1.2.2-4
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl_tools_version: 1.2.4-2
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout exact Bootstrap source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ inputs.commit }}
+
+      - name: Bind build to the exact source checkout
+        env:
+          CANDIDATE_COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+
+      - name: Require the public Probe Distribution Trust Root
+        id: trust-root
+        env:
+          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: |
+          if [ -z "$PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM" ]; then
+            echo "::error::ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM is required."
+            exit 1
+          fi
+          ROOT_KEY_ID="$(node -e '
+            const { createHash, createPublicKey } = require("node:crypto");
+            const value = process.env.PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM;
+            const key = createPublicKey(value);
+            if (
+              key.asymmetricKeyType !== "rsa" ||
+              key.asymmetricKeyDetails?.modulusLength !== 4096
+            ) throw new Error("root must be RSA-4096");
+            const canonical = key.export({ format: "pem", type: "spki" });
+            process.stdout.write(createHash("sha256").update(canonical).digest("hex"));
+          ')"
+          printf '%s\n' "$ROOT_KEY_ID" | grep -Eq '^[0-9a-f]{64}$'
+          echo "root-key-id=$ROOT_KEY_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Require the official Bootstrap distribution
+        env:
+          BOOTSTRAP_DISTRIBUTION: ${{ inputs.distribution }}
+        run: test "$BOOTSTRAP_DISTRIBUTION" = enoki
+
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.97.1 --profile minimal
+          --target ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y --no-install-recommends
+          musl-tools="${{ matrix.musl_tools_version }}"
+
+      - name: Build and package Bootstrap twice from clean target state
+        env:
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION: ${{ inputs.distribution }}
+          ENOKI_BOOTSTRAP_BUILD_ROOT_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          ENOKI_BOOTSTRAP_BUILD_TARGET: ${{ matrix.target }}
+          ENOKI_BOOTSTRAP_BUILD_VERSION: ${{ inputs.version }}
+          ROOT_KEY_ID: ${{ steps.trust-root.outputs.root-key-id }}
+          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace -C link-arg=-Wl,--build-id=none
+          SOURCE_DATE_EPOCH: "0"
+          BOOTSTRAP_TARGET: ${{ matrix.target }}
+          BOOTSTRAP_VERSION: ${{ inputs.version }}
+          BOOTSTRAP_DISTRIBUTION: ${{ inputs.distribution }}
+        run: |
+          rm -rf \
+            target/bootstrap-repro-first-acquirer \
+            target/bootstrap-repro-first-activator \
+            target/bootstrap-repro-second-acquirer \
+            target/bootstrap-repro-second-activator \
+            dist-bootstrap dist-bootstrap-second
+          if cargo tree -p enoki-probe-bootstrap --no-default-features --features activator,compiled-trust --edges normal | grep -Eq ' (ureq|url|tar|flate2|rustls) v'; then
+            echo "::error::root Bootstrap activator must not link network or archive dependencies"
+            exit 1
+          fi
+          build_role() {
+            role="$1"
+            features="$2"
+            binary="$3"
+            target_dir="$4"
+            ENOKI_BOOTSTRAP_BUILD_ROLE="$role" CARGO_TARGET_DIR="$target_dir" \
+              cargo build -p enoki-probe-bootstrap --release --no-default-features \
+              --features "$features" --bin "$binary" --target "$BOOTSTRAP_TARGET"
+            node scripts/probe-bootstrap-artifact.mjs inspect \
+              --binary "$target_dir/${BOOTSTRAP_TARGET}/release/$binary" \
+              --distribution "$BOOTSTRAP_DISTRIBUTION" --role "$role" \
+              --root-key-id "$ROOT_KEY_ID" --target "$BOOTSTRAP_TARGET" \
+              --version "$BOOTSTRAP_VERSION"
+          }
+          build_role acquirer acquirer,compiled-trust enoki-probe-bootstrap-acquire target/bootstrap-repro-first-acquirer
+          build_role activator activator,compiled-trust enoki-probe-bootstrap-activate target/bootstrap-repro-first-activator
+          node scripts/probe-bootstrap-artifact.mjs package \
+            --acquirer-binary "target/bootstrap-repro-first-acquirer/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-acquire" \
+            --activator-binary "target/bootstrap-repro-first-activator/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-activate" \
+            --distribution "$BOOTSTRAP_DISTRIBUTION" --root-key-id "$ROOT_KEY_ID" \
+            --output-dir dist-bootstrap --source-date-epoch 0 \
+            --target "$BOOTSTRAP_TARGET" --version "$BOOTSTRAP_VERSION"
+
+          build_role acquirer acquirer,compiled-trust enoki-probe-bootstrap-acquire target/bootstrap-repro-second-acquirer
+          build_role activator activator,compiled-trust enoki-probe-bootstrap-activate target/bootstrap-repro-second-activator
+          node scripts/probe-bootstrap-artifact.mjs package \
+            --acquirer-binary "target/bootstrap-repro-second-acquirer/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-acquire" \
+            --activator-binary "target/bootstrap-repro-second-activator/${BOOTSTRAP_TARGET}/release/enoki-probe-bootstrap-activate" \
+            --distribution "$BOOTSTRAP_DISTRIBUTION" --root-key-id "$ROOT_KEY_ID" \
+            --output-dir dist-bootstrap-second --source-date-epoch 0 \
+            --target "$BOOTSTRAP_TARGET" --version "$BOOTSTRAP_VERSION"
+
+          archive="enoki-probe-bootstrap-${BOOTSTRAP_TARGET}.tar.gz"
+          cmp --silent "dist-bootstrap/${archive}" "dist-bootstrap-second/${archive}"
+          cmp --silent "dist-bootstrap/${archive}.sha256" "dist-bootstrap-second/${archive}.sha256"
+
+      - name: Upload independent Probe Bootstrap artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: enoki-probe-bootstrap-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            dist-bootstrap/enoki-probe-bootstrap-${{ matrix.target }}.tar.gz
+            dist-bootstrap/enoki-probe-bootstrap-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          overwrite: true

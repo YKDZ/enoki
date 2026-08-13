@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { type BrowserContext, type Page } from "@playwright/test";
 
 import {
   closeFakeLiveWebSocket,
@@ -8,8 +8,9 @@ import {
   openFakeLiveWebSocket,
 } from "./fake-live-websocket";
 import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
+import { expect, test } from "./security-console";
 
-const { hubUrl, ownerPassword } = releaseUiBrowserRuntime();
+const { probeApiUrl } = releaseUiBrowserRuntime();
 
 type BrowserEnrollmentTarget =
   | { kind: "new_host" }
@@ -33,7 +34,6 @@ type BrowserEnrollmentResponse = BrowserEnrollmentStatus & {
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
-  installPath: string;
 };
 
 type BrowserHost = {
@@ -59,7 +59,8 @@ type BrowserScrollCall = {
   block?: ScrollLogicalPosition;
 };
 
-test("owner can generate a Hub-served probe install command", async ({
+test("owner can generate a two-role probe activation command", async ({
+  context,
   page,
 }) => {
   test.skip(
@@ -68,10 +69,6 @@ test("owner can generate a Hub-served probe install command", async ({
   );
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
-
   await page.getByRole("button", { name: "添加探针" }).click();
 
   await expect(page.getByRole("dialog", { name: "添加主机" })).toBeVisible();
@@ -79,9 +76,15 @@ test("owner can generate a Hub-served probe install command", async ({
 
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
-  await expect(command).toHaveValue(/\/api\/probe\/install\.sh/);
-  expect(await command.inputValue()).toContain(`ENOKI_HUB_URL='${hubUrl}'`);
+  await expect(command).toHaveValue(
+    /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
+  );
+  expect(await command.inputValue()).toContain(
+    `ENOKI_HUB_URL='${probeApiUrl}'`,
+  );
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  await expect(command).not.toHaveValue(/sudo env/);
+  await expect(command).not.toHaveValue(/curl/);
   await expect(command).not.toHaveValue(/github\.com/);
 
   await command.press("Control+A");
@@ -93,8 +96,7 @@ test("owner can generate a Hub-served probe install command", async ({
   await command.press("x");
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
 
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.evaluate(() => navigator.clipboard.writeText("must-not-paste"));
+  await seedSystemClipboard(context, "must-not-paste");
   await command.press("Control+V");
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
 });
@@ -106,7 +108,7 @@ test("owner can select the command with Cmd+A on a macOS browser runner", async 
     process.platform !== "darwin",
     "Cmd+A is executed only by the macOS Playwright gate.",
   );
-  await loginOwner(page);
+  await page.goto("/");
   await page.getByRole("button", { name: "添加探针" }).click();
 
   const command = page.getByRole("textbox", { name: "安装命令" });
@@ -138,9 +140,8 @@ test("an expired Enrollment closes the matching dialog through its status API", 
         expiresAtMs,
         expiredAtMs: null,
         hostId: null,
-        hubUrl,
+        hubUrl: probeApiUrl,
         installCommand: "curl expired-command",
-        installPath: "/usr/local/bin/enoki-probe",
         readyAtMs: null,
         rejectedAtMs: null,
         rejection: null,
@@ -174,8 +175,6 @@ test("an expired Enrollment closes the matching dialog through its status API", 
   );
 
   await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "添加探针" }).click();
 
   await expect(page.getByText("安装命令已过期")).toBeVisible();
@@ -213,8 +212,6 @@ test("a verifying Enrollment keeps its dialog open and withholds the install com
   });
 
   await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "添加探针" }).click();
 
   const dialog = page.getByRole("dialog", { name: "添加主机" });
@@ -267,7 +264,7 @@ test("a reconnect reconciles a missed terminal Enrollment exactly once from auth
     });
   });
 
-  await loginOwner(page);
+  await page.goto("/");
   await expect.poll(() => fakeLiveSocketGeneration(page)).toBe(1);
   await expect.poll(() => fakeLiveSocketOpenGeneration(page)).toBe(1);
   await page.clock.install();
@@ -607,7 +604,7 @@ for (const overviewView of ["cards", "list"] as const) {
   }) => {
     const requests = await prepareOfflineHostReenrollment(page, overviewView);
 
-    await loginOwner(page);
+    await page.goto("/");
 
     const surfaceSelector = (hostId: number) =>
       overviewView === "cards"
@@ -618,19 +615,19 @@ for (const overviewView of ["cards", "list"] as const) {
       name: "打开主机 Existing host",
     });
     const reenrollmentAction = offlineHost.getByRole("button", {
-      name: "重新注册 Probe",
+      name: "重新注册探针",
     });
     await expect(detailAction).toBeVisible();
     await expect(reenrollmentAction).toBeVisible();
     await expect(
       page
         .locator(surfaceSelector(72))
-        .getByRole("button", { name: "重新注册 Probe" }),
+        .getByRole("button", { name: "重新注册探针" }),
     ).toHaveCount(0);
     await expect(
       page
         .locator(surfaceSelector(73))
-        .getByRole("button", { name: "重新注册 Probe" }),
+        .getByRole("button", { name: "重新注册探针" }),
     ).toHaveCount(0);
     await expect(page.locator(surfaceSelector(74))).toHaveCount(0);
 
@@ -751,7 +748,7 @@ for (const scenario of [
     await page.goto("/");
     await page.getByRole("button", { name: "添加探针" }).click();
 
-    await expect(page.getByText("检测到已有 Probe 安装")).toBeVisible({
+    await expect(page.getByText("检测到已有探针安装")).toBeVisible({
       timeout: 5_000,
     });
     await expect(
@@ -771,9 +768,8 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     expiresAtMs: Date.now() + 60_000,
     expiredAtMs: null,
     hostId: null,
-    hubUrl,
+    hubUrl: probeApiUrl,
     installCommand: "curl ready-command",
-    installPath: "/usr/local/bin/enoki-probe",
     readyAtMs: null,
     rejectedAtMs: null,
     rejection: null,
@@ -781,13 +777,6 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     target: { kind: "new_host" },
     verificationDeadlineAtMs: null,
   };
-}
-
-async function loginOwner(page: Page) {
-  await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
-  await expect(page.getByRole("button", { name: "添加探针" })).toBeVisible();
 }
 
 async function prepareOfflineHostReenrollment(
@@ -990,4 +979,24 @@ async function scrollIntoViewCalls(page: Page) {
     };
     return liveWindow.__enokiScrollIntoViewCalls ?? [];
   });
+}
+
+async function seedSystemClipboard(context: BrowserContext, value: string) {
+  const origin = "https://clipboard-fixture.test";
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin,
+  });
+  const clipboardPage = await context.newPage();
+  await clipboardPage.route(`${origin}/`, (route) =>
+    route.fulfill({ body: "<!doctype html><title>Clipboard fixture</title>" }),
+  );
+  await clipboardPage.goto(origin);
+  await clipboardPage.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    value,
+  );
+  await expect
+    .poll(() => clipboardPage.evaluate(() => navigator.clipboard.readText()))
+    .toBe(value);
+  await clipboardPage.close();
 }

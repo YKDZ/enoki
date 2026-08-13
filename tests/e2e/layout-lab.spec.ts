@@ -1,4 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
+
+import { expect, test } from "./security-console";
 
 const viewportCases = [
   { height: 900, width: 375 },

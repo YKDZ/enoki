@@ -238,7 +238,7 @@ fn probe_run_rejects_unsafe_hub_url_before_reporting() {
     write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
-            "hub_url = \"http://hub.example\"",
+            "hub_url = \"https://hub.example/base\"",
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "",
@@ -271,13 +271,51 @@ fn probe_run_rejects_unsafe_hub_url_before_reporting() {
 }
 
 #[test]
+fn probe_run_allows_explicit_non_loopback_http_hub() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"http://192.0.2.20:8787\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        response: report_response(1, false),
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(1),
+        },
+    )
+    .expect("explicit HTTP Hub is accepted");
+
+    assert_eq!(
+        transport.observed_report_url,
+        "http://192.0.2.20:8787/api/probe/report",
+    );
+}
+
+#[test]
 fn probe_run_allows_localhost_http_hub_for_development() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     write_secure_bootstrap_config(
         &bootstrap_config_path,
         [
-            "hub_url = \"http://localhost:8787/base/\"",
+            "hub_url = \"http://localhost:8787\"",
             "probe_id = \"probe_01\"",
             "probe_configuration_version = \"default-v1\"",
             "",
@@ -304,7 +342,7 @@ fn probe_run_allows_localhost_http_hub_for_development() {
 
     assert_eq!(
         transport.observed_report_url,
-        "http://localhost:8787/base/api/probe/report",
+        "http://localhost:8787/api/probe/report",
     );
 }
 

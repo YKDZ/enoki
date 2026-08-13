@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { renderInstallCommand } from "../src/enrollment/install-command";
 
 const tempRoots: string[] = [];
 
@@ -43,6 +44,22 @@ describe("Owner add-host install command", () => {
     );
   });
 
+  it("quotes enrollment material for the unprivileged acquirer without passing it through sudo", () => {
+    const command = renderInstallCommand(
+      { probeApiOrigin: "https://hub.example/' $(whoami)" },
+      { enrollmentToken: "token'; touch /tmp/injected #" },
+    ).installCommand;
+
+    expect(command).toBe(
+      "ENOKI_HUB_URL='https://hub.example/'\"'\"' $(whoami)' " +
+        "ENOKI_ENROLLMENT_TOKEN='token'\"'\"'; touch /tmp/injected #' " +
+        "/usr/local/bin/enoki-probe-bootstrap-acquire | " +
+        "sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+    );
+    expect(command).not.toContain("sudo env");
+    expect(command).not.toContain("sudo ENOKI_");
+  });
+
   it("creates a pending NewHost Enrollment with a copyable Probe install command", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
@@ -53,19 +70,22 @@ describe("Owner add-host install command", () => {
       },
       database,
       installation: {
-        installPath: "/usr/local/bin/enoki-probe",
-        installScriptPath: "/api/probe/install.sh",
-        publicHubUrl: "https://hub.example",
+        probeApiOrigin: "https://hub.example",
       },
     });
     const ownerSession = await loginOwner(app);
 
-    const response = await app.request("/api/web/enrollments", {
-      headers: {
-        cookie: ownerSession,
+    const response = await app.request(
+      "https://attacker.example/api/web/enrollments",
+      {
+        body: JSON.stringify({}),
+        headers: {
+          "content-type": "application/json",
+          cookie: ownerSession,
+        },
+        method: "POST",
       },
-      method: "POST",
-    });
+    );
 
     expect(response.status).toBe(201);
     const body = (await response.json()) as {
@@ -73,69 +93,25 @@ describe("Owner add-host install command", () => {
       enrollmentToken: string;
       expiresAtMs: number;
       installCommand: string;
-      installPath: string;
       status: string;
     };
 
     expect(body.enrollmentId).toMatch(/^enr_/);
     expect(body.status).toBe("pending");
     expect(body.expiresAtMs).toBeGreaterThan(Date.now() - 1_000);
-    expect(body.installPath).toBe("/usr/local/bin/enoki-probe");
-    expect(body.installCommand).toContain(
-      "https://hub.example/api/probe/install.sh",
+    expect(body).not.toHaveProperty("installPath");
+    expect(body).not.toHaveProperty("installScriptUrl");
+    expect(body.installCommand).toBe(
+      "ENOKI_HUB_URL='https://hub.example' " +
+        `ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}' ` +
+        "/usr/local/bin/enoki-probe-bootstrap-acquire | " +
+        "sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
     );
-    expect(body.installCommand).toContain(
-      "ENOKI_HUB_URL='https://hub.example'",
-    );
-    expect(body.installCommand).toContain(
-      `ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}'`,
-    );
-    expect(body.installCommand).not.toContain("ENOKI_PROBE_VERSION=");
-    expect(body.installCommand).not.toContain("ENOKI_PROBE_DOWNLOAD_URL=");
-    expect(body.installCommand).not.toContain("ENOKI_INSTALL_PATH=");
     expect(
       database.sqlite
         .prepare("select count(*) as count from managed_hosts")
         .get(),
     ).toEqual({ count: 0 });
-
-    database.close();
-  });
-
-  it("keeps explicit install path overrides in the generated command", async () => {
-    const database = await createTemporaryDatabase();
-    const app = createHubApp({
-      auth: {
-        failureDelayMs: 0,
-        ownerPassword: "correct horse battery staple",
-        sessionCookieName: "enoki_owner_session",
-      },
-      database,
-      installation: {
-        installPath: "/opt/enoki/bin/enoki-probe",
-        installScriptPath: "/api/probe/install.sh",
-        publicHubUrl: "https://hub.example",
-      },
-    });
-    const ownerSession = await loginOwner(app);
-
-    const response = await app.request("/api/web/enrollments", {
-      headers: {
-        cookie: ownerSession,
-      },
-      method: "POST",
-    });
-
-    expect(response.status).toBe(201);
-    const body = (await response.json()) as {
-      installCommand: string;
-      installPath: string;
-    };
-
-    expect(body.installPath).toBe("/opt/enoki/bin/enoki-probe");
-    expect(body.installCommand).toContain(
-      "ENOKI_INSTALL_PATH='/opt/enoki/bin/enoki-probe'",
-    );
 
     database.close();
   });
@@ -162,14 +138,13 @@ describe("Owner add-host install command", () => {
       },
       database,
       installation: {
-        installPath: "/usr/local/bin/enoki-probe",
-        installScriptPath: "/api/probe/install.sh",
-        publicHubUrl: "https://hub.example",
+        probeApiOrigin: "https://hub.example",
       },
     });
     const ownerSession = await loginOwner(app);
     const newHost = await app.request("/api/web/enrollments", {
-      headers: { cookie: ownerSession },
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json", cookie: ownerSession },
       method: "POST",
     });
     const existingHost = await app.request("/api/web/enrollments", {
@@ -220,7 +195,8 @@ describe("Owner add-host install command", () => {
     });
     const ownerSession = await loginOwner(app);
     const created = await app.request("/api/web/enrollments", {
-      headers: { cookie: ownerSession },
+      body: JSON.stringify({}),
+      headers: { "content-type": "application/json", cookie: ownerSession },
       method: "POST",
     });
     const enrollment = (await created.json()) as {

@@ -1,3 +1,5 @@
+import { createNoopHubLogger, type HubLogger } from "../hub-logger.js";
+
 export type MetricsArchiveMaintenance = () => void | Promise<void>;
 
 export type MetricsArchiveScheduler = {
@@ -7,12 +9,14 @@ export type MetricsArchiveScheduler = {
 
 export type CreateMetricsArchiveSchedulerOptions = {
   intervalMs: number;
+  logger?: HubLogger;
   maintain: MetricsArchiveMaintenance;
 };
 
 export function createMetricsArchiveScheduler(
   options: CreateMetricsArchiveSchedulerOptions,
 ): MetricsArchiveScheduler {
+  const logger = options.logger ?? createNoopHubLogger();
   let running = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let activeRun: Promise<void> | undefined;
@@ -34,8 +38,19 @@ export function createMetricsArchiveScheduler(
   const runOnce = async () => {
     try {
       await options.maintain();
-    } catch (error) {
-      console.error("Metrics Archive maintenance failed.", error);
+      logger.log({
+        component: "metrics-archive",
+        event: "background.completed",
+        level: "info",
+        outcome: "maintenance_completed",
+      });
+    } catch {
+      logger.log({
+        component: "metrics-archive",
+        event: "background.failed",
+        level: "error",
+        outcome: "maintenance_failed",
+      });
     }
   };
 

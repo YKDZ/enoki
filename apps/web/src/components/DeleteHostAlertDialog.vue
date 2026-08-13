@@ -50,8 +50,8 @@ defineEmits<{
       <AlertDialogHeader>
         <AlertDialogTitle>删除主机</AlertDialogTitle>
         <AlertDialogDescription>
-          如果探针仍在运行，先卸载探针再删除记录。若探针已经手动卸载或长期离线，可以只删除
-          服务端记录。
+          删除主机只会删除 Hub 中的主机，不会卸载本机探针。若要同时清理本机和
+          Hub，请选择 “卸载探针并删除主机”。
         </AlertDialogDescription>
       </AlertDialogHeader>
       <AlertDialogFooter>
@@ -60,13 +60,13 @@ defineEmits<{
           variant="outline"
           @click="$emit('deleteHost', host, 'hub-only')"
         >
-          仅删除记录
+          删除主机
         </AlertDialogAction>
         <AlertDialogAction
           variant="destructive"
           @click="$emit('deleteHost', host, 'uninstall')"
         >
-          卸载并删除
+          卸载探针并删除主机
         </AlertDialogAction>
       </AlertDialogFooter>
     </AlertDialogContent>

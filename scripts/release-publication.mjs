@@ -9,7 +9,7 @@ import { reconcilePublication } from "./release-publication-lib.mjs";
 import { createGitHubGhcrPublicationRemote } from "./release-publication-remote.mjs";
 
 const usage = `Usage:
-  node scripts/release-publication.mjs reconcile --candidate-dir <path> --verification-summary <path> --repository <owner/name> --image <registry/image> --run-id <id> --run-attempt <number> --run-url <url> --output <path> --markdown <path>
+  node scripts/release-publication.mjs reconcile --candidate-dir <path> --verification-summary <path> --root-public-key-env <environment-variable> --repository <owner/name> --image <registry/image> --run-id <id> --run-attempt <number> --run-url <url> --output <path> --markdown <path>
   node scripts/release-publication.mjs assert-published --summary <path>`;
 
 try {
@@ -24,6 +24,7 @@ try {
           "--markdown",
           "--output",
           "--repository",
+          "--root-public-key-env",
           "--run-attempt",
           "--run-id",
           "--run-url",
@@ -62,8 +63,17 @@ async function reconcile(options) {
   let verificationSummary = null;
   let summary;
   try {
+    const trustedRootPublicKeyPem =
+      process.env[options["--root-public-key-env"]];
+    if (!trustedRootPublicKeyPem) {
+      throw new Error(
+        `Probe Distribution Trust Root environment variable ${options["--root-public-key-env"]} is empty`,
+      );
+    }
     [candidateManifest, verificationSummary] = await Promise.all([
-      validateReleaseCandidate(options["--candidate-dir"]),
+      validateReleaseCandidate(options["--candidate-dir"], {
+        trustedRootPublicKeyPem,
+      }),
       readJson(options["--verification-summary"], "verification summary"),
     ]);
     summary = await reconcilePublication({

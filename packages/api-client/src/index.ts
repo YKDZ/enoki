@@ -109,7 +109,6 @@ export type EnrollmentResponse = EnrollmentStatusResponse & {
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
-  installPath: string;
 };
 
 export type ProbeConfiguration = {

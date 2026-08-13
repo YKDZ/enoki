@@ -1,9 +1,5 @@
 import { execFile } from "node:child_process";
-import {
-  createHash,
-  generateKeyPairSync,
-  sign as signContents,
-} from "node:crypto";
+import { createHash, sign as signContents } from "node:crypto";
 import {
   chmod,
   cp,
@@ -30,9 +26,11 @@ import {
   validateResolvedReleaseBaseline,
 } from "./release-baseline-lib.mjs";
 import {
+  createProbeTrustDelegation,
   prepareProbeAssetSet,
   probeTargets,
 } from "./release-candidate-lib.mjs";
+import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";
@@ -119,14 +117,12 @@ describe("Release Baseline resolution", () => {
 
   it("rejects a self-signed baseline outside the canonical production trust root", async () => {
     const fixture = await createResolverFixture();
-    const { publicKey: unrelatedPublicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const { publicKey: unrelatedPublicKey } =
+      rsa4096TestKeyPair("baseline-unrelated");
     try {
-      fixture.arguments_.trustedProbePublicKeyPem = unrelatedPublicKey;
+      fixture.arguments_.trustedRootPublicKeyPem = unrelatedPublicKey;
       await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
-        "canonical production Probe public key",
+        "root key does not match the trusted Probe Distribution Trust Root",
       );
     } finally {
       await fixture.cleanup();
@@ -180,7 +176,7 @@ describe("Release Baseline resolution", () => {
       expect(archiveMembers.split("\n")).not.toContain("./index.json");
       await expect(
         validateReleaseBaselineBundle(fixture.outputDir, {
-          trustedProbePublicKeyPem: fixture.probe.publicKey,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
       ).resolves.toEqual(descriptor);
     } finally {
@@ -258,7 +254,9 @@ describe("Release Baseline resolution", () => {
       archive[archive.length - 1] ^= 0xff;
       await writeFile(archivePath, archive);
       await expect(
-        validateReleaseBaselineBundle(fixture.outputDir),
+        validateReleaseBaselineBundle(fixture.outputDir, {
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
       ).rejects.toThrow("OCI archive does not match its descriptor");
     } finally {
       await fixture.cleanup();
@@ -346,7 +344,7 @@ describe("Release Baseline resolution", () => {
           candidateVersion: "v2.0.0",
           githubRepository: "YKDZ/enoki",
           releaseCatalog: fixture.arguments_.releaseCatalog,
-          trustedProbePublicKeyPem: fixture.probe.publicKey,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
       ).rejects.toThrow("catalog changed");
     } finally {
@@ -365,7 +363,7 @@ describe("Release Baseline resolution", () => {
           candidateVersion: "v2.0.0",
           githubRepository: "YKDZ/enoki",
           releaseCatalog: fixture.arguments_.releaseCatalog,
-          trustedProbePublicKeyPem: fixture.probe.publicKey,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
       ).rejects.toThrow("tag identity changed");
     } finally {
@@ -377,7 +375,7 @@ describe("Release Baseline resolution", () => {
     const incomplete = await createResolverFixture();
     try {
       incomplete.release.assets = incomplete.release.assets.filter(
-        ({ name }) => name !== "install-probe.sh",
+        ({ name }) => name !== "manifest.json",
       );
       incomplete.releaseIdentity.assets = incomplete.release.assets;
       await expect(
@@ -389,7 +387,7 @@ describe("Release Baseline resolution", () => {
 
     const tampered = await createResolverFixture();
     try {
-      tampered.contents.set("install-probe.sh", Buffer.from("tampered"));
+      tampered.contents.set("manifest.json", Buffer.from("tampered"));
       await expect(resolveReleaseBaseline(tampered.arguments_)).rejects.toThrow(
         "published digest or size",
       );
@@ -411,7 +409,7 @@ describe("Release Baseline resolution", () => {
       "PRODUCTION_PROBE_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM }}",
     );
     expect(workflow).toContain("release-baseline.mjs recheck");
-    expect(workflow).toContain("--trusted-probe-public-key-env");
+    expect(workflow).toContain("--trusted-root-public-key-env");
     expect(releaseWorkflow).toContain("group: enoki-release-global");
   });
 });
@@ -471,7 +469,7 @@ async function createResolverFixture(options = {}) {
         listReleases: async () => releases,
         resolveReleaseIdentity: async () => releaseIdentity,
       },
-      trustedProbePublicKeyPem: probe.publicKey,
+      trustedRootPublicKeyPem: probe.root.publicKey,
     },
     cleanup: () => rm(workDir, { force: true, recursive: true }),
     contents,
@@ -491,12 +489,21 @@ async function createProbeAssetSetFixture(
 ) {
   const archivesDir = path.join(workDir, "archives");
   const outputDir = path.join(workDir, "probe-assets-source");
-  const installerPath = path.join(workDir, "install-probe.sh");
-  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 2048,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
+  const { privateKey, publicKey } = rsa4096TestKeyPair("baseline-release");
+  const root = rsa4096TestKeyPair("baseline-root");
+  const delegation = createProbeTrustDelegation({
+    distribution: "enoki",
+    generation: 1,
+    releasePublicKeyPem: publicKey,
+    rootPrivateKeyPem: root.privateKey,
   });
+  const delegationPath = path.join(workDir, "trust-delegation.json");
+  const delegationSignaturePath = path.join(
+    workDir,
+    "trust-delegation.json.sig",
+  );
+  await writeFile(delegationPath, delegation.bytes);
+  await writeFile(delegationSignaturePath, delegation.signature);
   await mkdir(archivesDir, { recursive: true });
   for (const target of probeTargets) {
     const file = `enoki-probe-${target}.tar.gz`;
@@ -511,28 +518,31 @@ async function createProbeAssetSetFixture(
       `${sha256(contents)}  ${file}\n`,
     );
   }
-  await writeFile(
-    installerPath,
-    "#!/bin/sh\nreadonly TRUST='__ENOKI_PROBE_ASSET_PUBLIC_KEY_SHA256__'\n",
-  );
   await prepareProbeAssetSet({
     archivesDir,
-    installerPath,
     outputDir,
     privateKeyPem: privateKey,
     publicKeyPem: publicKey,
+    rootPublicKeyPem: root.publicKey,
+    delegationBytes: delegation.bytes,
+    delegationSignature: delegation.signature,
+    distribution: "enoki",
     version,
   });
   if (legacyProbe) {
     const manifestPath = path.join(outputDir, "manifest.json");
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     for (const asset of manifest.assets) {
-      await writeProbeArchive(path.join(outputDir, asset.file), {
-        legacyProbe: true,
-        target: asset.target,
-        version,
-      });
+      const replacement = await writeProbeArchive(
+        path.join(outputDir, asset.file),
+        {
+          legacyProbe: true,
+          target: asset.target,
+          version,
+        },
+      );
       const archive = await readFile(path.join(outputDir, asset.file));
+      asset.bundleManifestSha256 = replacement.bundleManifestSha256;
       asset.sha256 = sha256(archive);
       asset.size = archive.byteLength;
       await writeFile(
@@ -547,7 +557,7 @@ async function createProbeAssetSetFixture(
       signContents("RSA-SHA256", manifestBytes, privateKey),
     );
   }
-  return { outputDir, privateKey, publicKey };
+  return { outputDir, privateKey, publicKey, root };
 }
 
 async function writeProbeArchive(
@@ -562,6 +572,25 @@ async function writeProbeArchive(
     createProbeElf({ includeIdentity: !legacyProbe, target, version }),
   );
   await chmod(binaryPath, 0o755);
+  const binary = await readFile(binaryPath);
+  const bundleManifest = Buffer.from(
+    `${JSON.stringify({
+      components: [
+        {
+          path: "enoki-probe",
+          permissionProfile: "probe-v1",
+          role: "probe",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+      ],
+      kind: "enoki-probe-bundle",
+      target,
+      version: version.slice(1),
+    })}\n`,
+  );
+  await writeFile(path.join(binaryDir, "bundle-manifest.json"), bundleManifest);
   await execFileAsync("tar", [
     "--create",
     "--gzip",
@@ -569,9 +598,11 @@ async function writeProbeArchive(
     archivePath,
     "--directory",
     binaryDir,
+    "bundle-manifest.json",
     "enoki-probe",
   ]);
   await rm(binaryDir, { force: true, recursive: true });
+  return { bundleManifestSha256: sha256(bundleManifest) };
 }
 
 function createProbeElf({ includeIdentity, target, version }) {
