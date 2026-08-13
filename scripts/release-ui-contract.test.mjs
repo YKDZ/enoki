@@ -13,6 +13,11 @@ import {
   runCandidateUiContract,
 } from "./release-ui-contract-lib.mjs";
 
+const testRootPublicKeyEnvironment = "TEST_PROBE_DISTRIBUTION_ROOT";
+const testRootEnvironment = {
+  [testRootPublicKeyEnvironment]: "public-root-pem",
+};
+
 describe("candidate-image UI Contract gate", () => {
   it("shares browser runtime identity between source E2E and the candidate gate", () => {
     expect(releaseUiBrowserRuntime({})).toEqual({
@@ -241,6 +246,101 @@ describe("candidate-image UI Contract gate", () => {
     );
   });
 
+  it("fails closed before candidate loading when no Probe Trust Root environment is selected", async () => {
+    const loadCandidate = vi.fn(async () => {
+      throw new Error("candidate loading must not start");
+    });
+    const createHubController = vi.fn(() => ({
+      cleanup: async () => ({ clean: true }),
+      start: async () => ({ container: "candidate-hub" }),
+    }));
+
+    await expect(
+      runCandidateUiContract(
+        {
+          candidateManifestPath: "/candidate/candidate-manifest.json",
+          containerEngine: "docker",
+          hubPort: 39_123,
+        },
+        {
+          createHubController,
+          environment: {},
+          loadCandidate,
+          ownerPassword: "temporary-owner-password",
+          runId: "ui-contract-test",
+        },
+      ),
+    ).rejects.toThrow(
+      "candidate UI Contract Probe Distribution Trust Root environment variable is required",
+    );
+    expect(loadCandidate).not.toHaveBeenCalled();
+    expect(createHubController).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before candidate loading when the selected Probe Trust Root environment is missing", async () => {
+    const loadCandidate = vi.fn(async () => {
+      throw new Error("candidate loading must not start");
+    });
+    const createHubController = vi.fn(() => ({
+      cleanup: async () => ({ clean: true }),
+      start: async () => ({ container: "candidate-hub" }),
+    }));
+
+    await expect(
+      runCandidateUiContract(
+        {
+          candidateManifestPath: "/candidate/candidate-manifest.json",
+          containerEngine: "docker",
+          hubPort: 39_123,
+          rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
+        },
+        {
+          createHubController,
+          environment: {},
+          loadCandidate,
+          ownerPassword: "temporary-owner-password",
+          runId: "ui-contract-test",
+        },
+      ),
+    ).rejects.toThrow(
+      `Probe Distribution Trust Root environment variable ${testRootPublicKeyEnvironment} is empty`,
+    );
+    expect(loadCandidate).not.toHaveBeenCalled();
+    expect(createHubController).not.toHaveBeenCalled();
+  });
+
+  it("fails closed before candidate loading when the selected Probe Trust Root environment is empty", async () => {
+    const loadCandidate = vi.fn(async () => {
+      throw new Error("candidate loading must not start");
+    });
+    const createHubController = vi.fn(() => ({
+      cleanup: async () => ({ clean: true }),
+      start: async () => ({ container: "candidate-hub" }),
+    }));
+
+    await expect(
+      runCandidateUiContract(
+        {
+          candidateManifestPath: "/candidate/candidate-manifest.json",
+          containerEngine: "docker",
+          hubPort: 39_123,
+          rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
+        },
+        {
+          createHubController,
+          environment: { [testRootPublicKeyEnvironment]: "" },
+          loadCandidate,
+          ownerPassword: "temporary-owner-password",
+          runId: "ui-contract-test",
+        },
+      ),
+    ).rejects.toThrow(
+      `Probe Distribution Trust Root environment variable ${testRootPublicKeyEnvironment} is empty`,
+    );
+    expect(loadCandidate).not.toHaveBeenCalled();
+    expect(createHubController).not.toHaveBeenCalled();
+  });
+
   it("runs Playwright against the validated candidate OCI runtime and always cleans it", async () => {
     const manifest = {
       candidate: { commit: "a".repeat(40), version: "v7.8.9" },
@@ -257,9 +357,11 @@ describe("candidate-image UI Contract gate", () => {
           candidateManifestPath: "/candidate/candidate-manifest.json",
           containerEngine: "docker",
           hubPort: 39_123,
+          rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
         },
         {
           createHubController: () => ({ cleanup, start }),
+          environment: testRootEnvironment,
           loadCandidate: async () => ({
             candidateDir: "/candidate",
             manifest,
@@ -299,12 +401,14 @@ describe("candidate-image UI Contract gate", () => {
           candidateManifestPath: "/candidate/candidate-manifest.json",
           containerEngine: "docker",
           hubPort: 39_123,
+          rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
         },
         {
           createHubController: () => ({
             cleanup,
             start: async () => ({ container: "candidate-hub" }),
           }),
+          environment: testRootEnvironment,
           loadCandidate: async () => ({
             candidateDir: "/candidate",
             manifest: {
@@ -335,6 +439,7 @@ describe("candidate-image UI Contract gate", () => {
           candidateManifestPath: "/candidate/candidate-manifest.json",
           containerEngine: "docker",
           hubPort: 39_123,
+          rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
         },
         {
           createHubController: () => ({
@@ -343,6 +448,7 @@ describe("candidate-image UI Contract gate", () => {
             },
             start: async () => ({ container: "candidate-hub" }),
           }),
+          environment: testRootEnvironment,
           loadCandidate: async () => ({
             candidateDir: "/candidate",
             manifest: {
@@ -387,6 +493,7 @@ describe("candidate-image UI Contract gate", () => {
             containerEngine: "docker",
             evidenceDir,
             hubPort: 39_123,
+            rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
           },
           {
             createHubController: () => ({
@@ -401,6 +508,7 @@ describe("candidate-image UI Contract gate", () => {
               }),
               start: async () => ({ container: "candidate-hub" }),
             }),
+            environment: testRootEnvironment,
             loadCandidate: async () => ({
               candidateDir: "/candidate",
               manifest: {
@@ -455,6 +563,7 @@ describe("candidate-image UI Contract gate", () => {
           candidateManifestPath: "/candidate/candidate-manifest.json",
           containerEngine: "docker",
           hubPort: 39_123,
+          rootPublicKeyEnvironment: testRootPublicKeyEnvironment,
         },
         {
           createHubController: () => ({
@@ -463,6 +572,7 @@ describe("candidate-image UI Contract gate", () => {
               throw new Error("candidate Hub health timeout");
             },
           }),
+          environment: testRootEnvironment,
           loadCandidate: async () => ({
             candidateDir: "/candidate",
             manifest: {

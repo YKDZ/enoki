@@ -66,12 +66,15 @@ export function parseCandidateUiContractCommandLine(arguments_) {
 }
 
 export async function runCandidateUiContract(options, dependencies = {}) {
-  const trustedRootPublicKeyPem = options.rootPublicKeyEnvironment
-    ? (dependencies.environment ?? process.env)[
-        options.rootPublicKeyEnvironment
-      ]
-    : undefined;
-  if (options.rootPublicKeyEnvironment && !trustedRootPublicKeyPem) {
+  if (!options.rootPublicKeyEnvironment) {
+    throw new Error(
+      "candidate UI Contract Probe Distribution Trust Root environment variable is required",
+    );
+  }
+  const trustedRootPublicKeyPem = (dependencies.environment ?? process.env)[
+    options.rootPublicKeyEnvironment
+  ];
+  if (!trustedRootPublicKeyPem) {
     throw new Error(
       `Probe Distribution Trust Root environment variable ${options.rootPublicKeyEnvironment} is empty`,
     );
