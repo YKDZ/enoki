@@ -1,6 +1,9 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+
+import { runBoundedProcess } from "./bounded-process.mjs";
+import { createContainerFetchSource } from "./container-http.mjs";
+import { formatFailureDiagnostic } from "./safe-diagnostics.mjs";
 
 const image = readImage(process.argv.slice(2));
 const runId = randomUUID().replaceAll("-", "").slice(0, 16);
@@ -10,14 +13,30 @@ const names = {
 };
 const secret = `seeded-secret-${runId}-never-log`;
 const ownerPassword = `owner-password-${secret}`;
+const redactions = [secret, ownerPassword];
+const dockerTimeoutMs = 10_000;
+const httpTimeoutMs = 2_000;
 
 try {
   await requireDocker();
   await proveRuntimeLogging();
   await proveFatalLogging();
   console.log("Hub container logging evidence passed.");
+} catch (error) {
+  const diagnostics = await Promise.all(
+    Object.values(names).map((name) => collectContainerDiagnostic(name)),
+  );
+  console.error(
+    formatFailureDiagnostic(error, diagnostics, {
+      limitBytes: 12 * 1024,
+      redactions,
+    }),
+  );
+  process.exitCode = 1;
 } finally {
-  await Promise.all(Object.values(names).map((name) => removeContainer(name)));
+  await Promise.allSettled(
+    Object.values(names).map((name) => removeContainer(name)),
+  );
 }
 
 function readImage(args) {
@@ -71,7 +90,9 @@ async function proveRuntimeLogging() {
   assertStatus(managementError, 404, "management unknown route");
   assertStatus(probeError, 404, "Probe unknown route");
 
-  await run("stop runtime Hub", ["kill", "--signal=SIGTERM", names.runtime]);
+  await run("stop runtime Hub", ["kill", "--signal=SIGTERM", names.runtime], {
+    timeoutMs: 10_000,
+  });
   await waitForContainerExit(names.runtime);
 
   const logs = await readLogs(names.runtime);
@@ -119,26 +140,30 @@ async function proveFatalLogging() {
 }
 
 async function startContainer(name, extraArgs) {
-  await run("start production Hub", [
-    "run",
-    "--detach",
-    "--name",
-    name,
-    "--mount",
-    "type=tmpfs,destination=/data,tmpfs-mode=0700",
-    "--env",
-    `OWNER_PASSWORD=${ownerPassword}`,
-    "--env",
-    "ENOKI_HUB_LOG_LEVEL=debug",
-    "--env",
-    "ENOKI_MANAGEMENT_ORIGIN=http://127.0.0.1",
-    "--env",
-    "ENOKI_PROBE_API_ORIGIN=http://127.0.0.1",
-    "--env",
-    "ENOKI_METRICS_ARCHIVE_ENABLED=false",
-    ...extraArgs,
-    image,
-  ]);
+  await run(
+    "start production Hub",
+    [
+      "run",
+      "--detach",
+      "--name",
+      name,
+      "--mount",
+      "type=tmpfs,destination=/data,tmpfs-mode=0700",
+      "--env",
+      `OWNER_PASSWORD=${ownerPassword}`,
+      "--env",
+      "ENOKI_HUB_LOG_LEVEL=debug",
+      "--env",
+      "ENOKI_MANAGEMENT_ORIGIN=http://127.0.0.1",
+      "--env",
+      "ENOKI_PROBE_API_ORIGIN=http://127.0.0.1",
+      "--env",
+      "ENOKI_METRICS_ARCHIVE_ENABLED=false",
+      ...extraArgs,
+      image,
+    ],
+    { timeoutMs: 20_000 },
+  );
 }
 
 function secretHeaders(clientRequestId) {
@@ -182,30 +207,26 @@ async function waitForHealth(name, port) {
 }
 
 async function execInContainer(name, request) {
-  const script = [
-    "const response = await fetch(process.env.ENOKI_EVIDENCE_URL, {",
-    "  body: process.env.ENOKI_EVIDENCE_BODY || undefined,",
-    "  headers: JSON.parse(process.env.ENOKI_EVIDENCE_HEADERS || '{}'),",
-    "  method: process.env.ENOKI_EVIDENCE_METHOD,",
-    "});",
-    "console.log(JSON.stringify({ requestId: response.headers.get('x-request-id'), status: response.status }));",
-  ].join("\n");
-  const result = await run("send HTTP request to Hub listener", [
-    "exec",
-    "--env",
-    `ENOKI_EVIDENCE_BODY=${request.body ?? ""}`,
-    "--env",
-    `ENOKI_EVIDENCE_HEADERS=${JSON.stringify(request.headers ?? {})}`,
-    "--env",
-    `ENOKI_EVIDENCE_METHOD=${request.method}`,
-    "--env",
-    `ENOKI_EVIDENCE_URL=${request.url}`,
-    name,
-    "node",
-    "--input-type=module",
-    "--eval",
-    script,
-  ]);
+  const result = await run(
+    "send HTTP request to Hub listener",
+    [
+      "exec",
+      "--env",
+      `ENOKI_EVIDENCE_BODY=${request.body ?? ""}`,
+      "--env",
+      `ENOKI_EVIDENCE_HEADERS=${JSON.stringify(request.headers ?? {})}`,
+      "--env",
+      `ENOKI_EVIDENCE_METHOD=${request.method}`,
+      "--env",
+      `ENOKI_EVIDENCE_URL=${request.url}`,
+      name,
+      "node",
+      "--input-type=module",
+      "--eval",
+      createContainerFetchSource(httpTimeoutMs),
+    ],
+    { timeoutMs: 5_000 },
+  );
 
   try {
     return JSON.parse(result.stdout);
@@ -217,12 +238,11 @@ async function execInContainer(name, request) {
 async function waitForContainerExit(name) {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    const state = await run("inspect Hub container state", [
-      "inspect",
-      "--format",
-      "{{.State.Running}}",
-      name,
-    ]);
+    const state = await run(
+      "inspect Hub container state",
+      ["inspect", "--format", "{{.State.Running}}", name],
+      { timeoutMs: Math.min(3_000, Math.max(1, deadline - Date.now())) },
+    );
     if (state.stdout.trim() === "false") return;
     await delay(100);
   }
@@ -231,13 +251,46 @@ async function waitForContainerExit(name) {
 }
 
 async function readLogs(name) {
-  return run("read Hub container console logs", ["logs", name]);
+  return run("read Hub container console logs", ["logs", name], {
+    timeoutMs: 5_000,
+  });
 }
 
 async function removeContainer(name) {
   await run("remove Hub container", ["rm", "--force", "--volumes", name], {
     allowFailure: true,
+    timeoutMs: 10_000,
   });
+}
+
+async function collectContainerDiagnostic(name) {
+  const [state, logs] = await Promise.all([
+    diagnosticCommand("inspect Hub container", [
+      "inspect",
+      "--format",
+      "{{json .State}}",
+      name,
+    ]),
+    diagnosticCommand("read Hub container logs", ["logs", name]),
+  ]);
+
+  return {
+    name,
+    state: state.stdout || state.stderr,
+    stderr: logs.stderr,
+    stdout: logs.stdout,
+  };
+}
+
+async function diagnosticCommand(label, args) {
+  try {
+    return await run(label, args, { allowFailure: true, timeoutMs: 3_000 });
+  } catch (error) {
+    return {
+      stderr: error instanceof Error ? error.message : String(error),
+      stdout: "",
+    };
+  }
 }
 
 async function requireDocker() {
@@ -246,6 +299,7 @@ async function requireDocker() {
     ["version", "--format", "{{.Server.Version}}"],
     {
       allowFailure: true,
+      timeoutMs: 10_000,
     },
   );
   if (version.code !== 0) {
@@ -256,29 +310,12 @@ async function requireDocker() {
 }
 
 function run(label, args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.once("error", () => {
-      reject(new Error(`Unable to ${label}.`));
-    });
-    child.once("close", (code) => {
-      const result = { code: code ?? 1, stderr, stdout };
-      if (result.code !== 0 && !options.allowFailure) {
-        reject(new Error(`Unable to ${label}.`));
-        return;
-      }
-      resolve(result);
-    });
+  return runBoundedProcess(label, "docker", args, {
+    allowFailure: options.allowFailure,
+    diagnosticLimitBytes: 4 * 1024,
+    killGraceMs: 500,
+    redactions,
+    timeoutMs: options.timeoutMs ?? dockerTimeoutMs,
   });
 }
 

@@ -36,6 +36,7 @@ jobs:
   hub-image:
     name: Hub Docker image
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - name: Checkout exact source
         uses: actions/checkout@v7
@@ -89,9 +90,10 @@ jobs:
 
       - name: Verify Hub container console logging
         if: ${{ !inputs.package-artifact }}
-        run: >-
-          node source/apps/hub/scripts/hub-container-logging-evidence.mjs
-          --image "enoki-hub:${{ inputs.version }}"
+        run: |
+          timeout --signal=TERM --kill-after=10s 3m \
+            node source/apps/hub/scripts/hub-container-logging-evidence.mjs \
+            --image "enoki-hub:${{ inputs.version }}"
 
       - name: Set up Docker Buildx
         if: inputs.package-artifact
