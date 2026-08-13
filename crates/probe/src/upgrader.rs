@@ -2047,7 +2047,24 @@ fn remove_owned_bootstrap_state(
     trusted_owner_uid: u32,
 ) -> Result<(), ProbeUpgraderRunError> {
     validate_owned_bootstrap_state(Some(path), trusted_owner_uid)?;
-    fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
+    for entry in [
+        path.join("trust/delegation-generation"),
+        path.join("trust/.delegation-generation.lock"),
+    ] {
+        match fs::remove_file(entry) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
+        }
+    }
+    for directory in [path.join("trust"), path.join("inbox")] {
+        match fs::remove_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
+        }
+    }
+    fs::remove_dir(path).map_err(ProbeUpgraderRunError::Io)
 }
 
 fn remove_path_if_exists(path: &Path) -> Result<(), ProbeUpgraderRunError> {
@@ -5205,8 +5222,8 @@ mod tests {
         private_directory(&outside);
         symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(
-                Some(&symlink_state),
+            remove_owned_bootstrap_state(
+                &symlink_state,
                 trusted_read_only_metadata_owner_uid(Some(symlink_temp.path())),
             ),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
@@ -5221,8 +5238,8 @@ mod tests {
         fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
             .expect("unsafe hardlink");
         assert!(matches!(
-            validate_owned_bootstrap_state(
-                Some(&hardlink_state),
+            remove_owned_bootstrap_state(
+                &hardlink_state,
                 trusted_read_only_metadata_owner_uid(Some(hardlink_temp.path())),
             ),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
@@ -5233,13 +5250,25 @@ mod tests {
         let extra_state = owned_state(extra_temp.path());
         fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
         assert!(matches!(
-            validate_owned_bootstrap_state(
-                Some(&extra_state),
+            remove_owned_bootstrap_state(
+                &extra_state,
                 trusted_read_only_metadata_owner_uid(Some(extra_temp.path())),
             ),
             Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
         ));
         assert!(extra_state.join("unrecognised").exists());
+
+        let owner_temp = tempfile::tempdir().expect("owner temp");
+        let owner_state = owned_state(owner_temp.path());
+        let actual_owner = fs::symlink_metadata(&owner_state)
+            .expect("Bootstrap state metadata")
+            .uid();
+        let unexpected_owner = actual_owner.wrapping_add(1);
+        assert!(matches!(
+            remove_owned_bootstrap_state(&owner_state, unexpected_owner),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert!(owner_state.exists());
     }
 
     #[test]

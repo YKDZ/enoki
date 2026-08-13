@@ -134,16 +134,18 @@ pub fn activate_current_probe(
     }
     validate_component(component, bundle.component_len)?;
     preflight_files(paths)?;
-    let created_etc_enoki = ensure_fixed_metadata_directory(&paths.etc_enoki())?;
+    preflight_fixed_metadata_directory(&paths.etc_enoki())?;
     validate_bootstrap_role(&paths.bootstrap_acquirer())?;
     validate_bootstrap_role(&paths.bootstrap_activator())?;
     accounts.require_absent()?;
     systemd.require_absent()?;
 
     let identity = accounts.create_static_service_identity()?;
+    let mut created_etc_enoki = false;
     let mut enabled = false;
     let mut started = false;
     let result = (|| {
+        created_etc_enoki = ensure_fixed_metadata_directory(&paths.etc_enoki())?;
         create_private_directory(&paths.state(), 0o750, identity)?;
         create_private_directory(&paths.identity_dir(), 0o700, identity)?;
         install_binary(component, &paths.binary())?;
@@ -173,22 +175,25 @@ pub fn activate_current_probe(
         systemd.wait_ready()?;
         Ok(())
     })();
-    if result.is_err() {
-        if started {
-            let _ = systemd.stop();
-        }
-        if enabled {
-            let _ = systemd.disable();
-        }
-        // No metadata is retained after failure, so every path below was
-        // created by this invocation and may be removed.  The bootstrap
-        // roles predate ownership transfer and are intentionally excluded.
-        let cleanup = cleanup_failed_install(paths, accounts, systemd, created_etc_enoki);
-        if cleanup.is_err() {
-            return Err(InstallError::Io);
+    match result {
+        Ok(()) => Ok(()),
+        Err(install_error) => {
+            if started {
+                let _ = systemd.stop();
+            }
+            if enabled {
+                let _ = systemd.disable();
+            }
+            // No metadata is retained after failure, so every path below was
+            // created by this invocation and may be removed.  The bootstrap
+            // roles predate ownership transfer and are intentionally excluded.
+            // Cleanup is best-effort and its aggregated error deliberately
+            // never masks the operation that caused installation to fail.
+            let _cleanup_error =
+                cleanup_failed_install(paths, accounts, systemd, created_etc_enoki);
+            Err(install_error)
         }
     }
-    result
 }
 
 fn cleanup_failed_install(
@@ -197,23 +202,43 @@ fn cleanup_failed_install(
     systemd: &mut impl SystemdPort,
     created_etc_enoki: bool,
 ) -> Result<(), InstallError> {
+    let mut cleanup_error = None;
     for path in [
         paths.unit(),
         paths.metadata(),
         paths.identity(),
         paths.binary(),
     ] {
-        remove_created_path(&path)?;
+        record_cleanup_error(&mut cleanup_error, remove_created_path(&path));
     }
-    remove_created_directory(&paths.identity_dir())?;
-    remove_created_directory(&paths.state())?;
+    record_cleanup_error(
+        &mut cleanup_error,
+        remove_created_directory(&paths.identity_dir()),
+    );
+    record_cleanup_error(&mut cleanup_error, remove_created_directory(&paths.state()));
     if created_etc_enoki {
-        remove_created_directory(&paths.etc_enoki())?;
+        record_cleanup_error(
+            &mut cleanup_error,
+            remove_created_directory(&paths.etc_enoki()),
+        );
     }
     // Systemd must forget the removed unit before another fresh install is
     // allowed to consult its absence state.
-    systemd.daemon_reload()?;
-    accounts.remove_static_service_identity()
+    record_cleanup_error(&mut cleanup_error, systemd.daemon_reload());
+    record_cleanup_error(
+        &mut cleanup_error,
+        accounts.remove_static_service_identity(),
+    );
+    cleanup_error.map_or(Ok(()), Err)
+}
+
+fn record_cleanup_error(
+    cleanup_error: &mut Option<InstallError>,
+    result: Result<(), InstallError>,
+) {
+    if let Err(error) = result {
+        cleanup_error.get_or_insert(error);
+    }
 }
 
 fn ensure_fixed_metadata_directory(path: &Path) -> Result<bool, InstallError> {
@@ -221,25 +246,45 @@ fn ensure_fixed_metadata_directory(path: &Path) -> Result<bool, InstallError> {
     ensure_safe_parent_chain(parent)?;
     match fs::create_dir(path) {
         Ok(()) => {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                .map_err(|_| InstallError::Io)?;
-            let dir = File::open(path).map_err(|_| InstallError::Io)?;
-            chown_file(&dir, ServiceIdentity { uid: 0, gid: 0 })?;
+            let configured = (|| {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                    .map_err(|_| InstallError::Io)?;
+                let dir = File::open(path).map_err(|_| InstallError::Io)?;
+                chown_file(&dir, ServiceIdentity { uid: 0, gid: 0 })?;
+                verify_directory(path, 0o755, ServiceIdentity { uid: 0, gid: 0 })
+            })();
+            if let Err(error) = configured {
+                let _ = fs::remove_dir(path);
+                return Err(error);
+            }
             Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || metadata.uid() != 0
-                || metadata.mode() & 0o777 != 0o755
-            {
-                return Err(InstallError::ExistingResidue);
-            }
+            validate_existing_metadata_directory(path)?;
             Ok(false)
         }
         Err(_) => Err(InstallError::Io),
     }
+}
+
+fn preflight_fixed_metadata_directory(path: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_existing_metadata_directory(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(InstallError::Io),
+    }
+}
+
+fn validate_existing_metadata_directory(path: &Path) -> Result<(), InstallError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o777 != 0o755
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(())
 }
 
 fn remove_created_path(path: &Path) -> Result<(), InstallError> {
@@ -480,12 +525,39 @@ impl AccountPort for SystemAccounts {
         )
     }
     fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
-        require_success("/usr/sbin/userdel", &[SERVICE_USER], InstallError::Account)?;
-        require_success(
-            "/usr/sbin/groupdel",
-            &[SERVICE_GROUP],
-            InstallError::Account,
-        )
+        remove_static_service_identity_with_commands(&mut |program, arguments| {
+            require_success(program, arguments, InstallError::Account)
+        })
+    }
+}
+
+fn remove_static_service_identity_with_commands(
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    let user = execute("/usr/sbin/userdel", &[SERVICE_USER]);
+    let group = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+    match (user, group) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(_)) => execute("/usr/sbin/groupdel", &[SERVICE_GROUP]),
+        (Err(_), Ok(())) => execute("/usr/sbin/userdel", &[SERVICE_USER]),
+        (Err(_), Err(_)) => {
+            // Keep the second compensation pass in dependency order.  The
+            // first group failure may be solely because the primary user
+            // survived its first deletion attempt, so it must not spend the
+            // group's own one-retry budget.
+            let user_retry = execute("/usr/sbin/userdel", &[SERVICE_USER]);
+            let group_retry = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+            match user_retry {
+                Err(error) => Err(error),
+                Ok(()) => match group_retry {
+                    Ok(()) => Ok(()),
+                    // This is the group's first attempt after its dependency
+                    // has been removed.  Give only this independent transient
+                    // failure one bounded retry.
+                    Err(_) => execute("/usr/sbin/groupdel", &[SERVICE_GROUP]),
+                },
+            }
+        }
     }
 }
 
@@ -531,12 +603,20 @@ fn create_static_service_identity_with_commands(
 }
 
 fn rollback_created_group(execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>) {
-    let _ = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+    if execute("/usr/sbin/groupdel", &[SERVICE_GROUP]).is_err() {
+        // The group was just created by this transaction.  One bounded retry
+        // makes a transient account-database failure recoverable without
+        // treating pre-existing residue as ours to remove.
+        let _ = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+    }
 }
 
 fn rollback_created_identity(execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>) {
-    let _ = execute("/usr/sbin/userdel", &[SERVICE_USER]);
-    rollback_created_group(execute);
+    // `groupdel` cannot succeed while its primary user still exists.  A
+    // single transient `userdel` failure would otherwise strand both
+    // identities and turn the next fresh install into residue.  This helper
+    // uses one bounded compensation pass, never an unbounded retry loop.
+    let _ = remove_static_service_identity_with_commands(execute);
 }
 
 /// Production systemd implementation. Its only dynamic data is absent: all
@@ -715,6 +795,7 @@ mod tests {
     struct Systemd {
         calls: Vec<&'static str>,
         fail_start: bool,
+        fail_reload: bool,
         residue: bool,
     }
     impl SystemdPort for Systemd {
@@ -726,7 +807,9 @@ mod tests {
         }
         fn daemon_reload(&mut self) -> Result<(), InstallError> {
             self.calls.push("reload");
-            Ok(())
+            (!self.fail_reload)
+                .then_some(())
+                .ok_or(InstallError::Systemd)
         }
         fn enable(&mut self) -> Result<(), InstallError> {
             self.calls.push("enable");
@@ -813,6 +896,192 @@ mod tests {
             ]);
             assert_eq!(*calls.borrow(), expected);
         }
+    }
+
+    #[test]
+    fn account_cleanup_attempts_both_user_and_group_removal() {
+        let mut calls = Vec::new();
+        let error = remove_static_service_identity_with_commands(&mut |program, _arguments| {
+            calls.push(program.to_string());
+            if program == "/usr/sbin/userdel" {
+                Err(InstallError::Account)
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("a failed account cleanup remains a failed transaction");
+
+        assert_eq!(error, InstallError::Account);
+        assert_eq!(
+            calls,
+            [
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+                "/usr/sbin/userdel",
+            ]
+        );
+    }
+
+    #[test]
+    fn account_cleanup_recovers_when_groupdel_first_fails_for_the_primary_user() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(true);
+        let user_exists = Cell::new(true);
+        let fail_first_userdel = Cell::new(true);
+        let mut execute = |program: &str, _arguments: &[&str]| match program {
+            "/usr/sbin/userdel" if user_exists.get() && fail_first_userdel.replace(false) => {
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+            "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
+            _ => Err(InstallError::Account),
+        };
+
+        remove_static_service_identity_with_commands(&mut execute)
+            .expect("one transient userdel failure must not strand its primary group");
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
+    }
+
+    #[test]
+    fn account_cleanup_retries_an_unblocked_groupdel_once() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(true);
+        let user_exists = Cell::new(true);
+        let fail_first_groupdel = Cell::new(true);
+        let mut calls = Vec::new();
+        let mut execute = |program: &str, _arguments: &[&str]| {
+            calls.push(program.to_string());
+            match program {
+                "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+                "/usr/sbin/groupdel"
+                    if !user_exists.get() && fail_first_groupdel.replace(false) =>
+                {
+                    Err(InstallError::Account)
+                }
+                "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
+                _ => Err(InstallError::Account),
+            }
+        };
+
+        remove_static_service_identity_with_commands(&mut execute)
+            .expect("one independent groupdel transient failure is recoverable");
+        assert_eq!(
+            calls,
+            [
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+                "/usr/sbin/groupdel"
+            ]
+        );
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
+    }
+
+    #[test]
+    fn account_cleanup_stops_after_two_dependency_blocked_rounds() {
+        let mut calls = Vec::new();
+        let error = remove_static_service_identity_with_commands(&mut |program, _arguments| {
+            calls.push(program.to_string());
+            Err(InstallError::Account)
+        })
+        .expect_err("persistent account deletion failure remains bounded");
+
+        assert_eq!(error, InstallError::Account);
+        assert_eq!(
+            calls,
+            [
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+            ]
+        );
+    }
+
+    #[test]
+    fn useradd_failure_recovers_from_one_transient_groupdel_failure() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(false);
+        let fail_first_groupdel = Cell::new(true);
+        let fail_first_useradd = Cell::new(true);
+        let mut execute = |program: &str, _arguments: &[&str]| match program {
+            "/usr/sbin/groupadd" if !group_exists.replace(true) => Ok(()),
+            "/usr/sbin/useradd" if fail_first_useradd.replace(false) => Err(InstallError::Account),
+            "/usr/sbin/useradd" if group_exists.get() => Ok(()),
+            "/usr/sbin/groupdel" if group_exists.get() && fail_first_groupdel.replace(false) => {
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/groupdel" if group_exists.replace(false) => Ok(()),
+            _ => Err(InstallError::Account),
+        };
+        let mut lookup = |_flag: &str| Ok(123);
+
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Err(InstallError::Account)
+        );
+        assert!(!group_exists.get());
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Ok(ServiceIdentity { uid: 123, gid: 123 }),
+            "the recovered group cleanup permits a fresh retry"
+        );
+    }
+
+    #[test]
+    fn numeric_identity_failure_recovers_from_combined_identity_cleanup_transients() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(false);
+        let user_exists = Cell::new(false);
+        let fail_first_lookup = Cell::new(true);
+        let fail_first_userdel = Cell::new(true);
+        let fail_first_unblocked_groupdel = Cell::new(true);
+        let mut execute = |program: &str, _arguments: &[&str]| match program {
+            "/usr/sbin/groupadd" if !group_exists.replace(true) => Ok(()),
+            "/usr/sbin/useradd" if group_exists.get() && !user_exists.replace(true) => Ok(()),
+            "/usr/sbin/userdel" if user_exists.get() && fail_first_userdel.replace(false) => {
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+            "/usr/sbin/groupdel"
+                if !user_exists.get() && fail_first_unblocked_groupdel.replace(false) =>
+            {
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
+            _ => Err(InstallError::Account),
+        };
+        let mut lookup = |_flag: &str| {
+            if fail_first_lookup.replace(false) {
+                Err(InstallError::Account)
+            } else {
+                Ok(123)
+            }
+        };
+
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Err(InstallError::Account)
+        );
+        // State, rather than merely calls, is the fresh-install contract:
+        // the first group deletion failed because the primary user remained;
+        // once its dependency is removed, a distinct transient group failure
+        // still receives its own bounded compensation attempt.
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
+
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Ok(ServiceIdentity { uid: 123, gid: 123 })
+        );
+        remove_static_service_identity_with_commands(&mut execute).unwrap();
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
     }
 
     #[test]
@@ -1022,6 +1291,7 @@ mod tests {
         let mut systemd = Systemd {
             calls: Vec::new(),
             fail_start: true,
+            fail_reload: false,
             residue: false,
         };
         let error = activate_current_probe(
@@ -1089,6 +1359,151 @@ mod tests {
     }
 
     #[test]
+    fn later_failure_removes_the_metadata_directory_created_by_this_attempt() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        assert!(
+            !temporary.path().join("etc/enoki").exists(),
+            "this attempt, rather than setup, must create the metadata directory"
+        );
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            calls: Vec::new(),
+            fail_start: true,
+            fail_reload: false,
+            residue: false,
+        };
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::Systemd),
+            "the failure occurs only after the metadata directory is created"
+        );
+        assert_eq!(
+            systemd.calls,
+            [
+                "absent", "reload", "enable", "start", "stop", "disable", "reload"
+            ]
+        );
+        assert!(
+            !temporary.path().join("etc/enoki").exists(),
+            "rollback removes only the metadata directory this transaction created"
+        );
+    }
+
+    #[test]
+    fn daemon_reload_failure_keeps_the_install_error_and_still_cleans_the_identity() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/enoki",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            calls: Vec::new(),
+            fail_start: false,
+            fail_reload: true,
+            residue: false,
+        };
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::Systemd),
+            "cleanup trouble must not replace the installation failure"
+        );
+        assert_eq!(accounts.calls, ["absent", "create", "remove"]);
+        assert_eq!(systemd.calls, ["absent", "reload", "reload"]);
+        assert!(!temporary.path().join("usr/local/bin/enoki-probe").exists());
+        assert!(
+            !temporary
+                .path()
+                .join("etc/enoki/probe-install.toml")
+                .exists()
+        );
+
+        systemd.fail_reload = false;
+        activate_current_probe(
+            &mut component,
+            &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .expect("a recoverable daemon reload failure leaves a fresh retry possible");
+    }
+
+    #[test]
+    fn cleanup_attempts_systemd_and_identity_removal_after_a_file_or_directory_failure() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/enoki",
+            "etc/systemd/system",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        // A directory at a transaction-owned file path makes removal fail.
+        // The observable requirement is that independent cleanup authorities
+        // still run, not that a test observes a particular helper call.
+        fs::create_dir(paths.binary()).unwrap();
+        fs::create_dir(paths.state()).unwrap();
+        fs::create_dir(paths.identity_dir()).unwrap();
+        fs::write(paths.identity(), "identity").unwrap();
+        fs::write(paths.metadata(), "metadata").unwrap();
+        fs::write(paths.unit(), "unit").unwrap();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            cleanup_failed_install(&paths, &mut accounts, &mut systemd, false),
+            Err(InstallError::Io)
+        );
+        assert_eq!(systemd.calls, ["reload"]);
+        assert_eq!(accounts.calls, ["remove"]);
+        assert!(!paths.metadata().exists());
+        assert!(!paths.unit().exists());
+        assert!(!paths.state().exists());
+        assert!(paths.binary().is_dir());
+    }
+
+    #[test]
     fn loaded_systemd_residue_fails_before_creating_the_service_account_or_files() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -1106,6 +1521,7 @@ mod tests {
         let mut systemd = Systemd {
             calls: Vec::new(),
             fail_start: false,
+            fail_reload: false,
             residue: true,
         };
         assert_eq!(
@@ -1123,6 +1539,45 @@ mod tests {
         assert_eq!(accounts.calls, ["absent"]);
         assert_eq!(systemd.calls, ["absent"]);
         assert!(!temporary.path().join("var/lib/enoki-probe").exists());
+    }
+
+    #[test]
+    fn pre_account_failure_rolls_back_a_new_metadata_directory() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            calls: Vec::new(),
+            fail_start: false,
+            fail_reload: false,
+            residue: true,
+        };
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(!temporary.path().join("etc/enoki").exists());
+        assert_eq!(accounts.calls, ["absent"]);
+        assert_eq!(systemd.calls, ["absent"]);
     }
 
     #[cfg(unix)]

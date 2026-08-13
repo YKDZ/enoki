@@ -674,6 +674,14 @@ describe("Probe Host Harness", () => {
       ),
     ).toHaveLength(1);
     expect(executions[0].command).toContain("probe-install.toml");
+    for (const path of [
+      "/var/lib/enoki-probe-bootstrap/trust/delegation-generation",
+      "/var/lib/enoki-probe-bootstrap/trust/.delegation-generation.lock",
+      "/var/lib/enoki-probe-bootstrap/trust",
+      "/var/lib/enoki-probe-bootstrap/inbox",
+    ]) {
+      expect(executions[0].command).toContain(path);
+    }
     expect(executions[0].options).toEqual({ root: true });
   });
 
