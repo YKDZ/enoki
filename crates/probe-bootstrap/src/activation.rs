@@ -326,33 +326,10 @@ mod tests {
     use crate::{
         generation::acquire_delegation_generation_for_test,
         handoff::{MAGIC, SCHEMA_VERSION},
+        verifier::signed_test_handoff,
     };
-    use rsa::{
-        RsaPrivateKey,
-        pkcs1v15::SigningKey,
-        pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding},
-        rand_core::OsRng,
-        signature::{RandomizedSigner, SignatureEncoding},
-    };
-    use sha2::{Digest, Sha256};
-    use std::{
-        fs,
-        io::Cursor,
-        os::unix::fs::PermissionsExt,
-        sync::{LazyLock, mpsc},
-        thread,
-        time::Duration,
-    };
+    use std::{fs, io::Cursor, os::unix::fs::PermissionsExt, sync::mpsc, thread, time::Duration};
     use tempfile::tempdir;
-
-    static FIXTURE_KEYS: LazyLock<(RsaPrivateKey, RsaPrivateKey)> = LazyLock::new(|| {
-        (
-            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-root-private.pem"))
-                .unwrap(),
-            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-daily-private.pem"))
-                .unwrap(),
-        )
-    });
 
     #[test]
     fn rejects_invalid_metadata_before_creating_a_root_component() {
@@ -595,56 +572,11 @@ mod tests {
     }
 
     fn fixture(generation: u64) -> Fixture {
-        let mut rng = OsRng;
-        let root = FIXTURE_KEYS.0.clone();
-        let daily = FIXTURE_KEYS.1.clone();
-        let root_pem = root
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let daily_pem = daily
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let root_id = sha256(&root_pem);
-        let daily_id = sha256(&daily_pem);
+        let vector = signed_test_handoff(generation);
         let component = b"probe";
-        let bundle = format!(
-            "{{\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
-            sha256(component)
-        )
-        .into_bytes();
-        let delegation = format!(
-            "{{\"distribution\":\"enoki\",\"generation\":{generation},\"kind\":\"enoki-probe-trust-delegation\",\"purpose\":\"probe-asset-signing\",\"rootKeyId\":\"{root_id}\",\"schemaVersion\":1,\"signingIdentity\":{{\"algorithm\":\"rsa-sha256\",\"keyId\":\"{daily_id}\",\"publicKeyPem\":{}}}}}\n",
-            serde_json::to_string(std::str::from_utf8(&daily_pem).unwrap()).unwrap()
-        )
-        .into_bytes();
-        let mut delegation_input = b"enoki/probe-trust-delegation/v1\0".to_vec();
-        delegation_input.extend_from_slice(&delegation);
-        let delegation_signature = SigningKey::<Sha256>::new(root)
-            .sign_with_rng(&mut rng, &delegation_input)
-            .to_vec();
-        let manifest = format!(
-            "{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-x86_64-unknown-linux-gnu.tar.gz\",\"sha256\":\"{}\",\"size\":1,\"target\":\"x86_64-unknown-linux-gnu\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":{generation},\"delegationKeyId\":\"{daily_id}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",
-            sha256(&bundle),
-            "0".repeat(64)
-        )
-        .into_bytes();
-        let manifest_signature = SigningKey::<Sha256>::new(daily)
-            .sign_with_rng(&mut rng, &manifest)
-            .to_vec();
-        let handoff = Handoff {
-            delegation,
-            delegation_signature,
-            manifest,
-            manifest_signature,
-            signing_key: daily_pem,
-            bundle_manifest: bundle,
-        };
         let mut stream = Vec::new();
-        handoff
+        vector
+            .handoff
             .write_from(
                 &crate::handoff::Enrollment::new("https://hub.example", "enk_enroll_test").unwrap(),
                 &mut Cursor::new(component),
@@ -655,13 +587,9 @@ mod tests {
         assert_eq!(&stream[..8], &MAGIC);
         assert_eq!(&stream[8..10], &SCHEMA_VERSION.to_be_bytes());
         Fixture {
-            root: root_pem,
-            root_fingerprint: root_id,
+            root_fingerprint: vector.root_fingerprint,
+            root: vector.root,
             stream,
         }
-    }
-
-    fn sha256(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
     }
 }

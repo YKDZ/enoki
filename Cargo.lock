@@ -173,6 +173,7 @@ dependencies = [
 name = "enoki-probe-bootstrap"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "flate2",
  "libc",
  "rsa",

@@ -1,5 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -318,12 +325,59 @@ describe("Probe Bootstrap build artifact", () => {
     expect(workflow).toContain('test "$BOOTSTRAP_DISTRIBUTION" = enoki');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM");
+    expect(workflow).toContain(
+      "key.asymmetricKeyDetails?.modulusLength !== 4096",
+    );
+    expect(workflow).toContain("root must be RSA-4096");
+    expect(workflow).not.toContain(
+      'key.asymmetricKeyType !== "rsa") throw new Error("root must be RSA")',
+    );
+    const bootstrapBuildScript = await readFile(
+      "crates/probe-bootstrap/build.rs",
+      "utf8",
+    );
+    expect(bootstrapBuildScript).toContain("root.n().bits() != 4096");
+    expect(bootstrapBuildScript).toContain("must be an RSA-4096 SPKI PEM");
     expect(workflow).toContain('ENOKI_BOOTSTRAP_BUILD_ROLE="$role"');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_TARGET");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_VERSION");
     expect(workflow).toContain("probe-bootstrap-artifact.mjs package");
     expect(workflow).toContain("probe-bootstrap-artifact.mjs inspect");
     expect(workflow).not.toMatch(/genpkey|openssl genrsa|private key/i);
+  });
+
+  it("keeps test vectors public and out of production Bootstrap inputs", async () => {
+    const testDataDirectory = "crates/probe-bootstrap/test-data";
+    const files = await readdir(testDataDirectory);
+    const contents = await Promise.all(
+      files.map((file) => readFile(path.join(testDataDirectory, file), "utf8")),
+    );
+    expect(files.join("\n")).not.toMatch(/private/i);
+    expect(contents.join("\n")).not.toMatch(
+      /BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY/,
+    );
+
+    const [buildScript, verifier, workflow] = await Promise.all(
+      [
+        "crates/probe-bootstrap/build.rs",
+        "crates/probe-bootstrap/src/verifier.rs",
+        ".github/workflows/reusable-build-probe-bootstrap.yml",
+      ].map((file) => readFile(file, "utf8")),
+    );
+    expect(`${buildScript}\n${workflow}`).not.toMatch(
+      /signed-handoff-vectors|weak-delegation-vector/,
+    );
+    const embeddedTestVectors = [
+      ...verifier.matchAll(
+        /include_str!\("\.\.\/test-data\/(?:signed-handoff-vectors|weak-delegation-vector)\.json"\)/g,
+      ),
+    ];
+    expect(embeddedTestVectors).toHaveLength(2);
+    for (const match of embeddedTestVectors) {
+      expect(
+        verifier.slice(Math.max(0, match.index - 800), match.index),
+      ).toMatch(/#\[cfg\(all\(test,/);
+    }
   });
 });
 

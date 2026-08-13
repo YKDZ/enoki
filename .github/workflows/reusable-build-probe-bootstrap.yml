@@ -64,7 +64,10 @@ jobs:
             const { createHash, createPublicKey } = require("node:crypto");
             const value = process.env.PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM;
             const key = createPublicKey(value);
-            if (key.asymmetricKeyType !== "rsa") throw new Error("root must be RSA");
+            if (
+              key.asymmetricKeyType !== "rsa" ||
+              key.asymmetricKeyDetails?.modulusLength !== 4096
+            ) throw new Error("root must be RSA-4096");
             const canonical = key.export({ format: "pem", type: "spki" });
             process.stdout.write(createHash("sha256").update(canonical).digest("hex"));
           ')"

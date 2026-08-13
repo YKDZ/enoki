@@ -431,6 +431,86 @@ fn select_asset<'a>(m: &'a AssetManifest, target: &str) -> Result<&'a Asset, Ver
     }
     found.ok_or(VerificationError::TargetAsset)
 }
+
+#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignedHandoffVectors {
+    root_public_key_pem: String,
+    signing_public_key_pem: String,
+    bundle_manifest_base64: String,
+    #[cfg(feature = "acquirer")]
+    archive_base64: String,
+    generations: std::collections::BTreeMap<String, SignedHandoffGeneration>,
+}
+
+#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignedHandoffGeneration {
+    delegation_base64: String,
+    delegation_signature_base64: String,
+    manifest_base64: String,
+    manifest_signature_base64: String,
+}
+
+#[cfg(all(test, feature = "acquirer"))]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WeakDelegationVector {
+    delegation_base64: String,
+    delegation_signature_base64: String,
+}
+
+#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
+pub(crate) struct SignedTestHandoff {
+    #[cfg(feature = "acquirer")]
+    pub(crate) archive: Vec<u8>,
+    pub(crate) handoff: Handoff,
+    pub(crate) root: Vec<u8>,
+    #[cfg(feature = "activator")]
+    pub(crate) root_fingerprint: String,
+}
+
+#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
+pub(crate) fn signed_test_handoff(generation: u64) -> SignedTestHandoff {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::sync::LazyLock;
+
+    static VECTORS: LazyLock<SignedHandoffVectors> = LazyLock::new(|| {
+        serde_json::from_str(include_str!("../test-data/signed-handoff-vectors.json")).unwrap()
+    });
+    let vector = VECTORS.generations.get(&generation.to_string()).unwrap();
+    let decode = |value: &str| STANDARD.decode(value).unwrap();
+    let root = VECTORS.root_public_key_pem.as_bytes().to_vec();
+    SignedTestHandoff {
+        #[cfg(feature = "acquirer")]
+        archive: decode(&VECTORS.archive_base64),
+        handoff: Handoff {
+            delegation: decode(&vector.delegation_base64),
+            delegation_signature: decode(&vector.delegation_signature_base64),
+            manifest: decode(&vector.manifest_base64),
+            manifest_signature: decode(&vector.manifest_signature_base64),
+            signing_key: VECTORS.signing_public_key_pem.as_bytes().to_vec(),
+            bundle_manifest: decode(&VECTORS.bundle_manifest_base64),
+        },
+        #[cfg(feature = "activator")]
+        root_fingerprint: sha256_hex(&root),
+        root,
+    }
+}
+
+#[cfg(all(test, feature = "acquirer"))]
+fn weak_delegation_test_vector() -> (Vec<u8>, Vec<u8>) {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let vector: WeakDelegationVector =
+        serde_json::from_str(include_str!("../test-data/weak-delegation-vector.json")).unwrap();
+    (
+        STANDARD.decode(vector.delegation_base64).unwrap(),
+        STANDARD.decode(vector.delegation_signature_base64).unwrap(),
+    )
+}
 #[cfg(feature = "acquirer")]
 fn verify_archive_digest(archive: &mut File, a: &Asset) -> Result<(), VerificationError> {
     if archive.metadata().map_err(|_| VerificationError::Io)?.len() != a.size {
@@ -728,31 +808,15 @@ struct BundleManifest {
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
-    use rsa::{
-        RsaPrivateKey,
-        pkcs1v15::SigningKey,
-        pkcs8::{DecodePrivateKey, EncodePublicKey},
-        rand_core::OsRng,
-        signature::{RandomizedSigner, SignatureEncoding},
-    };
-    use std::{fs::File, io::Write, sync::LazyLock};
+    use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey, rand_core::OsRng};
+    use std::{fs::File, io::Write};
     use tar::{Builder, Header};
     use tempfile::NamedTempFile;
     const TARGET: &str = "x86_64-unknown-linux-gnu";
-    static FIXTURE_KEYS: LazyLock<(RsaPrivateKey, RsaPrivateKey)> = LazyLock::new(|| {
-        (
-            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-root-private.pem"))
-                .unwrap(),
-            RsaPrivateKey::from_pkcs8_pem(include_str!("../test-data/rsa4096-daily-private.pem"))
-                .unwrap(),
-        )
-    });
     struct Fixture {
         archive: NamedTempFile,
-        daily: RsaPrivateKey,
         h: Handoff,
         root: Vec<u8>,
-        root_private: RsaPrivateKey,
         fingerprint: String,
     }
     impl Fixture {
@@ -770,74 +834,14 @@ mod tests {
         }
     }
     fn fixture() -> Fixture {
-        let mut rng = OsRng;
-        let root = FIXTURE_KEYS.0.clone();
-        let daily = FIXTURE_KEYS.1.clone();
-        let root_pem = root
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let daily_pem = daily
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let payload = b"probe".to_vec();
-        let bundle=format!("{{\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&payload)).into_bytes();
-        let gzip = GzEncoder::new(Vec::new(), Compression::default());
-        let mut tar = Builder::new(gzip);
-        for (name, data, kind) in [
-            ("bundle-manifest.json", bundle.clone(), b'0'),
-            ("enoki-probe", payload, b'0'),
-        ] {
-            let mut h = Header::new_gnu();
-            h.set_size(data.len() as u64);
-            h.set_mode(0o600);
-            h.set_entry_type(tar::EntryType::new(kind));
-            h.set_cksum();
-            tar.append_data(&mut h, name, &data[..]).unwrap();
-        }
-        let archive = tar.into_inner().unwrap().finish().unwrap();
-        let delegation = Delegation {
-            distribution: "enoki".into(),
-            generation: 1,
-            kind: "enoki-probe-trust-delegation".into(),
-            purpose: "probe-asset-signing".into(),
-            root_key_id: sha256_hex(&root_pem),
-            schema_version: 1,
-            signing_identity: SigningIdentity {
-                algorithm: "rsa-sha256".into(),
-                key_id: sha256_hex(&daily_pem),
-                public_key_pem: String::from_utf8(daily_pem.clone()).unwrap(),
-            },
-        };
-        let delegation_bytes = canonical_json(&delegation).unwrap();
-        let mut signed = DELEGATION_DOMAIN.to_vec();
-        signed.extend_from_slice(&delegation_bytes);
-        let ds = SigningKey::<Sha256>::new(root.clone())
-            .sign_with_rng(&mut rng, &signed)
-            .to_vec();
-        let manifest=format!("{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-{TARGET}.tar.gz\",\"sha256\":\"{}\",\"size\":{},\"target\":\"{TARGET}\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":1,\"delegationKeyId\":\"{}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",sha256_hex(&bundle),sha256_hex(&archive),archive.len(),delegation.signing_identity.key_id).into_bytes();
-        let ms = SigningKey::<Sha256>::new(daily.clone())
-            .sign_with_rng(&mut rng, &manifest)
-            .to_vec();
+        let vector = signed_test_handoff(1);
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&archive).unwrap();
+        f.write_all(&vector.archive).unwrap();
         Fixture {
             archive: f,
-            daily,
-            h: Handoff {
-                delegation: delegation_bytes,
-                delegation_signature: ds,
-                manifest,
-                manifest_signature: ms,
-                signing_key: daily_pem,
-                bundle_manifest: bundle,
-            },
-            fingerprint: sha256_hex(&root_pem),
-            root: root_pem,
-            root_private: root,
+            h: vector.handoff,
+            fingerprint: sha256_hex(&vector.root),
+            root: vector.root,
         }
     }
 
@@ -846,15 +850,6 @@ mod tests {
         x.archive.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
         x.archive.as_file_mut().write_all(&archive).unwrap();
         x.archive.as_file_mut().sync_all().unwrap();
-        let daily_id = sha256_hex(&x.h.signing_key);
-        x.h.manifest = format!(
-            "{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-{TARGET}.tar.gz\",\"sha256\":\"{}\",\"size\":{},\"target\":\"{TARGET}\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":1,\"delegationKeyId\":\"{daily_id}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",
-            sha256_hex(&x.h.bundle_manifest), sha256_hex(&archive), archive.len()
-        ).into_bytes();
-        let mut rng = OsRng;
-        x.h.manifest_signature = SigningKey::<Sha256>::new(x.daily.clone())
-            .sign_with_rng(&mut rng, &x.h.manifest)
-            .to_vec();
     }
 
     fn raw_archive_with_extra(name: &str, kind: u8) -> Vec<u8> {
@@ -933,32 +928,7 @@ mod tests {
     #[test]
     fn rejects_a_validly_root_signed_weak_delegated_key() {
         let mut x = fixture();
-        let mut rng = OsRng;
-        let weak = RsaPrivateKey::new(&mut rng, 1024).unwrap();
-        let weak_pem = weak
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let delegation = Delegation {
-            distribution: "enoki".into(),
-            generation: 1,
-            kind: "enoki-probe-trust-delegation".into(),
-            purpose: "probe-asset-signing".into(),
-            root_key_id: x.fingerprint.clone(),
-            schema_version: 1,
-            signing_identity: SigningIdentity {
-                algorithm: "rsa-sha256".into(),
-                key_id: sha256_hex(&weak_pem),
-                public_key_pem: String::from_utf8(weak_pem).unwrap(),
-            },
-        };
-        x.h.delegation = canonical_json(&delegation).unwrap();
-        let mut signed = DELEGATION_DOMAIN.to_vec();
-        signed.extend_from_slice(&x.h.delegation);
-        x.h.delegation_signature = SigningKey::<Sha256>::new(x.root_private.clone())
-            .sign_with_rng(&mut rng, &signed)
-            .to_vec();
+        (x.h.delegation, x.h.delegation_signature) = weak_delegation_test_vector();
 
         assert!(matches!(
             verify_outer_metadata(&x.h, &x.policy(0)),
@@ -1003,8 +973,11 @@ mod tests {
             );
         }
         let mut x = fixture();
-        replace_archive(&mut x, raw_archive_with_extra("extra", b'0'));
-        let metadata = verify_metadata(&x.h, &x.policy(0)).unwrap();
+        let mut metadata = verify_metadata(&x.h, &x.policy(0)).unwrap();
+        let malformed = raw_archive_with_extra("extra", b'0');
+        metadata.asset.sha256 = sha256_hex(&malformed);
+        metadata.asset.size = malformed.len() as u64;
+        replace_archive(&mut x, malformed);
         assert_eq!(
             verify_archive_and_extract(&mut x.open(), &x.h, &metadata, &mut Vec::new(),),
             Err(VerificationError::ArchiveStructure)
