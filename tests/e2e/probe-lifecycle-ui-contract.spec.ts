@@ -1,10 +1,11 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { type Page, type Route } from "@playwright/test";
 
 import type { HostDetail } from "../../apps/web/src/types";
 import {
   releaseUiBrowserRuntime,
   releaseUiLifecycleVersions,
 } from "./release-ui-contract-fixture";
+import { expect, test } from "./security-console";
 
 type ProbeUpgradeStatus = NonNullable<HostDetail["probeUpgradeStatus"]>;
 
@@ -27,7 +28,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     });
   });
 
-  test("显示等待中的 Probe Upgrade", async ({ page }) => {
+  test("显示等待中的探针升级", async ({ page }) => {
     await openHostDetail(page, probeUpgrade("pending"));
 
     const status = page.getByTestId("probe-upgrade-status");
@@ -35,7 +36,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     await expect(status).toContainText(targetProbeVersion);
   });
 
-  test("显示进行中的 Probe Upgrade", async ({ page }) => {
+  test("显示进行中的探针升级", async ({ page }) => {
     await openHostDetail(page, probeUpgrade("running"));
 
     await expect(page.getByTestId("probe-upgrade-status")).toContainText(
@@ -43,7 +44,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     );
   });
 
-  test("显示已完成的 Probe Upgrade", async ({ page }) => {
+  test("显示已完成的探针升级", async ({ page }) => {
     await openHostDetail(page, probeUpgrade("succeeded"));
 
     await expect(page.getByTestId("probe-upgrade-status")).toContainText(
@@ -51,9 +52,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     );
   });
 
-  test("失败的 Probe Upgrade 只提供 Probe Repair 恢复方向", async ({
-    page,
-  }) => {
+  test("失败的探针升级只提供探针修复恢复方向", async ({ page }) => {
     await openHostDetail(
       page,
       probeUpgrade("failed", {
@@ -65,7 +64,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     const status = page.getByTestId("probe-upgrade-status");
     await expect(status).toContainText("探针升级失败");
     await expect(status).toContainText("probe_upgrade_running_timeout");
-    await expect(status).toContainText("以 root 权限运行 Probe Repair");
+    await expect(status).toContainText("以 root 权限运行探针修复");
     await expect(status).not.toContainText("降级");
     await expect(status).not.toContainText("重新安装");
     await expect(status).not.toContainText("重新注册");
@@ -76,9 +75,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     ).toHaveCount(0);
   });
 
-  test("权限不足的 Probe Upgrade 指向一次性的 Installer Recovery", async ({
-    page,
-  }) => {
+  test("权限不足的探针升级指向一次性的安装恢复", async ({ page }) => {
     await openHostDetail(
       page,
       probeUpgrade("failed", {
@@ -90,12 +87,10 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     const status = page.getByTestId("probe-upgrade-status");
     await expect(status).toContainText("生成新的一次性安装命令");
     await expect(status).toContainText("root 权限运行");
-    await expect(status).not.toContainText("Probe Repair");
+    await expect(status).not.toContainText("探针修复");
   });
 
-  test("Owner 确认后发送一次带会话认证的 Probe Upgrade 请求", async ({
-    page,
-  }) => {
+  test("管理员确认后发送一次带会话认证的探针升级请求", async ({ page }) => {
     let requestCount = 0;
     let ownerCookie = "";
     await openHostDetail(page, null, {
@@ -134,7 +129,7 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     expect(ownerCookie).toContain("enoki_owner_session=");
   });
 
-  test("Owner 确认后发送一次带会话认证的 Probe Uninstall 请求", async ({
+  test("管理员确认后发送一次带会话认证的卸载探针并删除主机请求", async ({
     page,
   }) => {
     let requestCount = 0;
@@ -175,11 +170,70 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     expect(requestCount).toBe(0);
 
     await deleteButton.click();
-    await page.getByRole("button", { name: "卸载并删除" }).click();
+    await page.getByRole("button", { name: "卸载探针并删除主机" }).click();
 
-    await expect(page.getByText("已下发探针卸载请求")).toBeVisible();
+    await expect(page.getByText("已下发卸载探针并删除主机请求")).toBeVisible();
     expect(requestCount).toBe(1);
     expect(ownerCookie).toContain("enoki_owner_session=");
+  });
+
+  test("较晚返回的旧指标窗口不会覆盖新选择", async ({ page }) => {
+    const staleRequestStarted = deferred<void>();
+    const releaseStaleResponse = deferred<void>();
+    const staleResponseFinished = deferred<void>();
+
+    await openHostDetail(page, null, {
+      async onMetricsRequest(route) {
+        const requestedWindow = new URL(route.request().url()).searchParams.get(
+          "window",
+        );
+        if (requestedWindow === "1h") {
+          staleRequestStarted.resolve();
+          await releaseStaleResponse.promise;
+          await route.fulfill({
+            contentType: "application/json",
+            json: {
+              metrics: {
+                samples: [metricSample(11, 2, 1_725_000_002_000)],
+                window: "1h",
+              },
+            },
+          });
+          staleResponseFinished.resolve();
+          return true;
+        }
+
+        await route.fulfill({
+          contentType: "application/json",
+          json: {
+            metrics: {
+              samples: [metricSample(66, 6, 1_725_000_001_000)],
+              window: "6h",
+            },
+          },
+        });
+        return true;
+      },
+    });
+    await staleRequestStarted.promise;
+
+    const windowSelect = page.getByRole("combobox");
+    await windowSelect.click();
+    await page.getByRole("option", { name: "6 小时" }).click();
+
+    await expect(windowSelect).toContainText("6 小时");
+    await expect(
+      page.getByText("66.0%", { exact: true }).first(),
+    ).toBeVisible();
+
+    releaseStaleResponse.resolve();
+    await staleResponseFinished.promise;
+
+    await expect(windowSelect).toContainText("6 小时");
+    await expect(
+      page.getByText("66.0%", { exact: true }).first(),
+    ).toBeVisible();
+    await expect(page.getByText("11.0%", { exact: true })).toHaveCount(0);
   });
 });
 
@@ -188,6 +242,7 @@ async function openHostDetail(
   probeUpgradeStatus: ProbeUpgradeStatus | null,
   options: {
     onHostRequest?: (route: Route) => Promise<boolean>;
+    onMetricsRequest?: (route: Route) => Promise<boolean>;
   } = {},
 ) {
   const host = hostDetail(probeUpgradeStatus);
@@ -218,16 +273,20 @@ async function openHostDetail(
   await page.route(
     `**/api/web/hosts/${hostId}/metrics?window=*`,
     async (route) => {
+      if (await options.onMetricsRequest?.(route)) {
+        return;
+      }
+      const requestedWindow = new URL(route.request().url()).searchParams.get(
+        "window",
+      );
       await route.fulfill({
         contentType: "application/json",
-        json: { metrics: { samples: [], window: "1m" } },
+        json: { metrics: { samples: [], window: requestedWindow } },
       });
     },
   );
 
   await page.goto("/");
-  await page.locator("#owner-password").fill(ownerPassword);
-  await page.getByRole("button", { name: "登录" }).click();
   await page.goto(`/hosts/${hostId}`);
   await expect(
     page.getByRole("heading", { name: "UI Contract Host" }),
@@ -311,4 +370,39 @@ function hostDetail(probeUpgradeStatus: ProbeUpgradeStatus | null): HostDetail {
     system: "Ubuntu 24.04",
     warnings: [],
   };
+}
+
+function metricSample(
+  cpuPercent: number,
+  sequence: number,
+  collectedAtMs: number,
+) {
+  return {
+    collectedAtMs,
+    cpuCores: [],
+    cpuPercent,
+    cpuUserPercent: cpuPercent,
+    diskTotalBytes: null,
+    diskUsedBytes: null,
+    disks: [],
+    memoryTotalBytes: null,
+    memoryUsedBytes: null,
+    networkInterfaces: [],
+    networkRxBitsPerSecond: null,
+    networkRxBytesDelta: null,
+    networkTxBitsPerSecond: null,
+    networkTxBytesDelta: null,
+    receivedAtMs: collectedAtMs + 100,
+    sequence,
+    uptimeSeconds: null,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve) => {
+    resolve = promiseResolve;
+  });
+
+  return { promise, resolve };
 }

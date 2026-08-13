@@ -65,6 +65,7 @@ function latestPointValue(series: MetricSeries) {
         </span>
       </div>
       <SparklineChart
+        :data-core-name="core.name"
         :points="core.points"
         :window-end-ms="core.windowEndMs"
         :window-start-ms="core.windowEndMs - cpuSparklineWindowMs"

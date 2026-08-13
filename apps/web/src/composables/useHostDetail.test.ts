@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { reactive, ref } from "vue";
+import { effectScope, reactive, ref } from "vue";
 
 import { ApiError } from "@/lib/api";
 
@@ -118,6 +118,525 @@ describe("Host detail data", () => {
     });
   });
 
+  it("deduplicates concurrent initial loads and commits their shared response", async () => {
+    const pendingHost = deferred<unknown>();
+    const pendingMetrics = deferred<unknown>();
+    const requestedPaths: string[] = [];
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        requestedPaths.push(path);
+        if (path === "/api/web/hosts/1") {
+          return (await pendingHost.promise) as T;
+        }
+
+        return (await pendingMetrics.promise) as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    const firstLoad = detail.load();
+    const secondLoad = detail.load();
+
+    expect(requestedPaths).toEqual([
+      "/api/web/hosts/1",
+      "/api/web/hosts/1/metrics?window=1h",
+    ]);
+    expect(detail.isLoading.value).toBe(true);
+
+    pendingHost.resolve({
+      host: { ...hostDetail(1), displayName: "Initial Host" },
+    });
+    pendingMetrics.resolve({
+      metrics: {
+        samples: [metricSample(1, 1_725_000_000_000)],
+        window: "1h",
+      },
+    });
+    await Promise.all([firstLoad, secondLoad]);
+
+    expect(detail.host.value?.displayName).toBe("Initial Host");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([1]);
+    expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("keeps a newly selected window when an older refresh finishes later", async () => {
+    vi.useFakeTimers();
+    const staleRefresh = deferred<unknown>();
+    let metricsRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        metricsRequestCount += 1;
+        if (metricsRequestCount === 2) {
+          return (await staleRefresh.promise) as T;
+        }
+
+        const window = path.endsWith("window=6h") ? "6h" : "1h";
+        return {
+          metrics: {
+            samples: [metricSample(window === "6h" ? 6 : 1, 1_725_000_000_000)],
+            window,
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(metricsRequestCount).toBe(2);
+
+    await detail.switchWindow("6h");
+
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([6]);
+
+    staleRefresh.resolve({
+      metrics: {
+        samples: [metricSample(2, 1_725_000_001_000)],
+        window: "1h",
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([6]);
+  });
+
+  it("does not schedule an old range again when a stale refresh fails", async () => {
+    vi.useFakeTimers();
+    const staleRefresh = deferred<unknown>();
+    const metricsPaths: string[] = [];
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        metricsPaths.push(path);
+        if (metricsPaths.length === 2) {
+          return (await staleRefresh.promise) as T;
+        }
+
+        const window = path.endsWith("window=6h") ? "6h" : "1h";
+        return { metrics: { samples: [], window } } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await detail.switchWindow("6h");
+
+    staleRefresh.reject(new Error("stale refresh failed"));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(detail.metricsError.value).toBe("");
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(metricsPaths).toEqual([
+      "/api/web/hosts/1/metrics?window=1h",
+      "/api/web/hosts/1/metrics?window=1h",
+      "/api/web/hosts/1/metrics?window=6h",
+      "/api/web/hosts/1/metrics?window=6h",
+    ]);
+  });
+
+  it("ignores a late metrics success after its scope is disposed", async () => {
+    vi.useFakeTimers();
+    const pendingMetrics = deferred<unknown>();
+    const requestedPaths: string[] = [];
+    const scope = effectScope();
+    const detail = scope.run(() =>
+      useHostDetail(1, {
+        async fetchJson<T>(path: string): Promise<T> {
+          requestedPaths.push(path);
+          if (path === "/api/web/hosts/1") {
+            return {
+              host: {
+                ...hostDetail(1),
+                probeConfiguration: {
+                  configuration: {
+                    metricsCollectionIntervalSeconds: 1,
+                    version: "host-1-1",
+                  },
+                  mode: "override",
+                },
+              },
+            } as T;
+          }
+
+          return (await pendingMetrics.promise) as T;
+        },
+        windowPreferences: createWindowPreferences(),
+      }),
+    );
+
+    if (!detail) {
+      throw new Error("Expected Host detail scope to create a composable.");
+    }
+
+    const loading = detail.load();
+    await Promise.resolve();
+    scope.stop();
+
+    pendingMetrics.resolve({
+      metrics: {
+        samples: [metricSample(1, 1_725_000_000_000)],
+        window: "1h",
+      },
+    });
+    await loading;
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(detail.samples.value).toEqual([]);
+    expect(requestedPaths).toEqual([
+      "/api/web/hosts/1",
+      "/api/web/hosts/1/metrics?window=1h",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ignores a late metrics failure after its scope is disposed", async () => {
+    vi.useFakeTimers();
+    const pendingMetrics = deferred<unknown>();
+    const requestedPaths: string[] = [];
+    const scope = effectScope();
+    const detail = scope.run(() =>
+      useHostDetail(1, {
+        async fetchJson<T>(path: string): Promise<T> {
+          requestedPaths.push(path);
+          if (path === "/api/web/hosts/1") {
+            return { host: hostDetail(1) } as T;
+          }
+
+          return (await pendingMetrics.promise) as T;
+        },
+        windowPreferences: createWindowPreferences(),
+      }),
+    );
+
+    if (!detail) {
+      throw new Error("Expected Host detail scope to create a composable.");
+    }
+
+    const loading = detail.load();
+    await Promise.resolve();
+    scope.stop();
+    pendingMetrics.reject(new Error("late metrics failure"));
+    await loading;
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(detail.metricsError.value).toBe("");
+    expect(requestedPaths).toEqual([
+      "/api/web/hosts/1",
+      "/api/web/hosts/1/metrics?window=1h",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ignores a late unauthorized metrics failure after its scope is disposed", async () => {
+    const pendingMetrics = deferred<unknown>();
+    const onUnauthorized = vi.fn();
+    const scope = effectScope();
+    const detail = scope.run(() =>
+      useHostDetail(1, {
+        async fetchJson<T>(path: string): Promise<T> {
+          if (path === "/api/web/hosts/1") {
+            return { host: hostDetail(1) } as T;
+          }
+
+          return (await pendingMetrics.promise) as T;
+        },
+        onUnauthorized,
+        windowPreferences: createWindowPreferences(),
+      }),
+    );
+
+    if (!detail) {
+      throw new Error("Expected Host detail scope to create a composable.");
+    }
+
+    const loading = detail.load();
+    await Promise.resolve();
+    scope.stop();
+    pendingMetrics.reject(new ApiError("Request failed: 401", 401));
+    await loading;
+
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(detail.metricsError.value).toBe("");
+  });
+
+  it("does not retry a transient metrics request after its scope is disposed", async () => {
+    vi.useFakeTimers();
+    let metricsRequestCount = 0;
+    const scope = effectScope();
+    const detail = scope.run(() =>
+      useHostDetail(1, {
+        async fetchJson<T>(path: string): Promise<T> {
+          if (path === "/api/web/hosts/1") {
+            return { host: hostDetail(1) } as T;
+          }
+
+          metricsRequestCount += 1;
+          throw new TypeError("Failed to fetch");
+        },
+        windowPreferences: createWindowPreferences(),
+      }),
+    );
+
+    if (!detail) {
+      throw new Error("Expected Host detail scope to create a composable.");
+    }
+
+    const loading = detail.load();
+    await Promise.resolve();
+    expect(metricsRequestCount).toBe(1);
+    scope.stop();
+
+    await vi.advanceTimersByTimeAsync(150);
+    await loading;
+
+    expect(metricsRequestCount).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("ignores a late Host detail response after its scope is disposed", async () => {
+    const pendingHost = deferred<unknown>();
+    const scope = effectScope();
+    const detail = scope.run(() =>
+      useHostDetail(1, {
+        async fetchJson<T>(path: string): Promise<T> {
+          if (path === "/api/web/hosts/1") {
+            return (await pendingHost.promise) as T;
+          }
+
+          return {
+            metrics: { samples: [], window: "1h" },
+          } as T;
+        },
+        windowPreferences: createWindowPreferences(),
+      }),
+    );
+
+    if (!detail) {
+      throw new Error("Expected Host detail scope to create a composable.");
+    }
+
+    const loading = detail.load();
+    await Promise.resolve();
+    scope.stop();
+    pendingHost.resolve({ host: hostDetail(1) });
+    await loading;
+
+    expect(detail.host.value).toBeNull();
+  });
+
+  it("does not roll back a newer selection when an older switch fails", async () => {
+    const olderSwitch = deferred<unknown>();
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return { host: hostDetail(1) } as T;
+        }
+
+        if (path.endsWith("window=6h")) {
+          return (await olderSwitch.promise) as T;
+        }
+
+        const window = path.endsWith("window=10m") ? "10m" : "1h";
+        return {
+          metrics: {
+            samples: [
+              metricSample(window === "10m" ? 10 : 1, 1_725_000_000_000),
+            ],
+            window,
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    const pendingOlderSwitch = detail.switchWindow("6h");
+    await Promise.resolve();
+    await detail.switchWindow("10m");
+
+    olderSwitch.reject(new Error("older request failed"));
+    await pendingOlderSwitch;
+
+    expect(detail.selectedWindow.value).toBe("10m");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([10]);
+    expect(detail.metricsError.value).toBe("");
+    expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("keeps and retries the current selection when its switch request fails", async () => {
+    vi.useFakeTimers();
+    const metricsPaths: string[] = [];
+    let sixHourRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return { host: hostDetail(1) } as T;
+        }
+
+        metricsPaths.push(path);
+        if (path.endsWith("window=6h")) {
+          sixHourRequestCount += 1;
+          if (sixHourRequestCount === 1) {
+            throw new Error("switch failed");
+          }
+        }
+
+        const window = path.endsWith("window=6h") ? "6h" : "1h";
+        return {
+          metrics: {
+            samples: [metricSample(window === "6h" ? 6 : 1, 1_725_000_000_000)],
+            window,
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await detail.switchWindow("6h");
+
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.metricsError.value).toBe(
+      "无法读取历史指标，稍后会自动重试。",
+    );
+    expect(detail.isLoading.value).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(metricsPaths.at(-1)).toBe("/api/web/hosts/1/metrics?window=6h");
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([
+      1, 6,
+    ]);
+    expect(detail.metricsError.value).toBe("");
+  });
+
+  it("keeps and retries the current selection when the response window mismatches", async () => {
+    vi.useFakeTimers();
+    let sixHourRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return { host: hostDetail(1) } as T;
+        }
+
+        if (path.endsWith("window=6h")) {
+          sixHourRequestCount += 1;
+          return {
+            metrics: {
+              samples: [metricSample(6, 1_725_000_000_000)],
+              window: sixHourRequestCount === 1 ? "1h" : "6h",
+            },
+          } as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(1, 1_725_000_000_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await detail.switchWindow("6h");
+
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([1]);
+    expect(detail.metricsError.value).toBe(
+      "无法读取历史指标，稍后会自动重试。",
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(sixHourRequestCount).toBe(2);
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([
+      1, 6,
+    ]);
+    expect(detail.metricsError.value).toBe("");
+  });
+
+  it("ignores an unauthorized failure from an older switch", async () => {
+    const olderSwitch = deferred<unknown>();
+    const onUnauthorized = vi.fn();
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return { host: hostDetail(1) } as T;
+        }
+
+        if (path.endsWith("window=6h")) {
+          return (await olderSwitch.promise) as T;
+        }
+
+        const window = path.endsWith("window=10m") ? "10m" : "1h";
+        return {
+          metrics: {
+            samples: [
+              metricSample(window === "10m" ? 10 : 1, 1_725_000_000_000),
+            ],
+            window,
+          },
+        } as T;
+      },
+      onUnauthorized,
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    const pendingOlderSwitch = detail.switchWindow("6h");
+    await Promise.resolve();
+    await detail.switchWindow("10m");
+
+    olderSwitch.reject(new ApiError("Request failed: 401", 401));
+    await pendingOlderSwitch;
+
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(detail.selectedWindow.value).toBe("10m");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([10]);
+    expect(detail.metricsError.value).toBe("");
+    expect(detail.isLoading.value).toBe(false);
+  });
+
   it("delegates unauthorized detail loads without showing a detail error", async () => {
     const onUnauthorized = vi.fn();
     const detail = useHostDetail(1, {
@@ -134,6 +653,237 @@ describe("Host detail data", () => {
     expect(detail.error.value).toBe("");
     expect(detail.host.value).toBeNull();
     expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("ignores a deferred detail failure from an older load after a newer window switch", async () => {
+    vi.useFakeTimers();
+    const initialDetail = deferred<unknown>();
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return (await initialDetail.promise) as T;
+        }
+
+        const window = path.endsWith("window=6h") ? "6h" : "1h";
+        return {
+          metrics: {
+            samples: [metricSample(window === "6h" ? 6 : 1, 1_725_000_000_000)],
+            window,
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    const initialLoad = detail.load();
+    await Promise.resolve();
+    await detail.switchWindow("6h");
+
+    initialDetail.reject(new Error("older detail failed"));
+    await initialLoad;
+
+    expect(detail.error.value).toBe("");
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([6]);
+    expect(detail.isLoading.value).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("ignores a deferred unauthorized detail failure from an older load after a newer window switch", async () => {
+    vi.useFakeTimers();
+    const initialDetail = deferred<unknown>();
+    const onUnauthorized = vi.fn();
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return (await initialDetail.promise) as T;
+        }
+
+        const window = path.endsWith("window=6h") ? "6h" : "1h";
+        return {
+          metrics: {
+            samples: [metricSample(window === "6h" ? 6 : 1, 1_725_000_000_000)],
+            window,
+          },
+        } as T;
+      },
+      onUnauthorized,
+      windowPreferences: createWindowPreferences(),
+    });
+
+    const initialLoad = detail.load();
+    await Promise.resolve();
+    await detail.switchWindow("6h");
+
+    initialDetail.reject(new ApiError("Request failed: 401", 401));
+    await initialLoad;
+
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(detail.error.value).toBe("");
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([6]);
+    expect(detail.isLoading.value).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("starts a fresh Host activation after returning from overview and ignores its old initial response", async () => {
+    const activeHostId = ref(1);
+    const oldDetail = deferred<unknown>();
+    const oldMetrics = deferred<unknown>();
+    let detailRequestCount = 0;
+    let metricsRequestCount = 0;
+    const detail = useHostDetail(activeHostId, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          detailRequestCount += 1;
+          if (detailRequestCount === 1) {
+            return (await oldDetail.promise) as T;
+          }
+
+          return {
+            host: { ...hostDetail(1), displayName: "new activation" },
+          } as T;
+        }
+
+        metricsRequestCount += 1;
+        if (metricsRequestCount === 1) {
+          return (await oldMetrics.promise) as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(2, 1_725_000_002_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    const oldLoad = detail.load();
+    await Promise.resolve();
+
+    activeHostId.value = 0;
+    activeHostId.value = 1;
+    await detail.load();
+
+    oldDetail.resolve({
+      host: { ...hostDetail(1), displayName: "old activation" },
+    });
+    oldMetrics.resolve({
+      metrics: {
+        samples: [metricSample(1, 1_725_000_001_000)],
+        window: "1h",
+      },
+    });
+    await oldLoad;
+
+    expect(detailRequestCount).toBe(2);
+    expect(metricsRequestCount).toBe(2);
+    expect(detail.host.value?.displayName).toBe("new activation");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([2]);
+  });
+
+  it("ignores an old switch failure after Host 1 is activated again", async () => {
+    const activeHostId = ref(1);
+    const oldSwitch = deferred<unknown>();
+    let sixHourRequestCount = 0;
+    const detail = useHostDetail(activeHostId, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return { host: hostDetail(1) } as T;
+        }
+
+        if (path.endsWith("window=6h")) {
+          sixHourRequestCount += 1;
+          if (sixHourRequestCount === 1) {
+            return (await oldSwitch.promise) as T;
+          }
+        }
+
+        const window = path.endsWith("window=6h") ? "6h" : "1h";
+        return {
+          metrics: {
+            samples: [metricSample(2, 1_725_000_002_000)],
+            window,
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    const pendingOldSwitch = detail.switchWindow("6h");
+    await Promise.resolve();
+
+    activeHostId.value = 0;
+    activeHostId.value = 1;
+    await detail.load();
+    oldSwitch.reject(new Error("old switch failed"));
+    await pendingOldSwitch;
+
+    expect(detail.selectedWindow.value).toBe("6h");
+    expect(detail.metricsError.value).toBe("");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([2]);
+    expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("keeps the new activation's timer and session when an old refresh returns 401", async () => {
+    vi.useFakeTimers();
+    const activeHostId = ref(1);
+    const oldRefresh = deferred<unknown>();
+    const onUnauthorized = vi.fn();
+    let metricsRequestCount = 0;
+    const detail = useHostDetail(activeHostId, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        metricsRequestCount += 1;
+        if (metricsRequestCount === 2) {
+          return (await oldRefresh.promise) as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(metricsRequestCount, 1_725_000_000_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      onUnauthorized,
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(metricsRequestCount).toBe(2);
+
+    activeHostId.value = 0;
+    activeHostId.value = 1;
+    await detail.load();
+
+    oldRefresh.reject(new ApiError("Request failed: 401", 401));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onUnauthorized).not.toHaveBeenCalled();
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([3]);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(metricsRequestCount).toBe(4);
   });
 
   it("clears stale detail while loading a different host", async () => {
@@ -180,6 +930,55 @@ describe("Host detail data", () => {
     expect(detail.host.value?.id).toBe(2);
     expect(detail.samples.value).toHaveLength(1);
     expect(detail.isLoading.value).toBe(false);
+  });
+
+  it("keeps a new host's metrics range and samples when the previous host responds late", async () => {
+    const activeHostId = ref(1);
+    const hostOneMetrics = deferred<unknown>();
+    const requestedPaths: string[] = [];
+    const detail = useHostDetail(activeHostId, {
+      async fetchJson<T>(path: string): Promise<T> {
+        requestedPaths.push(path);
+        if (path === "/api/web/hosts/1") {
+          return { host: hostDetail(1) } as T;
+        }
+        if (path === "/api/web/hosts/2") {
+          return { host: hostDetail(2) } as T;
+        }
+        if (path.endsWith("/1/metrics?window=6h")) {
+          return (await hostOneMetrics.promise) as T;
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(2, 1_725_000_000_000)],
+            window: "10m",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences({ 1: "6h", 2: "10m" }),
+    });
+
+    const hostOneLoad = detail.load();
+    await Promise.resolve();
+
+    activeHostId.value = 2;
+    await detail.load();
+    expect(detail.selectedWindow.value).toBe("10m");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([2]);
+
+    hostOneMetrics.resolve({
+      metrics: {
+        samples: [metricSample(1, 1_725_000_000_000)],
+        window: "6h",
+      },
+    });
+    await hostOneLoad;
+
+    expect(requestedPaths).toContain("/api/web/hosts/1/metrics?window=6h");
+    expect(requestedPaths).toContain("/api/web/hosts/2/metrics?window=10m");
+    expect(detail.selectedWindow.value).toBe("10m");
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([2]);
   });
 
   it("starts the first metrics request immediately when entering a host detail", async () => {
@@ -427,6 +1226,55 @@ describe("Host detail data", () => {
       "无法读取历史指标，稍后会自动重试。",
     );
     expect(detail.samples.value).toEqual([]);
+  });
+
+  it("automatically retries a current initial metrics failure", async () => {
+    vi.useFakeTimers();
+    let metricsRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        metricsRequestCount += 1;
+        if (metricsRequestCount === 1) {
+          throw new Error("initial metrics failure");
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(2, 1_725_000_002_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+
+    expect(metricsRequestCount).toBe(1);
+    expect(detail.metricsError.value).toBe(
+      "无法读取历史指标，稍后会自动重试。",
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(metricsRequestCount).toBe(2);
+    expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([2]);
+    expect(detail.metricsError.value).toBe("");
   });
 
   it("creates a Probe Upgrade Request and updates Host detail status", async () => {
@@ -728,6 +1576,55 @@ describe("Host detail data", () => {
     expect(detail.samples.value.map((sample) => sample.sequence)).toEqual([
       1, 2, 3,
     ]);
+  });
+
+  it("automatically retries a current metrics refresh failure", async () => {
+    vi.useFakeTimers();
+    let metricsRequestCount = 0;
+    const detail = useHostDetail(1, {
+      async fetchJson<T>(path: string): Promise<T> {
+        if (path === "/api/web/hosts/1") {
+          return {
+            host: {
+              ...hostDetail(1),
+              probeConfiguration: {
+                configuration: {
+                  metricsCollectionIntervalSeconds: 1,
+                  version: "host-1-1",
+                },
+                mode: "override",
+              },
+            },
+          } as T;
+        }
+
+        metricsRequestCount += 1;
+        if (metricsRequestCount === 2) {
+          throw new Error("refresh failed");
+        }
+
+        return {
+          metrics: {
+            samples: [metricSample(metricsRequestCount, 1_725_000_000_000)],
+            window: "1h",
+          },
+        } as T;
+      },
+      windowPreferences: createWindowPreferences(),
+    });
+
+    await detail.load();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(metricsRequestCount).toBe(2);
+    expect(detail.metricsError.value).toBe(
+      "无法刷新历史指标，稍后会自动重试。",
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(metricsRequestCount).toBe(3);
+    expect(detail.metricsError.value).toBe("");
   });
 
   it("refreshes Host detail while a Probe Upgrade Request is active", async () => {

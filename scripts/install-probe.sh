@@ -83,68 +83,21 @@ validate_hub_url() {
   local authority
 
   case "$ENOKI_HUB_URL" in
-    *\?* | *\#*)
-      fail "ENOKI_HUB_URL must not contain credentials, a query, or a fragment."
-      ;;
-  esac
-
-  case "$ENOKI_HUB_URL" in
     https://*) rest="${ENOKI_HUB_URL#https://}" ;;
     http://*) rest="${ENOKI_HUB_URL#http://}" ;;
     file://*)
       if [ -n "$TEST_ROOT" ]; then
         return
       fi
-      fail "ENOKI_HUB_URL must use https, except localhost development URLs."
+      fail "ENOKI_HUB_URL must be an HTTP or HTTPS Origin."
       ;;
-    *) fail "ENOKI_HUB_URL must use https, except localhost development URLs." ;;
+    *) fail "ENOKI_HUB_URL must be an HTTP or HTTPS Origin." ;;
   esac
 
   authority="${rest%%/*}"
-  if [ -z "$authority" ] || [[ "$authority" == *"@"* ]]; then
-    fail "ENOKI_HUB_URL must not contain credentials, a query, or a fragment."
+  if [ -z "$authority" ] || [[ "$rest" == *"/"* || "$rest" == *"?"* || "$rest" == *"#"* || "$authority" == *"@"* ]]; then
+    fail "ENOKI_HUB_URL must be an HTTP or HTTPS Origin with only scheme, host, and optional port."
   fi
-
-  case "$ENOKI_HUB_URL" in
-    https://*) return ;;
-    http://*)
-      if is_local_http_url "$ENOKI_HUB_URL"; then
-        return
-      fi
-      ;;
-  esac
-
-  fail "ENOKI_HUB_URL must use https, except localhost development URLs."
-}
-
-is_local_http_url() {
-  local url="$1"
-  local rest="${url#http://}"
-  local authority="${rest%%[/?#]*}"
-
-  [ -n "$authority" ] || return 1
-  [[ "$authority" != *"@"* ]] || return 1
-
-  case "$authority" in
-    "[::1]") return 0 ;;
-    "[::1]":*)
-      is_numeric_port "${authority#"[::1]:"}"
-      return
-      ;;
-    localhost | 127.0.0.1) return 0 ;;
-    localhost:* | 127.0.0.1:*)
-      is_numeric_port "${authority#*:}"
-      return
-      ;;
-  esac
-
-  return 1
-}
-
-is_numeric_port() {
-  local port="$1"
-
-  [[ "$port" =~ ^[0-9]+$ ]]
 }
 
 verify_manifest_signature() {

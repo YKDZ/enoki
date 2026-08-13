@@ -1,9 +1,14 @@
 import type { HostsResponse } from "@enoki/api-client";
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { csrf } from "hono/csrf";
+import { HTTPException } from "hono/http-exception";
 import type { UpgradeWebSocket } from "hono/ws";
 
 import { createAuditLogRoutes } from "./audit/routes.js";
 import { type AuthConfig, type AuthEnvironment } from "./auth/config.js";
+import type { OwnerSessionRepository } from "./auth/owner-session-repository.js";
+import type { PasswordVerificationBudget } from "./auth/password-verification-budget.js";
 import { createOwnerAuth } from "./auth/routes.js";
 import {
   createHubRuntimeConfigFromEnvironment,
@@ -19,9 +24,16 @@ import {
   createProbeOperationRoutes,
 } from "./hosts/routes.js";
 import {
+  createHubRequestLoggingMiddleware,
+  createNoopHubLogger,
+  type HubListener,
+  type HubLogger,
+} from "./hub-logger.js";
+import {
   createLiveUpdateBroadcaster,
   type LiveUpdateBroadcaster,
 } from "./live-updates.js";
+import { createManagementSecurityMiddleware } from "./management-security.js";
 import {
   createHostProbeConfigurationRoutes,
   createProbeConfigurationRoutes,
@@ -44,12 +56,18 @@ export type HubAppOptions = {
   clockSkewThresholdMs?: number;
   database?: HubDatabase;
   installation?: InstallationCommandConfig;
+  listener?: HubListener;
+  logger?: HubLogger;
   probeAssets?: ProbeAssetRouteOptions;
   hostStatus?: HostStatusThresholds;
   now?: () => number;
+  ownerSessions?: OwnerSessionRepository;
+  passwordVerificationBudget?: PasswordVerificationBudget;
+  requestId?: () => string;
   probeOperations?: ProbeOperationConfig;
   probeOperationTokenSecret?: string;
-  trustForwardedProbeHeaders?: boolean;
+  probeApiOrigin?: string;
+  trustedProxyCidrs?: import("./network.js").TrustedProxyCidr[];
   liveUpdates?: LiveUpdateBroadcaster;
   webSocket?: {
     upgradeWebSocket: UpgradeWebSocket;
@@ -64,15 +82,51 @@ export type ProbeApiAppOptions = Pick<
   | "database"
   | "hostStatus"
   | "liveUpdates"
+  | "logger"
   | "now"
   | "probeOperationTokenSecret"
   | "probeOperations"
   | "probeAssets"
-  | "trustForwardedProbeHeaders"
+  | "requestId"
+  | "probeApiOrigin"
+  | "trustedProxyCidrs"
 >;
 
 export function createHubApp(options: HubAppOptions = {}) {
   const app = options.app ?? new Hono();
+  const managementOrigin = options.auth?.managementOrigin;
+  app.onError(hubErrorResponse);
+  const logger = options.logger ?? createNoopHubLogger();
+  app.use(
+    "*",
+    createHubRequestLoggingMiddleware({
+      listener: options.listener ?? "management",
+      logger,
+      now: options.now,
+      requestId: options.requestId,
+    }),
+  );
+  app.use("*", createManagementSecurityMiddleware());
+  if (managementOrigin) {
+    app.use("/api/web/*", csrf({ origin: managementOrigin }));
+    app.use("/api/web/*", async (context, next) => {
+      if (
+        context.req.method === "POST" &&
+        !isJsonContentType(context.req.header("content-type"))
+      ) {
+        return context.json({ error: "json_content_type_required" }, 415);
+      }
+      if (context.req.method === "POST") {
+        try {
+          await context.req.json();
+        } catch {
+          return context.json({ error: "invalid_json" }, 400);
+        }
+      }
+
+      return next();
+    });
+  }
   const liveUpdates =
     options.liveUpdates ??
     (options.webSocket ? createLiveUpdateBroadcaster() : null);
@@ -82,6 +136,12 @@ export function createHubApp(options: HubAppOptions = {}) {
         onSessionInvalidated: (sessionId) => {
           liveUpdates?.closeSession(sessionId);
         },
+        ...(options.ownerSessions
+          ? { ownerSessions: options.ownerSessions }
+          : {}),
+        ...(options.passwordVerificationBudget
+          ? { passwordVerificationBudget: options.passwordVerificationBudget }
+          : {}),
       })
     : null;
 
@@ -103,6 +163,16 @@ export function createHubApp(options: HubAppOptions = {}) {
     if (options.webSocket) {
       app.get(
         "/api/web/ws",
+        async (context, next) => {
+          if (
+            managementOrigin &&
+            context.req.header("origin") !== managementOrigin
+          ) {
+            return context.text("Forbidden", 403);
+          }
+
+          return next();
+        },
         options.webSocket.upgradeWebSocket((context) => {
           const sessionId = auth.currentOwnerSessionId(context.req.raw);
 
@@ -114,8 +184,12 @@ export function createHubApp(options: HubAppOptions = {}) {
               liveUpdates?.handleClientMessage(socket, event.data);
             },
             onOpen(_event, socket) {
-              if (sessionId) {
-                liveUpdates?.addClient(socket, { sessionId });
+              const activeSessionId = auth.currentOwnerSessionId(
+                context.req.raw,
+              );
+
+              if (sessionId && activeSessionId === sessionId) {
+                liveUpdates?.addClient(socket, { sessionId: activeSessionId });
               } else {
                 socket.close();
               }
@@ -230,8 +304,22 @@ export function createHubApp(options: HubAppOptions = {}) {
   return app;
 }
 
+function isJsonContentType(contentType: string | undefined) {
+  return /^application\/json(?:\s*;|$)/i.test(contentType ?? "");
+}
+
 export function createProbeApiApp(options: ProbeApiAppOptions = {}) {
   const app = options.app ?? new Hono();
+  app.onError(hubErrorResponse);
+  app.use(
+    "*",
+    createHubRequestLoggingMiddleware({
+      listener: "probe",
+      logger: options.logger ?? createNoopHubLogger(),
+      now: options.now,
+      requestId: options.requestId,
+    }),
+  );
 
   mountProbeApiSurface(app, options);
   app.route(
@@ -245,11 +333,21 @@ export function createProbeApiApp(options: ProbeApiAppOptions = {}) {
   return app;
 }
 
+function hubErrorResponse(error: unknown, context: Context) {
+  if (error instanceof HTTPException && error.status < 500) {
+    return error.getResponse();
+  }
+
+  return context.text("Internal Server Error", 500);
+}
+
 export function createHubAppFromEnvironment(
   environment: AuthEnvironment,
   options: Omit<HubAppOptions, "auth"> = {},
 ) {
-  const config = createHubRuntimeConfigFromEnvironment(environment);
+  const config = createHubRuntimeConfigFromEnvironment(environment, {
+    logger: options.logger,
+  });
 
   return createHubApp({
     ...options,
@@ -258,6 +356,8 @@ export function createHubAppFromEnvironment(
     hostStatus: config.hostStatus,
     probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
     probeOperations: config.probeOperations,
+    probeApiOrigin: config.network.probeApiOrigin,
+    trustedProxyCidrs: config.network.trustedProxyCidrs,
   });
 }
 
@@ -289,7 +389,8 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       liveUpdates: options.liveUpdates ?? null,
       now: options.now,
       probeOperationTokenSecret: options.probeOperationTokenSecret,
-      trustForwardedHeaders: options.trustForwardedProbeHeaders,
+      probeApiOrigin: options.probeApiOrigin,
+      trustedProxyCidrs: options.trustedProxyCidrs,
     }),
   );
 }

@@ -56,7 +56,9 @@ async function createEnrollmentToken(
   ownerSession: string,
 ) {
   const response = await app.request("/api/web/enrollments", {
+    body: JSON.stringify({}),
     headers: {
+      "content-type": "application/json",
       cookie: ownerSession,
     },
     method: "POST",
@@ -3664,7 +3666,7 @@ describe("Probe report API", () => {
     expect(downgraded.status).toBe(401);
   });
 
-  it("binds signed Probe report requests to the canonical request origin", async () => {
+  it("binds signed Probe report requests to the configured Probe API Origin", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -3673,6 +3675,7 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      probeApiOrigin: "https://probe.example",
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -3695,7 +3698,7 @@ describe("Probe report API", () => {
         headers: signedProbeHeaders({
           body,
           nonce: "11111111111111111111111111111111",
-          pathAndQuery: "/api/probe/report",
+          pathAndQuery: "http://hub.example/api/probe/report",
           privateKeyPem: registration.privateKeyPem,
           probeId: registration.probeId,
           timestampMs: String(Date.now()),
@@ -3712,7 +3715,7 @@ describe("Probe report API", () => {
         headers: signedProbeHeaders({
           body,
           nonce: "22222222222222222222222222222222",
-          pathAndQuery: "http://hub.example/api/probe/report",
+          pathAndQuery: "https://probe.example/api/probe/report",
           privateKeyPem: registration.privateKeyPem,
           probeId: registration.probeId,
           timestampMs: String(Date.now()),
@@ -3723,7 +3726,7 @@ describe("Probe report API", () => {
     expect(matchingOriginResponse.status).toBe(200);
   });
 
-  it("uses trusted forwarded headers for the Probe report signature origin", async () => {
+  it("ignores forwarded host and protocol for the Probe report signature origin", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -3732,7 +3735,7 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
-      trustForwardedProbeHeaders: true,
+      probeApiOrigin: "https://probe.example",
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -3756,7 +3759,7 @@ describe("Probe report API", () => {
           ...signedProbeHeaders({
             body,
             nonce: "33333333333333333333333333333333",
-            pathAndQuery: "https://public.example/api/probe/report",
+            pathAndQuery: "https://probe.example/api/probe/report",
             privateKeyPem: registration.privateKeyPem,
             probeId: registration.probeId,
             timestampMs: String(Date.now()),
@@ -3771,7 +3774,7 @@ describe("Probe report API", () => {
     expect(response.status).toBe(200);
   });
 
-  it("does not trust forwarded headers for the Probe report signature origin by default", async () => {
+  it("rejects a Probe signature bound to forwarded host and protocol", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -3780,6 +3783,7 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      probeApiOrigin: "https://probe.example",
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);

@@ -1,7 +1,6 @@
-import { defaultEnabledCollectorIds } from "@/lib/probe-configuration";
-import { buildMetricsChartData } from "@/metrics/chart-data";
-
+import { buildMetricsChartData } from "../metrics/chart-data";
 import type { HostDetail, HostMetricSample } from "../types";
+import { defaultEnabledCollectorIds } from "./probe-configuration";
 
 const nowMs = 1_725_000_000_000;
 
@@ -102,16 +101,16 @@ function createSamples(kind: "dense" | "sparse") {
   const coreCount = kind === "dense" ? 24 : 4;
   const diskCount = kind === "dense" ? 10 : 2;
   const networkCount = kind === "dense" ? 8 : 2;
+  const sampleCount = kind === "dense" ? 60 : 12;
+  const sampleIntervalMs = kind === "dense" ? 1_000 : 5_000;
 
-  return Array.from({ length: kind === "dense" ? 60 : 12 }, (_, index) => {
-    const timestampMs = nowMs - (59 - index) * 1_000;
+  return Array.from({ length: sampleCount }, (_, index) => {
+    const timestampMs = nowMs - (sampleCount - 1 - index) * sampleIntervalMs;
     const cpuCores = Array.from(
       { length: coreCount },
       (_unused, coreIndex) => ({
         name: `cpu${coreIndex}`,
-        usagePercent: boundedPercent(
-          30 + Math.sin((index + coreIndex) / 5) * 25 + (coreIndex % 4) * 5,
-        ),
+        usagePercent: sparseCpuUsage(kind, coreIndex, index),
       }),
     );
     const disks = Array.from({ length: diskCount }, (_unused, diskIndex) => ({
@@ -190,6 +189,32 @@ function createSamples(kind: "dense" | "sparse") {
       uptimeSeconds: 360_000 + index,
     } satisfies HostMetricSample;
   });
+}
+
+function sparseCpuUsage(
+  kind: "dense" | "sparse",
+  coreIndex: number,
+  sampleIndex: number,
+) {
+  if (kind !== "sparse") {
+    return boundedPercent(
+      30 + Math.sin((sampleIndex + coreIndex) / 5) * 25 + (coreIndex % 4) * 5,
+    );
+  }
+
+  if (coreIndex === 0) {
+    return 50;
+  }
+
+  if (coreIndex === 1) {
+    return sampleIndex === 5 ? 95 : 10;
+  }
+
+  if (coreIndex === 2) {
+    return sampleIndex % 2 === 0 ? 15 : 85;
+  }
+
+  return boundedPercent(30 + Math.sin(sampleIndex / 5) * 25);
 }
 
 function boundedPercent(value: number) {

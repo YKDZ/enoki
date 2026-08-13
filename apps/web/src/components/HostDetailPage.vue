@@ -6,7 +6,7 @@ import {
   CircleArrowUp,
 } from "@lucide/vue";
 import type { AcceptableValue } from "reka-ui";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, inject, onMounted, ref, watch } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -18,8 +18,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { toast } from "@/components/ui/sonner";
 import type { useHostDetail } from "@/composables/useHostDetail";
+import { webFeedbackKey } from "@/feedback/web-feedback-port";
 import { warningTitle } from "@/lib/host-display";
 import { buildMetricsChartData } from "@/metrics/chart-data";
 import { latestMetricsFromSample } from "@/metrics/latest-metrics";
@@ -97,6 +97,7 @@ const windowValues = new Set<MetricsWindow>(
   windowOptions.map((option) => option.value),
 );
 const isProbeUpgradeDialogOpen = ref(false);
+const webFeedback = inject(webFeedbackKey);
 
 const chartData = computed(() =>
   buildMetricsChartData(props.detail.samples.value),
@@ -158,35 +159,21 @@ const showProbeUpgradeButton = computed(
       isProbeUpgradeActive.value ||
       props.detail.isCreatingProbeUpgradeRequest.value),
 );
-const lastClockSkewToastHostId = ref<number | null>(null);
-
 onMounted(() => {
   void props.detail.load();
   watch(
     host,
     (currentHost) => {
-      if (!currentHost) {
-        lastClockSkewToastHostId.value = null;
-        return;
+      if (currentHost?.clockSkew.detected) {
+        webFeedback?.submit({
+          hostId: currentHost.id,
+          kind: "clock-skew-detected",
+          roundedDeltaSeconds:
+            currentHost.clockSkew.lastDeltaMs === null
+              ? null
+              : Math.round(currentHost.clockSkew.lastDeltaMs / 1000),
+        });
       }
-
-      if (!currentHost.clockSkew.detected) {
-        if (lastClockSkewToastHostId.value === currentHost.id) {
-          lastClockSkewToastHostId.value = null;
-        }
-        return;
-      }
-
-      if (lastClockSkewToastHostId.value === currentHost.id) {
-        return;
-      }
-
-      lastClockSkewToastHostId.value = currentHost.id;
-      toast.warning("时间不同步", {
-        description: clockSkewToastDescription(
-          currentHost.clockSkew.lastDeltaMs,
-        ),
-      });
     },
     {
       immediate: true,
@@ -214,18 +201,11 @@ async function createProbeUpgradeRequest() {
       emit("probeUpgradeRequested", host.value.id, status);
     }
   } catch {
-    toast.error("无法创建探针升级请求", {
-      description: "请稍后重试。",
+    webFeedback?.submit({
+      hostId: host.value?.id ?? 0,
+      kind: "probe-upgrade-request-failed",
     });
   }
-}
-
-function clockSkewToastDescription(deltaMs: number | null) {
-  if (deltaMs === null) {
-    return "探针时间与中心端时间存在偏移。";
-  }
-
-  return `探针时间与中心端时间相差约 ${Math.round(deltaMs / 1000)} 秒。`;
 }
 
 function openHostSettings(currentHost: HostDetail) {

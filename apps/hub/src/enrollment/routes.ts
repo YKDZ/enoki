@@ -117,7 +117,6 @@ function createOwnerEnrollment(
     enrollmentToken,
     ...renderInstallCommand(installation, {
       enrollmentToken,
-      requestUrl: context.req.url,
     }),
   } satisfies EnrollmentResponse;
 

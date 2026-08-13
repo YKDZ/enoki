@@ -1,14 +1,15 @@
-import { randomBytes } from "node:crypto";
+import { createNoopHubLogger, type HubLogger } from "../hub-logger.js";
+import { readHttpOrigin, type TrustedProxyCidr } from "../network.js";
 
 export type AuthEnvironment = Record<string, string | undefined>;
 
 export type AuthConfig = {
   failureDelayMs: number;
+  managementOrigin?: string;
   noPasswordWebUi?: boolean;
   ownerPassword?: string;
-  publicHttps?: boolean;
   sessionCookieName: string;
-  trustProxyHeaders?: boolean;
+  trustedProxyCidrs?: TrustedProxyCidr[];
 };
 
 const defaultFailureDelayMs = 250;
@@ -16,7 +17,9 @@ const sessionCookieName = "enoki_owner_session";
 
 export function createAuthConfigFromEnvironment(
   environment: AuthEnvironment,
+  options: { logger?: HubLogger } = {},
 ): AuthConfig {
+  const logger = options.logger ?? createNoopHubLogger();
   const ownerPassword = environment.OWNER_PASSWORD;
   const noPasswordWebUi = readBoolean(environment.ENOKI_WEB_UI_NO_PASSWORD);
 
@@ -30,48 +33,42 @@ export function createAuthConfigFromEnvironment(
       );
     }
 
-    console.warn(
-      "ENOKI_WEB_UI_NO_PASSWORD is enabled. Enoki Web UI and management APIs are accessible without login.",
-    );
+    logger.log({
+      component: "hub",
+      event: "configuration.warning",
+      level: "warn",
+      outcome: "no_password_web_ui_enabled",
+    });
 
     return {
       failureDelayMs: defaultFailureDelayMs,
+      managementOrigin: readHttpOrigin(
+        environment.ENOKI_MANAGEMENT_ORIGIN,
+        "ENOKI_MANAGEMENT_ORIGIN",
+      ),
       noPasswordWebUi: true,
       ownerPassword,
-      publicHttps: readBoolean(environment.ENOKI_PUBLIC_HTTPS),
       sessionCookieName,
-      trustProxyHeaders: readBoolean(environment.ENOKI_TRUST_PROXY_HEADERS),
     };
   }
 
   if (ownerPassword) {
     return {
       failureDelayMs: defaultFailureDelayMs,
+      managementOrigin: readHttpOrigin(
+        environment.ENOKI_MANAGEMENT_ORIGIN,
+        "ENOKI_MANAGEMENT_ORIGIN",
+      ),
       ownerPassword,
-      publicHttps: readBoolean(environment.ENOKI_PUBLIC_HTTPS),
       sessionCookieName,
-      trustProxyHeaders: readBoolean(environment.ENOKI_TRUST_PROXY_HEADERS),
     };
   }
 
-  if (isProductionLike(environment)) {
-    throw new Error(
-      "OWNER_PASSWORD is required when running the Enoki Hub in production.",
-    );
-  }
-
-  const temporaryPassword = randomBytes(18).toString("base64url");
-  console.warn(
-    `Generated temporary Enoki Owner password for development: ${temporaryPassword}`,
+  throw new Error(
+    isProductionLike(environment)
+      ? "OWNER_PASSWORD is required when running the Enoki Hub in production."
+      : "OWNER_PASSWORD is required when running the Enoki Hub; set it explicitly for development.",
   );
-
-  return {
-    failureDelayMs: defaultFailureDelayMs,
-    ownerPassword: temporaryPassword,
-    publicHttps: readBoolean(environment.ENOKI_PUBLIC_HTTPS),
-    sessionCookieName,
-    trustProxyHeaders: readBoolean(environment.ENOKI_TRUST_PROXY_HEADERS),
-  };
 }
 
 function isProductionLike(environment: AuthEnvironment) {

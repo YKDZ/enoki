@@ -2,16 +2,18 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { createHubAppFromEnvironment } from "../src/app";
 import { createAuthConfigFromEnvironment } from "../src/auth/config";
+import { createMemoryHubLogger } from "../src/hub-logger";
 
 describe("Hub Owner authentication configuration", () => {
   it("fails closed in production when OWNER_PASSWORD is missing", () => {
     expect(() =>
       createHubAppFromEnvironment({
         NODE_ENV: "production",
+        ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
       }),
     ).toThrow("OWNER_PASSWORD");
   });
@@ -20,6 +22,7 @@ describe("Hub Owner authentication configuration", () => {
     expect(() =>
       createHubAppFromEnvironment({
         ENOKI_DEPLOYMENT: "docker",
+        ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
       }),
     ).toThrow("OWNER_PASSWORD");
   });
@@ -28,6 +31,7 @@ describe("Hub Owner authentication configuration", () => {
     expect(() =>
       createHubAppFromEnvironment({
         ENOKI_WEB_UI_NO_PASSWORD: "true",
+        ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
         NODE_ENV: "production",
       }),
     ).toThrow("ENOKI_ALLOW_INSECURE_NO_PASSWORD");
@@ -38,51 +42,54 @@ describe("Hub Owner authentication configuration", () => {
       createHubAppFromEnvironment({
         ENOKI_DEPLOYMENT: "docker",
         ENOKI_WEB_UI_NO_PASSWORD: "true",
+        ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
       }),
     ).toThrow("ENOKI_ALLOW_INSECURE_NO_PASSWORD");
   });
 
   it("allows explicitly insecure no-password Web UI mode in Docker mode", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const memory = createMemoryHubLogger();
 
-    const app = createHubAppFromEnvironment({
-      ENOKI_ALLOW_INSECURE_NO_PASSWORD: "true",
-      ENOKI_DATA_ROOT: createTempDataRoot(),
-      ENOKI_DEPLOYMENT: "docker",
-      ENOKI_WEB_UI_NO_PASSWORD: "true",
-    });
+    const app = createHubAppFromEnvironment(
+      {
+        ENOKI_ALLOW_INSECURE_NO_PASSWORD: "true",
+        ENOKI_DATA_ROOT: createTempDataRoot(),
+        ENOKI_DEPLOYMENT: "docker",
+        ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
+        ENOKI_WEB_UI_NO_PASSWORD: "true",
+      },
+      { logger: memory.logger },
+    );
 
     expect(app).toBeDefined();
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("ENOKI_WEB_UI_NO_PASSWORD is enabled"),
+    expect(memory.events).toContainEqual(
+      expect.objectContaining({ outcome: "no_password_web_ui_enabled" }),
     );
-    warn.mockRestore();
   });
 
-  it("generates and prints a temporary Owner password in development", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("requires an explicit Owner password in development instead of hiding a generated credential", () => {
+    const memory = createMemoryHubLogger();
 
-    const app = createHubAppFromEnvironment({
-      ENOKI_DATA_ROOT: createTempDataRoot(),
-      NODE_ENV: "development",
-    });
-
-    expect(app).toBeDefined();
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining("Generated temporary Enoki Owner password"),
-    );
-    warn.mockRestore();
+    expect(() =>
+      createHubAppFromEnvironment(
+        {
+          ENOKI_DATA_ROOT: createTempDataRoot(),
+          ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
+          NODE_ENV: "development",
+        },
+        { logger: memory.logger },
+      ),
+    ).toThrow("OWNER_PASSWORD");
+    expect(memory.events).toEqual([]);
   });
 
-  it("reads explicit public HTTPS and trusted proxy deployment settings", () => {
+  it("reads the explicit Management Origin", () => {
     const config = createAuthConfigFromEnvironment({
-      ENOKI_PUBLIC_HTTPS: "true",
-      ENOKI_TRUST_PROXY_HEADERS: "1",
+      ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
       OWNER_PASSWORD: "correct horse battery staple",
     });
 
-    expect(config.publicHttps).toBe(true);
-    expect(config.trustProxyHeaders).toBe(true);
+    expect(config.managementOrigin).toBe("https://hub.example");
   });
 });
 

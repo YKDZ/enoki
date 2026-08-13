@@ -25,16 +25,20 @@ defineEmits<{
 <template>
   <Card>
     <CardHeader class="flex flex-row items-center justify-between gap-3 pb-3">
-      <CardTitle>主机信息</CardTitle>
+      <CardTitle>主机元数据</CardTitle>
       <Button
         variant="outline"
         size="icon-sm"
         type="button"
         :aria-label="
-          activeHostMetadataId === host.id ? '关闭主机信息编辑' : '编辑主机信息'
+          activeHostMetadataId === host.id
+            ? '关闭主机元数据编辑'
+            : '编辑主机元数据'
         "
         :title="
-          activeHostMetadataId === host.id ? '关闭主机信息编辑' : '编辑主机信息'
+          activeHostMetadataId === host.id
+            ? '关闭主机元数据编辑'
+            : '编辑主机元数据'
         "
         @click="$emit('openHostMetadata', host)"
       >

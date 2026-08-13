@@ -467,7 +467,8 @@ async function createEnrollment(
   ownerSession: string,
 ): Promise<CreatedEnrollment> {
   const response = await app.request("/api/web/enrollments", {
-    headers: { cookie: ownerSession },
+    body: JSON.stringify({}),
+    headers: { "content-type": "application/json", cookie: ownerSession },
     method: "POST",
   });
   expect(response.status).toBe(201);

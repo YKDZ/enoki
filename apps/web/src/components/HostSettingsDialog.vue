@@ -94,7 +94,7 @@ function updateOpen(open: boolean) {
       <DialogHeader>
         <DialogTitle>主机设置</DialogTitle>
         <DialogDescription class="sr-only">
-          编辑主机资料和探针配置。
+          编辑主机元数据和探针配置。
         </DialogDescription>
       </DialogHeader>
 
@@ -103,7 +103,7 @@ function updateOpen(open: boolean) {
         class="grid gap-4"
       >
         <TabsList class="grid w-full grid-cols-2">
-          <TabsTrigger value="metadata">主机资料</TabsTrigger>
+          <TabsTrigger value="metadata">主机元数据</TabsTrigger>
           <TabsTrigger value="probe">探针配置</TabsTrigger>
         </TabsList>
 
@@ -181,7 +181,7 @@ function updateOpen(open: boolean) {
                   class="size-4 animate-spin"
                 />
                 <Save v-else class="size-4" aria-hidden="true" />
-                保存主机资料
+                保存主机元数据
               </Button>
             </DialogFooter>
           </form>
