@@ -31,6 +31,11 @@ import {
   probeTargets,
 } from "./release-candidate-lib.mjs";
 import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
+import {
+  createTrustEpochMigrationAuthorization,
+  trustEpochMigrationAuthorizationSigningInput,
+  verifyTrustEpochMigrationAuthorization,
+} from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";
@@ -149,6 +154,89 @@ describe("Release Baseline resolution", () => {
       await fixture.cleanup();
     }
   });
+
+  it("admits the one root-authorized legacy baseline only as manual reinstall", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await expect(
+        resolveReleaseBaseline(fixture.arguments_),
+      ).resolves.toMatchObject({
+        kind: "enoki-trust-epoch-migration-baseline",
+        tag: "v0.1.74",
+        transition: "manual-reinstall-required",
+      });
+      await expect(
+        recheckReleaseBaseline({
+          bundleDir: fixture.outputDir,
+          candidateVersion: "v0.1.75",
+          githubRepository: "YKDZ/enoki",
+          releaseCatalog: fixture.arguments_.releaseCatalog,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+          trustEpochMigrationAuthorizationBytes:
+            fixture.arguments_.trustEpochMigrationAuthorizationBytes,
+          trustEpochMigrationAuthorizationSignature:
+            fixture.arguments_.trustEpochMigrationAuthorizationSignature,
+        }),
+      ).resolves.toMatchObject({ transition: "manual-reinstall-required" });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.each([
+    "assets",
+    "candidateVersion",
+    "distribution",
+    "legacySigningKeySha256",
+    "migrationGeneration",
+    "purpose",
+    "releaseId",
+    "root",
+    "tag",
+    "targetRootKeyId",
+  ])(
+    "rejects a Trust Epoch Migration Authorization with wrong %s",
+    async (field) => {
+      const fixture = await createLegacyTrustEpochFixture();
+      try {
+        const parsed = JSON.parse(
+          fixture.arguments_.trustEpochMigrationAuthorizationBytes.toString(
+            "utf8",
+          ),
+        );
+        if (field === "assets") parsed.legacyRelease.assets.pop();
+        if (field === "candidateVersion") parsed.candidateVersion = "v0.1.76";
+        if (field === "distribution") parsed.distribution = "other";
+        if (field === "legacySigningKeySha256") {
+          parsed.legacyRelease.legacySigningKeySha256 = "0".repeat(64);
+        }
+        if (field === "migrationGeneration") parsed.migrationGeneration = 2;
+        if (field === "purpose") parsed.purpose = "probe-asset-signing";
+        if (field === "releaseId") parsed.legacyRelease.githubRelease.id += 1;
+        if (field === "root") parsed.rootKeyId = "0".repeat(64);
+        if (field === "tag") parsed.legacyRelease.githubRelease.tag = "v0.1.73";
+        if (field === "targetRootKeyId")
+          parsed.targetRootKeyId = "0".repeat(64);
+        const bytes = Buffer.from(`${JSON.stringify(parsed)}\n`);
+        expect(() =>
+          verifyTrustEpochMigrationAuthorization({
+            bytes,
+            expectedCandidateVersion: "v0.1.75",
+            expectedDistribution: "enoki",
+            expectedLegacyRelease: fixture.expectedLegacyRelease,
+            rootPublicKeyPem: fixture.probe.root.publicKey,
+            signature: signContents(
+              "RSA-SHA256",
+              trustEpochMigrationAuthorizationSigningInput(bytes),
+              fixture.probe.root.privateKey,
+            ),
+          }),
+        ).toThrow();
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
 
   it("materializes and offline-validates one complete linux/amd64 OCI archive", async () => {
     const fixture = await createResolverFixture();
@@ -436,11 +524,60 @@ function release(tagName, overrides = {}) {
   };
 }
 
+async function createLegacyTrustEpochFixture() {
+  const fixture = await createResolverFixture({ legacyTrustEpoch: true });
+  fixture.release.tagName = "v0.1.74";
+  fixture.releaseIdentity.tagName = "v0.1.74";
+  fixture.releaseIdentity.assets = fixture.release.assets;
+  fixture.arguments_.candidateVersion = "v0.1.75";
+  const expectedLegacyRelease = {
+    assets: fixture.release.assets.map((asset) => ({
+      name: asset.name,
+      sha256: asset.digest.slice("sha256:".length),
+      size: asset.size,
+    })),
+    githubRelease: {
+      id: fixture.releaseIdentity.id,
+      peeledCommitSha: fixture.releaseIdentity.peeledCommitSha,
+      repository: "YKDZ/enoki",
+      tag: "v0.1.74",
+      tagRefSha: fixture.releaseIdentity.tagRefSha,
+      targetCommitish: fixture.releaseIdentity.targetCommitish,
+    },
+    hub: {
+      digest: fixture.hub.sourceManifest.descriptor.digest,
+      image: "ghcr.io/ykdz/enoki-hub",
+    },
+    legacySigningKeySha256: sha256(Buffer.from(fixture.probe.publicKey)),
+  };
+  const authorization = createTrustEpochMigrationAuthorization({
+    candidateVersion: "v0.1.75",
+    distribution: "enoki",
+    legacyRelease: expectedLegacyRelease,
+    rootPrivateKeyPem: fixture.probe.root.privateKey,
+  });
+  fixture.arguments_.trustEpochMigrationAuthorizationBytes =
+    authorization.bytes;
+  fixture.arguments_.trustEpochMigrationAuthorizationSignature =
+    authorization.signature;
+  fixture.expectedLegacyRelease = expectedLegacyRelease;
+  return fixture;
+}
+
 async function createResolverFixture(options = {}) {
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-baseline-"));
   const probe = await createProbeAssetSetFixture(workDir, "v1.7.2", {
     legacyProbe: options.legacyProbe,
   });
+  if (options.legacyTrustEpoch) {
+    await Promise.all(
+      [
+        "root-key.pem",
+        "trust-delegation.json",
+        "trust-delegation.json.sig",
+      ].map((file) => rm(path.join(probe.outputDir, file))),
+    );
+  }
   const hub = await createHubClosureFixture(workDir, probe.outputDir, options);
   const contents = new Map();
   for (const name of await readdir(probe.outputDir)) {

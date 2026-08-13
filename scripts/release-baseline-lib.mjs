@@ -1,5 +1,10 @@
 import { execFile } from "node:child_process";
-import { createHash, createPublicKey, randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  randomUUID,
+  verify as verifySignature,
+} from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -19,6 +24,11 @@ import {
   probeTargets,
 } from "./release-candidate-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
+import {
+  manualReinstallRequired,
+  resolveReleaseTransition,
+} from "./release-transition-policy.mjs";
+import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const stableSemVerTagPattern = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -295,6 +305,51 @@ export async function resolveReleaseBaseline({
   registry,
   releaseCatalog,
   trustedRootPublicKeyPem,
+  trustEpochMigrationAuthorizationBytes,
+  trustEpochMigrationAuthorizationSignature,
+}) {
+  try {
+    return await resolveRootedReleaseBaseline({
+      assetDownloader,
+      candidateVersion,
+      githubRepository,
+      hubImage,
+      outputDir,
+      registry,
+      releaseCatalog,
+      trustedRootPublicKeyPem,
+    });
+  } catch (rootedError) {
+    if (
+      trustEpochMigrationAuthorizationBytes === undefined ||
+      trustEpochMigrationAuthorizationSignature === undefined
+    ) {
+      throw rootedError;
+    }
+    return resolveTrustEpochMigrationBaseline({
+      assetDownloader,
+      candidateVersion,
+      githubRepository,
+      hubImage,
+      outputDir,
+      registry,
+      releaseCatalog,
+      trustedRootPublicKeyPem,
+      trustEpochMigrationAuthorizationBytes,
+      trustEpochMigrationAuthorizationSignature,
+    });
+  }
+}
+
+async function resolveRootedReleaseBaseline({
+  assetDownloader,
+  candidateVersion,
+  githubRepository,
+  hubImage,
+  outputDir,
+  registry,
+  releaseCatalog,
+  trustedRootPublicKeyPem,
 }) {
   const trustedRootPublicKey = canonicalTrustedProbePublicKey(
     trustedRootPublicKeyPem,
@@ -414,6 +469,210 @@ export async function resolveReleaseBaseline({
   }
 }
 
+async function resolveTrustEpochMigrationBaseline({
+  assetDownloader,
+  candidateVersion,
+  githubRepository,
+  hubImage,
+  outputDir,
+  registry,
+  releaseCatalog,
+  trustedRootPublicKeyPem,
+  trustEpochMigrationAuthorizationBytes,
+  trustEpochMigrationAuthorizationSignature,
+}) {
+  const trustedRoot = canonicalTrustedProbePublicKey(trustedRootPublicKeyPem);
+  const releases = await releaseCatalog.listReleases();
+  const catalogSnapshot = createReleaseCatalogSnapshot(releases);
+  const selected = selectReleaseBaseline({ candidateVersion, releases });
+  const identity = await resolveAndAssertReleaseIdentity({
+    releaseCatalog,
+    selected,
+  });
+  const resolvedHub = await registry.downloadImage({
+    image: hubImage,
+    reference: selected.tagName,
+  });
+  validateImageClosure(resolvedHub);
+  const expectedLegacyRelease = {
+    assets: (selected.assets ?? []).map((asset) => ({
+      name: asset.name,
+      sha256:
+        typeof asset.digest === "string"
+          ? asset.digest.slice("sha256:".length)
+          : "",
+      size: asset.size,
+    })),
+    githubRelease: {
+      id: identity.id,
+      peeledCommitSha: identity.peeledCommitSha,
+      repository: githubRepository,
+      tag: selected.tagName,
+      tagRefSha: identity.tagRefSha,
+      targetCommitish: identity.targetCommitish,
+    },
+    hub: {
+      digest: resolvedHub.sourceManifest.descriptor.digest,
+      image: hubImage,
+    },
+    legacySigningKeySha256: "",
+  };
+  // The verifier checks the release identity, asset closure, root binding, and
+  // candidate version before any legacy bytes are accepted into the bundle.
+  const authorization = verifyTrustEpochMigrationAuthorization({
+    bytes: trustEpochMigrationAuthorizationBytes,
+    expectedCandidateVersion: candidateVersion,
+    expectedDistribution: "enoki",
+    expectedLegacyRelease: {
+      ...expectedLegacyRelease,
+      legacySigningKeySha256: readLegacySigningKeyFingerprintFromAuthorization(
+        trustEpochMigrationAuthorizationBytes,
+      ),
+    },
+    rootPublicKeyPem: trustedRoot,
+    signature: trustEpochMigrationAuthorizationSignature,
+  });
+  const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
+  const probeAssetDir = path.join(stagingDir, "probe-assets");
+  try {
+    await mkdir(probeAssetDir, { recursive: true });
+    for (const asset of authorization.legacyRelease.assets) {
+      const published = (selected.assets ?? []).find(
+        ({ name }) => name === asset.name,
+      );
+      if (
+        !published ||
+        published.size !== asset.size ||
+        published.digest !== `sha256:${asset.sha256}`
+      ) {
+        throw new Error(
+          "Trust Epoch Migration Authorization asset closure disagrees with GitHub Release",
+        );
+      }
+      const bytes = Buffer.from(
+        await assetDownloader.downloadAsset({
+          asset: published,
+          release: selected,
+          repository: githubRepository,
+        }),
+      );
+      assertDownloadedAsset(bytes, published);
+      await writeFile(path.join(probeAssetDir, asset.name), bytes);
+    }
+    await verifyLegacySigningIdentity(
+      probeAssetDir,
+      authorization.legacyRelease.legacySigningKeySha256,
+    );
+    await writeFile(
+      path.join(stagingDir, "trust-epoch-migration-authorization.json"),
+      trustEpochMigrationAuthorizationBytes,
+    );
+    await writeFile(
+      path.join(stagingDir, "trust-epoch-migration-authorization.json.sig"),
+      trustEpochMigrationAuthorizationSignature,
+    );
+    await writeFile(
+      path.join(stagingDir, hubSourceManifestFile),
+      resolvedHub.sourceManifest.bytes,
+    );
+    const hubDirectory = path.join(stagingDir, "hub");
+    await mkdir(hubDirectory, { recursive: true });
+    const hubArchiveFile = `enoki-hub-${selected.tagName}.oci.tar`;
+    const hubArchivePath = path.join(hubDirectory, hubArchiveFile);
+    await materializeOciArchive(resolvedHub, hubArchivePath);
+    const legacyFiles = authorization.legacyRelease.assets.map((asset) => ({
+      file: asset.name,
+      sha256: asset.sha256,
+      size: asset.size,
+    }));
+    const offlineHub = await inspectBaselineHubArchive(
+      hubArchivePath,
+      legacyFiles,
+    );
+    if (offlineHub.digest !== resolvedHub.imageManifest.descriptor.digest)
+      throw new Error(
+        "materialized Trust Epoch Migration Hub OCI archive changed the image digest",
+      );
+    const descriptor = {
+      authorization: {
+        file: "trust-epoch-migration-authorization.json",
+        sha256: sha256(trustEpochMigrationAuthorizationBytes),
+        signatureFile: "trust-epoch-migration-authorization.json.sig",
+        signatureSha256: sha256(trustEpochMigrationAuthorizationSignature),
+      },
+      catalogSnapshot,
+      githubRelease: expectedLegacyRelease.githubRelease,
+      hub: {
+        archive: `hub/${hubArchiveFile}`,
+        archiveSha256: await fileSha256(hubArchivePath),
+        digest: resolvedHub.sourceManifest.descriptor.digest,
+        image: hubImage,
+        imageDigest: resolvedHub.imageManifest.descriptor.digest,
+        mediaType: resolvedHub.sourceManifest.descriptor.mediaType,
+        platform: resolvedHub.platform,
+        sourceManifest: hubSourceManifestFile,
+        sourceManifestSha256: sha256(resolvedHub.sourceManifest.bytes),
+        sourceManifestSize: resolvedHub.sourceManifest.bytes.byteLength,
+        size: (await stat(hubArchivePath)).size,
+      },
+      kind: "enoki-trust-epoch-migration-baseline",
+      legacyProbeAssets: {
+        directory: "probe-assets",
+        files: authorization.legacyRelease.assets,
+      },
+      schemaVersion: 1,
+      tag: selected.tagName,
+      transition: manualReinstallRequired,
+    };
+    await writeFile(
+      path.join(stagingDir, baselineDescriptorFile),
+      `${JSON.stringify(descriptor, null, 2)}\n`,
+    );
+    await validateTrustEpochMigrationBaselineBundle(stagingDir, {
+      trustedRootPublicKeyPem: trustedRoot,
+    });
+    await rename(stagingDir, outputDir);
+    return descriptor;
+  } catch (error) {
+    await rm(stagingDir, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+function readLegacySigningKeyFingerprintFromAuthorization(bytes) {
+  try {
+    return JSON.parse(Buffer.from(bytes).toString("utf8"))?.legacyRelease
+      ?.legacySigningKeySha256;
+  } catch {
+    return "";
+  }
+}
+
+async function verifyLegacySigningIdentity(assetDir, expectedFingerprint) {
+  const signingKey = await readFile(path.join(assetDir, "signing-key.pem"));
+  if (sha256(signingKey) !== expectedFingerprint)
+    throw new Error(
+      "Trust Epoch Migration Authorization legacy signing key does not match content",
+    );
+  const [manifest, signature] = await Promise.all([
+    readFile(path.join(assetDir, "manifest.json")),
+    readFile(path.join(assetDir, "manifest.json.sig")),
+  ]);
+  let valid = false;
+  try {
+    valid = verifySignature(
+      "RSA-SHA256",
+      manifest,
+      createPublicKey(signingKey),
+      signature,
+    );
+  } catch {
+    valid = false;
+  }
+  if (!valid)
+    throw new Error("legacy Probe Asset Set manifest signature is invalid");
+}
+
 export async function recheckReleaseBaseline({
   bundleDir,
   candidateVersion,
@@ -466,7 +725,230 @@ export async function recheckReleaseBaseline({
 }
 
 export async function validateResolvedReleaseBaseline(bundleDir, options = {}) {
+  const descriptor = await readJson(
+    path.join(bundleDir, baselineDescriptorFile),
+    "Release Baseline descriptor",
+  );
+  if (descriptor?.kind === "enoki-trust-epoch-migration-baseline") {
+    return validateTrustEpochMigrationBaselineBundle(bundleDir, options);
+  }
   return validateReleaseBaselineBundle(bundleDir, options);
+}
+
+export async function validateTrustEpochMigrationBaselineBundle(
+  bundleDir,
+  { trustedRootPublicKeyPem } = {},
+) {
+  assertSameFileNames(
+    (await readdir(bundleDir)).sort(),
+    [
+      baselineDescriptorFile,
+      "hub",
+      hubSourceManifestFile,
+      "probe-assets",
+      "trust-epoch-migration-authorization.json",
+      "trust-epoch-migration-authorization.json.sig",
+    ].sort(),
+    "Trust Epoch Migration Release Baseline bundle",
+  );
+  const descriptor = await readJson(
+    path.join(bundleDir, baselineDescriptorFile),
+    "Trust Epoch Migration Release Baseline descriptor",
+  );
+  assertPlainObject(
+    descriptor,
+    "Trust Epoch Migration Release Baseline descriptor",
+  );
+  assertExactKeys(descriptor, [
+    "authorization",
+    "catalogSnapshot",
+    "githubRelease",
+    "hub",
+    "kind",
+    "legacyProbeAssets",
+    "schemaVersion",
+    "tag",
+    "transition",
+  ]);
+  if (
+    descriptor.kind !== "enoki-trust-epoch-migration-baseline" ||
+    descriptor.schemaVersion !== 1 ||
+    descriptor.transition !== resolveReleaseTransition(descriptor) ||
+    descriptor.tag !== "v0.1.74"
+  ) {
+    throw new Error(
+      "Trust Epoch Migration Release Baseline descriptor is invalid",
+    );
+  }
+  validateReleaseCatalogSnapshot(descriptor.catalogSnapshot);
+  const authorizationBytes = await readFile(
+    path.join(bundleDir, "trust-epoch-migration-authorization.json"),
+  );
+  const authorizationSignature = await readFile(
+    path.join(bundleDir, "trust-epoch-migration-authorization.json.sig"),
+  );
+  assertPlainObject(
+    descriptor.authorization,
+    "Trust Epoch Migration Release Baseline authorization",
+  );
+  assertExactKeys(descriptor.authorization, [
+    "file",
+    "sha256",
+    "signatureFile",
+    "signatureSha256",
+  ]);
+  if (
+    descriptor.authorization.file !==
+      "trust-epoch-migration-authorization.json" ||
+    descriptor.authorization.signatureFile !==
+      "trust-epoch-migration-authorization.json.sig" ||
+    descriptor.authorization.sha256 !== sha256(authorizationBytes) ||
+    descriptor.authorization.signatureSha256 !== sha256(authorizationSignature)
+  ) {
+    throw new Error(
+      "Trust Epoch Migration Release Baseline authorization does not match content",
+    );
+  }
+  const legacyAssets = descriptor.legacyProbeAssets;
+  assertPlainObject(
+    legacyAssets,
+    "Trust Epoch Migration Release Baseline assets",
+  );
+  assertExactKeys(legacyAssets, ["directory", "files"]);
+  if (
+    legacyAssets.directory !== "probe-assets" ||
+    !Array.isArray(legacyAssets.files)
+  )
+    throw new Error(
+      "Trust Epoch Migration Release Baseline assets are invalid",
+    );
+  const expectedLegacyRelease = {
+    assets: legacyAssets.files,
+    githubRelease: descriptor.githubRelease,
+    hub: { digest: descriptor.hub?.digest, image: descriptor.hub?.image },
+    legacySigningKeySha256:
+      readLegacySigningKeyFingerprintFromAuthorization(authorizationBytes),
+  };
+  const authorization = verifyTrustEpochMigrationAuthorization({
+    bytes: authorizationBytes,
+    expectedCandidateVersion: readMigrationCandidateVersion(authorizationBytes),
+    expectedDistribution: "enoki",
+    expectedLegacyRelease,
+    rootPublicKeyPem: trustedRootPublicKeyPem,
+    signature: authorizationSignature,
+  });
+  if (!objectsEqual(authorization.legacyRelease.assets, legacyAssets.files))
+    throw new Error(
+      "Trust Epoch Migration Release Baseline asset closure is invalid",
+    );
+  assertSameFileNames(
+    (await readdir(path.join(bundleDir, "probe-assets"))).sort(),
+    legacyAssets.files.map(({ name }) => name).sort(),
+    "Trust Epoch Migration Release Baseline Probe assets",
+  );
+  for (const asset of legacyAssets.files) {
+    const bytes = await readFile(
+      path.join(bundleDir, "probe-assets", asset.name),
+    );
+    if (bytes.byteLength !== asset.size || sha256(bytes) !== asset.sha256)
+      throw new Error(
+        `Trust Epoch Migration Release Baseline asset ${asset.name} does not match its authorization`,
+      );
+  }
+  await verifyLegacySigningIdentity(
+    path.join(bundleDir, "probe-assets"),
+    authorization.legacyRelease.legacySigningKeySha256,
+  );
+  validateMigrationHubDescriptor(descriptor.hub, descriptor.tag);
+  const sourceBytes = await readFile(
+    path.join(bundleDir, hubSourceManifestFile),
+  );
+  if (
+    sourceBytes.byteLength !== descriptor.hub.sourceManifestSize ||
+    sha256(sourceBytes) !== descriptor.hub.sourceManifestSha256 ||
+    descriptor.hub.digest !== `sha256:${descriptor.hub.sourceManifestSha256}`
+  )
+    throw new Error(
+      "Trust Epoch Migration Release Baseline Hub source manifest does not match its descriptor",
+    );
+  const selectedImage = selectedImageDescriptorFromSource(
+    parseJsonBytes(
+      sourceBytes,
+      "Trust Epoch Migration Release Baseline Hub source manifest",
+    ),
+    {
+      digest: descriptor.hub.digest,
+      mediaType: descriptor.hub.mediaType,
+      size: descriptor.hub.sourceManifestSize,
+    },
+  );
+  if (selectedImage.digest !== descriptor.hub.imageDigest)
+    throw new Error(
+      "Trust Epoch Migration Release Baseline Hub source manifest selects a different image digest",
+    );
+  const archivePath = path.join(bundleDir, descriptor.hub.archive);
+  if (
+    (await stat(archivePath)).size !== descriptor.hub.size ||
+    (await fileSha256(archivePath)) !== descriptor.hub.archiveSha256
+  )
+    throw new Error(
+      "Trust Epoch Migration Release Baseline Hub OCI archive does not match its descriptor",
+    );
+  const offlineHub = await inspectBaselineHubArchive(
+    archivePath,
+    legacyAssets.files.map((asset) => ({
+      file: asset.name,
+      sha256: asset.sha256,
+      size: asset.size,
+    })),
+  );
+  if (offlineHub.digest !== descriptor.hub.imageDigest)
+    throw new Error(
+      "Trust Epoch Migration Release Baseline Hub OCI archive contains a different image digest",
+    );
+  return descriptor;
+}
+
+function readMigrationCandidateVersion(bytes) {
+  try {
+    return JSON.parse(Buffer.from(bytes).toString("utf8"))?.candidateVersion;
+  } catch {
+    return "";
+  }
+}
+
+function validateMigrationHubDescriptor(hub, tag) {
+  assertPlainObject(hub, "Trust Epoch Migration Release Baseline Hub");
+  assertExactKeys(hub, [
+    "archive",
+    "archiveSha256",
+    "digest",
+    "image",
+    "imageDigest",
+    "mediaType",
+    "platform",
+    "size",
+    "sourceManifest",
+    "sourceManifestSha256",
+    "sourceManifestSize",
+  ]);
+  if (
+    hub.archive !== `hub/enoki-hub-${tag}.oci.tar` ||
+    hub.sourceManifest !== hubSourceManifestFile ||
+    !sha256DigestPattern.test(hub.digest ?? "") ||
+    !sha256DigestPattern.test(hub.imageDigest ?? "") ||
+    !registryManifestMediaTypes.has(hub.mediaType) ||
+    !/^[0-9a-f]{64}$/.test(hub.archiveSha256 ?? "") ||
+    !/^[0-9a-f]{64}$/.test(hub.sourceManifestSha256 ?? "") ||
+    !Number.isSafeInteger(hub.size) ||
+    hub.size < 1 ||
+    !Number.isSafeInteger(hub.sourceManifestSize) ||
+    hub.sourceManifestSize < 1 ||
+    !objectsEqual(hub.platform, { architecture: "amd64", os: "linux" })
+  )
+    throw new Error(
+      "Trust Epoch Migration Release Baseline Hub descriptor is invalid",
+    );
 }
 
 export async function validateReleaseBaselineBundle(
