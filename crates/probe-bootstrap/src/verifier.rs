@@ -807,11 +807,11 @@ struct BundleManifest {
 #[cfg(all(test, feature = "acquirer"))]
 mod tests {
     use super::*;
-    use flate2::{Compression, write::GzEncoder};
+    use flate2::{Compression, read::GzDecoder as ReadGzDecoder, write::GzEncoder};
     use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey, rand_core::OsRng};
-    use std::{fs::File, io::Write};
+    use std::{fs::File, io::Write, path::Path, process::Command};
     use tar::{Builder, Header};
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, tempdir};
     const TARGET: &str = "x86_64-unknown-linux-gnu";
     struct Fixture {
         archive: NamedTempFile,
@@ -852,6 +852,14 @@ mod tests {
         x.archive.as_file_mut().sync_all().unwrap();
     }
 
+    fn replace_authenticated_archive(x: &mut Fixture, archive: Vec<u8>) -> VerifiedMetadata {
+        let mut metadata = verify_metadata(&x.h, &x.policy(0)).unwrap();
+        metadata.asset.sha256 = sha256_hex(&archive);
+        metadata.asset.size = archive.len() as u64;
+        replace_archive(x, archive);
+        metadata
+    }
+
     fn raw_archive_with_extra(name: &str, kind: u8) -> Vec<u8> {
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gzip);
@@ -886,6 +894,125 @@ mod tests {
             require_exact_gzip_and_tar_eof(tar.into_inner())
         })();
         result.is_err()
+    }
+    #[test]
+    fn accepts_archive_from_official_node_packager() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let temporary = tempdir().unwrap();
+        let binary = test_probe_elf();
+        let binary_path = temporary.path().join("probe");
+        std::fs::write(&binary_path, &binary).unwrap();
+        let output_dir = temporary.path().join("output");
+        let status = Command::new("node")
+            .arg(workspace.join("scripts/release-candidate.mjs"))
+            .args([
+                "package-probe",
+                "--binary",
+                binary_path.to_str().unwrap(),
+                "--output-dir",
+                output_dir.to_str().unwrap(),
+                "--source-date-epoch",
+                "1234567890",
+                "--target",
+                TARGET,
+                "--version",
+                "v1.2.3",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let archive_path = output_dir.join(format!("enoki-probe-{TARGET}.tar.gz"));
+        let archive_bytes = std::fs::read(&archive_path).unwrap();
+        let mut archive = File::open(&archive_path).unwrap();
+        let bundle_manifest = read_bundle_manifest(&mut archive).unwrap();
+        let vector = signed_test_handoff(1);
+        let handoff = Handoff {
+            bundle_manifest: bundle_manifest.clone(),
+            ..vector.handoff
+        };
+        let metadata = VerifiedMetadata {
+            asset: Asset {
+                bundle_manifest_sha256: sha256_hex(&bundle_manifest),
+                file: format!("enoki-probe-{TARGET}.tar.gz"),
+                sha256: sha256_hex(&archive_bytes),
+                size: archive_bytes.len() as u64,
+                target: TARGET.to_owned(),
+            },
+            bundle: VerifiedBundle {
+                version: "1.2.3".to_owned(),
+                target: TARGET.to_owned(),
+                delegation_generation: 1,
+                component_len: binary.len() as u64,
+            },
+        };
+        let mut extracted = Vec::new();
+
+        assert_eq!(
+            verify_archive_and_extract(&mut archive, &handoff, &metadata, &mut extracted),
+            Ok(metadata.bundle.clone())
+        );
+        assert_eq!(extracted, binary);
+    }
+
+    #[test]
+    fn rejects_nonzero_tar_trailing_bytes_and_concatenated_gzip() {
+        let mut tar_bytes = Vec::new();
+        ReadGzDecoder::new(fixture().open())
+            .read_to_end(&mut tar_bytes)
+            .unwrap();
+        tar_bytes.push(1);
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        gzip.write_all(&tar_bytes).unwrap();
+        let malformed = gzip.finish().unwrap();
+        let mut x = fixture();
+        let metadata = replace_authenticated_archive(&mut x, malformed);
+        assert_eq!(
+            verify_archive_and_extract(&mut x.open(), &x.h, &metadata, &mut Vec::new()),
+            Err(VerificationError::ArchiveStructure)
+        );
+
+        let mut extra_member = GzEncoder::new(Vec::new(), Compression::default());
+        extra_member.write_all(b"extra gzip member").unwrap();
+        let mut concatenated = Vec::new();
+        fixture().open().read_to_end(&mut concatenated).unwrap();
+        concatenated.extend(extra_member.finish().unwrap());
+        let mut x = fixture();
+        let metadata = replace_authenticated_archive(&mut x, concatenated);
+        assert_eq!(
+            verify_archive_and_extract(&mut x.open(), &x.h, &metadata, &mut Vec::new()),
+            Err(VerificationError::ArchiveStructure)
+        );
+    }
+
+    fn test_probe_elf() -> Vec<u8> {
+        let interpreter = b"/lib64/ld-linux-x86-64.so.2\0";
+        let marker = format!("ENOKI_PROBE_TARGET={TARGET}\0ENOKI_PROBE_VERSION=v1.2.3\0");
+        let header_size = 64_usize;
+        let program_header_size = 56_usize;
+        let mut binary =
+            vec![0; header_size + program_header_size + interpreter.len() + marker.len()];
+        binary[..8].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+        binary[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        binary[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        binary[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        binary[32..40].copy_from_slice(&(header_size as u64).to_le_bytes());
+        binary[52..54].copy_from_slice(&(header_size as u16).to_le_bytes());
+        binary[54..56].copy_from_slice(&(program_header_size as u16).to_le_bytes());
+        binary[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        binary[header_size..header_size + 4].copy_from_slice(&3_u32.to_le_bytes());
+        binary[header_size + 4..header_size + 8].copy_from_slice(&4_u32.to_le_bytes());
+        binary[header_size + 8..header_size + 16]
+            .copy_from_slice(&((header_size + program_header_size) as u64).to_le_bytes());
+        binary[header_size + 32..header_size + 40]
+            .copy_from_slice(&(interpreter.len() as u64).to_le_bytes());
+        binary[header_size + 40..header_size + 48]
+            .copy_from_slice(&(interpreter.len() as u64).to_le_bytes());
+        let interpreter_start = header_size + program_header_size;
+        binary[interpreter_start..interpreter_start + interpreter.len()]
+            .copy_from_slice(interpreter);
+        binary[interpreter_start + interpreter.len()..].copy_from_slice(marker.as_bytes());
+        binary
     }
     #[test]
     fn authenticates_exact_bundle_bytes_and_extracts_component() {
