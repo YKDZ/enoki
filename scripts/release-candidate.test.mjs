@@ -680,8 +680,12 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
 
     expect(verificationSteps).not.toHaveLength(0);
     for (const step of verificationSteps) {
+      const environmentName = step.match(
+        /--root-public-key-env\s+([A-Z][A-Z0-9_]*)/,
+      )?.[1];
+      expect(environmentName).toBeTruthy();
       expect(step).toContain(
-        "ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}",
+        `${environmentName}: \${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}`,
       );
       expect(step).not.toContain("secrets.probe_asset_signing_key_pem");
     }
