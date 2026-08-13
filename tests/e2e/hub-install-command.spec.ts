@@ -10,7 +10,7 @@ import {
 import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
 import { expect, test } from "./security-console";
 
-const { hubUrl, ownerPassword } = releaseUiBrowserRuntime();
+const { ownerPassword, probeApiUrl } = releaseUiBrowserRuntime();
 
 type BrowserEnrollmentTarget =
   | { kind: "new_host" }
@@ -79,7 +79,9 @@ test("owner can generate a two-role probe activation command", async ({
   await expect(command).toHaveValue(
     /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
   );
-  expect(await command.inputValue()).toContain(`ENOKI_HUB_URL='${hubUrl}'`);
+  expect(await command.inputValue()).toContain(
+    `ENOKI_HUB_URL='${probeApiUrl}'`,
+  );
   await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
   await expect(command).not.toHaveValue(/sudo env/);
   await expect(command).not.toHaveValue(/curl/);
@@ -138,7 +140,7 @@ test("an expired Enrollment closes the matching dialog through its status API", 
         expiresAtMs,
         expiredAtMs: null,
         hostId: null,
-        hubUrl,
+        hubUrl: probeApiUrl,
         installCommand: "curl expired-command",
         readyAtMs: null,
         rejectedAtMs: null,
@@ -768,7 +770,7 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     expiresAtMs: Date.now() + 60_000,
     expiredAtMs: null,
     hostId: null,
-    hubUrl,
+    hubUrl: probeApiUrl,
     installCommand: "curl ready-command",
     readyAtMs: null,
     rejectedAtMs: null,

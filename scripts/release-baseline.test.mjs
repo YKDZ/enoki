@@ -1,9 +1,5 @@
 import { execFile } from "node:child_process";
-import {
-  createHash,
-  generateKeyPairSync,
-  sign as signContents,
-} from "node:crypto";
+import { createHash, sign as signContents } from "node:crypto";
 import {
   chmod,
   cp,
@@ -34,6 +30,7 @@ import {
   prepareProbeAssetSet,
   probeTargets,
 } from "./release-candidate-lib.mjs";
+import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";
@@ -120,10 +117,8 @@ describe("Release Baseline resolution", () => {
 
   it("rejects a self-signed baseline outside the canonical production trust root", async () => {
     const fixture = await createResolverFixture();
-    const { publicKey: unrelatedPublicKey } = generateKeyPairSync("rsa", {
-      modulusLength: 4096,
-      publicKeyEncoding: { format: "pem", type: "spki" },
-    });
+    const { publicKey: unrelatedPublicKey } =
+      rsa4096TestKeyPair("baseline-unrelated");
     try {
       fixture.arguments_.trustedRootPublicKeyPem = unrelatedPublicKey;
       await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
@@ -494,16 +489,8 @@ async function createProbeAssetSetFixture(
 ) {
   const archivesDir = path.join(workDir, "archives");
   const outputDir = path.join(workDir, "probe-assets-source");
-  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-    modulusLength: 4096,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
-  const root = generateKeyPairSync("rsa", {
-    modulusLength: 4096,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
+  const { privateKey, publicKey } = rsa4096TestKeyPair("baseline-release");
+  const root = rsa4096TestKeyPair("baseline-root");
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",
     generation: 1,

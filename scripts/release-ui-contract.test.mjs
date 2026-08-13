@@ -18,15 +18,18 @@ describe("candidate-image UI Contract gate", () => {
     expect(releaseUiBrowserRuntime({})).toEqual({
       hubUrl: "http://127.0.0.1:38200",
       ownerPassword: "correct horse battery staple",
+      probeApiUrl: "http://127.0.0.1:38201",
     });
     expect(
       releaseUiBrowserRuntime({
         ENOKI_RELEASE_UI_BASE_URL: "http://127.0.0.1:39123/",
         ENOKI_RELEASE_UI_OWNER_PASSWORD: "candidate-owner-password",
+        ENOKI_RELEASE_UI_PROBE_API_URL: "http://127.0.0.1:39124/",
       }),
     ).toEqual({
       hubUrl: "http://127.0.0.1:39123",
       ownerPassword: "candidate-owner-password",
+      probeApiUrl: "http://127.0.0.1:39124",
     });
   });
 
