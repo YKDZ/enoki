@@ -198,8 +198,7 @@ function validateLegacyRelease(value) {
       assertExactKeys(asset, ["name", "sha256", "size"]);
       if (
         typeof asset.name !== "string" ||
-        !asset.name ||
-        asset.name.includes("/") ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(asset.name) ||
         !sha256Pattern.test(asset.sha256 ?? "") ||
         !Number.isSafeInteger(asset.size) ||
         asset.size < 0 ||
@@ -209,7 +208,7 @@ function validateLegacyRelease(value) {
       names.add(asset.name);
       return { name: asset.name, sha256: asset.sha256, size: asset.size };
     })
-    .sort((left, right) => left.name.localeCompare(right.name));
+    .sort((left, right) => compareAscii(left.name, right.name));
   return {
     assets,
     githubRelease: {
@@ -240,6 +239,12 @@ function sameLegacyRelease(left, right) {
 
 function canonicalBytes(authorization) {
   return Buffer.from(`${JSON.stringify(authorization)}\n`, "utf8");
+}
+
+function compareAscii(left, right) {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
 }
 
 function signingInput(bytes) {

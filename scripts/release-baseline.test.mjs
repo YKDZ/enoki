@@ -370,6 +370,56 @@ describe("Release Baseline resolution", () => {
     }
   });
 
+  it.each(["探针.tar.gz", "line\nbreak", "tab\tasset"])(
+    "rejects non-protocol migration asset name %j",
+    async (name) => {
+      const fixture = await createLegacyTrustEpochFixture();
+      try {
+        const legacyRelease = structuredClone(fixture.expectedLegacyRelease);
+        legacyRelease.assets[0].name = name;
+        expect(() =>
+          createTrustEpochMigrationAuthorization({
+            candidateVersion: "v0.1.75",
+            distribution: "enoki",
+            legacyRelease,
+            rootPrivateKeyPem: fixture.probe.root.privateKey,
+          }),
+        ).toThrow("asset");
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it("uses one locale-independent asset order for canonical authorization bytes", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      const first = structuredClone(fixture.expectedLegacyRelease);
+      first.assets = [
+        { name: "z_asset", sha256: "1".repeat(64), size: 1 },
+        { name: "A.asset", sha256: "2".repeat(64), size: 2 },
+        { name: "a-asset", sha256: "3".repeat(64), size: 3 },
+      ];
+      const second = structuredClone(first);
+      second.assets.reverse();
+      const canonical = (legacyRelease) =>
+        createTrustEpochMigrationAuthorization({
+          candidateVersion: "v0.1.75",
+          distribution: "enoki",
+          legacyRelease,
+          rootPrivateKeyPem: fixture.probe.root.privateKey,
+        }).bytes;
+      expect(canonical(second)).toEqual(canonical(first));
+      expect(
+        JSON.parse(canonical(first)).legacyRelease.assets.map(
+          ({ name }) => name,
+        ),
+      ).toEqual(["A.asset", "a-asset", "z_asset"]);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it.each([
     "assets",
     "candidateVersion",
