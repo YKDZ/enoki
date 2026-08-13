@@ -502,13 +502,18 @@ impl AccountPort for SystemAccounts {
         )
     }
     fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
-        require_success("/usr/sbin/userdel", &[SERVICE_USER], InstallError::Account)?;
-        require_success(
-            "/usr/sbin/groupdel",
-            &[SERVICE_GROUP],
-            InstallError::Account,
-        )
+        remove_static_service_identity_with_commands(&mut |program, arguments| {
+            require_success(program, arguments, InstallError::Account)
+        })
     }
+}
+
+fn remove_static_service_identity_with_commands(
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    let user = execute("/usr/sbin/userdel", &[SERVICE_USER]);
+    let group = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+    user.and(group)
 }
 
 /// The account transaction has no durable metadata until identity discovery
@@ -835,6 +840,61 @@ mod tests {
             ]);
             assert_eq!(*calls.borrow(), expected);
         }
+    }
+
+    #[test]
+    fn account_cleanup_attempts_both_user_and_group_removal() {
+        let mut calls = Vec::new();
+        let error = remove_static_service_identity_with_commands(&mut |program, _arguments| {
+            calls.push(program.to_string());
+            if program == "/usr/sbin/userdel" {
+                Err(InstallError::Account)
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("a failed account cleanup remains a failed transaction");
+
+        assert_eq!(error, InstallError::Account);
+        assert_eq!(calls, ["/usr/sbin/userdel", "/usr/sbin/groupdel"]);
+    }
+
+    #[test]
+    fn numeric_identity_failure_leaves_a_fresh_retryable_host() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(false);
+        let user_exists = Cell::new(false);
+        let fail_first_lookup = Cell::new(true);
+        let mut execute = |program: &str, _arguments: &[&str]| match program {
+            "/usr/sbin/groupadd" if !group_exists.replace(true) => Ok(()),
+            "/usr/sbin/useradd" if group_exists.get() && !user_exists.replace(true) => Ok(()),
+            "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+            "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
+            _ => Err(InstallError::Account),
+        };
+        let mut lookup = |_flag: &str| {
+            if fail_first_lookup.replace(false) {
+                Err(InstallError::Account)
+            } else {
+                Ok(123)
+            }
+        };
+
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Err(InstallError::Account)
+        );
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
+
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Ok(ServiceIdentity { uid: 123, gid: 123 })
+        );
+        remove_static_service_identity_with_commands(&mut execute).unwrap();
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
     }
 
     #[test]
