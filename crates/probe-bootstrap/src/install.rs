@@ -134,16 +134,18 @@ pub fn activate_current_probe(
     }
     validate_component(component, bundle.component_len)?;
     preflight_files(paths)?;
-    let created_etc_enoki = ensure_fixed_metadata_directory(&paths.etc_enoki())?;
+    preflight_fixed_metadata_directory(&paths.etc_enoki())?;
     validate_bootstrap_role(&paths.bootstrap_acquirer())?;
     validate_bootstrap_role(&paths.bootstrap_activator())?;
     accounts.require_absent()?;
     systemd.require_absent()?;
 
     let identity = accounts.create_static_service_identity()?;
+    let mut created_etc_enoki = false;
     let mut enabled = false;
     let mut started = false;
     let result = (|| {
+        created_etc_enoki = ensure_fixed_metadata_directory(&paths.etc_enoki())?;
         create_private_directory(&paths.state(), 0o750, identity)?;
         create_private_directory(&paths.identity_dir(), 0o700, identity)?;
         install_binary(component, &paths.binary())?;
@@ -221,25 +223,45 @@ fn ensure_fixed_metadata_directory(path: &Path) -> Result<bool, InstallError> {
     ensure_safe_parent_chain(parent)?;
     match fs::create_dir(path) {
         Ok(()) => {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                .map_err(|_| InstallError::Io)?;
-            let dir = File::open(path).map_err(|_| InstallError::Io)?;
-            chown_file(&dir, ServiceIdentity { uid: 0, gid: 0 })?;
+            let configured = (|| {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                    .map_err(|_| InstallError::Io)?;
+                let dir = File::open(path).map_err(|_| InstallError::Io)?;
+                chown_file(&dir, ServiceIdentity { uid: 0, gid: 0 })?;
+                verify_directory(path, 0o755, ServiceIdentity { uid: 0, gid: 0 })
+            })();
+            if let Err(error) = configured {
+                let _ = fs::remove_dir(path);
+                return Err(error);
+            }
             Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || metadata.uid() != 0
-                || metadata.mode() & 0o777 != 0o755
-            {
-                return Err(InstallError::ExistingResidue);
-            }
+            validate_existing_metadata_directory(path)?;
             Ok(false)
         }
         Err(_) => Err(InstallError::Io),
     }
+}
+
+fn preflight_fixed_metadata_directory(path: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_existing_metadata_directory(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(InstallError::Io),
+    }
+}
+
+fn validate_existing_metadata_directory(path: &Path) -> Result<(), InstallError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o777 != 0o755
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(())
 }
 
 fn remove_created_path(path: &Path) -> Result<(), InstallError> {
@@ -1123,6 +1145,44 @@ mod tests {
         assert_eq!(accounts.calls, ["absent"]);
         assert_eq!(systemd.calls, ["absent"]);
         assert!(!temporary.path().join("var/lib/enoki-probe").exists());
+    }
+
+    #[test]
+    fn pre_account_failure_rolls_back_a_new_metadata_directory() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            calls: Vec::new(),
+            fail_start: false,
+            residue: true,
+        };
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(!temporary.path().join("etc/enoki").exists());
+        assert_eq!(accounts.calls, ["absent"]);
+        assert_eq!(systemd.calls, ["absent"]);
     }
 
     #[cfg(unix)]
