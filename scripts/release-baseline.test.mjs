@@ -39,6 +39,10 @@ const configMediaType = "application/vnd.oci.image.config.v1+json";
 const layerMediaType = "application/vnd.oci.image.layer.v1.tar";
 const commitSha = "1".repeat(40);
 const tagSha = "2".repeat(40);
+// This fixture generates three distinct RSA-4096 identities. On a shared CI
+// worker that legitimate cryptographic setup can outlast Vitest's 5s default;
+// keep the allowance local and bounded so an actual hang still fails quickly.
+const rsa4096FixtureTimeoutMs = 15_000;
 
 describe("Release Baseline resolution", () => {
   it("selects the highest published stable SemVer below the candidate", () => {
@@ -115,19 +119,25 @@ describe("Release Baseline resolution", () => {
     );
   });
 
-  it("rejects a self-signed baseline outside the canonical production trust root", async () => {
-    const fixture = await createResolverFixture();
-    const { publicKey: unrelatedPublicKey } =
-      rsa4096TestKeyPair("baseline-unrelated");
-    try {
-      fixture.arguments_.trustedRootPublicKeyPem = unrelatedPublicKey;
-      await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
-        "root key does not match the trusted Probe Distribution Trust Root",
-      );
-    } finally {
-      await fixture.cleanup();
-    }
-  });
+  it(
+    "rejects a self-signed baseline outside the canonical production trust root",
+    async () => {
+      const fixture = await createResolverFixture();
+      const { publicKey: unrelatedPublicKey } =
+        rsa4096TestKeyPair("baseline-unrelated");
+      try {
+        fixture.arguments_.trustedRootPublicKeyPem = unrelatedPublicKey;
+        await expect(
+          resolveReleaseBaseline(fixture.arguments_),
+        ).rejects.toThrow(
+          "root key does not match the trusted Probe Distribution Trust Root",
+        );
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+    rsa4096FixtureTimeoutMs,
+  );
 
   it("accepts legacy Probe binaries without identity markers only after trust-root and signature verification", async () => {
     const fixture = await createResolverFixture({ legacyProbe: true });
