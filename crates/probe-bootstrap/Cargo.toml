@@ -27,7 +27,7 @@ libc = "0.2"
 rsa = { version = "0.9", features = ["pem"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
 tar = { version = "0.4", optional = true }
 ureq = { version = "2.12.1", default-features = false, features = [
   "tls",
@@ -37,10 +37,10 @@ zeroize = { version = "1.8", features = ["derive"] }
 
 [build-dependencies]
 rsa = { version = "0.9", features = ["pem"] }
-sha2 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
 
 [dev-dependencies]
-base64 = "0.22"
+base64 = "0.23"
 tempfile = "3.20.0"
 
 [lints]
