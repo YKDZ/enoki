@@ -66,7 +66,7 @@ jobs:
           ref: ${{ inputs.commit }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: candidate-source/package.json
 
@@ -97,7 +97,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -167,7 +167,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -236,7 +236,7 @@ jobs:
           ref: ${{ inputs.commit }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: candidate-source/package.json
 
@@ -315,7 +315,7 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$TRUSTED_SIGNER_COMMIT"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-signer/package.json
 
@@ -407,7 +407,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -503,7 +503,7 @@ jobs:
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
       - name: Attest immutable candidate provenance
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: candidate.tar.gz
 
@@ -539,7 +539,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -575,7 +575,7 @@ jobs:
           ref: ${{ needs.validate-candidate-inputs.outputs.trusted-workflow-sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
 
@@ -698,7 +698,7 @@ jobs:
 
       - name: Set up Node.js
         id: setup-node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
           cache: pnpm
@@ -849,7 +849,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v7
         with:
           node-version-file: trusted-tool/package.json
 
