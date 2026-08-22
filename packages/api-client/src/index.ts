@@ -190,6 +190,9 @@ export type ProbeUpgradeEligibility = {
     | "probe_version_missing"
     | "probe_version_malformed"
     | "probe_version_development"
+    | "probe_release_transition_missing"
+    | "probe_release_transition_mismatch"
+    | "probe_release_transition_replacement_required"
     | "probe_version_current"
     | "probe_version_newer"
     | null;
@@ -223,6 +226,12 @@ export type ProbeUpgradeStatus = {
 
 export type ProbeUpgradeRequestResponse = {
   probeUpgradeRequest: ProbeUpgradeStatus;
+};
+
+export type ProbeUpgradeAllResponse = {
+  failed: number;
+  skipped: number;
+  submitted: number;
 };
 
 export type ProbeOperationResponse = {

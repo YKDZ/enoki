@@ -3,6 +3,7 @@ import type {
   HostMetadataResponse,
   HostMetricSample,
   HostMetricsResponse,
+  ProbeUpgradeAllResponse,
   ProbeUpgradeRequestResponse,
   ProbeUpgradeStatus,
 } from "@enoki/api-client";
@@ -32,9 +33,11 @@ import {
   cancelProbeUpgradeRequest,
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
+  isActiveProbeOperation,
   type ProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
+import { readVerifiedReleaseTransitionFromDirectory } from "../probe/release-transition.js";
 import {
   currentProbeUpgradeProblem,
   probeUpgradeRecoveryDisposition,
@@ -57,6 +60,7 @@ export type HostRouteServices = {
   metrics?: MetricsRepository;
   now?: () => number;
   probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: Buffer | string;
   probeOperationTimeouts?: ProbeOperationConfig;
   probeConfigurations?: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
@@ -80,6 +84,98 @@ export function createHostRoutes(services: HostRouteServices) {
   const now = services.now ?? Date.now;
   const probeOperationTimeouts =
     services.probeOperationTimeouts ?? defaultProbeOperationTimeouts;
+
+  routes.post("/probe-upgrade-requests", async (context) => {
+    const body = await readJsonBody(context.req);
+    if (!body.ok || !isEmptyJsonObject(body.value)) {
+      return hostMetadataError("invalid_request");
+    }
+
+    if (!services.probeOperations) {
+      return hostMetadataError("probe_operations_unavailable", 503);
+    }
+
+    const [assetSet, releaseTransition] =
+      await readProbeUpgradeReleaseContext(services);
+    const activeHosts = services.hosts.listActive();
+    const latestOperations = services.probeOperations.findLatestForHosts(
+      activeHosts.map((host) => host.id),
+    );
+    const response: ProbeUpgradeAllResponse = {
+      failed: 0,
+      skipped: 0,
+      submitted: 0,
+    };
+
+    for (const host of activeHosts) {
+      const eligibility = evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: assetSet.version,
+        probeAssetSetVersionNonUpgradeableReason: assetSet.nonUpgradeableReason,
+        probeVersion: host.probeVersion,
+        releaseTransition,
+      });
+      const latestOperation = latestOperations.get(host.id) ?? null;
+      const hostProfileObservation =
+        services.snapshotCollectors?.hostProfile.readObservation(host.id) ??
+        null;
+      const currentProblem = currentProbeUpgradeProblem({
+        operation: latestOperation,
+        reportedProbeVersion: hostProfileObservation?.view.probeVersion,
+        reportedProbeVersionObservedAtMs: hostProfileObservation?.observedAtMs,
+      });
+
+      if (
+        !eligibility.isUpgradeable ||
+        !eligibility.currentProbeAssetSetVersion ||
+        (latestOperation && isActiveProbeOperation(latestOperation)) ||
+        currentProblem
+      ) {
+        response.skipped += 1;
+        continue;
+      }
+
+      const result = createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: eligibility.currentProbeVersion,
+        hostId: host.id,
+        nowMs: now(),
+        targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+      });
+
+      let created: ProbeUpgradeRequest;
+      try {
+        created = services.probeOperations.createProbeUpgradeRequest(
+          result.operation,
+        );
+      } catch {
+        response.failed += 1;
+        continue;
+      }
+
+      response.submitted += 1;
+      services.audit?.record({
+        action: "probe_upgrade_request.create",
+        actor: "owner",
+        details: {
+          hostId: host.id,
+          targetProbeVersion: created.targetProbeVersion,
+        },
+        occurredAtMs: now(),
+        outcome: "success",
+        subjectId: String(created.id),
+        subjectType: "probe_upgrade_request",
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      });
+      broadcastHostSummaryHint(services, {
+        hostId: host.id,
+        nowMs: now(),
+        timeouts: probeOperationTimeouts,
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      });
+    }
+
+    return context.json(response);
+  });
 
   routes.get("/:hostId", async (context) => {
     const hostId = numericHostId(context.req.param("hostId"));
@@ -116,12 +212,8 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    const currentProbeAssetSetVersion = services.probeAssetDir
-      ? await readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
-      : {
-          nonUpgradeableReason: "probe_asset_set_version_missing" as const,
-          version: null,
-        };
+    const [currentProbeAssetSetVersion, releaseTransition] =
+      await readProbeUpgradeReleaseContext(services);
 
     const hostProfileObservation =
       services.snapshotCollectors?.hostProfile.readObservation(hostId) ?? null;
@@ -180,6 +272,7 @@ export function createHostRoutes(services: HostRouteServices) {
           probeAssetSetVersionNonUpgradeableReason:
             currentProbeAssetSetVersion.nonUpgradeableReason,
           probeVersion: host.probeVersion,
+          releaseTransition,
         }),
         probeUpgradeStatus: probeUpgradeStatus(currentOperation),
         warnings: warningList(host),
@@ -204,17 +297,14 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    const currentProbeAssetSetVersion = services.probeAssetDir
-      ? await readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
-      : {
-          nonUpgradeableReason: "probe_asset_set_version_missing" as const,
-          version: null,
-        };
+    const [currentProbeAssetSetVersion, releaseTransition] =
+      await readProbeUpgradeReleaseContext(services);
     const eligibility = evaluateProbeUpgradeEligibility({
       probeAssetSetVersion: currentProbeAssetSetVersion.version,
       probeAssetSetVersionNonUpgradeableReason:
         currentProbeAssetSetVersion.nonUpgradeableReason,
       probeVersion: host.probeVersion,
+      releaseTransition,
     });
 
     if (
@@ -625,6 +715,15 @@ export function createHostRoutes(services: HostRouteServices) {
   return routes;
 }
 
+function isEmptyJsonObject(value: unknown): value is Record<string, never> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === 0
+  );
+}
+
 export function createProbeOperationRoutes(
   services: Pick<HostRouteServices, "probeOperations">,
 ) {
@@ -732,6 +831,23 @@ function failTimedOutActiveProbeUpgradeRequest(input: {
     timeouts: input.probeOperationTimeouts,
     userAgent: input.userAgent,
   });
+}
+
+function readProbeUpgradeReleaseContext(services: HostRouteServices) {
+  return Promise.all([
+    services.probeAssetDir
+      ? readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
+      : Promise.resolve({
+          nonUpgradeableReason: "probe_asset_set_version_missing" as const,
+          version: null,
+        }),
+    services.probeAssetDir && services.probeDistributionRootPublicKeyPem
+      ? readVerifiedReleaseTransitionFromDirectory({
+          assetDir: services.probeAssetDir,
+          trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+        })
+      : Promise.resolve(null),
+  ]);
 }
 
 function succeedActiveProbeUpgradeRequestFromHostProfile(input: {

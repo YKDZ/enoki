@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { hashStableHostProfile } from "./host-profile-hash";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import {
   createTestProbeIdentity,
   signedProbeRequest,
@@ -1144,10 +1145,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -1157,6 +1159,7 @@ describe("Host detail API", () => {
       database,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1191,10 +1194,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -1205,6 +1209,7 @@ describe("Host detail API", () => {
       now: () => 1_725_000_000_000,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1526,9 +1531,12 @@ describe("Host detail API", () => {
     const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
-    const manifestPath = path.join(assetDir, "manifest.json");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(manifestPath, JSON.stringify(probeAssetManifest("v0.2.0")));
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -1539,6 +1547,7 @@ describe("Host detail API", () => {
       now: () => 1_725_000_000_000,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1568,7 +1577,12 @@ describe("Host detail API", () => {
         1_725_000_000_500,
         created.probeUpgradeRequest.id,
       );
-    await writeFile(manifestPath, JSON.stringify(probeAssetManifest("v0.3.0")));
+    await writeSignedProbeAssetSet(assetDir, {
+      authority: release.authority,
+      sourceVersion: "0.1.0",
+      targetVersion: "0.3.0",
+      transition: "compatible",
+    });
 
     const rejectedResponse = await app.request(
       `/api/web/hosts/${hostId}/probe-upgrade-requests`,
@@ -1718,10 +1732,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -1732,6 +1747,7 @@ describe("Host detail API", () => {
       now: () => 1_725_000_001_000,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1829,10 +1845,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -1843,6 +1860,7 @@ describe("Host detail API", () => {
       now: () => 1_725_000_001_000,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);
@@ -1913,10 +1931,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     let nowMs = 1_725_000_000_000;
     const app = createHubApp({
       auth: {
@@ -1928,6 +1947,7 @@ describe("Host detail API", () => {
       now: () => nowMs,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
       probeOperations: {
         acceptedTimeoutMs: 1_000,
@@ -2074,10 +2094,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -2087,6 +2108,7 @@ describe("Host detail API", () => {
       database,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);
@@ -2119,10 +2141,11 @@ describe("Host detail API", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify(probeAssetManifest("v0.2.0")),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -2133,6 +2156,7 @@ describe("Host detail API", () => {
       now: () => 1_725_000_000_000,
       probeAssets: {
         assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
       },
     });
     const ownerSession = await loginOwner(app);

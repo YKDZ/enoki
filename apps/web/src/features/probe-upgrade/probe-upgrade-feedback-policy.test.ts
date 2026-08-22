@@ -3,6 +3,41 @@ import { describe, expect, it } from "vitest";
 import { decideProbeUpgradeFeedback } from "./probe-upgrade-feedback-policy";
 
 describe("Probe Upgrade feedback policy", () => {
+  it("maps one all-Host submission to one bounded trusted summary", () => {
+    expect(
+      decideProbeUpgradeFeedback({
+        attemptId: 7,
+        failed: 1,
+        kind: "probe-upgrade-all-submitted",
+        skipped: 3,
+        submitted: 2,
+      }),
+    ).toEqual({
+      aggregateKey: "probe-upgrade-all-submitted:7",
+      deduplicationKey: "probe-upgrade-all-submitted:7",
+      description: "已提交 2 台，跳过 3 台，失败 1 台。",
+      kind: "display",
+      level: "warning",
+      title: "已提交部分探针升级",
+    });
+  });
+
+  it("maps an all-Host request failure without inventing per-Host counts", () => {
+    expect(
+      decideProbeUpgradeFeedback({
+        attemptId: 8,
+        kind: "probe-upgrade-all-request-failed",
+      }),
+    ).toEqual({
+      aggregateKey: "probe-upgrade-all-request-failed:8",
+      deduplicationKey: "probe-upgrade-all-request-failed:8",
+      description: "请稍后重试。",
+      kind: "display",
+      level: "error",
+      title: "无法提交全部探针升级",
+    });
+  });
+
   it("maps a failed request to its trusted presentation", () => {
     expect(
       decideProbeUpgradeFeedback({

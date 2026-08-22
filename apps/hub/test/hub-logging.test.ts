@@ -168,6 +168,11 @@ describe("Hub structured logging", () => {
       ["GET", "/api/probe/assets/probe.tar.gz", "probe_asset"],
       [
         "POST",
+        "/api/web/hosts/probe-upgrade-requests",
+        "web_probe_upgrade_request",
+      ],
+      [
+        "POST",
         "/api/web/hosts/42/probe-upgrade-requests",
         "web_probe_upgrade_request",
       ],

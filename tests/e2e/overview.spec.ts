@@ -5,6 +5,51 @@ import type { HostSummary } from "../../apps/web/src/types";
 const now = Date.UTC(2026, 5, 22, 12, 0, 0);
 
 test.describe("主页主机列表", () => {
+  test("全部升级确认不受当前页影响且浏览器只提交空批量意图", async ({
+    page,
+  }) => {
+    const hosts = createHosts(25);
+    let submission: { body: unknown; method: string; pathname: string } | null =
+      null;
+    await mockAuthenticatedOverview(page, hosts);
+    await page.route(
+      "**/api/web/hosts/probe-upgrade-requests",
+      async (route) => {
+        const request = route.request();
+        submission = {
+          body: request.postDataJSON(),
+          method: request.method(),
+          pathname: new URL(request.url()).pathname,
+        };
+        await route.fulfill({
+          contentType: "application/json",
+          json: { failed: 1, skipped: 22, submitted: 2 },
+        });
+      },
+    );
+    await setOverviewView(page, "list");
+    await page.addInitScript(() => {
+      window.localStorage.setItem("enoki-overview-list-page", "2");
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("11-20 / 25")).toBeVisible();
+    await page.getByRole("button", { name: "升级全部探针" }).click();
+    const dialog = page.getByRole("alertdialog", { name: "升级全部探针" });
+    await expect(dialog).toContainText("全部活动主机");
+    await expect(dialog).toContainText("不受当前分页、排序或过滤影响");
+    await page.getByRole("button", { name: "确认升级全部探针" }).click();
+
+    await expect(
+      page.getByText("已提交部分探针升级", { exact: true }),
+    ).toBeVisible();
+    expect(submission).toEqual({
+      body: {},
+      method: "POST",
+      pathname: "/api/web/hosts/probe-upgrade-requests",
+    });
+  });
+
   test("卡片与列表显示相同升级问题且概览不读取逐主机状态", async ({ page }) => {
     const hosts = createHosts(2);
     hosts[0]!.probeUpgradeProblem = { status: "in_progress" };

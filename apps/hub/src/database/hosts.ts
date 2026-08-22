@@ -151,6 +151,7 @@ export type HostRepository = {
     expiresAtMs: number;
     nowMs: number;
   }) => boolean;
+  listActive: () => HostRow[];
   listSummaries: (options?: HostSummaryOptions) => HostSummary[];
   recordReport: (
     id: number,
@@ -245,6 +246,13 @@ export function createHostRepository(database: HostDatabase): HostRepository {
       } catch {
         return false;
       }
+    },
+    listActive() {
+      return database
+        .select()
+        .from(hosts)
+        .where(isNull(hosts.deletedAtMs))
+        .all();
     },
     listSummaries(options = {}) {
       const nowMs = options.nowMs ?? Date.now();
