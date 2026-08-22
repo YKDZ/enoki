@@ -4,7 +4,11 @@
 //! become only the current Probe service at the paths below.  It has no
 //! archive, network, command-line interpolation, or candidate-code surface.
 
-use crate::{handoff::Enrollment, trust::BuildTrust, verifier::VerifiedBundle};
+use crate::{
+    handoff::Enrollment,
+    trust::{BootstrapRole, BuildTrust},
+    verifier::VerifiedBundle,
+};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Seek, SeekFrom, Write},
@@ -38,12 +42,69 @@ pub struct ServiceIdentity {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum InstallErrorKind {
+    ExistingResidue,
+    InvalidVerifiedComponent,
+    Account,
+    Systemd,
+    Io,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RollbackStep {
+    StopService,
+    DisableService,
+    RemoveUnit,
+    RemoveInstallMetadata,
+    RemoveIdentity,
+    RemoveBinary,
+    RemoveIdentityDirectory,
+    RemoveStateDirectory,
+    RemoveMetadataDirectory,
+    ReloadSystemd,
+    RemoveServiceIdentity,
+    RemoveServiceUser,
+    RemoveServiceGroup,
+    RemoveTemporary,
+    RemovePartiallyInstalledPath,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct RollbackFailure {
+    pub step: RollbackStep,
+    pub error: InstallErrorKind,
+}
+
+impl RollbackFailure {
+    pub const fn new(step: RollbackStep, error: InstallErrorKind) -> Self {
+        Self { step, error }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum InstallError {
     ExistingResidue,
     InvalidVerifiedComponent,
     Account,
     Systemd,
     Io,
+    Rollback {
+        cause: InstallErrorKind,
+        failures: Vec<RollbackFailure>,
+    },
+}
+
+impl InstallError {
+    fn kind(&self) -> InstallErrorKind {
+        match self {
+            Self::ExistingResidue => InstallErrorKind::ExistingResidue,
+            Self::InvalidVerifiedComponent => InstallErrorKind::InvalidVerifiedComponent,
+            Self::Account => InstallErrorKind::Account,
+            Self::Systemd => InstallErrorKind::Systemd,
+            Self::Io => InstallErrorKind::Io,
+            Self::Rollback { cause, .. } => *cause,
+        }
+    }
 }
 
 /// Accounts are deliberately separate from systemd so tests can prove the
@@ -63,6 +124,83 @@ pub trait SystemdPort {
     fn wait_ready(&mut self) -> Result<(), InstallError>;
     fn stop(&mut self) -> Result<(), InstallError>;
     fn disable(&mut self) -> Result<(), InstallError>;
+}
+
+trait InstallFilePort {
+    fn ensure_metadata_directory(&mut self, path: &Path) -> Result<bool, InstallError>;
+    fn create_directory(
+        &mut self,
+        path: &Path,
+        mode: u32,
+        identity: ServiceIdentity,
+    ) -> Result<(), InstallError>;
+    fn install_binary(&mut self, component: &mut File, path: &Path) -> Result<(), InstallError>;
+    fn write_owned(
+        &mut self,
+        path: &Path,
+        contents: &[u8],
+        mode: u32,
+        owner: ServiceIdentity,
+    ) -> Result<(), InstallError>;
+    fn remove_path(&mut self, path: &Path) -> Result<(), InstallError>;
+    fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError>;
+}
+
+struct SystemInstallFiles;
+
+#[derive(Clone, Copy)]
+enum CreatedPathKind {
+    File,
+    Directory,
+}
+
+struct CreatedPath {
+    path: PathBuf,
+    step: RollbackStep,
+    kind: CreatedPathKind,
+}
+
+struct InstallPorts<'a, A, S, F> {
+    accounts: &'a mut A,
+    systemd: &'a mut S,
+    files: &'a mut F,
+}
+
+impl InstallFilePort for SystemInstallFiles {
+    fn ensure_metadata_directory(&mut self, path: &Path) -> Result<bool, InstallError> {
+        ensure_fixed_metadata_directory(path)
+    }
+
+    fn create_directory(
+        &mut self,
+        path: &Path,
+        mode: u32,
+        identity: ServiceIdentity,
+    ) -> Result<(), InstallError> {
+        create_private_directory(path, mode, identity)
+    }
+
+    fn install_binary(&mut self, component: &mut File, path: &Path) -> Result<(), InstallError> {
+        install_binary(component, path)
+    }
+
+    fn write_owned(
+        &mut self,
+        path: &Path,
+        contents: &[u8],
+        mode: u32,
+        owner: ServiceIdentity,
+    ) -> Result<(), InstallError> {
+        atomic_write_owned(path, contents, mode, owner)
+    }
+
+    fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
+        remove_created_path(path)
+    }
+
+    fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
+        remove_created_directory(path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -127,93 +265,202 @@ pub fn activate_current_probe(
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
+    let mut files = SystemInstallFiles;
+    activate_current_probe_with_files(
+        component,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        &mut InstallPorts {
+            accounts,
+            systemd,
+            files: &mut files,
+        },
+    )
+}
+
+fn activate_current_probe_with_files(
+    component: &mut File,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+) -> Result<(), InstallError> {
     let trust_version = trust.version.strip_prefix('v').unwrap_or(trust.version);
-    if bundle.target != trust.target || bundle.version != trust_version || bundle.component_len == 0
+    if !trust.is_for(BootstrapRole::Activator)
+        || bundle.target != trust.target
+        || bundle.version != trust_version
+        || bundle.component_len == 0
     {
         return Err(InstallError::InvalidVerifiedComponent);
     }
     validate_component(component, bundle.component_len)?;
+    preflight_parent_chains(paths)?;
     preflight_files(paths)?;
-    let created_etc_enoki = ensure_fixed_metadata_directory(&paths.etc_enoki())?;
+    preflight_fixed_metadata_directory(&paths.etc_enoki())?;
     validate_bootstrap_role(&paths.bootstrap_acquirer())?;
     validate_bootstrap_role(&paths.bootstrap_activator())?;
-    accounts.require_absent()?;
-    systemd.require_absent()?;
+    ports.accounts.require_absent()?;
+    ports.systemd.require_absent()?;
 
-    let identity = accounts.create_static_service_identity()?;
+    let identity = ports.accounts.create_static_service_identity()?;
+    let mut created_paths = Vec::new();
     let mut enabled = false;
     let mut started = false;
     let result = (|| {
-        create_private_directory(&paths.state(), 0o750, identity)?;
-        create_private_directory(&paths.identity_dir(), 0o700, identity)?;
-        install_binary(component, &paths.binary())?;
-        atomic_write_owned(
+        if ports.files.ensure_metadata_directory(&paths.etc_enoki())? {
+            created_paths.push(CreatedPath {
+                path: paths.etc_enoki(),
+                step: RollbackStep::RemoveMetadataDirectory,
+                kind: CreatedPathKind::Directory,
+            });
+        }
+        ports
+            .files
+            .create_directory(&paths.state(), 0o750, identity)?;
+        created_paths.push(CreatedPath {
+            path: paths.state(),
+            step: RollbackStep::RemoveStateDirectory,
+            kind: CreatedPathKind::Directory,
+        });
+        ports
+            .files
+            .create_directory(&paths.identity_dir(), 0o700, identity)?;
+        created_paths.push(CreatedPath {
+            path: paths.identity_dir(),
+            step: RollbackStep::RemoveIdentityDirectory,
+            kind: CreatedPathKind::Directory,
+        });
+        ports.files.install_binary(component, &paths.binary())?;
+        created_paths.push(CreatedPath {
+            path: paths.binary(),
+            step: RollbackStep::RemoveBinary,
+            kind: CreatedPathKind::File,
+        });
+        ports.files.write_owned(
             &paths.identity(),
             bootstrap_config(enrollment, trust).as_bytes(),
             0o600,
             identity,
         )?;
-        atomic_write_owned(
+        created_paths.push(CreatedPath {
+            path: paths.identity(),
+            step: RollbackStep::RemoveIdentity,
+            kind: CreatedPathKind::File,
+        });
+        ports.files.write_owned(
             &paths.metadata(),
             install_metadata(enrollment, trust).as_bytes(),
             0o600,
             ServiceIdentity { uid: 0, gid: 0 },
         )?;
-        atomic_write_owned(
+        created_paths.push(CreatedPath {
+            path: paths.metadata(),
+            step: RollbackStep::RemoveInstallMetadata,
+            kind: CreatedPathKind::File,
+        });
+        ports.files.write_owned(
             &paths.unit(),
             service_unit().as_bytes(),
             0o644,
             ServiceIdentity { uid: 0, gid: 0 },
         )?;
-        systemd.daemon_reload()?;
-        systemd.enable()?;
+        created_paths.push(CreatedPath {
+            path: paths.unit(),
+            step: RollbackStep::RemoveUnit,
+            kind: CreatedPathKind::File,
+        });
+        ports.systemd.daemon_reload()?;
         enabled = true;
+        ports.systemd.enable()?;
         started = true;
-        systemd.start()?;
-        systemd.wait_ready()?;
+        ports.systemd.start()?;
+        ports.systemd.wait_ready()?;
         Ok(())
     })();
-    if result.is_err() {
-        if started {
-            let _ = systemd.stop();
-        }
-        if enabled {
-            let _ = systemd.disable();
-        }
-        // No metadata is retained after failure, so every path below was
-        // created by this invocation and may be removed.  The bootstrap
-        // roles predate ownership transfer and are intentionally excluded.
-        let cleanup = cleanup_failed_install(paths, accounts, systemd, created_etc_enoki);
-        if cleanup.is_err() {
-            return Err(InstallError::Io);
+    match result {
+        Ok(()) => Ok(()),
+        Err(install_error) => {
+            let mut failures = Vec::new();
+            if started {
+                record_rollback(
+                    &mut failures,
+                    RollbackStep::StopService,
+                    ports.systemd.stop(),
+                );
+            }
+            if enabled {
+                record_rollback(
+                    &mut failures,
+                    RollbackStep::DisableService,
+                    ports.systemd.disable(),
+                );
+            }
+            // No metadata is retained after failure, so every path below was
+            // created by this invocation and may be removed. The bootstrap
+            // roles predate ownership transfer and are intentionally excluded.
+            cleanup_failed_install(
+                ports.accounts,
+                ports.systemd,
+                ports.files,
+                &created_paths,
+                &mut failures,
+            );
+            if failures.is_empty() {
+                Err(install_error)
+            } else {
+                Err(InstallError::Rollback {
+                    cause: install_error.kind(),
+                    failures,
+                })
+            }
         }
     }
-    result
 }
 
 fn cleanup_failed_install(
-    paths: &FixedInstallPaths,
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
-    created_etc_enoki: bool,
-) -> Result<(), InstallError> {
-    for path in [
-        paths.unit(),
-        paths.metadata(),
-        paths.identity(),
-        paths.binary(),
-    ] {
-        remove_created_path(&path)?;
-    }
-    remove_created_directory(&paths.identity_dir())?;
-    remove_created_directory(&paths.state())?;
-    if created_etc_enoki {
-        remove_created_directory(&paths.etc_enoki())?;
+    files: &mut impl InstallFilePort,
+    created_paths: &[CreatedPath],
+    failures: &mut Vec<RollbackFailure>,
+) {
+    for created in created_paths.iter().rev() {
+        let result = match created.kind {
+            CreatedPathKind::File => files.remove_path(&created.path),
+            CreatedPathKind::Directory => files.remove_directory(&created.path),
+        };
+        record_rollback(failures, created.step, result);
     }
     // Systemd must forget the removed unit before another fresh install is
     // allowed to consult its absence state.
-    systemd.daemon_reload()?;
-    accounts.remove_static_service_identity()
+    record_rollback(
+        failures,
+        RollbackStep::ReloadSystemd,
+        systemd.daemon_reload(),
+    );
+    record_rollback(
+        failures,
+        RollbackStep::RemoveServiceIdentity,
+        accounts.remove_static_service_identity(),
+    );
+}
+
+fn record_rollback(
+    failures: &mut Vec<RollbackFailure>,
+    step: RollbackStep,
+    result: Result<(), InstallError>,
+) {
+    if let Err(error) = result {
+        match error {
+            InstallError::Rollback {
+                failures: nested, ..
+            } => failures.extend(nested),
+            error => failures.push(RollbackFailure::new(step, error.kind())),
+        }
+    }
 }
 
 fn ensure_fixed_metadata_directory(path: &Path) -> Result<bool, InstallError> {
@@ -221,25 +468,44 @@ fn ensure_fixed_metadata_directory(path: &Path) -> Result<bool, InstallError> {
     ensure_safe_parent_chain(parent)?;
     match fs::create_dir(path) {
         Ok(()) => {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                .map_err(|_| InstallError::Io)?;
-            let dir = File::open(path).map_err(|_| InstallError::Io)?;
-            chown_file(&dir, ServiceIdentity { uid: 0, gid: 0 })?;
+            let configured = (|| {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                    .map_err(|_| InstallError::Io)?;
+                let dir = File::open(path).map_err(|_| InstallError::Io)?;
+                chown_file(&dir, ServiceIdentity { uid: 0, gid: 0 })?;
+                verify_directory(path, 0o755, ServiceIdentity { uid: 0, gid: 0 })
+            })();
+            if let Err(error) = configured {
+                return Err(cleanup_partial_directory(path, error));
+            }
             Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || metadata.uid() != 0
-                || metadata.mode() & 0o777 != 0o755
-            {
-                return Err(InstallError::ExistingResidue);
-            }
+            validate_existing_metadata_directory(path)?;
             Ok(false)
         }
         Err(_) => Err(InstallError::Io),
     }
+}
+
+fn preflight_fixed_metadata_directory(path: &Path) -> Result<(), InstallError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => validate_existing_metadata_directory(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(InstallError::Io),
+    }
+}
+
+fn validate_existing_metadata_directory(path: &Path) -> Result<(), InstallError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::Io)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o777 != 0o755
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(())
 }
 
 fn remove_created_path(path: &Path) -> Result<(), InstallError> {
@@ -293,6 +559,20 @@ fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallError> {
     Ok(())
 }
 
+fn preflight_parent_chains(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    for path in [
+        paths.binary(),
+        paths.state(),
+        paths.etc_enoki(),
+        paths.unit(),
+        paths.map(OPERATION_SUDOERS),
+        paths.bootstrap_acquirer(),
+    ] {
+        ensure_safe_parent_chain(path.parent().ok_or(InstallError::Io)?)?;
+    }
+    Ok(())
+}
+
 /// The two bootstrap roles were installed before this transaction.  They only
 /// become Probe-owned after the schema-2 metadata is atomically persisted.
 /// Until then a failed activation deliberately leaves them untouched.
@@ -316,10 +596,27 @@ fn create_private_directory(
     let parent = path.parent().ok_or(InstallError::Io)?;
     ensure_safe_parent_chain(parent)?;
     fs::create_dir(path).map_err(|_| InstallError::Io)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|_| InstallError::Io)?;
-    let directory = File::open(path).map_err(|_| InstallError::Io)?;
-    chown_file(&directory, identity)?;
-    verify_directory(path, mode, identity)
+    let configured = (|| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .map_err(|_| InstallError::Io)?;
+        let directory = File::open(path).map_err(|_| InstallError::Io)?;
+        chown_file(&directory, identity)?;
+        verify_directory(path, mode, identity)
+    })();
+    configured.map_err(|error| cleanup_partial_directory(path, error))
+}
+
+fn cleanup_partial_directory(path: &Path, cause: InstallError) -> InstallError {
+    match fs::remove_dir(path) {
+        Ok(()) => cause,
+        Err(_) => InstallError::Rollback {
+            cause: cause.kind(),
+            failures: vec![RollbackFailure::new(
+                RollbackStep::RemovePartiallyInstalledPath,
+                InstallErrorKind::Io,
+            )],
+        },
+    }
 }
 
 fn ensure_safe_parent_chain(path: &Path) -> Result<(), InstallError> {
@@ -355,9 +652,14 @@ fn install_binary(component: &mut File, destination: &Path) -> Result<(), Instal
         .seek(SeekFrom::Start(0))
         .map_err(|_| InstallError::Io)?;
     let mut output = exclusive_temp(parent, 0o755)?;
-    std::io::copy(component, &mut output.0).map_err(|_| InstallError::Io)?;
-    output.0.sync_all().map_err(|_| InstallError::Io)?;
-    chown_file(&output.0, ServiceIdentity { uid: 0, gid: 0 })?;
+    let staged = (|| {
+        std::io::copy(component, &mut output.0).map_err(|_| InstallError::Io)?;
+        output.0.sync_all().map_err(|_| InstallError::Io)?;
+        chown_file(&output.0, ServiceIdentity { uid: 0, gid: 0 })
+    })();
+    if let Err(error) = staged {
+        return Err(cleanup_temporary_file(&output.1, error));
+    }
     rename_new(output.1, destination)
 }
 
@@ -370,9 +672,14 @@ fn atomic_write_owned(
     let parent = path.parent().ok_or(InstallError::Io)?;
     ensure_safe_parent_chain(parent)?;
     let (mut file, temporary) = exclusive_temp(parent, mode)?;
-    file.write_all(contents).map_err(|_| InstallError::Io)?;
-    file.sync_all().map_err(|_| InstallError::Io)?;
-    chown_file(&file, owner)?;
+    let staged = (|| {
+        file.write_all(contents).map_err(|_| InstallError::Io)?;
+        file.sync_all().map_err(|_| InstallError::Io)?;
+        chown_file(&file, owner)
+    })();
+    if let Err(error) = staged {
+        return Err(cleanup_temporary_file(&temporary, error));
+    }
     rename_new(temporary, path)
 }
 
@@ -389,8 +696,12 @@ fn exclusive_temp(parent: &Path, mode: u32) -> Result<(File, PathBuf), InstallEr
                 // `mode` on create is filtered by the caller's umask. These
                 // are security contracts, so restore the exact mode on the
                 // opened descriptor before it can be linked into the layout.
-                file.set_permissions(fs::Permissions::from_mode(mode))
-                    .map_err(|_| InstallError::Io)?;
+                if file
+                    .set_permissions(fs::Permissions::from_mode(mode))
+                    .is_err()
+                {
+                    return Err(cleanup_temporary_file(&path, InstallError::Io));
+                }
                 return Ok((file, path));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -403,15 +714,69 @@ fn exclusive_temp(parent: &Path, mode: u32) -> Result<(File, PathBuf), InstallEr
 fn rename_new(from: PathBuf, destination: &Path) -> Result<(), InstallError> {
     match fs::hard_link(&from, destination) {
         Ok(()) => {
-            fs::remove_file(from).map_err(|_| InstallError::Io)?;
-            File::open(destination.parent().ok_or(InstallError::Io)?)
+            let committed = fs::remove_file(&from)
+                .and_then(|()| {
+                    File::open(
+                        destination
+                            .parent()
+                            .ok_or(std::io::Error::other("no parent"))?,
+                    )
+                })
                 .and_then(|directory| directory.sync_all())
-                .map_err(|_| InstallError::Io)
+                .map_err(|_| InstallError::Io);
+            if let Err(error) = committed {
+                let mut failures = Vec::new();
+                record_io_cleanup(
+                    &mut failures,
+                    RollbackStep::RemovePartiallyInstalledPath,
+                    fs::remove_file(destination),
+                );
+                record_io_cleanup(
+                    &mut failures,
+                    RollbackStep::RemoveTemporary,
+                    fs::remove_file(&from),
+                );
+                return if failures.is_empty() {
+                    Err(error)
+                } else {
+                    Err(InstallError::Rollback {
+                        cause: error.kind(),
+                        failures,
+                    })
+                };
+            }
+            Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(InstallError::ExistingResidue)
+            Err(cleanup_temporary_file(&from, InstallError::ExistingResidue))
         }
-        Err(_) => Err(InstallError::Io),
+        Err(_) => Err(cleanup_temporary_file(&from, InstallError::Io)),
+    }
+}
+
+fn cleanup_temporary_file(path: &Path, cause: InstallError) -> InstallError {
+    match fs::remove_file(path) {
+        Ok(()) => cause,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => cause,
+        Err(_) => InstallError::Rollback {
+            cause: cause.kind(),
+            failures: vec![RollbackFailure::new(
+                RollbackStep::RemoveTemporary,
+                InstallErrorKind::Io,
+            )],
+        },
+    }
+}
+
+fn record_io_cleanup(
+    failures: &mut Vec<RollbackFailure>,
+    step: RollbackStep,
+    result: std::io::Result<()>,
+) {
+    if let Err(error) = result
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        failures.push(RollbackFailure::new(step, InstallErrorKind::Io));
     }
 }
 
@@ -480,12 +845,9 @@ impl AccountPort for SystemAccounts {
         )
     }
     fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
-        require_success("/usr/sbin/userdel", &[SERVICE_USER], InstallError::Account)?;
-        require_success(
-            "/usr/sbin/groupdel",
-            &[SERVICE_GROUP],
-            InstallError::Account,
-        )
+        remove_static_service_identity_with_commands(&mut |program, arguments| {
+            require_success(program, arguments, InstallError::Account)
+        })
     }
 }
 
@@ -496,7 +858,9 @@ fn create_static_service_identity_with_commands(
     execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
     lookup_id: &mut impl FnMut(&str) -> Result<u32, InstallError>,
 ) -> Result<ServiceIdentity, InstallError> {
-    execute("/usr/sbin/groupadd", &["--system", SERVICE_GROUP])?;
+    if let Err(error) = execute("/usr/sbin/groupadd", &["--system", SERVICE_GROUP]) {
+        return rollback_account_creation(error, rollback_created_group(execute));
+    }
     if let Err(error) = execute(
         "/usr/sbin/useradd",
         &[
@@ -510,33 +874,92 @@ fn create_static_service_identity_with_commands(
             SERVICE_USER,
         ],
     ) {
-        rollback_created_group(execute);
-        return Err(error);
+        return rollback_account_creation(error, rollback_created_identity(execute));
     }
     let uid = match lookup_id("-u") {
         Ok(uid) => uid,
         Err(error) => {
-            rollback_created_identity(execute);
-            return Err(error);
+            return rollback_account_creation(error, rollback_created_identity(execute));
         }
     };
     let gid = match lookup_id("-g") {
         Ok(gid) => gid,
         Err(error) => {
-            rollback_created_identity(execute);
-            return Err(error);
+            return rollback_account_creation(error, rollback_created_identity(execute));
         }
     };
     Ok(ServiceIdentity { uid, gid })
 }
 
-fn rollback_created_group(execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>) {
-    let _ = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+fn rollback_account_creation(
+    cause: InstallError,
+    failures: Vec<RollbackFailure>,
+) -> Result<ServiceIdentity, InstallError> {
+    if failures.is_empty() {
+        Err(cause)
+    } else {
+        Err(InstallError::Rollback {
+            cause: cause.kind(),
+            failures,
+        })
+    }
 }
 
-fn rollback_created_identity(execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>) {
-    let _ = execute("/usr/sbin/userdel", &[SERVICE_USER]);
-    rollback_created_group(execute);
+fn rollback_created_group(
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+) -> Vec<RollbackFailure> {
+    let first = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+    let final_result = if first.is_err() {
+        execute("/usr/sbin/groupdel", &[SERVICE_GROUP])
+    } else {
+        first
+    };
+    final_result.err().map_or_else(Vec::new, |error| {
+        vec![RollbackFailure::new(
+            RollbackStep::RemoveServiceGroup,
+            error.kind(),
+        )]
+    })
+}
+
+fn rollback_created_identity(
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+) -> Vec<RollbackFailure> {
+    remove_static_service_identity_with_commands(execute)
+        .err()
+        .and_then(|error| match error {
+            InstallError::Rollback { failures, .. } => Some(failures),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn remove_static_service_identity_with_commands(
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    let first_user = execute("/usr/sbin/userdel", &[SERVICE_USER]);
+    let first_group = execute("/usr/sbin/groupdel", &[SERVICE_GROUP]);
+    let final_user = if first_user.is_err() {
+        execute("/usr/sbin/userdel", &[SERVICE_USER])
+    } else {
+        first_user
+    };
+    let final_group = if first_group.is_err() {
+        execute("/usr/sbin/groupdel", &[SERVICE_GROUP])
+    } else {
+        first_group
+    };
+    let mut failures = Vec::new();
+    record_rollback(&mut failures, RollbackStep::RemoveServiceUser, final_user);
+    record_rollback(&mut failures, RollbackStep::RemoveServiceGroup, final_group);
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(InstallError::Rollback {
+            cause: InstallErrorKind::Account,
+            failures,
+        })
+    }
 }
 
 /// Production systemd implementation. Its only dynamic data is absent: all
@@ -652,7 +1075,7 @@ fn require_success(
         .env_clear()
         .env("LANG", "C")
         .status()
-        .map_err(|_| error)?;
+        .map_err(|_| error.clone())?;
     status.success().then_some(()).ok_or(error)
 }
 fn numeric_id(flag: &str) -> Result<u32, InstallError> {
@@ -813,6 +1236,90 @@ mod tests {
             ]);
             assert_eq!(*calls.borrow(), expected);
         }
+    }
+
+    #[test]
+    fn account_mutation_failure_exhausts_and_stably_reports_identity_compensations() {
+        let mut calls = Vec::new();
+        let error = create_static_service_identity_with_commands(
+            &mut |program, _arguments| {
+                calls.push(program.to_string());
+                match program {
+                    "/usr/sbin/groupadd" => Ok(()),
+                    _ => Err(InstallError::Account),
+                }
+            },
+            &mut |_flag| Ok(123),
+        )
+        .expect_err("useradd failure with failed cleanup must report all residue");
+
+        assert_eq!(
+            error,
+            InstallError::Rollback {
+                cause: InstallErrorKind::Account,
+                failures: vec![
+                    RollbackFailure::new(
+                        RollbackStep::RemoveServiceUser,
+                        InstallErrorKind::Account,
+                    ),
+                    RollbackFailure::new(
+                        RollbackStep::RemoveServiceGroup,
+                        InstallErrorKind::Account,
+                    ),
+                ],
+            }
+        );
+        assert_eq!(
+            calls,
+            [
+                "/usr/sbin/groupadd",
+                "/usr/sbin/useradd",
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+                "/usr/sbin/userdel",
+                "/usr/sbin/groupdel",
+            ]
+        );
+    }
+
+    #[test]
+    fn transient_account_compensation_failure_still_allows_fresh_retry() {
+        use std::cell::Cell;
+
+        let group_exists = Cell::new(false);
+        let user_exists = Cell::new(false);
+        let fail_useradd = Cell::new(true);
+        let fail_first_userdel = Cell::new(true);
+        let fail_first_groupdel = Cell::new(true);
+        let mut execute = |program: &str, _arguments: &[&str]| match program {
+            "/usr/sbin/groupadd" if !group_exists.replace(true) => Ok(()),
+            "/usr/sbin/useradd" if fail_useradd.replace(false) => {
+                user_exists.set(true);
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/useradd" if group_exists.get() && !user_exists.replace(true) => Ok(()),
+            "/usr/sbin/userdel" if user_exists.get() && fail_first_userdel.replace(false) => {
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/userdel" if user_exists.replace(false) => Ok(()),
+            "/usr/sbin/groupdel" if group_exists.get() && fail_first_groupdel.replace(false) => {
+                Err(InstallError::Account)
+            }
+            "/usr/sbin/groupdel" if !user_exists.get() && group_exists.replace(false) => Ok(()),
+            _ => Err(InstallError::Account),
+        };
+        let mut lookup = |_flag: &str| Ok(123);
+
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Err(InstallError::Account)
+        );
+        assert!(!user_exists.get());
+        assert!(!group_exists.get());
+        assert_eq!(
+            create_static_service_identity_with_commands(&mut execute, &mut lookup),
+            Ok(ServiceIdentity { uid: 123, gid: 123 })
+        );
     }
 
     #[test]
@@ -1089,6 +1596,462 @@ mod tests {
     }
 
     #[test]
+    fn rollback_attempts_every_compensation_and_reports_failures_in_stable_order() {
+        struct FailingAccounts {
+            calls: Vec<&'static str>,
+        }
+        impl AccountPort for FailingAccounts {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                self.calls.push("absent");
+                Ok(())
+            }
+            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
+                self.calls.push("create");
+                Ok(ServiceIdentity {
+                    uid: unsafe { libc::geteuid() },
+                    gid: unsafe { libc::getegid() },
+                })
+            }
+            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
+                self.calls.push("remove");
+                Err(InstallError::Account)
+            }
+        }
+        struct FailingSystemd {
+            calls: Vec<&'static str>,
+            unit: PathBuf,
+            reloads: usize,
+        }
+        impl SystemdPort for FailingSystemd {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                self.calls.push("absent");
+                Ok(())
+            }
+            fn daemon_reload(&mut self) -> Result<(), InstallError> {
+                self.calls.push("reload");
+                self.reloads += 1;
+                if self.reloads == 2 {
+                    Err(InstallError::Systemd)
+                } else {
+                    Ok(())
+                }
+            }
+            fn enable(&mut self) -> Result<(), InstallError> {
+                self.calls.push("enable");
+                Ok(())
+            }
+            fn start(&mut self) -> Result<(), InstallError> {
+                self.calls.push("start");
+                fs::remove_file(&self.unit).unwrap();
+                fs::create_dir(&self.unit).unwrap();
+                Err(InstallError::Systemd)
+            }
+            fn wait_ready(&mut self) -> Result<(), InstallError> {
+                unreachable!()
+            }
+            fn stop(&mut self) -> Result<(), InstallError> {
+                self.calls.push("stop");
+                Err(InstallError::Systemd)
+            }
+            fn disable(&mut self) -> Result<(), InstallError> {
+                self.calls.push("disable");
+                Err(InstallError::Systemd)
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/enoki",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = FailingAccounts { calls: Vec::new() };
+        let unit = temporary
+            .path()
+            .join("etc/systemd/system/enoki-probe.service");
+        let mut systemd = FailingSystemd {
+            calls: Vec::new(),
+            unit,
+            reloads: 0,
+        };
+
+        let error = activate_current_probe(
+            &mut component,
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .expect_err("start and rollback failures must remain observable");
+
+        assert_eq!(
+            error,
+            InstallError::Rollback {
+                cause: InstallErrorKind::Systemd,
+                failures: vec![
+                    RollbackFailure::new(RollbackStep::StopService, InstallErrorKind::Systemd),
+                    RollbackFailure::new(RollbackStep::DisableService, InstallErrorKind::Systemd),
+                    RollbackFailure::new(RollbackStep::RemoveUnit, InstallErrorKind::Io),
+                    RollbackFailure::new(RollbackStep::ReloadSystemd, InstallErrorKind::Systemd),
+                    RollbackFailure::new(
+                        RollbackStep::RemoveServiceIdentity,
+                        InstallErrorKind::Account,
+                    ),
+                ],
+            }
+        );
+        assert_eq!(
+            systemd.calls,
+            [
+                "absent", "reload", "enable", "start", "stop", "disable", "reload"
+            ]
+        );
+        assert_eq!(accounts.calls, ["absent", "create", "remove"]);
+        assert!(
+            !temporary.path().join("var/lib/enoki-probe").exists(),
+            "a unit cleanup failure must not stop later filesystem compensations"
+        );
+        assert!(
+            !temporary
+                .path()
+                .join("etc/enoki/probe-install.toml")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn every_filesystem_mutation_failure_rolls_back_to_a_retryable_fresh_state() {
+        struct FaultFiles {
+            inner: SystemInstallFiles,
+            fail_at: usize,
+            mutation: usize,
+        }
+        impl FaultFiles {
+            fn before_mutation(&mut self) -> Result<(), InstallError> {
+                let current = self.mutation;
+                self.mutation += 1;
+                if current == self.fail_at {
+                    Err(InstallError::Io)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl InstallFilePort for FaultFiles {
+            fn ensure_metadata_directory(&mut self, path: &Path) -> Result<bool, InstallError> {
+                self.before_mutation()?;
+                self.inner.ensure_metadata_directory(path)
+            }
+            fn create_directory(
+                &mut self,
+                path: &Path,
+                mode: u32,
+                identity: ServiceIdentity,
+            ) -> Result<(), InstallError> {
+                self.before_mutation()?;
+                self.inner.create_directory(path, mode, identity)
+            }
+            fn install_binary(
+                &mut self,
+                component: &mut File,
+                path: &Path,
+            ) -> Result<(), InstallError> {
+                self.before_mutation()?;
+                self.inner.install_binary(component, path)
+            }
+            fn write_owned(
+                &mut self,
+                path: &Path,
+                contents: &[u8],
+                mode: u32,
+                owner: ServiceIdentity,
+            ) -> Result<(), InstallError> {
+                self.before_mutation()?;
+                self.inner.write_owned(path, contents, mode, owner)
+            }
+            fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
+                self.inner.remove_path(path)
+            }
+            fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
+                self.inner.remove_directory(path)
+            }
+        }
+
+        for fail_at in 0..7 {
+            let temporary = tempdir().unwrap();
+            for parent in [
+                "usr/local/bin",
+                "var/lib",
+                "etc",
+                "etc/systemd/system",
+                "etc/sudoers.d",
+            ] {
+                fs::create_dir_all(temporary.path().join(parent)).unwrap();
+            }
+            write_bootstrap_roles(temporary.path());
+            let paths = FixedInstallPaths::under(temporary.path());
+            let mut component = component();
+            let mut accounts = Accounts::default();
+            let mut systemd = Systemd::default();
+            let mut files = FaultFiles {
+                inner: SystemInstallFiles,
+                fail_at,
+                mutation: 0,
+            };
+
+            assert_eq!(
+                activate_current_probe_with_files(
+                    &mut component,
+                    &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                    &bundle(),
+                    &trust(),
+                    &paths,
+                    &mut InstallPorts {
+                        accounts: &mut accounts,
+                        systemd: &mut systemd,
+                        files: &mut files,
+                    },
+                ),
+                Err(InstallError::Io),
+                "filesystem mutation {fail_at} must preserve the initiating failure"
+            );
+            for residue in [
+                "usr/local/bin/enoki-probe",
+                "var/lib/enoki-probe",
+                "etc/enoki",
+                "etc/systemd/system/enoki-probe.service",
+            ] {
+                assert!(
+                    !temporary.path().join(residue).exists(),
+                    "filesystem mutation {fail_at} left {residue}"
+                );
+            }
+            assert!(paths.bootstrap_acquirer().exists());
+            assert!(paths.bootstrap_activator().exists());
+
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut Accounts::default(),
+                &mut Systemd::default(),
+            )
+            .expect("rollback must permit a fresh retry");
+        }
+    }
+
+    #[test]
+    fn rollback_never_removes_state_not_created_by_this_transaction() {
+        struct RacingFiles {
+            inner: SystemInstallFiles,
+        }
+        impl InstallFilePort for RacingFiles {
+            fn ensure_metadata_directory(&mut self, path: &Path) -> Result<bool, InstallError> {
+                self.inner.ensure_metadata_directory(path)
+            }
+            fn create_directory(
+                &mut self,
+                path: &Path,
+                mode: u32,
+                identity: ServiceIdentity,
+            ) -> Result<(), InstallError> {
+                self.inner.create_directory(path, mode, identity)
+            }
+            fn install_binary(
+                &mut self,
+                _component: &mut File,
+                path: &Path,
+            ) -> Result<(), InstallError> {
+                fs::write(path, b"preexisting-race").unwrap();
+                Err(InstallError::ExistingResidue)
+            }
+            fn write_owned(
+                &mut self,
+                path: &Path,
+                contents: &[u8],
+                mode: u32,
+                owner: ServiceIdentity,
+            ) -> Result<(), InstallError> {
+                self.inner.write_owned(path, contents, mode, owner)
+            }
+            fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
+                self.inner.remove_path(path)
+            }
+            fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
+                self.inner.remove_directory(path)
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let mut files = RacingFiles {
+            inner: SystemInstallFiles,
+        };
+
+        assert_eq!(
+            activate_current_probe_with_files(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut InstallPorts {
+                    accounts: &mut accounts,
+                    systemd: &mut systemd,
+                    files: &mut files,
+                },
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert_eq!(fs::read(paths.binary()).unwrap(), b"preexisting-race");
+        assert!(!paths.state().exists());
+        assert!(!paths.metadata().exists());
+        assert!(!paths.unit().exists());
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut Accounts::default(),
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::ExistingResidue),
+            "retry must preserve and report the authoritative pre-existing state"
+        );
+        assert_eq!(fs::read(paths.binary()).unwrap(), b"preexisting-race");
+    }
+
+    #[test]
+    fn every_systemd_mutation_failure_compensates_uncertain_partial_state() {
+        struct FailOnceSystemd {
+            calls: Vec<&'static str>,
+            fail_on: &'static str,
+            failed: bool,
+        }
+        impl FailOnceSystemd {
+            fn call(&mut self, action: &'static str) -> Result<(), InstallError> {
+                self.calls.push(action);
+                if action == self.fail_on && !self.failed {
+                    self.failed = true;
+                    Err(InstallError::Systemd)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl SystemdPort for FailOnceSystemd {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                self.call("absent")
+            }
+            fn daemon_reload(&mut self) -> Result<(), InstallError> {
+                self.call("reload")
+            }
+            fn enable(&mut self) -> Result<(), InstallError> {
+                self.call("enable")
+            }
+            fn start(&mut self) -> Result<(), InstallError> {
+                self.call("start")
+            }
+            fn wait_ready(&mut self) -> Result<(), InstallError> {
+                self.call("ready")
+            }
+            fn stop(&mut self) -> Result<(), InstallError> {
+                self.call("stop")
+            }
+            fn disable(&mut self) -> Result<(), InstallError> {
+                self.call("disable")
+            }
+        }
+
+        for fail_on in ["reload", "enable", "start", "ready"] {
+            let temporary = tempdir().unwrap();
+            for parent in [
+                "usr/local/bin",
+                "var/lib",
+                "etc",
+                "etc/systemd/system",
+                "etc/sudoers.d",
+            ] {
+                fs::create_dir_all(temporary.path().join(parent)).unwrap();
+            }
+            write_bootstrap_roles(temporary.path());
+            let paths = FixedInstallPaths::under(temporary.path());
+            let mut component = component();
+            let mut accounts = Accounts::default();
+            let mut systemd = FailOnceSystemd {
+                calls: Vec::new(),
+                fail_on,
+                failed: false,
+            };
+
+            assert_eq!(
+                activate_current_probe(
+                    &mut component,
+                    &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                    &bundle(),
+                    &trust(),
+                    &paths,
+                    &mut accounts,
+                    &mut systemd,
+                ),
+                Err(InstallError::Systemd)
+            );
+            if fail_on == "enable" {
+                assert!(
+                    systemd.calls.contains(&"disable"),
+                    "a failed mutating enable has uncertain partial state and must be disabled"
+                );
+            }
+            if matches!(fail_on, "start" | "ready") {
+                assert!(systemd.calls.contains(&"stop"));
+                assert!(systemd.calls.contains(&"disable"));
+            }
+            assert_eq!(accounts.calls, ["absent", "create", "remove"]);
+            assert!(!paths.binary().exists());
+            assert!(!paths.state().exists());
+            assert!(!paths.metadata().exists());
+            assert!(!paths.unit().exists());
+
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut Accounts::default(),
+                &mut Systemd::default(),
+            )
+            .expect("systemd compensation must permit a fresh retry");
+        }
+    }
+
+    #[test]
     fn loaded_systemd_residue_fails_before_creating_the_service_account_or_files() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -1178,6 +2141,121 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[test]
+    fn missing_bootstrap_role_fails_before_creating_the_metadata_directory() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(
+            !temporary.path().join("etc/enoki").exists(),
+            "preflight rejection must leave the Host filesystem unchanged"
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[test]
+    fn acquirer_trust_cannot_enter_the_fixed_activation_transaction() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let mut wrong_role = trust();
+        wrong_role.role = BootstrapRole::Acquirer;
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &wrong_role,
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::InvalidVerifiedComponent)
+        );
+        assert!(!temporary.path().join("etc/enoki").exists());
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_destination_parent_fails_before_creating_identity_or_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var",
+            "etc",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+            "outside",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        symlink(
+            temporary.path().join("outside"),
+            temporary.path().join("var/lib"),
+        )
+        .unwrap();
+        write_bootstrap_roles(temporary.path());
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            activate_current_probe(
+                &mut component,
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &FixedInstallPaths::under(temporary.path()),
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::Io)
+        );
+        assert!(!temporary.path().join("etc/enoki").exists());
         assert!(accounts.calls.is_empty());
         assert!(systemd.calls.is_empty());
     }
