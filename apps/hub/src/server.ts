@@ -17,6 +17,7 @@ import {
   createProbeApiNodeServer,
   type HubNodeServer,
 } from "./node-server.js";
+import { readProbeDistributionRootPublicKeyFromImage } from "./probe/distribution-root.js";
 import {
   createBoundedHubShutdown,
   installHubFatalHandlers,
@@ -65,6 +66,8 @@ try {
     process.env.ENOKI_WEB_DIST ??
     new URL("../../web/dist", import.meta.url).pathname;
   const config = createHubRuntimeConfigFromEnvironment(process.env, { logger });
+  const probeDistributionRootPublicKeyPem =
+    await readProbeDistributionRootPublicKeyFromImage();
   database = initializeHubDatabase(config.database);
   const liveUpdates = createLiveUpdateBroadcaster();
   metricsArchiveScheduler = createMetricsArchiveScheduler({
@@ -90,7 +93,12 @@ try {
       logger,
       liveUpdates,
       port,
-      probeAssets: config.probeAssets,
+      probeAssets: {
+        ...config.probeAssets,
+        ...(probeDistributionRootPublicKeyPem
+          ? { trustedRootPublicKeyPem: probeDistributionRootPublicKeyPem }
+          : {}),
+      },
       probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
       probeOperations: config.probeOperations,
       probeApiOrigin: config.network.probeApiOrigin,

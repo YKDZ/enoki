@@ -59,7 +59,7 @@ export type HubAppOptions = {
   installation?: InstallationCommandConfig;
   listener?: HubListener;
   logger?: HubLogger;
-  probeAssets?: ProbeAssetRouteOptions;
+  probeAssets?: HubProbeAssetOptions;
   hostStatus?: HostStatusThresholds;
   now?: () => number;
   ownerSessions?: OwnerSessionRepository;
@@ -74,6 +74,10 @@ export type HubAppOptions = {
     upgradeWebSocket: UpgradeWebSocket;
   };
   webDistPath?: string;
+};
+
+export type HubProbeAssetOptions = ProbeAssetRouteOptions & {
+  trustedRootPublicKeyPem?: Buffer | string;
 };
 
 export type ProbeApiAppOptions = Pick<
@@ -194,6 +198,21 @@ export function createHubApp(options: HubAppOptions = {}) {
       );
     }
     if (options.database) {
+      const hostRouteServices = {
+        audit: options.database.audit,
+        hostStatus: options.hostStatus,
+        hosts: options.database.hosts,
+        liveUpdates,
+        metrics: options.database.metrics,
+        now: options.now,
+        probeAssetDir: options.probeAssets?.assetDir,
+        probeDistributionRootPublicKeyPem:
+          options.probeAssets?.trustedRootPublicKeyPem,
+        probeOperationTimeouts: options.probeOperations,
+        probeConfigurations: options.database.probeConfigurations,
+        probeOperations: options.database.probeOperations,
+        snapshotCollectors: options.database.snapshotCollectors,
+      };
       app.route(
         "/api/web/audit-log",
         createAuditLogRoutes({ audit: options.database.audit }),
@@ -208,22 +227,7 @@ export function createHubApp(options: HubAppOptions = {}) {
           now: options.now,
         }),
       );
-      app.route(
-        "/api/web/hosts",
-        createHostRoutes({
-          audit: options.database.audit,
-          hostStatus: options.hostStatus,
-          hosts: options.database.hosts,
-          liveUpdates,
-          metrics: options.database.metrics,
-          now: options.now,
-          probeAssetDir: options.probeAssets?.assetDir,
-          probeOperationTimeouts: options.probeOperations,
-          probeConfigurations: options.database.probeConfigurations,
-          probeOperations: options.database.probeOperations,
-          snapshotCollectors: options.database.snapshotCollectors,
-        }),
-      );
+      app.route("/api/web/hosts", createHostRoutes(hostRouteServices));
       app.route(
         "/api/web/probe-operations",
         createProbeOperationRoutes({

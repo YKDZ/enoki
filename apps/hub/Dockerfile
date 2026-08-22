@@ -34,7 +34,8 @@ FROM installer AS builder
 COPY --from=prepare /repo/out/full/ ./
 COPY --from=prepare /repo/tsconfig.base.json ./tsconfig.base.json
 COPY --from=prepare /repo/probe-assets/ /app/probe-assets/
-RUN mkdir -p /app/probe-assets
+RUN mkdir -p /app/probe-assets /app/probe-distribution-root && \
+  cp /app/probe-assets/root-key.pem /app/probe-distribution-root/root-key.pem
 
 RUN pnpm exec turbo run build --filter=@enoki/hub --filter=@enoki/web
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
@@ -59,6 +60,7 @@ COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
 COPY --from=builder --chown=node:node /app/apps/hub/drizzle-official-metrics drizzle-official-metrics
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
+COPY --from=builder --chown=node:node /app/probe-distribution-root probe-distribution-root
 COPY apps/hub/docker-entrypoint.sh /usr/local/bin/enoki-hub-entrypoint
 
 ADD --checksum=sha256:4003163f58cd4a75df79973171d25e4912df4284d8bac9850ac267b58b969be5 \
