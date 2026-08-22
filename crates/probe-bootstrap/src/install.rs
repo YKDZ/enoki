@@ -70,6 +70,8 @@ pub enum RollbackStep {
     RemoveInstallMetadata,
     RemoveIdentity,
     RemoveBinary,
+    RemoveBootstrapAcquirer,
+    RemoveBootstrapActivator,
     RemoveIdentityDirectory,
     RemoveStateDirectory,
     RemoveMetadataDirectory,
@@ -167,6 +169,8 @@ impl RollbackStep {
             Self::RemoveInstallMetadata => "remove_install_metadata",
             Self::RemoveIdentity => "remove_identity",
             Self::RemoveBinary => "remove_binary",
+            Self::RemoveBootstrapAcquirer => "remove_bootstrap_acquirer",
+            Self::RemoveBootstrapActivator => "remove_bootstrap_activator",
             Self::RemoveIdentityDirectory => "remove_identity_directory",
             Self::RemoveStateDirectory => "remove_state_directory",
             Self::RemoveMetadataDirectory => "remove_metadata_directory",
@@ -407,6 +411,7 @@ pub fn activate_current_probe(
     let mut files = SystemInstallFiles;
     activate_current_probe_with_files(
         component,
+        None,
         enrollment,
         bundle,
         trust,
@@ -437,109 +442,64 @@ pub fn activate_fresh_current_probe(
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
-    preflight_parent_chains(paths)?;
-    let acquirer =
-        publish_bootstrap_receipt(components.bootstrap_acquirer, &paths.bootstrap_acquirer())?;
-    let activator = match publish_bootstrap_receipt(
-        components.bootstrap_activator,
-        &paths.bootstrap_activator(),
-    ) {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            remove_published_bootstrap(&acquirer);
-            return Err(error);
-        }
-    };
-    let result = activate_current_probe(
+    let mut files = SystemInstallFiles;
+    activate_current_probe_with_files(
         components.probe,
+        Some((
+            components.bootstrap_acquirer,
+            components.bootstrap_activator,
+        )),
         enrollment,
         bundle,
         trust,
         paths,
-        accounts,
-        systemd,
-    );
-    if result.is_err() {
-        remove_published_bootstrap(&activator);
-        remove_published_bootstrap(&acquirer);
-    }
-    result
+        &mut InstallPorts {
+            accounts,
+            systemd,
+            files: &mut files,
+        },
+    )
 }
 
-struct PublishedBootstrap {
-    device: u64,
-    inode: u64,
+struct BootstrapRolePath {
     path: PathBuf,
+    rollback: RollbackStep,
 }
 
-fn publish_bootstrap_receipt(
-    source: &mut File,
-    destination: &Path,
-) -> Result<PublishedBootstrap, InstallError> {
-    match fs::symlink_metadata(destination) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Ok(_) => return Err(InstallError::ExistingResidue),
-        Err(_) => return Err(InstallError::Io),
-    }
-    let parent = destination.parent().ok_or(InstallError::Io)?;
-    let temporary = parent.join(format!(
-        ".enoki-bootstrap-role-{}-{}",
-        std::process::id(),
-        destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or(InstallError::Io)?
-    ));
-    let _ = fs::remove_file(&temporary);
-    let result = (|| {
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temporary)
-            .map_err(|_| InstallError::Io)?;
-        source
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| InstallError::Io)?;
-        std::io::copy(source, &mut output).map_err(|_| InstallError::Io)?;
-        output.sync_all().map_err(|_| InstallError::Io)?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
-            .map_err(|_| InstallError::Io)?;
-        fs::hard_link(&temporary, destination).map_err(|_| InstallError::ExistingResidue)?;
-        let metadata = fs::symlink_metadata(destination).map_err(|_| InstallError::Io)?;
-        fs::remove_file(&temporary).map_err(|_| InstallError::Io)?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| InstallError::Io)?;
-        Ok(PublishedBootstrap {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            path: destination.to_owned(),
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+fn bootstrap_role_registry(paths: &FixedInstallPaths) -> [BootstrapRolePath; 2] {
+    [
+        BootstrapRolePath {
+            path: paths.bootstrap_acquirer(),
+            rollback: RollbackStep::RemoveBootstrapAcquirer,
+        },
+        BootstrapRolePath {
+            path: paths.bootstrap_activator(),
+            rollback: RollbackStep::RemoveBootstrapActivator,
+        },
+    ]
 }
 
-fn remove_published_bootstrap(receipt: &PublishedBootstrap) {
-    if let Ok(metadata) = fs::symlink_metadata(&receipt.path)
-        && metadata.is_file()
-        && !metadata.file_type().is_symlink()
-        && metadata.dev() == receipt.device
-        && metadata.ino() == receipt.inode
-    {
-        let _ = fs::remove_file(&receipt.path);
-        if let Some(parent) = receipt.path.parent() {
-            let _ = File::open(parent).and_then(|directory| directory.sync_all());
+fn require_bootstrap_roles_absent(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    for role in bootstrap_role_registry(paths) {
+        match fs::symlink_metadata(role.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Err(InstallError::ExistingResidue),
+            Err(_) => return Err(InstallError::Io),
         }
     }
+    Ok(())
+}
+
+fn validate_bootstrap_roles(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    for role in bootstrap_role_registry(paths) {
+        validate_bootstrap_role(&role.path)?;
+    }
+    Ok(())
 }
 
 fn activate_current_probe_with_files(
     component: &mut File,
+    bootstrap_components: Option<(&mut File, &mut File)>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
@@ -564,8 +524,11 @@ fn activate_current_probe_with_files(
     preflight_parent_chains(paths)?;
     preflight_files(paths)?;
     preflight_fixed_metadata_directory(&paths.etc_enoki())?;
-    validate_bootstrap_role(&paths.bootstrap_acquirer())?;
-    validate_bootstrap_role(&paths.bootstrap_activator())?;
+    if bootstrap_components.is_some() {
+        require_bootstrap_roles_absent(paths)?;
+    } else {
+        validate_bootstrap_roles(paths)?;
+    }
     let install_deadline = Instant::now() + INSTALL_COMMAND_BUDGET;
     ports.accounts.set_command_deadline(install_deadline);
     ports.systemd.set_command_deadline(install_deadline);
@@ -573,6 +536,18 @@ fn activate_current_probe_with_files(
     ports.systemd.require_absent()?;
 
     let mut journal = TransactionJournal::begin(&paths.bootstrap_state())?;
+    if let Some((acquirer, activator)) = bootstrap_components {
+        let role_sources = [acquirer, activator];
+        for (source, role) in role_sources.into_iter().zip(bootstrap_role_registry(paths)) {
+            if let Err(error) =
+                ports
+                    .files
+                    .install_binary(source, &role.path, &mut journal, role.rollback)
+            {
+                return Err(abort_prepared_install(error, &journal, ports.accounts));
+            }
+        }
+    }
     let identity = match ports
         .accounts
         .create_transaction_identity(journal.transaction_id())
@@ -674,9 +649,8 @@ fn activate_current_probe_with_files(
                     ports.systemd.disable(),
                 );
             }
-            // No metadata is retained after failure, so every path below was
-            // created by this invocation and may be removed. The bootstrap
-            // roles predate ownership transfer and are intentionally excluded.
+            // No metadata is retained after failure, so every journal-owned
+            // path below, including fresh Bootstrap roles, is compensated.
             cleanup_failed_install(
                 ports.accounts,
                 ports.systemd,

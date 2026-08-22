@@ -9,6 +9,20 @@ import { initializeHubDatabase } from "../src/database/index";
 import { renderInstallCommand } from "../src/enrollment/install-command";
 
 const tempRoots: string[] = [];
+const bootstrapRecipe = {
+  bundleVersion: "1.2.3",
+  distribution: "enoki",
+  kind: "enoki-probe-bootstrap-recipe-record" as const,
+  recipe: {
+    file: "enoki-probe-bootstrap.py",
+    sha256: "a".repeat(64),
+    size: 123,
+    version: "v1",
+  },
+  rootFingerprint: "b".repeat(64),
+  schemaVersion: 1 as const,
+  targets: ["x86_64-unknown-linux-gnu"],
+};
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-install-db-"));
@@ -67,6 +81,7 @@ describe("Owner add-host install command", () => {
       },
       database,
       installation: {
+        bootstrapRecipe,
         probeApiOrigin: "https://hub.example",
       },
     });
@@ -95,6 +110,9 @@ describe("Owner add-host install command", () => {
 
     expect(body.enrollmentId).toMatch(/^enr_/);
     expect(body.status).toBe("pending");
+    expect(
+      (body as typeof body & { bootstrapRecipe: unknown }).bootstrapRecipe,
+    ).toEqual(bootstrapRecipe);
     expect(body.expiresAtMs).toBeGreaterThan(Date.now() - 1_000);
     expect(body).not.toHaveProperty("installPath");
     expect(body).not.toHaveProperty("installScriptUrl");

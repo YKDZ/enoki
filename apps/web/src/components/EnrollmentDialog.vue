@@ -108,13 +108,26 @@ watch(
                 {{ enrollment.hubUrl }}
               </dd>
             </div>
+            <div>
+              <dt class="text-muted-foreground">安装配方版本</dt>
+              <dd class="mt-1">
+                {{ enrollment.bootstrapRecipe.recipe.version }}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-muted-foreground">探针安装包版本</dt>
+              <dd class="mt-1">
+                {{ enrollment.bootstrapRecipe.bundleVersion }}
+              </dd>
+            </div>
           </dl>
 
           <p class="text-muted-foreground text-sm leading-6">
-            请先从独立发布的探针安装包安装
-            <code>enoki-probe-bootstrap-acquire</code> 与
-            <code>enoki-probe-bootstrap-activate</code> 到
-            <code>/usr/local/bin/</code>，再执行此命令。
+            请先从 GitHub Release 获取配方与公开记录，核对配方 SHA-256
+            <code>{{ enrollment.bootstrapRecipe.recipe.sha256 }}</code>
+            及分发信任根指纹
+            <code>{{ enrollment.bootstrapRecipe.rootFingerprint }}</code
+            >，再执行此命令。
           </p>
 
           <textarea

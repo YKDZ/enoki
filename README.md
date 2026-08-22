@@ -88,9 +88,9 @@ pnpm dev
 
 探针的可选本机 helper 前置条件只在安装和升级流程中评估。例如主机后来安装了 `smartctl`，Disk Health helper 不会被 Web UI、探针配置或运行时主机概况自动启用；需要重新安装或升级探针，安装/升级流程才会重新渲染 collector-helper sudoers。相反，移除可选前置条件后也应重新安装或升级，避免保留不再需要的 helper sudoers。
 
-从对应版本的不可变 GitHub Release 下载 `enoki-probe-bootstrap.py`，并按同一发布记录核对 recipe 版本、SHA-256、探针分发信任根指纹和目标安装包版本。recipe 是一份可审计的静态获取配方，不是第二个签名归档；它只依赖目标 Linux 上的 Python 3、OpenSSL 和 sudo。不要使用当前 Hub 返回的动态脚本或由 Hub 选择信任根来冒充此官方路径。
+从对应版本的不可变 GitHub Release 下载 `enoki-probe-bootstrap.py` 与 `enoki-probe-bootstrap-recipe.json`。先用 record 核对 recipe 的版本、字节数和 SHA-256，再把 record 中的探针分发信任根指纹、目标平台及探针安装包版本与 Hub 安装界面显示值逐项比较；GitHub Release body 也列出同一份 exact identity，作为 Hub 外对照。recipe 是一份可审计的静态获取配方，不是第二个签名归档；它只依赖目标 Linux 上的 Python 3、OpenSSL 和 sudo。不要从待信 recipe 自身推导这些对照值，也不要使用当前 Hub 返回的动态脚本或由 Hub 选择信任根来冒充此官方路径。
 
-把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 随后从同一私有归档重验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和 Probe binary 的精确摘要与大小，再完成 fresh install。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
+把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和 Probe binary 的精确摘要与大小，再在同一个 fresh transaction 中发布三个角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
 Hub 只对已安装探针所需的签名安装包提供有界分发。若在主机本机执行“卸载探针”，只会移除本机探针，不会删除 Hub 中的主机；需要两侧一并清理时，请在 Hub 中选择“卸载探针并删除主机”。
 

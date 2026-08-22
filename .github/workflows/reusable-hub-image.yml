@@ -79,6 +79,18 @@ jobs:
           validate-probe-assets source/probe-assets
           --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
 
+      - name: Derive immutable Probe Bootstrap publication
+        if: inputs.probe-assets-artifact-name != ''
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+        run: >-
+          node source/scripts/release-candidate.mjs write-bootstrap-publication
+          --source-dir source
+          --version "$CANDIDATE_VERSION"
+          --output source/probe-bootstrap-publication
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
+
       - name: Build the standard CI Hub image
         if: ${{ !inputs.package-artifact }}
         run: >-

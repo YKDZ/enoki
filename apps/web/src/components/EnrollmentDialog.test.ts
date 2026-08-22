@@ -8,6 +8,20 @@ import type { EnrollmentResponse } from "../types";
 import EnrollmentDialog from "./EnrollmentDialog.vue";
 
 const pendingEnrollment: EnrollmentResponse = {
+  bootstrapRecipe: {
+    bundleVersion: "1.2.3",
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: "enoki-probe-bootstrap.py",
+      sha256: "a".repeat(64),
+      size: 123,
+      version: "v1",
+    },
+    rootFingerprint: "b".repeat(64),
+    schemaVersion: 1,
+    targets: ["x86_64-unknown-linux-gnu"],
+  },
   createdAtMs: 1_725_000_000_000,
   enrollmentId: "enr_1234567890abcdef",
   enrollmentToken: "enk_enroll_component_test",

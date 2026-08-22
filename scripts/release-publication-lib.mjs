@@ -50,7 +50,11 @@ export async function reconcilePublication({
   }
 
   if (!release) {
-    release = await remote.createDraftRelease({ commit, version });
+    release = await remote.createDraftRelease({
+      body: renderBootstrapRecipeRecord(candidateManifest.bootstrapRecipe),
+      commit,
+      version,
+    });
     actions.push({ action: "created", stage: "private-release-draft" });
     release ??= await remote.getRelease({ version });
   } else {
@@ -420,13 +424,43 @@ function publicReleaseAssets(manifest) {
   const recipe = manifest.bootstrapRecipe;
   if (
     recipe?.file !== "enoki-probe-bootstrap.py" ||
+    recipe?.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    recipe?.recordFile !== "enoki-probe-bootstrap-recipe.json" ||
+    !/^[0-9a-f]{64}$/.test(recipe.recordSha256 ?? "") ||
+    !Number.isSafeInteger(recipe.recordSize) ||
+    recipe.recordSize < 1 ||
+    recipe.schemaVersion !== 1 ||
+    !Array.isArray(recipe.targets) ||
+    recipe.targets.length < 1 ||
+    !/^[0-9a-f]{64}$/.test(recipe.rootFingerprint ?? "") ||
     !/^[0-9a-f]{64}$/.test(recipe.sha256 ?? "") ||
     !Number.isSafeInteger(recipe.size) ||
     recipe.size < 1
   ) {
     throw new Error("Candidate public Bootstrap recipe is malformed");
   }
-  return [...files, { ...recipe, directory: "recipe" }];
+  const record = {
+    file: recipe.recordFile,
+    sha256: recipe.recordSha256,
+    size: recipe.recordSize,
+    directory: "recipe",
+  };
+  return [...files, { ...recipe, directory: "recipe" }, record];
+}
+
+function renderBootstrapRecipeRecord(recipe) {
+  return [
+    `Enoki ${recipe.bundleVersion}`,
+    "",
+    "Probe Bootstrap recipe record:",
+    `- Recipe: ${recipe.file}`,
+    `- Recipe version: ${recipe.version}`,
+    `- Size: ${recipe.size}`,
+    `- SHA-256: ${recipe.sha256}`,
+    `- Distribution root fingerprint: ${recipe.rootFingerprint}`,
+    `- Bundle version: ${recipe.bundleVersion}`,
+    `- Targets: ${recipe.targets.join(", ")}`,
+  ].join("\n");
 }
 
 async function fileSha256(file) {

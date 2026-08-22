@@ -2,6 +2,7 @@
 """由不可变发行记录生成的 Probe 首装配方。"""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -189,7 +190,7 @@ def authenticate_metadata(stage, target):
     return asset
 
 
-def verify_bundle_and_extract_acquirer(archive_path, asset, destination):
+def verify_bundle_and_extract_acquirer(archive_path, asset):
     try:
         with tarfile.open(archive_path, "r:gz") as archive:
             members = archive.getmembers()
@@ -224,13 +225,58 @@ def verify_bundle_and_extract_acquirer(archive_path, asset, destination):
                     acquirer = data
             if set(by_name) != expected_paths or acquirer is None:
                 fail("Probe Asset Bundle has an unexpected or missing role")
-            with destination.open("xb") as output:
-                output.write(acquirer)
-                output.flush()
-                os.fsync(output.fileno())
-            os.chmod(destination, 0o500)
+            return acquirer
     except (tarfile.TarError, EOFError) as error:
         fail(f"Probe Asset Bundle is invalid: {error}")
+
+
+def execute_verified_acquirer(acquirer, environment, input_stream):
+    descriptor = os.memfd_create(
+        "enoki-probe-bootstrap-acquire",
+        os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING,
+    )
+    try:
+        with os.fdopen(os.dup(descriptor), "wb", closefd=True) as output:
+            output.write(acquirer)
+            output.flush()
+            os.fsync(output.fileno())
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        if fcntl.fcntl(descriptor, fcntl.F_GET_SEALS) != seals:
+            fail("verified Probe acquirer descriptor could not be sealed")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        receipt = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            receipt.update(chunk)
+            total += len(chunk)
+        if total != len(acquirer) or receipt.hexdigest() != digest(acquirer):
+            fail("verified Probe acquirer descriptor changed before execution")
+        result = subprocess.run(
+            [f"/proc/self/fd/{descriptor}"],
+            env=environment,
+            stdin=input_stream,
+            check=False,
+            close_fds=True,
+            pass_fds=(descriptor,),
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        after = hashlib.sha256()
+        after_size = 0
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            after.update(chunk)
+            after_size += len(chunk)
+        if after_size != total or after.hexdigest() != receipt.hexdigest():
+            fail("verified Probe acquirer descriptor changed during execution")
+        return result.returncode
+    finally:
+        os.close(descriptor)
 
 
 def main():
@@ -257,11 +303,9 @@ def main():
         archive_digest, archive_size = fetch(origin, asset["file"], archive_path, asset["size"], deadline, asset["size"])
         if archive_digest != asset["sha256"] or archive_size != asset["size"]:
             fail("Probe Asset Bundle receipt mismatch")
-        acquirer = stage / "enoki-probe-bootstrap-acquire"
-        verify_bundle_and_extract_acquirer(archive_path, asset, acquirer)
+        acquirer = verify_bundle_and_extract_acquirer(archive_path, asset)
         environment = {"ENOKI_HUB_URL": origin, "ENOKI_PROBE_LOCAL_ASSET_DIR": str(stage), "ENOKI_PROBE_LOCAL_BUNDLE_ARCHIVE": str(archive_path)}
-        result = subprocess.run([str(acquirer)], env=environment, stdin=sys.stdin, check=False)
-        if result.returncode != 0:
+        if execute_verified_acquirer(acquirer, environment, sys.stdin) != 0:
             fail("verified Probe acquirer failed")
     finally:
         shutil.rmtree(stage)

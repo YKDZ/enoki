@@ -73,7 +73,7 @@ export function createGitHubGhcrPublicationRemote({
       return normalizeGitHubRelease(release);
     },
 
-    async createDraftRelease({ commit, version }) {
+    async createDraftRelease({ body, commit, version }) {
       const response = await command("gh", [
         "api",
         "--method",
@@ -86,7 +86,7 @@ export function createGitHubGhcrPublicationRemote({
         "-f",
         `name=${version}`,
         "-f",
-        `body=Enoki ${version}`,
+        `body=${body}`,
         "-F",
         "draft=true",
       ]);
@@ -254,6 +254,26 @@ async function verifyPublicCandidate({
       ) {
         throw new Error(
           `public Probe Bootstrap recipe does not match candidate: ${recipe.file}`,
+        );
+      }
+      const publicRecord = release.assets[recipe.recordFile];
+      if (!publicRecord?.downloadUrl) {
+        throw new Error(
+          `public Probe Bootstrap recipe record is missing: ${recipe.recordFile}`,
+        );
+      }
+      const recordResponse = await fetchImpl(publicRecord.downloadUrl, {
+        credentials: "omit",
+        redirect: "follow",
+      });
+      const recordBytes = Buffer.from(await recordResponse.arrayBuffer());
+      if (
+        !recordResponse.ok ||
+        recordBytes.length !== recipe.recordSize ||
+        sha256(recordBytes) !== recipe.recordSha256
+      ) {
+        throw new Error(
+          "public Probe Bootstrap recipe record does not match candidate",
         );
       }
       publicAssetsReady = true;

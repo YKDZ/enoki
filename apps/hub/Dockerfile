@@ -10,6 +10,7 @@ RUN corepack enable
 
 COPY . .
 RUN mkdir -p probe-assets
+RUN mkdir -p probe-bootstrap-publication
 
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm config set store-dir /pnpm/store && \
@@ -34,6 +35,7 @@ FROM installer AS builder
 COPY --from=prepare /repo/out/full/ ./
 COPY --from=prepare /repo/tsconfig.base.json ./tsconfig.base.json
 COPY --from=prepare /repo/probe-assets/ /app/probe-assets/
+COPY --from=prepare /repo/probe-bootstrap-publication/ /app/probe-bootstrap-publication/
 RUN mkdir -p /app/probe-assets /app/probe-distribution-root && \
   cp /app/probe-assets/root-key.pem /app/probe-distribution-root/root-key.pem
 
@@ -60,6 +62,7 @@ COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
 COPY --from=builder --chown=node:node /app/apps/hub/drizzle-official-metrics drizzle-official-metrics
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
+COPY --from=builder --chown=node:node /app/probe-bootstrap-publication probe-bootstrap-publication
 COPY --from=builder /app/probe-distribution-root probe-distribution-root
 COPY apps/hub/docker-entrypoint.sh /usr/local/bin/enoki-hub-entrypoint
 

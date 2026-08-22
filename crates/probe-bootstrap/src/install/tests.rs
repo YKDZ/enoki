@@ -450,6 +450,102 @@ mod tests {
     }
 
     #[test]
+    fn fresh_role_publication_rolls_back_with_the_probe_transaction_and_retries() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/enoki",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut probe = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            fail_start: true,
+            ..Systemd::default()
+        };
+
+        assert_eq!(
+            activate_fresh_current_probe(
+                VerifiedFreshComponents {
+                    probe: &mut probe,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::Systemd)
+        );
+        assert!(!paths.bootstrap_acquirer().exists());
+        assert!(!paths.bootstrap_activator().exists());
+        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+
+        systemd.fail_start = false;
+        activate_fresh_current_probe(
+            VerifiedFreshComponents {
+                probe: &mut probe,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+        )
+        .expect("the complete fresh transaction is retryable");
+    }
+
+    #[test]
+    fn fresh_role_publication_preserves_preexisting_paths() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::write(paths.bootstrap_acquirer(), b"preexisting").unwrap();
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut probe = component();
+
+        assert_eq!(
+            activate_fresh_current_probe(
+                VerifiedFreshComponents {
+                    probe: &mut probe,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut Accounts::default(),
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"preexisting");
+        assert!(!paths.bootstrap_activator().exists());
+    }
+
+    #[test]
     fn fresh_activation_recovers_an_interrupted_owned_layout_before_retrying() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -499,6 +595,54 @@ mod tests {
             systemd.calls,
             ["reload", "absent", "reload", "enable", "start", "ready"]
         );
+    }
+
+    #[test]
+    fn fresh_retry_recovers_journal_owned_bootstrap_roles() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib/enoki-probe-bootstrap",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        fs::set_permissions(
+            temporary.path().join("var/lib/enoki-probe-bootstrap"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut journal = TransactionJournal::begin(&paths.bootstrap_state()).unwrap();
+        for role in bootstrap_role_registry(&paths) {
+            fs::write(&role.path, b"interrupted").unwrap();
+            fs::set_permissions(&role.path, fs::Permissions::from_mode(0o755)).unwrap();
+            journal
+                .record_path(OwnedPath::capture(&role.path, false, role.rollback).unwrap())
+                .unwrap();
+        }
+        drop(journal);
+
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut probe = component();
+        activate_fresh_current_probe(
+            VerifiedFreshComponents {
+                probe: &mut probe,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut Accounts::default(),
+            &mut Systemd::default(),
+        )
+        .expect("retry recovers and republishes both fixed Bootstrap roles");
+        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"probe");
+        assert_eq!(fs::read(paths.bootstrap_activator()).unwrap(), b"probe");
     }
 
     #[test]
@@ -1000,6 +1144,7 @@ mod tests {
             assert_eq!(
                 activate_current_probe_with_files(
                     &mut component,
+                    None,
                     &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                     &bundle(),
                     &trust(),
@@ -1116,6 +1261,7 @@ mod tests {
         assert_eq!(
             activate_current_probe_with_files(
                 &mut component,
+                None,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                 &bundle(),
                 &trust(),

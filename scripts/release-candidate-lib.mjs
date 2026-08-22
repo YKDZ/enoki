@@ -51,12 +51,80 @@ const dynamicLoaderByProbeTarget = Object.freeze({
   "x86_64-unknown-linux-musl": "/lib/ld-musl-x86_64.so.1",
 });
 const bootstrapRecipeFile = "enoki-probe-bootstrap.py";
+const bootstrapRecipeRecordFile = "enoki-probe-bootstrap-recipe.json";
 export const probeTargets = Object.freeze([
   "aarch64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
 ]);
+
+export async function createProbeBootstrapPublication({
+  bundleVersion,
+  sourceDir,
+  trustedRootPublicKeyPem,
+}) {
+  const rootFingerprint = sha256(
+    canonicalPublicKeyPem(trustedRootPublicKeyPem),
+  );
+  const recipeTemplate = await readFile(
+    path.join(sourceDir, "scripts/probe-bootstrap-recipe.py"),
+    "utf8",
+  );
+  const recipeBytes = Buffer.from(
+    recipeTemplate
+      .replaceAll("__ENOKI_DISTRIBUTION__", "enoki")
+      .replaceAll("__ENOKI_ROOT_FINGERPRINT__", rootFingerprint)
+      .replaceAll("__ENOKI_BUNDLE_VERSION__", bundleVersion),
+  );
+  if (recipeBytes.includes("__ENOKI_")) {
+    throw new Error("Probe Bootstrap recipe record is incomplete");
+  }
+  const record = {
+    bundleVersion,
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: bootstrapRecipeFile,
+      sha256: sha256(recipeBytes),
+      size: recipeBytes.byteLength,
+      version: "v1",
+    },
+    rootFingerprint,
+    schemaVersion: 1,
+    targets: [...probeTargets],
+  };
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+  return { recipeBytes, record, recordBytes };
+}
+
+export async function writeProbeBootstrapPublication({
+  bundleVersion,
+  outputDir,
+  sourceDir,
+  trustedRootPublicKeyPem,
+}) {
+  const publication = await createProbeBootstrapPublication({
+    bundleVersion,
+    sourceDir,
+    trustedRootPublicKeyPem,
+  });
+  await mkdir(outputDir, { recursive: true });
+  await Promise.all([
+    writeFile(
+      path.join(outputDir, bootstrapRecipeFile),
+      publication.recipeBytes,
+      {
+        mode: 0o755,
+      },
+    ),
+    writeFile(
+      path.join(outputDir, bootstrapRecipeRecordFile),
+      publication.recordBytes,
+    ),
+  ]);
+  return publication.record;
+}
 
 export function validateCandidateIdentity({ commit, version }) {
   if (!commitPattern.test(commit ?? "")) {
@@ -883,29 +951,25 @@ export async function assembleReleaseCandidate({
     embeddedProbeVersion: probeAssetSet.version,
     size: (await stat(hubOciPath)).size,
   };
-  const rootFingerprint = sha256(
-    canonicalPublicKeyPem(trustedRootPublicKeyPem),
-  );
-  const recipeTemplate = await readFile(
-    path.join(sourceDir, "scripts/probe-bootstrap-recipe.py"),
-    "utf8",
-  );
-  const recipeBytes = Buffer.from(
-    recipeTemplate
-      .replaceAll("__ENOKI_DISTRIBUTION__", "enoki")
-      .replaceAll("__ENOKI_ROOT_FINGERPRINT__", rootFingerprint)
-      .replaceAll("__ENOKI_BUNDLE_VERSION__", version.slice(1)),
-  );
-  if (recipeBytes.includes("__ENOKI_")) {
-    throw new Error("Probe Bootstrap recipe record is incomplete");
-  }
+  const { recipeBytes, record, recordBytes } =
+    await createProbeBootstrapPublication({
+      bundleVersion: version.slice(1),
+      sourceDir,
+      trustedRootPublicKeyPem,
+    });
   const bootstrapRecipe = {
-    bundleVersion: version.slice(1),
-    distribution: "enoki",
+    bundleVersion: record.bundleVersion,
+    distribution: record.distribution,
     file: bootstrapRecipeFile,
-    rootFingerprint,
+    kind: record.kind,
+    recordFile: bootstrapRecipeRecordFile,
+    recordSha256: sha256(recordBytes),
+    recordSize: recordBytes.byteLength,
+    rootFingerprint: record.rootFingerprint,
+    schemaVersion: record.schemaVersion,
     sha256: sha256(recipeBytes),
     size: recipeBytes.byteLength,
+    targets: record.targets,
     version: "v1",
   };
   const manifest = {
@@ -938,6 +1002,10 @@ export async function assembleReleaseCandidate({
       path.join(stagingDir, "recipe", bootstrapRecipeFile),
       recipeBytes,
       { mode: 0o755 },
+    );
+    await writeFile(
+      path.join(stagingDir, "recipe", bootstrapRecipeRecordFile),
+      recordBytes,
     );
     await writeFile(
       path.join(stagingDir, "candidate-manifest.json"),
@@ -1054,15 +1122,28 @@ export async function validateReleaseCandidate(
     "bundleVersion",
     "distribution",
     "file",
+    "kind",
+    "recordFile",
+    "recordSha256",
+    "recordSize",
     "rootFingerprint",
+    "schemaVersion",
     "sha256",
     "size",
+    "targets",
     "version",
   ]);
   if (
     bootstrapRecipe.bundleVersion !== identity.version.slice(1) ||
     bootstrapRecipe.distribution !== "enoki" ||
     bootstrapRecipe.file !== bootstrapRecipeFile ||
+    bootstrapRecipe.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    bootstrapRecipe.recordFile !== bootstrapRecipeRecordFile ||
+    !/^[0-9a-f]{64}$/.test(bootstrapRecipe.recordSha256 ?? "") ||
+    !Number.isSafeInteger(bootstrapRecipe.recordSize) ||
+    bootstrapRecipe.recordSize < 1 ||
+    bootstrapRecipe.schemaVersion !== 1 ||
+    JSON.stringify(bootstrapRecipe.targets) !== JSON.stringify(probeTargets) ||
     bootstrapRecipe.version !== "v1" ||
     !/^[0-9a-f]{64}$/.test(bootstrapRecipe.rootFingerprint ?? "") ||
     !/^[0-9a-f]{64}$/.test(bootstrapRecipe.sha256 ?? "") ||
@@ -1078,13 +1159,34 @@ export async function validateReleaseCandidate(
     throw new Error("Probe Bootstrap recipe root does not match trusted root");
   }
   assertSameFileNames(
-    await readdir(path.join(candidateDir, "recipe")),
-    [bootstrapRecipeFile],
+    (await readdir(path.join(candidateDir, "recipe"))).sort(),
+    [bootstrapRecipeRecordFile, bootstrapRecipeFile].sort(),
     "Candidate Probe Bootstrap recipe directory",
   );
   const recipePath = path.join(candidateDir, "recipe", bootstrapRecipe.file);
   const recipeDetails = await stat(recipePath);
   const recipeBytes = await readFile(recipePath);
+  const recordPath = path.join(
+    candidateDir,
+    "recipe",
+    bootstrapRecipe.recordFile,
+  );
+  const recordDetails = await stat(recordPath);
+  const recordBytes = await readFile(recordPath);
+  const expectedRecord = {
+    bundleVersion: bootstrapRecipe.bundleVersion,
+    distribution: bootstrapRecipe.distribution,
+    kind: bootstrapRecipe.kind,
+    recipe: {
+      file: bootstrapRecipe.file,
+      sha256: bootstrapRecipe.sha256,
+      size: bootstrapRecipe.size,
+      version: bootstrapRecipe.version,
+    },
+    rootFingerprint: bootstrapRecipe.rootFingerprint,
+    schemaVersion: bootstrapRecipe.schemaVersion,
+    targets: bootstrapRecipe.targets,
+  };
   if (
     !recipeDetails.isFile() ||
     recipeDetails.size !== bootstrapRecipe.size ||
@@ -1096,7 +1198,13 @@ export async function validateReleaseCandidate(
       `BUNDLE_VERSION = "${bootstrapRecipe.bundleVersion}"`,
     ) ||
     !recipeBytes.includes(`DISTRIBUTION = "${bootstrapRecipe.distribution}"`) ||
-    !recipeBytes.includes(`RECIPE_VERSION = "${bootstrapRecipe.version}"`)
+    !recipeBytes.includes(`RECIPE_VERSION = "${bootstrapRecipe.version}"`) ||
+    !recordDetails.isFile() ||
+    recordDetails.size !== bootstrapRecipe.recordSize ||
+    sha256(recordBytes) !== bootstrapRecipe.recordSha256 ||
+    !recordBytes.equals(
+      Buffer.from(`${JSON.stringify(expectedRecord, null, 2)}\n`),
+    )
   ) {
     throw new Error(
       "Candidate Probe Bootstrap recipe does not match its record",

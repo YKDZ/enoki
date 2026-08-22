@@ -112,9 +112,25 @@ export type EnrollmentStatusResponse = {
 };
 
 export type EnrollmentResponse = EnrollmentStatusResponse & {
+  bootstrapRecipe: ProbeBootstrapRecipeRecord;
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
+};
+
+export type ProbeBootstrapRecipeRecord = {
+  bundleVersion: string;
+  distribution: string;
+  kind: "enoki-probe-bootstrap-recipe-record";
+  recipe: {
+    file: string;
+    sha256: string;
+    size: number;
+    version: string;
+  };
+  rootFingerprint: string;
+  schemaVersion: 1;
+  targets: string[];
 };
 
 export type ProbeConfiguration = {

@@ -131,8 +131,7 @@ pub(super) fn preflight_parent_chains(paths: &FixedInstallPaths) -> Result<(), I
     Ok(())
 }
 
-/// 两个 Bootstrap role 早于本事务安装，仅在 schema-2 metadata 原子落盘后才归 Probe
-/// 管理；在此之前，激活失败必须保留它们。
+/// 已安装路径使用同一固定 role registry 复验；fresh 路径则在 transaction 内发布。
 pub(super) fn validate_bootstrap_role(path: &Path) -> Result<(), InstallError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::ExistingResidue)?;
     if metadata.file_type().is_symlink()

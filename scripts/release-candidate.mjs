@@ -19,6 +19,7 @@ import {
   validateDelegatedProbeSigningIdentity,
   validateProbeSigningIdentity,
   validateReleaseCandidate,
+  writeProbeBootstrapPublication,
 } from "./release-candidate-lib.mjs";
 
 try {
@@ -245,6 +246,24 @@ try {
         process.env[requiredOption(options, "--root-public-key-env")],
     });
     process.stdout.write(`Hub OCI builds are reproducible: ${result.digest}\n`);
+  } else if (command === "write-bootstrap-publication") {
+    assertAllowedOptions(command, options, [
+      "--output",
+      "--root-public-key-env",
+      "--source-dir",
+      "--version",
+    ]);
+    const version = requiredOption(options, "--version");
+    const record = await writeProbeBootstrapPublication({
+      bundleVersion: version.startsWith("v") ? version.slice(1) : version,
+      outputDir: requiredOption(options, "--output"),
+      sourceDir: requiredOption(options, "--source-dir"),
+      trustedRootPublicKeyPem:
+        process.env[requiredOption(options, "--root-public-key-env")],
+    });
+    process.stdout.write(
+      `wrote Probe Bootstrap publication ${record.bundleVersion}\n`,
+    );
   } else if (command === "assemble") {
     assertAllowedOptions(command, options, [
       "--commit",

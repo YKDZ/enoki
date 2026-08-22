@@ -211,6 +211,21 @@ describe("verify-only release workflow", () => {
     expect(workflow).toContain("id-token: write");
   });
 
+  it("derives and embeds the same immutable Bootstrap publication before Hub image construction", async () => {
+    const [workflow, dockerfile] = await Promise.all([
+      readFile(".github/workflows/reusable-hub-image.yml", "utf8"),
+      readFile("apps/hub/Dockerfile", "utf8"),
+    ]);
+    const derivation = workflow.indexOf("write-bootstrap-publication");
+    const firstBuild = workflow.indexOf("docker build", derivation);
+    expect(derivation).toBeGreaterThan(0);
+    expect(firstBuild).toBeGreaterThan(derivation);
+    expect(workflow).toContain("--output source/probe-bootstrap-publication");
+    expect(dockerfile).toContain(
+      "COPY --from=builder --chown=node:node /app/probe-bootstrap-publication probe-bootstrap-publication",
+    );
+  });
+
   it("summarizes every candidate gate without making verification promotable", async () => {
     const matrix = JSON.parse(
       await readFile("scripts/release-e2e-matrix.json", "utf8"),
@@ -1248,9 +1263,20 @@ function releaseCandidateManifest() {
       bundleVersion: "1.2.3",
       distribution: "enoki",
       file: "enoki-probe-bootstrap.py",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recordFile: "enoki-probe-bootstrap-recipe.json",
+      recordSha256: "9".repeat(64),
+      recordSize: 321,
       rootFingerprint: "e".repeat(64),
+      schemaVersion: 1,
       sha256: "f".repeat(64),
       size: 123,
+      targets: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+      ],
       version: "v1",
     },
     candidate: {

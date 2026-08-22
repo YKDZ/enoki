@@ -57,6 +57,24 @@ const testDistributionRoot = generateKeyPairSync("rsa", {
 });
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
+  it("executes verified recipe acquirer bytes only through one sealed descriptor", async () => {
+    const program = String.raw`
+import importlib.util, os, pathlib
+path = pathlib.Path("scripts/probe-bootstrap-recipe.py")
+spec = importlib.util.spec_from_file_location("enoki_recipe", path)
+recipe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recipe)
+verified = b'#!/bin/sh\n[ "$ENOKI_RECIPE_FD" = sealed ] || exit 9\nexit 0\n'
+with open(os.devnull, "rb") as input_stream:
+    assert recipe.execute_verified_acquirer(verified, {"ENOKI_RECIPE_FD": "sealed"}, input_stream) == 0
+`;
+    await expect(
+      execFileAsync("python3", ["-c", program], {
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+      }),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+  });
+
   it("requires exactly one root private-key representation for trust delegations", () => {
     const root = generateKeyPairSync("rsa", {
       modulusLength: 2048,
@@ -1475,6 +1493,30 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       });
       expect(manifest).not.toHaveProperty("bootstrap");
       expect(await readdir(candidateDir)).not.toContain("probe-bootstrap");
+      const publicRecipeRecord = JSON.parse(
+        await readFile(
+          path.join(
+            candidateDir,
+            "recipe",
+            manifest.bootstrapRecipe.recordFile,
+          ),
+          "utf8",
+        ),
+      );
+      expect(publicRecipeRecord).toEqual({
+        bundleVersion: manifest.bootstrapRecipe.bundleVersion,
+        distribution: manifest.bootstrapRecipe.distribution,
+        kind: manifest.bootstrapRecipe.kind,
+        recipe: {
+          file: manifest.bootstrapRecipe.file,
+          sha256: manifest.bootstrapRecipe.sha256,
+          size: manifest.bootstrapRecipe.size,
+          version: manifest.bootstrapRecipe.version,
+        },
+        rootFingerprint: manifest.bootstrapRecipe.rootFingerprint,
+        schemaVersion: 1,
+        targets: probeTargets,
+      });
       expect(manifest.probeAssetSet.files.map(({ file }) => file)).toEqual(
         (await readdir(probeAssetSetDir)).sort(),
       );

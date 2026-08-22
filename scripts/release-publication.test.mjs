@@ -780,6 +780,16 @@ describe("GitHub and GHCR publication adapter", () => {
           ),
         ),
       );
+      publicFiles.set(
+        `https://downloads.example/${fixture.candidateManifest.bootstrapRecipe.recordFile}`,
+        await readFile(
+          path.join(
+            fixture.candidateDir,
+            "recipe",
+            fixture.candidateManifest.bootstrapRecipe.recordFile,
+          ),
+        ),
+      );
       const runCommand = async (command, arguments_, options) => {
         commands.push({ arguments_, command, options });
         if (
@@ -1060,7 +1070,15 @@ function seedMatchingTagAndRelease(
 }
 
 function releaseAssetFiles(manifest) {
-  return [...manifest.probeAssetSet.files, manifest.bootstrapRecipe];
+  return [
+    ...manifest.probeAssetSet.files,
+    manifest.bootstrapRecipe,
+    {
+      file: manifest.bootstrapRecipe.recordFile,
+      sha256: manifest.bootstrapRecipe.recordSha256,
+      size: manifest.bootstrapRecipe.recordSize,
+    },
+  ];
 }
 
 class FakePublicationRemote {
@@ -1173,18 +1191,50 @@ async function createPublicationFixture() {
   const hubBytes = Buffer.from("immutable OCI archive");
   await writeFile(path.join(candidateDir, hubArchive), hubBytes);
   const recipeBytes = Buffer.from("immutable bootstrap recipe");
+  const recipeRecord = {
+    bundleVersion: "1.2.3",
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: "enoki-probe-bootstrap.py",
+      sha256: sha256(recipeBytes),
+      size: recipeBytes.length,
+      version: "v1",
+    },
+    rootFingerprint: "e".repeat(64),
+    schemaVersion: 1,
+    targets: [
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+    ],
+  };
+  const recipeRecordBytes = Buffer.from(
+    `${JSON.stringify(recipeRecord, null, 2)}\n`,
+  );
   await writeFile(
     path.join(recipeDir, "enoki-probe-bootstrap.py"),
     recipeBytes,
+  );
+  await writeFile(
+    path.join(recipeDir, "enoki-probe-bootstrap-recipe.json"),
+    recipeRecordBytes,
   );
   const candidateManifest = {
     bootstrapRecipe: {
       bundleVersion: "1.2.3",
       distribution: "enoki",
       file: "enoki-probe-bootstrap.py",
+      kind: recipeRecord.kind,
+      recordFile: "enoki-probe-bootstrap-recipe.json",
+      recordSha256: sha256(recipeRecordBytes),
+      recordSize: recipeRecordBytes.length,
       rootFingerprint: "e".repeat(64),
+      schemaVersion: 1,
       sha256: sha256(recipeBytes),
       size: recipeBytes.length,
+      targets: recipeRecord.targets,
       version: "v1",
     },
     candidate: { commit: "a".repeat(40), version: "v1.2.3" },

@@ -1432,14 +1432,28 @@ function isCandidateBootstrapRecipe(recipe, candidate) {
       bundleVersion: null,
       distribution: null,
       file: null,
+      kind: null,
+      recordFile: null,
+      recordSha256: null,
+      recordSize: null,
       rootFingerprint: null,
+      schemaVersion: null,
       sha256: null,
       size: null,
+      targets: null,
       version: null,
     }) &&
     recipe.bundleVersion === candidate.version.slice(1) &&
     recipe.distribution === "enoki" &&
     recipe.file === "enoki-probe-bootstrap.py" &&
+    recipe.kind === "enoki-probe-bootstrap-recipe-record" &&
+    recipe.recordFile === "enoki-probe-bootstrap-recipe.json" &&
+    /^[0-9a-f]{64}$/.test(recipe.recordSha256 ?? "") &&
+    Number.isSafeInteger(recipe.recordSize) &&
+    recipe.recordSize > 0 &&
+    recipe.schemaVersion === 1 &&
+    Array.isArray(recipe.targets) &&
+    recipe.targets.length === 4 &&
     recipe.version === "v1" &&
     /^[0-9a-f]{64}$/.test(recipe.rootFingerprint ?? "") &&
     /^[0-9a-f]{64}$/.test(recipe.sha256 ?? "") &&
