@@ -18,10 +18,9 @@ import type { HostStatusThresholds } from "./database/hosts.js";
 import type { HubDatabase } from "./database/index.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createEnrollmentRoutes } from "./enrollment/routes.js";
-import {
-  hostSummaryResponse,
-  probeUpgradeOverviewProblem,
-} from "./hosts/api-response.js";
+import { hostSummaryResponse } from "./hosts/api-response.js";
+import { probeUpgradeOverviewProblems } from "./hosts/probe-upgrade-overview.js";
+import { defaultProbeOperationTimeouts } from "./hosts/probe-upgrade-timeout.js";
 import {
   createHostRoutes,
   createProbeOperationRoutes,
@@ -252,11 +251,19 @@ export function createHubApp(options: HubAppOptions = {}) {
     }
     app.get("/api/web/hosts", (context) => {
       const nowMs = options.now?.() ?? Date.now();
+      const reportedProbeVersions = new Map<
+        number,
+        string | null | undefined
+      >();
       const hostSummaries =
         options.database?.hosts.listSummaries({
-          hostProfileForHost: (hostId) =>
-            options.database?.snapshotCollectors.hostProfile.read(hostId) ??
-            null,
+          hostProfileForHost: (hostId) => {
+            const hostProfile =
+              options.database?.snapshotCollectors.hostProfile.read(hostId) ??
+              null;
+            reportedProbeVersions.set(hostId, hostProfile?.probeVersion);
+            return hostProfile;
+          },
           latestMetricForHost: (hostId) =>
             options.database?.metrics.findLatestSample(hostId) ?? null,
           nowMs,
@@ -271,10 +278,16 @@ export function createHubApp(options: HubAppOptions = {}) {
           },
           thresholds: options.hostStatus,
         }) ?? [];
-      const latestProbeOperations =
-        options.database?.probeOperations.findLatestForHosts(
-          hostSummaries.map((host) => host.id),
-        ) ?? new Map();
+      const probeUpgradeProblems = probeUpgradeOverviewProblems({
+        audit: options.database?.audit,
+        hostIds: hostSummaries.map((host) => host.id),
+        nowMs,
+        probeOperations: options.database?.probeOperations,
+        reportedProbeVersionForHost: (hostId) =>
+          reportedProbeVersions.get(hostId),
+        timeouts: options.probeOperations ?? defaultProbeOperationTimeouts,
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      });
 
       const response = {
         hosts: hostSummaries.map((host) => {
@@ -282,17 +295,10 @@ export function createHubApp(options: HubAppOptions = {}) {
             options.database?.probeConfigurations.getEffectiveForHost(host.id);
           const intervalSeconds =
             effective?.configuration.metricsCollectionIntervalSeconds ?? 5;
-          const reportedProbeVersion =
-            options.database?.snapshotCollectors.hostProfile.read(
-              host.id,
-            )?.probeVersion;
 
           return hostSummaryResponse(host, {
             metricsCollectionIntervalSeconds: intervalSeconds,
-            probeUpgradeProblem: probeUpgradeOverviewProblem({
-              operation: latestProbeOperations.get(host.id) ?? null,
-              reportedProbeVersion,
-            }),
+            probeUpgradeProblem: probeUpgradeProblems.get(host.id) ?? null,
           });
         }),
       } satisfies HostsResponse;
@@ -380,6 +386,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,
       probeOperations: options.database.probeOperations,
+      probeOperationTimeouts: options.probeOperations,
       reportTransaction: options.database.reportTransaction,
       snapshotCollectors: options.database.snapshotCollectors,
       clockSkewThresholdMs: options.clockSkewThresholdMs,

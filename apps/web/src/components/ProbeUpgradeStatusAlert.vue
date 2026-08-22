@@ -50,7 +50,7 @@ const presentation = computed(() => {
       };
     case "failed":
       return failedPresentation(
-        props.status.failure?.recoveryDisposition ?? "unclassified",
+        props.status.failure?.recoveryDisposition ?? null,
       );
     case "succeeded":
     case "canceled":
@@ -100,7 +100,6 @@ function failedPresentation(disposition: RecoveryDisposition) {
           : "当前安装无法安全原地恢复。现有恢复流程只支持离线主机，请待主机状态变为离线后再继续。",
         title: "探针升级失败：需要手动重新安装探针",
       };
-    case "unclassified":
     default:
       return {
         ...base,

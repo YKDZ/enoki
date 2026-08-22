@@ -74,7 +74,7 @@ describe("Probe Upgrade current problem", () => {
 
   it("renders unknown failures generically without a privileged action", () => {
     const wrapper = mount(ProbeUpgradeStatusAlert, {
-      props: { status: failedProbeUpgradeStatus("unclassified") },
+      props: { status: failedProbeUpgradeStatus(null) },
     });
 
     expect(wrapper.text()).toContain("Hub 无法安全判断恢复方式");

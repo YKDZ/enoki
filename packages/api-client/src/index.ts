@@ -198,15 +198,14 @@ export type ProbeUpgradeEligibility = {
 export type ProbeUpgradeRecoveryDisposition =
   | "retry_probe_upgrade"
   | "probe_repair"
-  | "manual_reinstall_required"
-  | "unclassified";
+  | "manual_reinstall_required";
 
 export type ProbeUpgradeStatus = {
   acceptedAtMs: number | null;
   completedAtMs: number | null;
   createdAtMs: number;
   failure: {
-    recoveryDisposition: ProbeUpgradeRecoveryDisposition;
+    recoveryDisposition: ProbeUpgradeRecoveryDisposition | null;
   } | null;
   id: number;
   runningAtMs: number | null;

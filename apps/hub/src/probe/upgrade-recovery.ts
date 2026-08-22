@@ -30,7 +30,7 @@ const retryProbeUpgradeFailureCodes = new Set([
 
 export function probeUpgradeRecoveryDisposition(
   failureCode: string,
-): ProbeUpgradeRecoveryDisposition {
+): ProbeUpgradeRecoveryDisposition | null {
   if (manualReinstallFailureCodes.has(failureCode)) {
     return "manual_reinstall_required";
   }
@@ -43,7 +43,7 @@ export function probeUpgradeRecoveryDisposition(
     return "retry_probe_upgrade";
   }
 
-  return "unclassified";
+  return null;
 }
 
 export function currentProbeUpgradeProblem(input: {
@@ -63,6 +63,33 @@ export function currentProbeUpgradeProblem(input: {
   }
 
   return operation;
+}
+
+export function currentHostDetailProbeUpgradeProblem(input: {
+  operation: ProbeUpgradeRequest | null;
+  reportedProbeVersion?: string | null;
+  reportedProbeVersionObservedAtMs: number | null | undefined;
+}) {
+  if (
+    input.operation?.state === "failed" &&
+    !recoveryEvidenceIsFresh(input, input.operation)
+  ) {
+    return input.operation;
+  }
+
+  return currentProbeUpgradeProblem(input);
+}
+
+function recoveryEvidenceIsFresh(
+  input: { reportedProbeVersionObservedAtMs: number | null | undefined },
+  operation: ProbeUpgradeRequest,
+) {
+  return (
+    operation.completedAtMs !== null &&
+    input.reportedProbeVersionObservedAtMs !== null &&
+    input.reportedProbeVersionObservedAtMs !== undefined &&
+    input.reportedProbeVersionObservedAtMs > operation.completedAtMs
+  );
 }
 
 function normalizeProbeVersion(value: string | null | undefined) {

@@ -1412,7 +1412,7 @@ describe("Host detail API", () => {
     for (const [failureCode, recoveryDisposition] of [
       ["accepted_timeout", "retry_probe_upgrade"],
       ["post_replacement_restart_failure", "probe_repair"],
-      ["unrecognized_failure", "unclassified"],
+      ["unrecognized_failure", null],
     ] as const) {
       const failureMessage = `private diagnostic for ${failureCode}`;
       database.sqlite
@@ -1429,7 +1429,7 @@ describe("Host detail API", () => {
       const classifiedBody = (await classifiedResponse.json()) as {
         host: {
           probeUpgradeStatus: {
-            failure: { recoveryDisposition: string };
+            failure: { recoveryDisposition: string | null };
           };
         };
       };
@@ -1451,7 +1451,7 @@ describe("Host detail API", () => {
     expect(operationHistoryResponse.status).toBe(200);
     await expect(operationHistoryResponse.json()).resolves.toEqual({
       probeOperation: expect.objectContaining({
-        failure: { recoveryDisposition: "unclassified" },
+        failure: { recoveryDisposition: null },
         id: createdBody.probeUpgradeRequest.id,
         state: "failed",
       }),
@@ -1596,6 +1596,94 @@ describe("Host detail API", () => {
         target_probe_version: "0.2.0",
       },
     ]);
+
+    database.close();
+  });
+
+  it("keeps a failed Probe Upgrade current until target-version Host Profile evidence is newer", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_002_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    const hostId = await firstHostId(app, ownerSession);
+    const targetProfile = {
+      architecture: "x86_64",
+      cpuCount: 2,
+      cpuModel: "Contract CPU",
+      filesystems: [],
+      hostname: "managed-host-01",
+      kernel: "6.8.0",
+      memoryTotalBytes: 8_589_934_592,
+      networkInterfaces: [],
+      os: "linux",
+      probeVersion: "v0.2.0",
+    };
+
+    database.snapshotCollectors.write({
+      collectorId: "official.host-profile",
+      hostId,
+      payload: targetProfile,
+      snapshotHash: "target-profile-before-failure",
+      updatedAtMs: 1_725_000_001_000,
+    });
+    const failed = database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: 1_725_000_000_100,
+      canceledAtMs: null,
+      completedAtMs: 1_725_000_001_500,
+      createdAtMs: 1_725_000_000_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: "post_replacement_restart_failure",
+      failureMessage: "local restart failed",
+      hostId,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: 1_725_000_000_200,
+      state: "failed",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_001_500,
+    });
+
+    const staleDetailResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(staleDetailResponse.status).toBe(200);
+    await expect(staleDetailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
+      }),
+    });
+
+    database.snapshotCollectors.write({
+      collectorId: "official.host-profile",
+      hostId,
+      payload: targetProfile,
+      snapshotHash: "target-profile-after-failure",
+      updatedAtMs: 1_725_000_001_600,
+    });
+    const recoveredDetailResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(recoveredDetailResponse.status).toBe(200);
+    await expect(recoveredDetailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+    expect(database.probeOperations.findById(failed.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "failed" }),
+    );
 
     database.close();
   });

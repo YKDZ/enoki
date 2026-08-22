@@ -173,6 +173,19 @@ describe("HTTP API contracts", () => {
         updatedAtMs: 1_725_000_800_000,
       },
     } satisfies ProbeUpgradeRequestResponse;
+    const unknownFailedProbeUpgrade = {
+      probeUpgradeRequest: {
+        acceptedAtMs: 1_725_000_800_100,
+        completedAtMs: 1_725_000_800_300,
+        createdAtMs: 1_725_000_800_000,
+        failure: { recoveryDisposition: null },
+        id: 8,
+        runningAtMs: 1_725_000_800_200,
+        state: "failed",
+        targetProbeVersion: "0.2.0",
+        updatedAtMs: 1_725_000_800_300,
+      },
+    } satisfies ProbeUpgradeRequestResponse;
 
     expect({
       enrollment,
@@ -181,6 +194,7 @@ describe("HTTP API contracts", () => {
       probeConfiguration,
       probeUpgrade,
       session,
+      unknownFailedProbeUpgrade,
     }).toBeDefined();
   });
 });

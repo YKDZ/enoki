@@ -13,6 +13,7 @@ import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
 import type { Context } from "hono";
 
+import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
 import type { EnrollmentRepository } from "../database/enrollments.js";
 import {
@@ -33,11 +34,11 @@ import {
   maxEnrollmentRejectionMessageLength,
 } from "../enrollment/lifecycle.js";
 import { hashSecret } from "../enrollment/routes.js";
-import { probeUpgradeOverviewProblem } from "../hosts/api-response.js";
+import { broadcastHostSummaryHint } from "../hosts/live-summary.js";
+import { defaultProbeOperationTimeouts } from "../hosts/probe-upgrade-timeout.js";
 import {
   broadcastHostReadyHint,
   broadcastHostRemovedHint,
-  liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
 import { deriveObservedIp, type TrustedProxyCidr } from "../network.js";
@@ -90,6 +91,7 @@ export type ProbeRouteServices = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+  probeOperationTimeouts?: ProbeOperationConfig;
   reportTransaction: ProbeReportTransaction;
   snapshotCollectors?: SnapshotCollectorStorageRegistry;
   clockSkewThresholdMs?: number;
@@ -791,7 +793,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       );
     }
 
-    broadcastHostSummary(services, host.id, ingested.reportReceivedAtMs);
+    broadcastHostSummaryHint(services, {
+      hostId: host.id,
+      nowMs: ingested.reportReceivedAtMs,
+      timeouts:
+        services.probeOperationTimeouts ?? defaultProbeOperationTimeouts,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
     if (ingested.hostProfileUpdate) {
       services.liveUpdates?.broadcastHostProfile(
         host.id,
@@ -1500,56 +1508,6 @@ function parseProbeOperationId(operationId: string | null | undefined) {
   }
 
   return Number(operationId);
-}
-
-function broadcastHostSummary(
-  services: ProbeRouteServices,
-  hostId: number,
-  nowMs: number,
-) {
-  if (!services.liveUpdates) {
-    return;
-  }
-
-  const hostSummary = services.hosts
-    .listSummaries({
-      hostProfileForHost: (hostId) =>
-        services.snapshotCollectors?.hostProfile.read(hostId) ?? null,
-      latestMetricForHost: (hostId) =>
-        services.metrics.findLatestSample(hostId),
-      nowMs,
-      probeConfigurationForHost: (hostId) => {
-        const effective =
-          services.probeConfigurations.getEffectiveForHost(hostId);
-
-        return {
-          mode: effective.mode,
-          version: effective.configuration.version,
-        };
-      },
-      thresholds: services.hostStatus,
-    })
-    .find((summary) => summary.id === hostId);
-
-  if (hostSummary) {
-    const effectiveConfiguration =
-      services.probeConfigurations.getEffectiveForHost(hostId);
-
-    services.liveUpdates.broadcastHostSummary(
-      liveSummaryFromHost(hostSummary, {
-        metricsCollectionIntervalSeconds:
-          effectiveConfiguration.configuration.metricsCollectionIntervalSeconds,
-        probeUpgradeProblem: probeUpgradeOverviewProblem({
-          operation:
-            services.probeOperations
-              ?.findLatestForHosts([hostId])
-              .get(hostId) ?? null,
-          reportedProbeVersion:
-            services.snapshotCollectors?.hostProfile.read(hostId)?.probeVersion,
-        }),
-      }),
-    );
-  }
 }
 
 function liveDetailSampleFromMetricSample(

@@ -29,22 +29,25 @@ import {
   readProbeAssetSetVersionFromDirectory,
 } from "../probe/asset-set.js";
 import {
-  acceptedTimedOutProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
   type ProbeUpgradeRequest,
-  runningTimedOutProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
 import {
-  currentProbeUpgradeProblem,
+  currentHostDetailProbeUpgradeProblem,
   probeUpgradeRecoveryDisposition,
 } from "../probe/upgrade-recovery.js";
 import {
   hostSummaryResponse,
   probeUpgradeOverviewProblem,
 } from "./api-response.js";
+import { broadcastHostSummaryHint } from "./live-summary.js";
+import {
+  defaultProbeOperationTimeouts,
+  persistTimedOutProbeUpgradeRequest,
+} from "./probe-upgrade-timeout.js";
 
 export type HostRouteServices = {
   audit?: AuditRepository;
@@ -58,11 +61,6 @@ export type HostRouteServices = {
   probeConfigurations?: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
   snapshotCollectors?: SnapshotCollectorStorageRegistry;
-};
-
-const defaultProbeOperationTimeouts: ProbeOperationConfig = {
-  acceptedTimeoutMs: 5 * 60 * 1000,
-  runningTimeoutMs: 15 * 60 * 1000,
 };
 
 const metricsWindows = {
@@ -125,8 +123,9 @@ export function createHostRoutes(services: HostRouteServices) {
           version: null,
         };
 
-    const hostProfile =
-      services.snapshotCollectors?.hostProfile.read(hostId) ?? null;
+    const hostProfileObservation =
+      services.snapshotCollectors?.hostProfile.readObservation(hostId) ?? null;
+    const hostProfile = hostProfileObservation?.view ?? null;
     const succeededOperation = succeedActiveProbeUpgradeRequestFromHostProfile({
       hostId,
       hostProfile,
@@ -143,13 +142,14 @@ export function createHostRoutes(services: HostRouteServices) {
           userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
         });
 
-    const currentOperation = currentProbeUpgradeProblem({
+    const currentOperation = currentHostDetailProbeUpgradeProblem({
       operation:
         succeededOperation ??
         timedOutOperation ??
         services.probeOperations?.findLatestForHost(hostId) ??
         null,
       reportedProbeVersion: hostProfile?.probeVersion,
+      reportedProbeVersionObservedAtMs: hostProfileObservation?.observedAtMs,
     });
     const response = {
       host: {
@@ -299,6 +299,15 @@ export function createHostRoutes(services: HostRouteServices) {
       probeUpgradeRequest: probeUpgradeStatus(operation),
     } satisfies ProbeUpgradeRequestResponse;
 
+    if (!isDuplicate) {
+      broadcastHostSummaryHint(services, {
+        hostId,
+        nowMs: now(),
+        timeouts: probeOperationTimeouts,
+        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+      });
+    }
+
     return context.json(response, isDuplicate ? 200 : 201);
   });
 
@@ -348,6 +357,13 @@ export function createHostRoutes(services: HostRouteServices) {
     const response = {
       probeUpgradeRequest: probeUpgradeStatus(canceled),
     } satisfies ProbeUpgradeRequestResponse;
+
+    broadcastHostSummaryHint(services, {
+      hostId,
+      nowMs: now(),
+      timeouts: probeOperationTimeouts,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
 
     return context.json(response);
   });
@@ -706,40 +722,14 @@ function failTimedOutActiveProbeUpgradeRequest(input: {
     return null;
   }
 
-  const failed =
-    acceptedTimedOutProbeUpgradeRequest({
-      acceptedTimeoutMs: input.probeOperationTimeouts.acceptedTimeoutMs,
-      nowMs: input.nowMs,
-      operation: activeOperation,
-    }) ??
-    runningTimedOutProbeUpgradeRequest({
-      nowMs: input.nowMs,
-      operation: activeOperation,
-      runningTimeoutMs: input.probeOperationTimeouts.runningTimeoutMs,
-    });
-
-  if (!failed) {
-    return null;
-  }
-
-  const persisted =
-    input.services.probeOperations?.updateProbeUpgradeRequest(failed) ?? failed;
-  input.services.audit?.record({
-    action: "probe_upgrade_request.fail",
-    actor: "system",
-    details: {
-      failureCode: persisted.failureCode,
-      hostId: input.hostId,
-      targetProbeVersion: persisted.targetProbeVersion,
-    },
-    occurredAtMs: input.nowMs,
-    outcome: "success",
-    subjectId: String(persisted.id),
-    subjectType: "probe_upgrade_request",
+  return persistTimedOutProbeUpgradeRequest({
+    audit: input.services.audit,
+    nowMs: input.nowMs,
+    operation: activeOperation,
+    probeOperations: input.services.probeOperations,
+    timeouts: input.probeOperationTimeouts,
     userAgent: input.userAgent,
   });
-
-  return persisted;
 }
 
 function succeedActiveProbeUpgradeRequestFromHostProfile(input: {

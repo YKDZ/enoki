@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -46,6 +46,7 @@ async function createTemporaryDatabase() {
 async function startHubServer(options: {
   database: Awaited<ReturnType<typeof createTemporaryDatabase>>;
   now?: () => number;
+  probeAssetDir?: string;
 }) {
   const server = await createHubNodeServer({
     auth: {
@@ -60,6 +61,9 @@ async function startHubServer(options: {
       capacity: 20,
     }),
     port: 0,
+    probeAssets: options.probeAssetDir
+      ? { assetDir: options.probeAssetDir }
+      : undefined,
   });
   openServers.push(server);
 
@@ -1044,6 +1048,146 @@ describe("WebSocket live updates", () => {
         }),
       ]),
     );
+
+    await closeSocket(socket);
+    database.close();
+  });
+
+  it("fails an accepted timeout on the first overview summary without requiring Host detail", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const { baseUrl } = await startHubServer({
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-overview-timeout",
+    });
+    const operation = database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: nowMs - 5 * 60 * 1_000 - 1,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: nowMs - 6 * 60 * 1_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: 1,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "accepted",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: nowMs - 5 * 60 * 1_000 - 1,
+    });
+
+    const firstOverview = await fetch(`${baseUrl}/api/web/hosts`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(firstOverview.status).toBe(200);
+    await expect(firstOverview.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: 1,
+          probeUpgradeProblem: { status: "failed" },
+        }),
+      ],
+    });
+    expect(database.probeOperations.findById(operation.id!)).toEqual(
+      expect.objectContaining({
+        failureCode: "accepted_timeout",
+        state: "failed",
+      }),
+    );
+
+    const secondOverview = await fetch(`${baseUrl}/api/web/hosts`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(secondOverview.status).toBe(200);
+    const failureAudits = database.audit
+      .recent(10)
+      .filter((event) => event.action === "probe_upgrade_request.fail");
+    expect(failureAudits).toHaveLength(1);
+
+    database.close();
+  });
+
+  it("broadcasts the authoritative Host summary after Owner create and cancel", async () => {
+    const database = await createTemporaryDatabase();
+    const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
+    tempRoots.push(assetRoot);
+    const assetDir = path.join(assetRoot, "assets");
+    await mkdir(assetDir, { recursive: true });
+    await writeFile(
+      path.join(assetDir, "manifest.json"),
+      JSON.stringify({
+        assets: [
+          {
+            file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+            sha256: "a".repeat(64),
+            target: "x86_64-unknown-linux-gnu",
+          },
+        ],
+        kind: "enoki-probe-assets",
+        signature: {
+          algorithm: "rsa-sha256",
+          file: "manifest.json.sig",
+        },
+        version: "0.2.0",
+      }),
+    );
+    const { baseUrl, webSocketUrl } = await startHubServer({
+      database,
+      now: () => 1_725_000_010_000,
+      probeAssetDir: assetDir,
+    });
+    const ownerSession = await loginOwner(baseUrl);
+    const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);
+    const registration = await registerProbe(baseUrl, enrollmentToken);
+    await sendStartupReport(baseUrl, registration, {
+      bootId: "boot-owner-transition",
+    });
+    const socket = await openWebSocket(webSocketUrl, { cookie: ownerSession });
+
+    const createdSummary = readWebSocketJson(socket);
+    const creation = await fetch(
+      `${baseUrl}/api/web/hosts/1/probe-upgrade-requests`,
+      {
+        headers: { cookie: ownerSession },
+        method: "POST",
+      },
+    );
+    expect(creation.status).toBe(201);
+    const created = (await creation.json()) as {
+      probeUpgradeRequest: { id: number };
+    };
+    await expect(createdSummary).resolves.toEqual({
+      host: expect.objectContaining({
+        id: 1,
+        probeUpgradeProblem: { status: "in_progress" },
+      }),
+      type: "host_summary",
+    });
+
+    const canceledSummary = readWebSocketJson(socket);
+    const cancellation = await fetch(
+      `${baseUrl}/api/web/hosts/1/probe-upgrade-requests/${created.probeUpgradeRequest.id}`,
+      {
+        headers: { cookie: ownerSession },
+        method: "DELETE",
+      },
+    );
+    expect(cancellation.status).toBe(200);
+    await expect(canceledSummary).resolves.toEqual({
+      host: expect.objectContaining({
+        id: 1,
+        probeUpgradeProblem: null,
+      }),
+      type: "host_summary",
+    });
 
     await closeSocket(socket);
     database.close();

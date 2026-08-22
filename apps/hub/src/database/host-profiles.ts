@@ -26,6 +26,9 @@ export type SnapshotCollectorStorageAdapter<Payload, View> = {
     snapshotHash: string | null | undefined,
   ) => boolean;
   read: (hostId: number) => View | null;
+  readObservation: (
+    hostId: number,
+  ) => { observedAtMs: number; view: View } | null;
   write: (input: {
     hostId: number;
     observedIp?: string | null;
@@ -200,6 +203,18 @@ export function createHostProfileStorageAdapter(
           .get() ?? null;
 
       return row ? viewFromRow(row) : null;
+    },
+    readObservation(hostId) {
+      const row =
+        database
+          .select()
+          .from(officialHostProfiles)
+          .where(eq(officialHostProfiles.hostId, hostId))
+          .get() ?? null;
+
+      return row
+        ? { observedAtMs: row.updatedAtMs, view: viewFromRow(row) }
+        : null;
     },
     write(input) {
       const view = normalizeHostProfile(input.payload);
