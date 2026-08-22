@@ -35,6 +35,8 @@ import {
   validateProbeSigningIdentity,
   verifyProbeTrustDelegation,
 } from "./release-candidate-lib.mjs";
+import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
+import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const candidateCli = "scripts/release-candidate.mjs";
@@ -872,6 +874,80 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       expect(validation.stdout).toBe(
         `Probe Asset Set is valid: 1.2.3 ${publicKeySha256}\n`,
       );
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
+  it("resolves one replacement transition against the current single-Bundle manifest", async () => {
+    const workDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-set-"));
+    try {
+      const fixture = await createProbeAssetSetFixture(workDir, {
+        version: "v1.2.3",
+      });
+      const legacyRelease = legacyMigrationRelease();
+      const authorization = createTrustEpochMigrationAuthorization({
+        candidateVersion: "v1.2.3",
+        distribution: "enoki",
+        legacyRelease,
+        rootPrivateKeyPem: fixture.root.privateKey,
+      });
+      const targetManifestBytes = await readFile(
+        path.join(fixture.outputDir, "manifest.json"),
+      );
+      const transition = createReleaseTransitionContract({
+        authorizationBytes: authorization.bytes,
+        authorizationSignature: authorization.signature,
+        candidateCommit: checkedOutCommit,
+        delegationBytes: await readFile(
+          path.join(fixture.outputDir, "trust-delegation.json"),
+        ),
+        delegationSignature: await readFile(
+          path.join(fixture.outputDir, "trust-delegation.json.sig"),
+        ),
+        legacyRelease,
+        rootPrivateKeyPem: fixture.root.privateKey,
+        rootPublicKeyPem: fixture.root.publicKey,
+        targetManifestBytes,
+        targetVersion: "1.2.3",
+      });
+      await Promise.all([
+        writeFile(
+          path.join(fixture.outputDir, "release-transition-contract.json"),
+          transition.bytes,
+        ),
+        writeFile(
+          path.join(fixture.outputDir, "release-transition-contract.json.sig"),
+          transition.signature,
+        ),
+        writeFile(
+          path.join(
+            fixture.outputDir,
+            "trust-epoch-migration-authorization.json",
+          ),
+          authorization.bytes,
+        ),
+        writeFile(
+          path.join(
+            fixture.outputDir,
+            "trust-epoch-migration-authorization.json.sig",
+          ),
+          authorization.signature,
+        ),
+      ]);
+
+      await expect(
+        inspectProbeAssetSet(fixture.outputDir, {
+          expectedVersion: "1.2.3",
+          trustedRootPublicKeyPem: fixture.root.publicKey,
+        }),
+      ).resolves.toMatchObject({
+        releaseTransition: {
+          candidateCommit: checkedOutCommit,
+          transition: "replacement-required",
+          target: { version: "1.2.3" },
+        },
+      });
     } finally {
       await rm(workDir, { force: true, recursive: true });
     }
@@ -1750,6 +1826,29 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
 
 function sha256(contents) {
   return createHash("sha256").update(contents).digest("hex");
+}
+
+function legacyMigrationRelease() {
+  return {
+    assets: [
+      { name: "manifest.json", sha256: "1".repeat(64), size: 100 },
+      { name: "manifest.json.sig", sha256: "2".repeat(64), size: 256 },
+      { name: "signing-key.pem", sha256: "3".repeat(64), size: 451 },
+    ],
+    githubRelease: {
+      id: 368250351,
+      peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
+      repository: "YKDZ/enoki",
+      tag: "v0.1.74",
+      tagRefSha: "4".repeat(40),
+      targetCommitish: "main",
+    },
+    hub: {
+      digest: `sha256:${"5".repeat(64)}`,
+      image: "ghcr.io/ykdz/enoki-hub",
+    },
+    legacySigningKeySha256: "3".repeat(64),
+  };
 }
 
 async function createProbeAssetSetFixture(

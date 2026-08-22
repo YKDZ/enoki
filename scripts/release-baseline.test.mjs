@@ -36,6 +36,7 @@ import {
   prepareProbeAssetSet,
   probeTargets,
 } from "./release-candidate-lib.mjs";
+import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";
@@ -142,6 +143,60 @@ describe("Release Baseline resolution", () => {
       await expect(
         resolveReleaseBaseline(fixture.arguments_),
       ).resolves.toMatchObject({ tag: "v1.7.2" });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("resolves the exact root-authorized v0.1.74 baseline as replacement-required", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await expect(
+        resolveReleaseBaseline(fixture.arguments_),
+      ).resolves.toMatchObject({
+        kind: "enoki-trust-epoch-migration-baseline",
+        schemaVersion: 1,
+        tag: "v0.1.74",
+        transition: "replacement-required",
+      });
+      await expect(
+        recheckReleaseBaseline({
+          bundleDir: fixture.outputDir,
+          candidateVersion: "v0.1.75",
+          githubRepository: "YKDZ/enoki",
+          releaseCatalog: fixture.arguments_.releaseCatalog,
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).resolves.toMatchObject({ transition: "replacement-required" });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps the ordinary rooted failure when migration material is unavailable", async () => {
+    const fixture = await createResolverFixture({ legacyTrustEpoch: true });
+    try {
+      fixture.release.tagName = "v0.1.74";
+      fixture.releaseIdentity.tagName = "v0.1.74";
+      fixture.releaseIdentity.assets = fixture.release.assets;
+      fixture.arguments_.candidateVersion = "v0.1.75";
+      await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
+        "must contain exactly",
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("does not classify another legacy tag as the trust epoch migration", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      fixture.release.tagName = "v0.1.73";
+      fixture.releaseIdentity.tagName = "v0.1.73";
+      fixture.arguments_.candidateVersion = "v0.1.75";
+      await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
+        "must contain exactly",
+      );
     } finally {
       await fixture.cleanup();
     }
@@ -417,6 +472,18 @@ describe("Release Baseline resolution", () => {
     );
     expect(workflow).toContain("release-baseline.mjs recheck");
     expect(workflow).toContain("--trusted-root-public-key-env");
+    expect(workflow).toContain(
+      "TRUST_EPOCH_MIGRATION_AUTHORIZATION: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON }}",
+    );
+    expect(workflow).toContain(
+      "RELEASE_TRANSITION_CONTRACT: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_JSON }}",
+    );
+    expect(workflow).toContain(
+      'if [ "$RELEASE_BASELINE_KIND" = "enoki-trust-epoch-migration-baseline" ]; then',
+    );
+    expect(releaseWorkflow).not.toMatch(
+      /trust[_-]epoch|skip[_-]baseline|legacy[_-]signing/i,
+    );
     expect(releaseWorkflow).toContain("group: enoki-release-global");
   });
 });
@@ -438,6 +505,15 @@ async function createResolverFixture(options = {}) {
   const probe = await createProbeAssetSetFixture(workDir, "v1.7.2", {
     legacyProbe: options.legacyProbe,
   });
+  if (options.legacyTrustEpoch) {
+    await Promise.all(
+      [
+        "root-key.pem",
+        "trust-delegation.json",
+        "trust-delegation.json.sig",
+      ].map((file) => rm(path.join(probe.outputDir, file))),
+    );
+  }
   const hub = await createHubClosureFixture(workDir, probe.outputDir, options);
   const contents = new Map();
   for (const name of await readdir(probe.outputDir)) {
@@ -487,6 +563,45 @@ async function createResolverFixture(options = {}) {
     releaseIdentity,
     releases,
   };
+}
+
+async function createLegacyTrustEpochFixture() {
+  const fixture = await createResolverFixture({ legacyTrustEpoch: true });
+  fixture.release.tagName = "v0.1.74";
+  fixture.releaseIdentity.tagName = "v0.1.74";
+  fixture.releaseIdentity.assets = fixture.release.assets;
+  fixture.arguments_.candidateVersion = "v0.1.75";
+  const expectedLegacyRelease = {
+    assets: fixture.release.assets.map((asset) => ({
+      name: asset.name,
+      sha256: asset.digest.slice("sha256:".length),
+      size: asset.size,
+    })),
+    githubRelease: {
+      id: fixture.releaseIdentity.id,
+      peeledCommitSha: fixture.releaseIdentity.peeledCommitSha,
+      repository: "YKDZ/enoki",
+      tag: "v0.1.74",
+      tagRefSha: fixture.releaseIdentity.tagRefSha,
+      targetCommitish: fixture.releaseIdentity.targetCommitish,
+    },
+    hub: {
+      digest: fixture.hub.sourceManifest.descriptor.digest,
+      image: "ghcr.io/ykdz/enoki-hub",
+    },
+    legacySigningKeySha256: sha256(Buffer.from(fixture.probe.publicKey)),
+  };
+  const authorization = createTrustEpochMigrationAuthorization({
+    candidateVersion: "v0.1.75",
+    distribution: "enoki",
+    legacyRelease: expectedLegacyRelease,
+    rootPrivateKeyPem: fixture.probe.root.privateKey,
+  });
+  fixture.arguments_.trustEpochMigrationAuthorizationBytes =
+    authorization.bytes;
+  fixture.arguments_.trustEpochMigrationAuthorizationSignature =
+    authorization.signature;
+  return fixture;
 }
 
 async function createProbeAssetSetFixture(

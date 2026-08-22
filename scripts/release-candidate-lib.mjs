@@ -864,9 +864,15 @@ export async function assembleReleaseCandidate({
   const releaseBaseline = await validateResolvedReleaseBaseline(
     releaseBaselineDir,
     {
+      candidateVersion: version,
       trustedRootPublicKeyPem,
     },
   );
+  assertReleaseTransitionMatchesCandidate({
+    identity,
+    releaseBaseline,
+    releaseTransition: probeAssetSet.releaseTransition ?? null,
+  });
   const hubArchiveFile = `enoki-hub-${version}.oci.tar`;
   const hubArchive = {
     archive: `hub/${hubArchiveFile}`,
@@ -895,11 +901,9 @@ export async function assembleReleaseCandidate({
     await cp(probeAssetSetDir, path.join(stagingDir, "probe-assets"), {
       recursive: true,
     });
-    if (releaseBaseline.kind === "enoki-release-baseline") {
-      await cp(releaseBaselineDir, path.join(stagingDir, "release-baseline"), {
-        recursive: true,
-      });
-    }
+    await cp(releaseBaselineDir, path.join(stagingDir, "release-baseline"), {
+      recursive: true,
+    });
     await copyFile(hubOciPath, path.join(stagingDir, "hub", hubArchiveFile));
     await writeFile(
       path.join(stagingDir, "candidate-manifest.json"),
@@ -973,18 +977,21 @@ export async function validateReleaseCandidate(
     "probe-assets",
     "release-baseline",
   ];
-  if (releaseBaseline.kind === "enoki-release-baseline") {
+  if (
+    releaseBaseline.kind === "enoki-release-baseline" ||
+    releaseBaseline.kind === "enoki-trust-epoch-migration-baseline"
+  ) {
     const {
       assertReleaseBaselinePrecedesCandidate,
-      validateReleaseBaselineBundle,
+      validateResolvedReleaseBaseline,
     } = await import("./release-baseline-lib.mjs");
     assertReleaseBaselinePrecedesCandidate({
       baselineTag: releaseBaseline.tag,
       candidateVersion: identity.version,
     });
-    const inspectedBaseline = await validateReleaseBaselineBundle(
+    const inspectedBaseline = await validateResolvedReleaseBaseline(
       path.join(candidateDir, "release-baseline"),
-      { trustedRootPublicKeyPem },
+      { candidateVersion: identity.version, trustedRootPublicKeyPem },
     );
     if (JSON.stringify(inspectedBaseline) !== JSON.stringify(releaseBaseline)) {
       throw new Error(
@@ -1017,6 +1024,11 @@ export async function validateReleaseCandidate(
     path.join(candidateDir, "probe-assets"),
     { expectedVersion: probe.version, trustedRootPublicKeyPem },
   );
+  assertReleaseTransitionMatchesCandidate({
+    identity,
+    releaseBaseline,
+    releaseTransition: inspectedProbe.releaseTransition ?? null,
+  });
   if (JSON.stringify(inspectedProbe.files) !== JSON.stringify(probe.files)) {
     throw new Error(
       "Candidate Manifest Probe file identities do not match content",
@@ -1076,6 +1088,30 @@ export async function validateReleaseCandidate(
   return manifest;
 }
 
+function assertReleaseTransitionMatchesCandidate({
+  identity,
+  releaseBaseline,
+  releaseTransition,
+}) {
+  const migration =
+    releaseBaseline.kind === "enoki-trust-epoch-migration-baseline";
+  if (!migration && releaseTransition !== null) {
+    throw new Error("Ordinary Release Candidate transition does not match");
+  }
+  if (!migration) return;
+  if (
+    releaseTransition === null ||
+    releaseTransition.transition !== "replacement-required" ||
+    releaseTransition.candidateCommit !== identity.commit ||
+    releaseTransition.source.tag !== releaseBaseline.tag ||
+    releaseTransition.source.commit !==
+      releaseBaseline.githubRelease?.peeledCommitSha ||
+    `v${releaseTransition.target.version}` !== identity.version
+  ) {
+    throw new Error("Trust Epoch Migration candidate does not match");
+  }
+}
+
 export async function inspectProbeAssetSet(
   assetDir,
   {
@@ -1089,6 +1125,22 @@ export async function inspectProbeAssetSet(
     unsigned = false,
   } = {},
 ) {
+  const transitionFileNames = [
+    "release-transition-contract.json",
+    "release-transition-contract.json.sig",
+    "trust-epoch-migration-authorization.json",
+    "trust-epoch-migration-authorization.json.sig",
+  ];
+  const actualFiles = (await readdir(assetDir)).sort();
+  const transitionFileCount = transitionFileNames.filter((file) =>
+    actualFiles.includes(file),
+  ).length;
+  if (transitionFileCount !== 0 && transitionFileCount !== 4) {
+    throw new Error("Probe Asset Set transition closure is incomplete");
+  }
+  if (unsigned && transitionFileCount !== 0) {
+    throw new Error("Unsigned Probe Asset Set cannot declare a transition");
+  }
   const expectedFiles = [
     ...probeTargets.flatMap((target) => {
       const archive = `enoki-probe-${target}.tar.gz`;
@@ -1100,12 +1152,9 @@ export async function inspectProbeAssetSet(
     "signing-key.pem",
     "trust-delegation.json",
     "trust-delegation.json.sig",
+    ...(transitionFileCount === 4 ? transitionFileNames : []),
   ].sort();
-  assertSameFileNames(
-    (await readdir(assetDir)).sort(),
-    expectedFiles,
-    "Probe Asset Set",
-  );
+  assertSameFileNames(actualFiles, expectedFiles, "Probe Asset Set");
 
   const manifestBytes = await readFile(path.join(assetDir, "manifest.json"));
   let manifest;
@@ -1319,6 +1368,41 @@ export async function inspectProbeAssetSet(
       throw new Error("Probe Asset Set manifest signature is invalid");
     }
   }
+  let releaseTransition = null;
+  if (transitionFileCount === 4) {
+    const contractBytes = await readFile(
+      path.join(assetDir, "release-transition-contract.json"),
+    );
+    let contract;
+    try {
+      contract = JSON.parse(contractBytes.toString("utf8"));
+    } catch {
+      throw new Error("Release Transition Contract is malformed");
+    }
+    const { verifyReleaseTransitionContract } =
+      await import("./release-transition-contract.mjs");
+    releaseTransition = verifyReleaseTransitionContract({
+      authorizationBytes: await readFile(
+        path.join(assetDir, "trust-epoch-migration-authorization.json"),
+      ),
+      authorizationSignature: await readFile(
+        path.join(assetDir, "trust-epoch-migration-authorization.json.sig"),
+      ),
+      contractBytes,
+      contractSignature: await readFile(
+        path.join(assetDir, "release-transition-contract.json.sig"),
+      ),
+      expected: {
+        candidateCommit: contract.candidateCommit,
+        delegationGeneration: manifest.signature.delegationGeneration,
+        sourceCommit: contract.source?.commit,
+        sourceTag: contract.source?.tag,
+        targetAssetSetManifestSha256: sha256(manifestBytes),
+        targetVersion: manifest.version,
+      },
+      rootPublicKeyPem: trustedRootPublicKey ?? canonicalRootPublicKey,
+    });
+  }
   const publicKeySha256 = sha256(publicKey);
   const files = [];
   for (const file of expectedFiles) {
@@ -1332,6 +1416,7 @@ export async function inspectProbeAssetSet(
   }
   return {
     files,
+    ...(releaseTransition ? { releaseTransition } : {}),
     signingIdentity: {
       algorithm: "rsa-sha256",
       publicKeyFile: "signing-key.pem",

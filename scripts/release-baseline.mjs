@@ -38,6 +38,12 @@ try {
     "--github-repository",
     "--github-token-env",
     "--hub-image",
+    ...(command === "resolve"
+      ? [
+          "--trust-epoch-migration-authorization-env",
+          "--trust-epoch-migration-signature-env",
+        ]
+      : []),
     "--output",
     "--registry-token-env",
     "--trusted-root-public-key-env",
@@ -83,6 +89,7 @@ try {
     }),
     releaseCatalog: githubClient,
     trustedRootPublicKeyPem,
+    ...optionalMigrationAuthorization(options),
   });
   process.stdout.write(
     `resolved Release Baseline: ${descriptor.tag ?? descriptor.kind}\n`,
@@ -102,4 +109,38 @@ function requiredEnvironmentOption(options, option) {
     );
   }
   return value;
+}
+
+function optionalMigrationAuthorization(options) {
+  const authorizationEnvironment = options.get(
+    "--trust-epoch-migration-authorization-env",
+  );
+  const signatureEnvironment = options.get(
+    "--trust-epoch-migration-signature-env",
+  );
+  if (
+    authorizationEnvironment === undefined &&
+    signatureEnvironment === undefined
+  ) {
+    return {};
+  }
+  if (!authorizationEnvironment || !signatureEnvironment) {
+    throw new Error(
+      "Trust Epoch Migration Authorization public material must be configured together",
+    );
+  }
+  const authorization = process.env[authorizationEnvironment];
+  const signature = process.env[signatureEnvironment];
+  if (!authorization && !signature) {
+    return {};
+  }
+  if (!authorization || !signature) {
+    throw new Error(
+      "Trust Epoch Migration Authorization public material is unavailable",
+    );
+  }
+  return {
+    trustEpochMigrationAuthorizationBytes: Buffer.from(authorization, "utf8"),
+    trustEpochMigrationAuthorizationSignature: Buffer.from(signature, "base64"),
+  };
 }
