@@ -64,6 +64,19 @@ message ProbeReportRequest {
   repeated ProbeOperationStatus operation_statuses = 11;
   repeated Snapshot snapshots = 12;
   string enrollment_id = 13;
+  ObservationWindowFailure observation_window_failure = 14;
+}
+
+// 闭合的 Runtime 报告级失败，不携带 Provider、Resource、路径或本机诊断。
+message ObservationWindowFailure {
+  ObservationWindowFailureReason reason = 1;
+}
+
+enum ObservationWindowFailureReason {
+  OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED = 0;
+  OBSERVATION_RUNTIME_UNAVAILABLE = 1;
+  OBSERVATION_RUNTIME_INVALID_RESPONSE = 2;
+  PROBE_ASSET_BUNDLE_INCOHERENT = 3;
 }
 
 message ProbeReportResponse {

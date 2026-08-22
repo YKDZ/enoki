@@ -14,6 +14,7 @@ use crate::{
     host_profile::collect_local_host_profile,
     hub_url,
     metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
+    observation_runtime::{ObservationClientError, UnixObservationRuntimeClient},
     protocol::enoki::v1::{
         HostProfileSnapshot, ProbeConfigurationError, ProbeConfigurationRequest,
         ProbeConfigurationResponse, ProbeOperationFailed, ProbeOperationRunning,
@@ -426,6 +427,7 @@ fn run_reporting_loop(
     let mut sequence = 1;
     let mut reports_sent = 0;
     let mut metrics_collector = MetricsCollector::default();
+    let observation_runtime = UnixObservationRuntimeClient::production();
     let mut operation_reports = ProbeOperationReportQueue::default();
     let request = startup_report(StartupReportInput {
         boot_id: &boot_id,
@@ -504,12 +506,35 @@ fn run_reporting_loop(
     }
 
     while !report_limit_reached(reports_sent, control) {
-        let (sequence_start, sequence_end, metrics) = collect_observation_batch(
+        let collected = collect_observation_batch(
             sleeper,
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
+            &observation_runtime,
         );
+        let (sequence_start, sequence_end, metrics, observation_window_failure) = match collected {
+            Ok((sequence_start, sequence_end, metrics)) => {
+                (sequence_start, sequence_end, metrics, None)
+            }
+            Err(error) => {
+                let sequence_start = sequence + 1;
+                sequence = sequence_start;
+                let reason = match error {
+                    ObservationClientError::BundleIncoherent => crate::protocol::enoki::v1::ObservationWindowFailureReason::ProbeAssetBundleIncoherent,
+                    ObservationClientError::Unavailable => crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeUnavailable,
+                    ObservationClientError::InvalidResponse | ObservationClientError::WindowFailed => crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeInvalidResponse,
+                };
+                (
+                    sequence_start,
+                    sequence,
+                    Vec::new(),
+                    Some(crate::protocol::enoki::v1::ObservationWindowFailure {
+                        reason: reason as i32,
+                    }),
+                )
+            }
+        };
 
         let latest_host_profile = host_profile_provider.collect_host_profile();
         host_profile = latest_host_profile;
@@ -518,6 +543,7 @@ fn run_reporting_loop(
             boot_id: &boot_id,
             host_profile: &host_profile,
             metrics,
+            observation_window_failure,
             operation_progress: operation_reports.take_progress(),
             probe_configuration_error: pending_configuration_error.take(),
             probe_configuration_version: &active_configuration.version,
@@ -1080,15 +1106,25 @@ fn collect_observation_batch(
     active_configuration: &ActiveProbeConfiguration,
     sequence: &mut u64,
     metrics_collector: &mut MetricsCollector,
-) -> (u64, u64, Vec<crate::protocol::enoki::v1::MetricSample>) {
+    observation_runtime: &UnixObservationRuntimeClient,
+) -> Result<(u64, u64, Vec<crate::protocol::enoki::v1::MetricSample>), ObservationClientError> {
     let sequence_start = *sequence + 1;
 
     if !active_configuration.metrics_config.any_enabled() {
         sleeper.sleep(active_configuration.reporting_interval);
         *sequence += 1;
 
-        return (sequence_start, *sequence, Vec::new());
+        return Ok((sequence_start, *sequence, Vec::new()));
     }
+
+    let cpu_window = if active_configuration
+        .metrics_config
+        .collector_enabled(CollectorId::Cpu)
+    {
+        Some(observation_runtime.request_finalized_window()?)
+    } else {
+        None
+    };
 
     let schedule = CollectorCadenceSchedule::for_tick_interval(
         active_configuration.metrics_collection_interval,
@@ -1098,15 +1134,36 @@ fn collect_observation_batch(
     for _ in 0..REPORTING_WINDOW_TICKS {
         sleeper.sleep(active_configuration.metrics_collection_interval);
         *sequence += 1;
-        metrics.push(metrics_collector.collect_after(
+        let mut sample = metrics_collector.collect_after(
             *sequence,
             active_configuration.metrics_collection_interval,
             schedule,
             &active_configuration.metrics_config,
-        ));
+        );
+        if let Some(cpu_window) = &cpu_window {
+            let cpu_sample = cpu_window
+                .get(metrics.len())
+                .ok_or(ObservationClientError::InvalidResponse)?
+                .clone();
+            merge_cpu_metrics(&mut sample, cpu_sample);
+        }
+        metrics.push(sample);
     }
 
-    (sequence_start, *sequence, metrics)
+    Ok((sequence_start, *sequence, metrics))
+}
+
+fn merge_cpu_metrics(
+    sample: &mut crate::protocol::enoki::v1::MetricSample,
+    cpu_sample: crate::protocol::enoki::v1::MetricSample,
+) {
+    sample.cpu_cores = cpu_sample.cpu_cores;
+    sample.cpu_percent = cpu_sample.cpu_percent;
+    sample.cpu_idle_percent = cpu_sample.cpu_idle_percent;
+    sample.cpu_iowait_percent = cpu_sample.cpu_iowait_percent;
+    sample.cpu_steal_percent = cpu_sample.cpu_steal_percent;
+    sample.cpu_system_percent = cpu_sample.cpu_system_percent;
+    sample.cpu_user_percent = cpu_sample.cpu_user_percent;
 }
 
 fn apply_newer_configuration_if_needed(
@@ -1511,7 +1568,10 @@ mod tests {
     fn observation_batch_keeps_low_frequency_collectors_off_high_frequency_ticks() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(5),
-            metrics_config: MetricsCollectionConfig::all_enabled(),
+            metrics_config: MetricsCollectionConfig::from_enabled_collectors([
+                CollectorId::Memory,
+                CollectorId::Load,
+            ]),
             reporting_interval: Duration::from_secs(15),
             version: "default-v1".to_string(),
         };
@@ -1521,7 +1581,7 @@ mod tests {
             crate::metrics::CollectorRegistry::from_collectors(vec![
                 Box::new(FakeMetricCollector {
                     cadence: crate::metrics::CollectorCadence::EveryTick,
-                    metric_field: FakeMetricField::Cpu,
+                    metric_field: FakeMetricField::Memory,
                 }),
                 Box::new(FakeMetricCollector {
                     cadence: crate::metrics::CollectorCadence::Every12Ticks,
@@ -1535,7 +1595,9 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-        );
+            &UnixObservationRuntimeClient::production(),
+        )
+        .expect("non-CPU Observation Batch succeeds");
 
         assert_eq!(
             metrics
@@ -1547,7 +1609,7 @@ mod tests {
         assert!(
             metrics
                 .iter()
-                .all(|sample| sample.cpu_percent == Some(42.0))
+                .all(|sample| sample.memory_used_bytes == Some(42))
         );
         assert!(metrics.iter().all(|sample| sample.load_1.is_none()));
     }
@@ -1556,7 +1618,7 @@ mod tests {
     fn observation_batch_collects_low_frequency_metrics_every_four_reporting_windows() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(7),
-            metrics_config: MetricsCollectionConfig::all_enabled(),
+            metrics_config: MetricsCollectionConfig::from_enabled_collectors([CollectorId::Load]),
             reporting_interval: Duration::from_secs(21),
             version: "default-v1".to_string(),
         };
@@ -1575,25 +1637,33 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-        );
+            &UnixObservationRuntimeClient::production(),
+        )
+        .expect("first non-CPU Observation Batch succeeds");
         let (_, _, second_metrics) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-        );
+            &UnixObservationRuntimeClient::production(),
+        )
+        .expect("second non-CPU Observation Batch succeeds");
         let (_, _, third_metrics) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-        );
+            &UnixObservationRuntimeClient::production(),
+        )
+        .expect("third non-CPU Observation Batch succeeds");
         let (_, _, fourth_metrics) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-        );
+            &UnixObservationRuntimeClient::production(),
+        )
+        .expect("fourth non-CPU Observation Batch succeeds");
 
         assert_eq!(
             [
@@ -1625,8 +1695,8 @@ mod tests {
     }
 
     enum FakeMetricField {
-        Cpu,
         Load,
+        Memory,
     }
 
     struct FakeMetricCollector {
@@ -1644,8 +1714,8 @@ mod tests {
             sample: &mut crate::protocol::enoki::v1::MetricSample,
         ) -> Result<bool, crate::metrics::CollectorError> {
             match self.metric_field {
-                FakeMetricField::Cpu => sample.cpu_percent = Some(42.0),
                 FakeMetricField::Load => sample.load_1 = Some(1.0),
+                FakeMetricField::Memory => sample.memory_used_bytes = Some(42),
             }
 
             Ok(true)
@@ -1655,8 +1725,8 @@ mod tests {
     impl FakeMetricField {
         fn collector_id(&self) -> crate::metrics::CollectorId {
             match self {
-                FakeMetricField::Cpu => crate::metrics::CollectorId::Cpu,
                 FakeMetricField::Load => crate::metrics::CollectorId::Load,
+                FakeMetricField::Memory => crate::metrics::CollectorId::Memory,
             }
         }
     }

@@ -267,6 +267,102 @@ describe("Probe report API", () => {
     );
   });
 
+  it("persists one idempotent Observation Window Failure without Metrics", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-window-failure",
+        observationWindowFailure: {
+          reason:
+            root.enoki.v1.ObservationWindowFailureReason
+              .OBSERVATION_RUNTIME_UNAVAILABLE,
+        },
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    expect(
+      database.metrics.findObservation({
+        bootId: "boot-window-failure",
+        probeId: registration.probeId,
+        sequence: 2,
+      }),
+    ).toEqual({ observationWindowFailureReason: 1 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select count(*) as count from metric_samples where boot_id = ?",
+        )
+        .get("boot-window-failure"),
+    ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
+  it("rejects unknown Observation Window Failure reasons", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-window-failure-invalid",
+        observationWindowFailure: {
+          reason: 99 as root.enoki.v1.ObservationWindowFailureReason,
+        },
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", body),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "malformed_probe_report",
+    });
+    database.close();
+  });
+
   it("rejects the next authentic Probe report after Hub-only Host deletion", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

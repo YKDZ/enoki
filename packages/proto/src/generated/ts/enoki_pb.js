@@ -1493,6 +1493,7 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.IProbeOperationStatus>|null} [operationStatuses] ProbeReportRequest operationStatuses
              * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeReportRequest snapshots
              * @property {string|null} [enrollmentId] ProbeReportRequest enrollmentId
+             * @property {enoki.v1.IObservationWindowFailure|null} [observationWindowFailure] ProbeReportRequest observationWindowFailure
              */
 
             /**
@@ -1603,6 +1604,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.enrollmentId = "";
 
             /**
+             * ProbeReportRequest observationWindowFailure.
+             * @member {enoki.v1.IObservationWindowFailure|null|undefined} observationWindowFailure
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.observationWindowFailure = null;
+
+            /**
              * Creates a new ProbeReportRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportRequest
@@ -1656,6 +1665,8 @@ export const enoki = $root.enoki = (() => {
                         $root.enoki.v1.Snapshot.encode(message.snapshots[i], writer.uint32(/* id 12, wireType 2 =*/98).fork(), q + 1).ldelim();
                 if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
                     writer.uint32(/* id 13, wireType 2 =*/106).string(message.enrollmentId);
+                if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure"))
+                    $root.enoki.v1.ObservationWindowFailure.encode(message.observationWindowFailure, writer.uint32(/* id 14, wireType 2 =*/114).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -1746,6 +1757,10 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 13: {
                             message.enrollmentId = reader.string();
+                            break;
+                        }
+                    case 14: {
+                            message.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
                     default:
@@ -1846,6 +1861,11 @@ export const enoki = $root.enoki = (() => {
                 if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
                     if (!$util.isString(message.enrollmentId))
                         return "enrollmentId: string expected";
+                if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure")) {
+                    let error = $root.enoki.v1.ObservationWindowFailure.verify(message.observationWindowFailure, long + 1);
+                    if (error)
+                        return "observationWindowFailure." + error;
+                }
                 return null;
             };
 
@@ -1938,6 +1958,11 @@ export const enoki = $root.enoki = (() => {
                 }
                 if (object.enrollmentId != null)
                     message.enrollmentId = String(object.enrollmentId);
+                if (object.observationWindowFailure != null) {
+                    if (!$util.isObject(object.observationWindowFailure))
+                        throw TypeError(".enoki.v1.ProbeReportRequest.observationWindowFailure: object expected");
+                    message.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.fromObject(object.observationWindowFailure, long + 1);
+                }
                 return message;
             };
 
@@ -1980,6 +2005,7 @@ export const enoki = $root.enoki = (() => {
                     object.probeConfigurationVersion = "";
                     object.probeConfigurationError = null;
                     object.enrollmentId = "";
+                    object.observationWindowFailure = null;
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -2025,6 +2051,8 @@ export const enoki = $root.enoki = (() => {
                 }
                 if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
                     object.enrollmentId = message.enrollmentId;
+                if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure"))
+                    object.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.toObject(message.observationWindowFailure, options, q + 1);
                 return object;
             };
 
@@ -2055,6 +2083,280 @@ export const enoki = $root.enoki = (() => {
             };
 
             return ProbeReportRequest;
+        })();
+
+        v1.ObservationWindowFailure = (function() {
+
+            /**
+             * Properties of an ObservationWindowFailure.
+             * @memberof enoki.v1
+             * @interface IObservationWindowFailure
+             * @property {enoki.v1.ObservationWindowFailureReason|null} [reason] ObservationWindowFailure reason
+             */
+
+            /**
+             * Constructs a new ObservationWindowFailure.
+             * @memberof enoki.v1
+             * @classdesc Represents an ObservationWindowFailure.
+             * @implements IObservationWindowFailure
+             * @constructor
+             * @param {enoki.v1.IObservationWindowFailure=} [properties] Properties to set
+             */
+            function ObservationWindowFailure(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ObservationWindowFailure reason.
+             * @member {enoki.v1.ObservationWindowFailureReason} reason
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @instance
+             */
+            ObservationWindowFailure.prototype.reason = 0;
+
+            /**
+             * Creates a new ObservationWindowFailure instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {enoki.v1.IObservationWindowFailure=} [properties] Properties to set
+             * @returns {enoki.v1.ObservationWindowFailure} ObservationWindowFailure instance
+             */
+            ObservationWindowFailure.create = function create(properties) {
+                return new ObservationWindowFailure(properties);
+            };
+
+            /**
+             * Encodes the specified ObservationWindowFailure message. Does not implicitly {@link enoki.v1.ObservationWindowFailure.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {enoki.v1.IObservationWindowFailure} message ObservationWindowFailure message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ObservationWindowFailure.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
+                    writer.uint32(/* id 1, wireType 0 =*/8).int32(message.reason);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ObservationWindowFailure message, length delimited. Does not implicitly {@link enoki.v1.ObservationWindowFailure.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {enoki.v1.IObservationWindowFailure} message ObservationWindowFailure message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ObservationWindowFailure.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes an ObservationWindowFailure message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ObservationWindowFailure} ObservationWindowFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ObservationWindowFailure.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ObservationWindowFailure();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.reason = reader.int32();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes an ObservationWindowFailure message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ObservationWindowFailure} ObservationWindowFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ObservationWindowFailure.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies an ObservationWindowFailure message.
+             * @function verify
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ObservationWindowFailure.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
+                    switch (message.reason) {
+                    default:
+                        return "reason: enum value expected";
+                    case 0:
+                    case 1:
+                    case 2:
+                    case 3:
+                        break;
+                    }
+                return null;
+            };
+
+            /**
+             * Creates an ObservationWindowFailure message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ObservationWindowFailure} ObservationWindowFailure
+             */
+            ObservationWindowFailure.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ObservationWindowFailure)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ObservationWindowFailure: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ObservationWindowFailure();
+                switch (object.reason) {
+                default:
+                    if (typeof object.reason === "number") {
+                        message.reason = object.reason;
+                        break;
+                    }
+                    break;
+                case "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED":
+                case 0:
+                    message.reason = 0;
+                    break;
+                case "OBSERVATION_RUNTIME_UNAVAILABLE":
+                case 1:
+                    message.reason = 1;
+                    break;
+                case "OBSERVATION_RUNTIME_INVALID_RESPONSE":
+                case 2:
+                    message.reason = 2;
+                    break;
+                case "PROBE_ASSET_BUNDLE_INCOHERENT":
+                case 3:
+                    message.reason = 3;
+                    break;
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from an ObservationWindowFailure message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {enoki.v1.ObservationWindowFailure} message ObservationWindowFailure
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ObservationWindowFailure.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.reason = options.enums === String ? "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED" : 0;
+                if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
+                    object.reason = options.enums === String ? $root.enoki.v1.ObservationWindowFailureReason[message.reason] === undefined ? message.reason : $root.enoki.v1.ObservationWindowFailureReason[message.reason] : message.reason;
+                return object;
+            };
+
+            /**
+             * Converts this ObservationWindowFailure to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ObservationWindowFailure.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ObservationWindowFailure
+             * @function getTypeUrl
+             * @memberof enoki.v1.ObservationWindowFailure
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ObservationWindowFailure.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ObservationWindowFailure";
+            };
+
+            return ObservationWindowFailure;
+        })();
+
+        /**
+         * ObservationWindowFailureReason enum.
+         * @name enoki.v1.ObservationWindowFailureReason
+         * @enum {number}
+         * @property {number} OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED=0 OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED value
+         * @property {number} OBSERVATION_RUNTIME_UNAVAILABLE=1 OBSERVATION_RUNTIME_UNAVAILABLE value
+         * @property {number} OBSERVATION_RUNTIME_INVALID_RESPONSE=2 OBSERVATION_RUNTIME_INVALID_RESPONSE value
+         * @property {number} PROBE_ASSET_BUNDLE_INCOHERENT=3 PROBE_ASSET_BUNDLE_INCOHERENT value
+         */
+        v1.ObservationWindowFailureReason = (function() {
+            const valuesById = {}, values = Object.create(valuesById);
+            values[valuesById[0] = "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED"] = 0;
+            values[valuesById[1] = "OBSERVATION_RUNTIME_UNAVAILABLE"] = 1;
+            values[valuesById[2] = "OBSERVATION_RUNTIME_INVALID_RESPONSE"] = 2;
+            values[valuesById[3] = "PROBE_ASSET_BUNDLE_INCOHERENT"] = 3;
+            return values;
         })();
 
         v1.ProbeReportResponse = (function() {

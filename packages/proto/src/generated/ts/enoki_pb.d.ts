@@ -593,6 +593,9 @@ export namespace enoki {
 
             /** ProbeReportRequest enrollmentId */
             enrollmentId?: (string|null);
+
+            /** ProbeReportRequest observationWindowFailure */
+            observationWindowFailure?: (enoki.v1.IObservationWindowFailure|null);
         }
 
         /** Represents a ProbeReportRequest. */
@@ -636,6 +639,9 @@ export namespace enoki {
 
             /** ProbeReportRequest enrollmentId. */
             public enrollmentId: string;
+
+            /** ProbeReportRequest observationWindowFailure. */
+            public observationWindowFailure?: (enoki.v1.IObservationWindowFailure|null);
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.
@@ -713,6 +719,111 @@ export namespace enoki {
              * @returns The default type url
              */
             public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of an ObservationWindowFailure. */
+        interface IObservationWindowFailure {
+
+            /** ObservationWindowFailure reason */
+            reason?: (enoki.v1.ObservationWindowFailureReason|null);
+        }
+
+        /** Represents an ObservationWindowFailure. */
+        class ObservationWindowFailure implements IObservationWindowFailure {
+
+            /**
+             * Constructs a new ObservationWindowFailure.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IObservationWindowFailure);
+
+            /** ObservationWindowFailure reason. */
+            public reason: enoki.v1.ObservationWindowFailureReason;
+
+            /**
+             * Creates a new ObservationWindowFailure instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ObservationWindowFailure instance
+             */
+            public static create(properties?: enoki.v1.IObservationWindowFailure): enoki.v1.ObservationWindowFailure;
+
+            /**
+             * Encodes the specified ObservationWindowFailure message. Does not implicitly {@link enoki.v1.ObservationWindowFailure.verify|verify} messages.
+             * @param message ObservationWindowFailure message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IObservationWindowFailure, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ObservationWindowFailure message, length delimited. Does not implicitly {@link enoki.v1.ObservationWindowFailure.verify|verify} messages.
+             * @param message ObservationWindowFailure message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IObservationWindowFailure, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes an ObservationWindowFailure message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ObservationWindowFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ObservationWindowFailure;
+
+            /**
+             * Decodes an ObservationWindowFailure message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ObservationWindowFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ObservationWindowFailure;
+
+            /**
+             * Verifies an ObservationWindowFailure message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates an ObservationWindowFailure message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ObservationWindowFailure
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ObservationWindowFailure;
+
+            /**
+             * Creates a plain object from an ObservationWindowFailure message. Also converts values to other types if specified.
+             * @param message ObservationWindowFailure
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ObservationWindowFailure, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ObservationWindowFailure to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ObservationWindowFailure
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** ObservationWindowFailureReason enum. */
+        enum ObservationWindowFailureReason {
+            OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED = 0,
+            OBSERVATION_RUNTIME_UNAVAILABLE = 1,
+            OBSERVATION_RUNTIME_INVALID_RESPONSE = 2,
+            PROBE_ASSET_BUNDLE_INCOHERENT = 3
         }
 
         /** Properties of a ProbeReportResponse. */

@@ -4,6 +4,7 @@ pub mod host_profile;
 pub mod local_lifecycle;
 pub mod local_privilege_boundary;
 pub mod metrics;
+pub mod observation_runtime;
 pub mod privileged_collector_helpers;
 pub mod probe_auth;
 pub mod protocol;

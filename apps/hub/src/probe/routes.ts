@@ -566,6 +566,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           sample,
         ]),
       );
+      const observationWindowFailureReason =
+        validatedReport.observationWindowFailureReason;
       const detailSamples: HostDetailSample[] = [];
 
       for (
@@ -580,6 +582,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             observation: {
               bootId: request.bootId,
               hostId: host.id,
+              observationWindowFailureReason,
               probeId: host.probeId,
               receivedAtMs: reportReceivedAtMs,
               sequence,
@@ -704,6 +707,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             observation: {
               bootId: request.bootId,
               hostId: host.id,
+              observationWindowFailureReason,
               probeId: host.probeId,
               receivedAtMs: reportReceivedAtMs,
               sequence,
@@ -1998,7 +2002,24 @@ function validateReportEnvelope(request: ProtoMessage) {
   }
 
   const samples = request.metrics ?? [];
+  const observationWindowFailureReason = observationWindowFailureReasonFor(
+    request.observationWindowFailure,
+  );
   const sequenceCount = sequenceEnd - sequenceStart + 1;
+
+  if (
+    request.observationWindowFailure != null &&
+    observationWindowFailureReason === null
+  ) {
+    return null;
+  }
+
+  if (
+    observationWindowFailureReason !== null &&
+    (samples.length !== 0 || sequenceCount !== 1)
+  ) {
+    return null;
+  }
 
   if (samples.length === 0 && sequenceCount !== 1) {
     return null;
@@ -2041,7 +2062,16 @@ function validateReportEnvelope(request: ProtoMessage) {
     }
   }
 
-  return { sequenceEnd, sequenceStart };
+  return { observationWindowFailureReason, sequenceEnd, sequenceStart };
+}
+
+function observationWindowFailureReasonFor(failure: unknown): number | null {
+  if (!failure || typeof failure !== "object") {
+    return null;
+  }
+
+  const reason = unsignedNumber((failure as ProtoMessage).reason);
+  return reason >= 1 && reason <= 3 ? reason : null;
 }
 
 function reportResponsibilityFor(input: {
@@ -2084,7 +2114,8 @@ function reportResponsibilityFor(input: {
       (input.request.metrics ?? []).length === 0 &&
       typeof input.request.probeConfigurationVersion === "string" &&
       input.request.probeConfigurationVersion.length > 0 &&
-      !input.request.probeConfigurationError
+      !input.request.probeConfigurationError &&
+      !input.request.observationWindowFailure
       ? "startup"
       : null;
   }
@@ -2101,6 +2132,7 @@ function reportResponsibilityFor(input: {
 function hasSnapshotReplayOnlyContents(request: ProtoMessage) {
   return (
     (request.metrics ?? []).length === 0 &&
+    !request.observationWindowFailure &&
     !request.probeConfigurationError &&
     (request.operationAcknowledgements ?? []).length === 0 &&
     (request.operationStatuses ?? []).length === 0

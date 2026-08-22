@@ -35,11 +35,18 @@ const SERVICE_NAME: &str = "enoki-probe";
 const SERVICE_USER: &str = "enoki-probe";
 const SERVICE_GROUP: &str = "enoki-probe";
 const BINARY: &str = "/usr/local/bin/enoki-probe";
+const OBSERVATION_RUNTIME_BINARY: &str = "/usr/local/bin/enoki-observation-runtime";
+const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const STATE: &str = "/var/lib/enoki-probe";
 const IDENTITY_DIR: &str = "/var/lib/enoki-probe/identity";
 const IDENTITY: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
 const UNIT: &str = "/etc/systemd/system/enoki-probe.service";
+const OBSERVATION_RUNTIME_UNIT: &str = "/etc/systemd/system/enoki-observation-runtime.service";
+const OBSERVATION_RUNTIME_SOCKET_UNIT: &str =
+    "/etc/systemd/system/enoki-observation-runtime.socket";
+const CPU_PROVIDER_UNIT: &str = "/etc/systemd/system/enoki-cpu-resource-provider@.service";
+const CPU_PROVIDER_SOCKET_UNIT: &str = "/etc/systemd/system/enoki-cpu-resource-provider.socket";
 const BOOTSTRAP_ACQUIRER: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const BOOTSTRAP_ACTIVATOR: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const BOOTSTRAP_STATE: &str = "/var/lib/enoki-probe-bootstrap";
@@ -359,6 +366,12 @@ impl FixedInstallPaths {
     fn binary(&self) -> PathBuf {
         self.map(BINARY)
     }
+    fn observation_runtime_binary(&self) -> PathBuf {
+        self.map(OBSERVATION_RUNTIME_BINARY)
+    }
+    fn cpu_provider_binary(&self) -> PathBuf {
+        self.map(CPU_PROVIDER_BINARY)
+    }
     fn state(&self) -> PathBuf {
         self.map(STATE)
     }
@@ -376,6 +389,18 @@ impl FixedInstallPaths {
     }
     fn unit(&self) -> PathBuf {
         self.map(UNIT)
+    }
+    fn observation_runtime_unit(&self) -> PathBuf {
+        self.map(OBSERVATION_RUNTIME_UNIT)
+    }
+    fn observation_runtime_socket_unit(&self) -> PathBuf {
+        self.map(OBSERVATION_RUNTIME_SOCKET_UNIT)
+    }
+    fn cpu_provider_unit(&self) -> PathBuf {
+        self.map(CPU_PROVIDER_UNIT)
+    }
+    fn cpu_provider_socket_unit(&self) -> PathBuf {
+        self.map(CPU_PROVIDER_SOCKET_UNIT)
     }
     fn bootstrap_acquirer(&self) -> PathBuf {
         self.map(BOOTSTRAP_ACQUIRER)
@@ -433,6 +458,14 @@ pub struct VerifiedFreshComponents<'a> {
     pub bootstrap_activator: &'a mut File,
 }
 
+pub struct VerifiedCompleteFreshComponents<'a> {
+    pub probe: &'a mut File,
+    pub observation_runtime: &'a mut File,
+    pub cpu_provider: &'a mut File,
+    pub bootstrap_acquirer: &'a mut File,
+    pub bootstrap_activator: &'a mut File,
+}
+
 pub fn activate_fresh_current_probe(
     components: VerifiedFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -445,6 +478,35 @@ pub fn activate_fresh_current_probe(
     let mut files = SystemInstallFiles;
     activate_current_probe_with_files(
         components.probe,
+        Some((
+            components.bootstrap_acquirer,
+            components.bootstrap_activator,
+        )),
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        &mut InstallPorts {
+            accounts,
+            systemd,
+            files: &mut files,
+        },
+    )
+}
+
+pub fn activate_complete_fresh_current_probe(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    let mut files = SystemInstallFiles;
+    activate_current_probe_with_observation_files(
+        components.probe,
+        Some((components.observation_runtime, components.cpu_provider)),
         Some((
             components.bootstrap_acquirer,
             components.bootstrap_activator,
@@ -506,15 +568,49 @@ fn activate_current_probe_with_files(
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
 ) -> Result<(), InstallError> {
+    activate_current_probe_with_observation_files(
+        component,
+        None,
+        bootstrap_components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        ports,
+    )
+}
+
+// The closed activation boundary makes every authority-bearing dependency
+// explicit; none of these values are caller-selected role collections.
+#[allow(clippy::too_many_arguments)]
+fn activate_current_probe_with_observation_files(
+    component: &mut File,
+    mut observation_components: Option<(&mut File, &mut File)>,
+    bootstrap_components: Option<(&mut File, &mut File)>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+) -> Result<(), InstallError> {
     let trust_version = trust.version.strip_prefix('v').unwrap_or(trust.version);
+    let runtime_receipt = bundle.component_receipt("observation-runtime");
+    let cpu_provider_receipt = bundle.component_receipt("cpu-provider");
     if !trust.is_for(BootstrapRole::Activator)
         || bundle.target != trust.target
         || bundle.version != trust_version
         || bundle.component_len == 0
+        || (observation_components.is_some()
+            && (runtime_receipt.is_none() || cpu_provider_receipt.is_none()))
     {
         return Err(InstallError::InvalidVerifiedComponent);
     }
     validate_component(component, bundle.component_len)?;
+    let install_observation = observation_components.is_some();
+    if let Some((runtime, cpu_provider)) = observation_components.as_mut() {
+        validate_component(runtime, runtime_receipt.expect("checked").1)?;
+        validate_component(cpu_provider, cpu_provider_receipt.expect("checked").1)?;
+    }
     let _activation_lock = ActivationLock::acquire(
         &paths.bootstrap_state(),
         paths.expected_root_uid(),
@@ -575,18 +671,23 @@ fn activate_current_probe_with_files(
             ports.files,
         ));
     }
-    let staged =
-        match stage_complete_layout(component, enrollment, trust, journal.staging_directory()) {
-            Ok(staged) => staged,
-            Err(error) => {
-                return Err(abort_prepared_install(
-                    error,
-                    &journal,
-                    ports.accounts,
-                    ports.files,
-                ));
-            }
-        };
+    let staged = match stage_complete_layout(
+        component,
+        enrollment,
+        trust,
+        journal.staging_directory(),
+        install_observation,
+    ) {
+        Ok(staged) => staged,
+        Err(error) => {
+            return Err(abort_prepared_install(
+                error,
+                &journal,
+                ports.accounts,
+                ports.files,
+            ));
+        }
+    };
     let mut enabled = false;
     let mut started = false;
     let result = (|| {
@@ -614,6 +715,20 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveBinary,
         )?;
+        if let Some((runtime, cpu_provider)) = observation_components {
+            ports.files.install_binary(
+                runtime,
+                &paths.observation_runtime_binary(),
+                &mut journal,
+                RollbackStep::RemoveBinary,
+            )?;
+            ports.files.install_binary(
+                cpu_provider,
+                &paths.cpu_provider_binary(),
+                &mut journal,
+                RollbackStep::RemoveBinary,
+            )?;
+        }
         ports.files.write_owned(
             &paths.identity(),
             &fs::read(&staged.identity).map_err(|_| InstallError::Io)?,
@@ -638,6 +753,28 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveUnit,
         )?;
+        for (path, contents) in install_observation
+            .then_some([
+                (paths.observation_runtime_unit(), observation_runtime_unit()),
+                (
+                    paths.observation_runtime_socket_unit(),
+                    observation_runtime_socket_unit(),
+                ),
+                (paths.cpu_provider_unit(), cpu_provider_unit()),
+                (paths.cpu_provider_socket_unit(), cpu_provider_socket_unit()),
+            ])
+            .into_iter()
+            .flatten()
+        {
+            ports.files.write_owned(
+                &path,
+                contents.as_bytes(),
+                0o644,
+                ServiceIdentity { uid: 0, gid: 0 },
+                &mut journal,
+                RollbackStep::RemoveUnit,
+            )?;
+        }
         ports.systemd.daemon_reload()?;
         journal.record_enabled_intent()?;
         enabled = true;
@@ -900,6 +1037,7 @@ fn stage_complete_layout(
     enrollment: &Enrollment,
     trust: &BuildTrust,
     staging: &Path,
+    install_observation: bool,
 ) -> Result<StagedLayout, InstallError> {
     let binary = staging.join("enoki-probe");
     component
@@ -918,7 +1056,10 @@ fn stage_complete_layout(
     let unit = staging.join("enoki-probe.service");
     for (path, contents) in [
         (&identity, bootstrap_config(enrollment, trust)),
-        (&metadata, install_metadata(enrollment, trust)),
+        (
+            &metadata,
+            install_metadata(enrollment, trust, install_observation),
+        ),
         (&unit, service_unit().to_owned()),
     ] {
         let mut file = OpenOptions::new()
@@ -971,12 +1112,36 @@ fn bootstrap_config(enrollment: &Enrollment, trust: &BuildTrust) -> String {
     )
 }
 
-fn install_metadata(enrollment: &Enrollment, trust: &BuildTrust) -> String {
+fn install_metadata(
+    enrollment: &Enrollment,
+    trust: &BuildTrust,
+    install_observation: bool,
+) -> String {
+    if !install_observation {
+        return format!(
+            "schema_version = 2\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\n",
+            enrollment.hub_origin(),
+            IDENTITY,
+            BINARY,
+            "/var/lib/enoki-probe/probe-operation-status.toml",
+            STATE,
+            trust.root_fingerprint,
+            BOOTSTRAP_STATE,
+            BOOTSTRAP_ACQUIRER,
+            BOOTSTRAP_ACTIVATOR,
+            SERVICE_NAME,
+            SERVICE_USER,
+            SERVICE_GROUP,
+            UNIT,
+        );
+    }
     format!(
-        "schema_version = 2\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\n",
+        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
+        OBSERVATION_RUNTIME_BINARY,
+        CPU_PROVIDER_BINARY,
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
         trust.root_fingerprint,
@@ -987,11 +1152,31 @@ fn install_metadata(enrollment: &Enrollment, trust: &BuildTrust) -> String {
         SERVICE_USER,
         SERVICE_GROUP,
         UNIT,
+        OBSERVATION_RUNTIME_UNIT,
+        OBSERVATION_RUNTIME_SOCKET_UNIT,
+        CPU_PROVIDER_UNIT,
+        CPU_PROVIDER_SOCKET_UNIT,
     )
 }
 
 fn service_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nPrivateTmp=true\nProtectHome=true\nProtectSystem=full\nProtectControlGroups=true\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+    "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+}
+
+fn observation_runtime_socket_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki Observation Runtime socket\n\n[Socket]\nListenStream=/run/enoki-observation-runtime.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+}
+
+fn observation_runtime_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\n"
+}
+
+fn cpu_provider_socket_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-runtime\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+}
+
+fn cpu_provider_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki one-shot CPU Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProcSubset=pid\nProtectProc=invisible\nReadOnlyPaths=/proc/stat\n"
 }
 
 fn command_presence(

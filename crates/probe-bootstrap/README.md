@@ -1,6 +1,6 @@
 # Probe Bootstrap
 
-`enoki-probe-bootstrap` 是 Probe 首次安装的最小信任入口。它不单独分发：每个目标平台只有一个签名的探针安装包，包内固定包含 `probe`、`bootstrap-acquirer` 与 `bootstrap-activator` 三个同版本角色；后续角色继续通过同一 role registry 加入该安装包。
+`enoki-probe-bootstrap` 是 Probe 首次安装的最小信任入口。它不单独分发：每个目标平台只有一个签名的 Probe Asset Bundle，包内固定包含 `probe`、`observation-runtime`、`cpu-provider`、`bootstrap-acquirer` 与 `bootstrap-activator` 五个同版本角色；每个运行角色同时绑定固定权限配置与资源合同。
 
 管理员先从 GitHub Release 取得静态 recipe 与公开 recipe record，核对 recipe 版本、字节数、SHA-256、Probe Distribution Trust Root 指纹、目标平台及 Probe Asset Bundle Version。非 root recipe 从 Hub 下载一个目标平台安装包，验证离线根、委派、签名清单、归档 receipt 和完整角色 closure；验证后的 acquirer 字节直接进入 sealed memfd，并由绑定该 FD 的 `/proc/self/fd` 路径执行，不会落入用户可写 pathname 后再重读。
 

@@ -30,8 +30,7 @@ use crate::{
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
         MAX_COMPONENT_BYTES, VerificationPolicy, VerifiedBundle, read_bundle_manifest,
-        verify_archive_and_extract, verify_archive_and_extract_roles, verify_metadata,
-        verify_outer_metadata,
+        verify_archive_and_extract_roles, verify_metadata, verify_outer_metadata,
     },
 };
 
@@ -304,6 +303,8 @@ pub(crate) struct VerifiedAcquisition {
     pub handoff: Handoff,
     pub bundle: VerifiedBundle,
     component: File,
+    runtime: File,
+    cpu_provider: File,
     activator: File,
 }
 
@@ -323,6 +324,14 @@ impl VerifiedAcquisition {
         output: &mut impl Write,
     ) -> Result<(), AcquisitionFailure> {
         let component_len = self.bundle.component_len;
+        let (_, runtime_len) = self
+            .bundle
+            .component_receipt("observation-runtime")
+            .ok_or(AcquisitionFailure::Permanent)?;
+        let (_, cpu_provider_len) = self
+            .bundle
+            .component_receipt("cpu-provider")
+            .ok_or(AcquisitionFailure::Permanent)?;
         let (acquirer_sha256, acquirer_len) = self
             .bundle
             .acquirer_receipt()
@@ -330,12 +339,24 @@ impl VerifiedAcquisition {
         let mut acquirer = File::open("/proc/self/exe").map_err(|_| AcquisitionFailure::Local)?;
         verify_open_file(&mut acquirer, acquirer_sha256, acquirer_len)?;
         let handoff = self.handoff.clone();
-        let component = self.component()?;
+        self.component
+            .rewind()
+            .map_err(|_| AcquisitionFailure::Local)?;
+        self.runtime
+            .rewind()
+            .map_err(|_| AcquisitionFailure::Local)?;
+        self.cpu_provider
+            .rewind()
+            .map_err(|_| AcquisitionFailure::Local)?;
         handoff
             .write_from(
                 enrollment,
-                component,
+                &mut self.component,
                 component_len,
+                &mut self.runtime,
+                runtime_len,
+                &mut self.cpu_provider,
+                cpu_provider_len,
                 &mut acquirer,
                 acquirer_len,
                 output,
@@ -445,16 +466,24 @@ fn acquire_local(
     };
     let metadata = verify_metadata(&handoff, policy).map_err(|_| AcquisitionFailure::Permanent)?;
     let mut component = create_exclusive_staging_file(asset_dir)?;
+    let mut runtime = create_exclusive_staging_file(asset_dir)?;
+    let mut cpu_provider = create_exclusive_staging_file(asset_dir)?;
     let mut activator = create_exclusive_staging_file(asset_dir)?;
     let bundle = verify_archive_and_extract_roles(
         &mut archive,
         &handoff,
         &metadata,
         &mut component,
+        &mut runtime,
+        &mut cpu_provider,
         &mut activator,
     )
     .map_err(|_| AcquisitionFailure::Permanent)?;
     component
+        .sync_all()
+        .map_err(|_| AcquisitionFailure::Local)?;
+    runtime.sync_all().map_err(|_| AcquisitionFailure::Local)?;
+    cpu_provider
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
     activator
@@ -464,6 +493,8 @@ fn acquire_local(
         handoff,
         bundle,
         component,
+        runtime,
+        cpu_provider,
         activator,
     })
 }
@@ -644,16 +675,34 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
     let metadata =
         verify_metadata(&handoff, &request.policy).map_err(|_| AcquisitionFailure::Permanent)?;
     let mut component = create_exclusive_staging_file(&request.staging_dir)?;
-    let bundle = verify_archive_and_extract(&mut archive, &handoff, &metadata, &mut component)
-        .map_err(|_| AcquisitionFailure::Permanent)?;
-    component
-        .sync_all()
-        .map_err(|_| AcquisitionFailure::Local)?;
+    let mut runtime = create_exclusive_staging_file(&request.staging_dir)?;
+    let mut cpu_provider = create_exclusive_staging_file(&request.staging_dir)?;
+    let mut activator = create_exclusive_staging_file(&request.staging_dir)?;
+    let bundle = verify_archive_and_extract_roles(
+        &mut archive,
+        &handoff,
+        &metadata,
+        &mut component,
+        &mut runtime,
+        &mut cpu_provider,
+        &mut activator,
+    )
+    .map_err(|_| AcquisitionFailure::Permanent)?;
+    for role in [
+        &mut component,
+        &mut runtime,
+        &mut cpu_provider,
+        &mut activator,
+    ] {
+        role.sync_all().map_err(|_| AcquisitionFailure::Local)?;
+    }
     Ok(VerifiedAcquisition {
         handoff,
         bundle,
         component,
-        activator: create_exclusive_staging_file(&request.staging_dir)?,
+        runtime,
+        cpu_provider,
+        activator,
     })
 }
 

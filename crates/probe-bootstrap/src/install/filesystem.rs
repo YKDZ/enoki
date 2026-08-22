@@ -98,11 +98,17 @@ pub(super) fn validate_component(
 pub(super) fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallError> {
     for path in [
         paths.binary(),
+        paths.observation_runtime_binary(),
+        paths.cpu_provider_binary(),
         paths.state(),
         paths.identity_dir(),
         paths.identity(),
         paths.metadata(),
         paths.unit(),
+        paths.observation_runtime_unit(),
+        paths.observation_runtime_socket_unit(),
+        paths.cpu_provider_unit(),
+        paths.cpu_provider_socket_unit(),
         paths.map(OPERATION_SUDOERS),
         paths.map(COLLECTOR_SUDOERS),
         paths.map(LEGACY_SUDOERS),
@@ -120,9 +126,12 @@ pub(super) fn preflight_files(paths: &FixedInstallPaths) -> Result<(), InstallEr
 pub(super) fn preflight_parent_chains(paths: &FixedInstallPaths) -> Result<(), InstallError> {
     for path in [
         paths.binary(),
+        paths.observation_runtime_binary(),
+        paths.cpu_provider_binary(),
         paths.state(),
         paths.etc_enoki(),
         paths.unit(),
+        paths.observation_runtime_unit(),
         paths.map(OPERATION_SUDOERS),
         paths.bootstrap_acquirer(),
     ] {

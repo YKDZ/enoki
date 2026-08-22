@@ -18,13 +18,14 @@ pub use disk_health::{
     last_disk_health_collector_capability,
 };
 pub use official::{
-    BatteryMetrics, CpuBreakdownMetrics, CpuCounterSnapshot, CpuMetrics, DiskCounterSnapshot,
-    LoadMetrics, MemoryMetrics, NetworkCounterSnapshot, NetworkMetrics,
-    collect_battery_metrics_from_sysfs, collect_cpu_metrics_from_proc_stat,
-    collect_default_route_interfaces_from_proc_routes, collect_disk_counters_from_proc_diskstats,
-    collect_disk_metrics_from_mounts, collect_load_metrics_from_proc_loadavg,
-    collect_memory_metrics_from_proc_meminfo, collect_network_metrics_from_proc_net_dev,
-    collect_temperature_celsius_from_sysfs, collect_uptime_seconds_from_proc_uptime,
+    BatteryMetrics, CpuBreakdownMetrics, CpuCounterRecord, CpuCounterSnapshot, CpuMetrics,
+    DiskCounterSnapshot, LoadMetrics, MemoryMetrics, NetworkCounterSnapshot, NetworkMetrics,
+    collect_battery_metrics_from_sysfs, collect_cpu_metrics_from_counter_records,
+    collect_cpu_metrics_from_proc_stat, collect_default_route_interfaces_from_proc_routes,
+    collect_disk_counters_from_proc_diskstats, collect_disk_metrics_from_mounts,
+    collect_load_metrics_from_proc_loadavg, collect_memory_metrics_from_proc_meminfo,
+    collect_network_metrics_from_proc_net_dev, collect_temperature_celsius_from_sysfs,
+    collect_uptime_seconds_from_proc_uptime, parse_linux_proc_stat_cpu_counters,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -573,6 +573,16 @@ with open(os.devnull, "rb") as input_stream:
       const secondBinary = path.join(workDir, "second-probe");
       await writeFile(firstBinary, binary, { mode: 0o700 });
       await writeFile(secondBinary, binary, { mode: 0o755 });
+      await writeFile(path.join(workDir, "enoki-observation-runtime"), binary, {
+        mode: 0o755,
+      });
+      await writeFile(
+        path.join(workDir, "enoki-cpu-resource-provider"),
+        binary,
+        {
+          mode: 0o755,
+        },
+      );
       const firstOutput = path.join(workDir, "first");
       const secondOutput = path.join(workDir, "second");
       const commonArguments = [
@@ -865,6 +875,8 @@ with open(os.devnull, "rb") as input_stream:
       expect(archiveListing).toEqual([
         "bundle-manifest.json",
         "enoki-probe",
+        "enoki-observation-runtime",
+        "enoki-cpu-resource-provider",
         "bootstrap/enoki-probe-bootstrap-acquire",
         "bootstrap/enoki-probe-bootstrap-activate",
       ]);
@@ -882,21 +894,26 @@ with open(os.devnull, "rb") as input_stream:
           version: "1.2.3",
         }),
       ]);
-      expect(bundleManifest).toEqual({
-        bootstrapAssets: expect.any(Array),
-        components: [
-          expect.objectContaining({
-            path: "enoki-probe",
-            permissionProfile: "probe-v1",
-            role: "probe",
-            size: expect.any(Number),
-            version: "1.2.3",
-          }),
-        ],
-        kind: "enoki-probe-bundle",
-        target: "x86_64-unknown-linux-gnu",
-        version: "1.2.3",
-      });
+      expect(bundleManifest).toEqual(
+        expect.objectContaining({
+          bootstrapAssets: expect.any(Array),
+          components: expect.arrayContaining([
+            expect.objectContaining({
+              path: "enoki-probe",
+              permissionProfile: "probe-v1",
+              resourceContract: "hub-reporting-v1",
+              role: "probe",
+              size: expect.any(Number),
+              version: "1.2.3",
+            }),
+            expect.objectContaining({ role: "observation-runtime" }),
+            expect.objectContaining({ role: "cpu-provider" }),
+          ]),
+          kind: "enoki-probe-bundle",
+          target: "x86_64-unknown-linux-gnu",
+          version: "1.2.3",
+        }),
+      );
       expect(bundleManifest.components[0].sha256).toMatch(/^[0-9a-f]{64}$/);
       expect(bundleManifest.components[0].size).toBeGreaterThan(0);
       expect(
@@ -1384,6 +1401,16 @@ with open(os.devnull, "rb") as input_stream:
       try {
         await writeFile(
           binaryPath,
+          createProbeElf({ interpreter, target, version: "v1.2.3" }),
+          { mode: 0o755 },
+        );
+        await writeFile(
+          path.join(workDir, "enoki-observation-runtime"),
+          createProbeElf({ interpreter, target, version: "v1.2.3" }),
+          { mode: 0o755 },
+        );
+        await writeFile(
+          path.join(workDir, "enoki-cpu-resource-provider"),
           createProbeElf({ interpreter, target, version: "v1.2.3" }),
           { mode: 0o755 },
         );
@@ -2067,6 +2094,13 @@ async function writeProbeArchive(
   const binary = createProbeElf({ interpreter, target, version });
   await writeFile(binaryPath, binary);
   await chmod(binaryPath, mode);
+  for (const rolePath of [
+    "enoki-observation-runtime",
+    "enoki-cpu-resource-provider",
+  ]) {
+    await writeFile(path.join(binaryDir, rolePath), binary);
+    await chmod(path.join(binaryDir, rolePath), mode);
+  }
   const bundleManifest = {
     ...(bundledBootstrap.length > 0
       ? {
@@ -2086,7 +2120,26 @@ async function writeProbeArchive(
       {
         path: "enoki-probe",
         permissionProfile: "probe-v1",
+        resourceContract: "hub-reporting-v1",
         role: "probe",
+        sha256: sha256(binary),
+        size: binary.byteLength,
+        version: version.slice(1),
+      },
+      {
+        path: "enoki-observation-runtime",
+        permissionProfile: "observation-runtime-v1",
+        resourceContract: "cpu-observation-v1",
+        role: "observation-runtime",
+        sha256: sha256(binary),
+        size: binary.byteLength,
+        version: version.slice(1),
+      },
+      {
+        path: "enoki-cpu-resource-provider",
+        permissionProfile: "cpu-provider-v1",
+        resourceContract: "cpu-counters-v1",
+        role: "cpu-provider",
         sha256: sha256(binary),
         size: binary.byteLength,
         version: version.slice(1),
@@ -2125,6 +2178,8 @@ async function writeProbeArchive(
       : [
           "bundle-manifest.json",
           "enoki-probe",
+          "enoki-observation-runtime",
+          "enoki-cpu-resource-provider",
           ...bundledBootstrap.map(({ archiveMember }) => archiveMember),
         ]),
   ]);

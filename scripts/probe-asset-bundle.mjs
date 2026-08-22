@@ -8,6 +8,17 @@ export const probeBundleComponentProfiles = Object.freeze({
   probe: Object.freeze({
     path: "enoki-probe",
     permissionProfile: "probe-v1",
+    resourceContract: "hub-reporting-v1",
+  }),
+  "observation-runtime": Object.freeze({
+    path: "enoki-observation-runtime",
+    permissionProfile: "observation-runtime-v1",
+    resourceContract: "cpu-observation-v1",
+  }),
+  "cpu-provider": Object.freeze({
+    path: "enoki-cpu-resource-provider",
+    permissionProfile: "cpu-provider-v1",
+    resourceContract: "cpu-counters-v1",
   }),
 });
 

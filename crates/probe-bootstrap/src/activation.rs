@@ -4,13 +4,13 @@ use crate::{
     generation::{DelegationGenerationLease, GenerationStateError, acquire_delegation_generation},
     handoff::{Enrollment, Handoff, HandoffError},
     install::{
-        FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd, VerifiedFreshComponents,
-        activate_fresh_current_probe,
+        FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd,
+        VerifiedCompleteFreshComponents, activate_complete_fresh_current_probe,
     },
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
         VerificationPolicy, VerifiedBundle, verify_acquirer_receipt, verify_activator_receipt,
-        verify_component, verify_metadata,
+        verify_component, verify_metadata, verify_role_component,
     },
 };
 use std::{
@@ -55,6 +55,8 @@ pub struct ReceivedRootHandoff {
     pub handoff: Handoff,
     pub bundle: VerifiedBundle,
     component: File,
+    runtime: File,
+    cpu_provider: File,
     acquirer: Option<File>,
     activator: Option<File>,
     enrollment: Enrollment,
@@ -70,6 +72,8 @@ impl ReceivedRootHandoff {
         adapter: impl FnOnce(&mut File, &Enrollment, &VerifiedBundle) -> Result<T, ActivationError>,
     ) -> Result<T, ActivationError> {
         self.component()?;
+        validate_received_role(&mut self.runtime, &self.bundle, "observation-runtime")?;
+        validate_received_role(&mut self.cpu_provider, &self.bundle, "cpu-provider")?;
         adapter(&mut self.component, &self.enrollment, &self.bundle)
     }
 
@@ -90,9 +94,11 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
-        activate_fresh_current_probe(
-            VerifiedFreshComponents {
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
                 probe: &mut self.component,
+                observation_runtime: &mut self.runtime,
+                cpu_provider: &mut self.cpu_provider,
                 bootstrap_acquirer: acquirer,
                 bootstrap_activator: activator,
             },
@@ -122,6 +128,15 @@ impl Drop for ReceivedRootHandoff {
     fn drop(&mut self) {
         self.enrollment.zeroize();
     }
+}
+
+fn validate_received_role(
+    component: &mut File,
+    bundle: &VerifiedBundle,
+    role: &str,
+) -> Result<(), ActivationError> {
+    validate_regular_file(component, 0, 0o600)?;
+    verify_role_component(component, bundle, role).map_err(|_| ActivationError::Verification)
 }
 
 /// Root orchestration boundary. The caller must construct `policy` only from
@@ -240,6 +255,8 @@ fn receive_root_handoff(
         expected_uid,
     )?;
     let (temporary_name, mut component) = create_exclusive_component(&inbox, expected_uid)?;
+    let (runtime_name, mut runtime) = create_exclusive_component(&inbox, expected_uid)?;
+    let (cpu_provider_name, mut cpu_provider) = create_exclusive_component(&inbox, expected_uid)?;
     let (acquirer_name, mut acquirer) = create_exclusive_component(&inbox, expected_uid)?;
     let (activator_name, mut activator) = create_exclusive_component(&inbox, expected_uid)?;
     let has_bootstrap_receipts = activator_receipt.is_some();
@@ -247,6 +264,22 @@ fn receive_root_handoff(
         Handoff::read_component_into(input, &mut component, metadata.bundle().component_len)?;
         component.sync_all().map_err(|_| ActivationError::Io)?;
         verify_component(&mut component, &handoff, metadata.bundle())
+            .map_err(|_| ActivationError::Verification)?;
+        let (_, runtime_len) = metadata
+            .bundle()
+            .component_receipt("observation-runtime")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_runtime_into(input, &mut runtime, runtime_len)?;
+        runtime.sync_all().map_err(|_| ActivationError::Io)?;
+        verify_role_component(&mut runtime, metadata.bundle(), "observation-runtime")
+            .map_err(|_| ActivationError::Verification)?;
+        let (_, cpu_provider_len) = metadata
+            .bundle()
+            .component_receipt("cpu-provider")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_cpu_provider_into(input, &mut cpu_provider, cpu_provider_len)?;
+        cpu_provider.sync_all().map_err(|_| ActivationError::Io)?;
+        verify_role_component(&mut cpu_provider, metadata.bundle(), "cpu-provider")
             .map_err(|_| ActivationError::Verification)?;
         if let Some(receipt) = activator_receipt {
             let (_, acquirer_len) = metadata
@@ -276,6 +309,8 @@ fn receive_root_handoff(
             .seek(SeekFrom::Start(0))
             .map_err(|_| ActivationError::Io)?;
         unlink_at(inbox.as_raw_fd(), &temporary_name)?;
+        unlink_at(inbox.as_raw_fd(), &runtime_name)?;
+        unlink_at(inbox.as_raw_fd(), &cpu_provider_name)?;
         unlink_at(inbox.as_raw_fd(), &acquirer_name)?;
         unlink_at(inbox.as_raw_fd(), &activator_name)?;
         // The candidate has now passed every coherence, enrollment, exact
@@ -286,6 +321,8 @@ fn receive_root_handoff(
             handoff,
             bundle: metadata.bundle().clone(),
             component,
+            runtime,
+            cpu_provider,
             acquirer: has_bootstrap_receipts.then_some(acquirer),
             activator: has_bootstrap_receipts.then_some(activator),
             enrollment,
@@ -294,6 +331,8 @@ fn receive_root_handoff(
     })();
     if result.is_err() {
         let _ = unlink_at(inbox.as_raw_fd(), &temporary_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &runtime_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &cpu_provider_name);
         let _ = unlink_at(inbox.as_raw_fd(), &acquirer_name);
         let _ = unlink_at(inbox.as_raw_fd(), &activator_name);
     }
@@ -716,10 +755,12 @@ mod tests {
         let daily_id = sha256(&daily_pem);
         let component = b"probe";
         let bundle = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
             sha256(b"a"),
             sha256(b"b"),
             sha256(component),
+            sha256(b"runtime"),
+            sha256(b"cpu-provider"),
         )
         .into_bytes();
         let delegation = format!(
@@ -755,6 +796,10 @@ mod tests {
                 &crate::handoff::Enrollment::new("https://hub.example", "enk_enroll_test").unwrap(),
                 &mut Cursor::new(component),
                 component.len() as u64,
+                &mut Cursor::new(b"runtime"),
+                7,
+                &mut Cursor::new(b"cpu-provider"),
+                12,
                 &mut Cursor::new(b"a"),
                 1,
                 &mut stream,

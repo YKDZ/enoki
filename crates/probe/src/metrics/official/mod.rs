@@ -11,7 +11,9 @@ mod uptime;
 
 pub use battery::{BatteryMetrics, collect_battery_metrics_from_sysfs};
 pub use cpu::{
-    CpuBreakdownMetrics, CpuCounterSnapshot, CpuMetrics, collect_cpu_metrics_from_proc_stat,
+    CpuBreakdownMetrics, CpuCounterRecord, CpuCounterSnapshot, CpuMetrics,
+    collect_cpu_metrics_from_counter_records, collect_cpu_metrics_from_proc_stat,
+    parse_linux_proc_stat_cpu_counters,
 };
 pub use disk::{
     DiskCounterSnapshot, collect_disk_counters_from_proc_diskstats,
@@ -40,13 +42,15 @@ pub const COLLECTOR_DEFINITIONS: &[CollectorDefinition] = &[
 pub fn collectors() -> Vec<Box<dyn MetricCollector>> {
     COLLECTOR_DEFINITIONS
         .iter()
+        // CPU 已迁入 Observation Runtime，Probe 内注册表不得实例化直接读取器。
+        .filter(|definition| definition.id != CollectorId::Cpu)
         .map(|definition| collector_for_id(definition.id))
         .collect()
 }
 
 fn collector_for_id(collector_id: CollectorId) -> Box<dyn MetricCollector> {
     match collector_id {
-        CollectorId::Cpu => Box::<cpu::CpuMetricCollector>::default(),
+        CollectorId::Cpu => unreachable!("CPU is owned by the Observation Runtime"),
         CollectorId::Memory => Box::<memory::MemoryMetricCollector>::default(),
         CollectorId::Disk => Box::<disk::DiskMetricCollector>::default(),
         CollectorId::Network => Box::<network::NetworkMetricCollector>::default(),

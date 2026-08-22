@@ -29,6 +29,23 @@ use crate::{
     protocol::enoki::v1::ProbeConfigurationRequest,
 };
 
+const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-runtime";
+const CPU_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-cpu-resource-provider";
+const OBSERVATION_RUNTIME_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-observation-runtime.service";
+const OBSERVATION_RUNTIME_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-observation-runtime.socket";
+const CPU_PROVIDER_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-cpu-resource-provider@.service";
+const CPU_PROVIDER_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-cpu-resource-provider.socket";
+const OBSERVATION_SERVICES: [&str; 4] = [
+    "enoki-observation-runtime.service",
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider@.service",
+    "enoki-cpu-resource-provider.socket",
+];
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeUpgraderRunInput {
     pub bootstrap_config_path: PathBuf,
@@ -962,7 +979,7 @@ pub fn run_probe_repair(
     }
     let install_metadata =
         read_trusted_probe_install_metadata(Path::new(PRODUCTION_INSTALL_METADATA_PATH), None)?;
-    if install_metadata.schema_version == 2 {
+    if matches!(install_metadata.schema_version, 2 | 3) {
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
     }
     let installed_version = read_installed_probe_version(&install_metadata.install_path)?;
@@ -1378,7 +1395,7 @@ pub fn run_probe_upgrader_with_systemd_runner(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Some(&input.bootstrap_config_path),
     )?;
-    if install_metadata.schema_version == 2 {
+    if matches!(install_metadata.schema_version, 2 | 3) {
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired);
     }
     run_probe_upgrader_with_systemd_runner_and_install_metadata(
@@ -1631,6 +1648,18 @@ fn rebase_trusted_install_metadata_paths(
     for path in &mut metadata.old_sudoers_paths {
         *path = preflight_rooted_path(test_root, path);
     }
+    for path in [
+        &mut metadata.observation_runtime_path,
+        &mut metadata.cpu_provider_path,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        *path = preflight_rooted_path(test_root, path);
+    }
+    for path in &mut metadata.observation_unit_paths {
+        *path = preflight_rooted_path(test_root, path);
+    }
 }
 
 #[derive(Debug)]
@@ -1673,7 +1702,19 @@ fn plan_probe_uninstall_cleanup<'a>(
     for path in &install_metadata.old_sudoers_paths {
         ensure_absolute_path(path)?;
     }
-    if install_metadata.schema_version == 2 {
+    for path in [
+        install_metadata.observation_runtime_path.as_deref(),
+        install_metadata.cpu_provider_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        ensure_absolute_path(path)?;
+    }
+    for path in &install_metadata.observation_unit_paths {
+        ensure_absolute_path(path)?;
+    }
+    if matches!(install_metadata.schema_version, 2 | 3) {
         validate_owned_bootstrap_role(install_metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role(install_metadata.bootstrap_activator_path.as_deref())?;
         validate_owned_bootstrap_state(install_metadata.bootstrap_state_dir.as_deref())?;
@@ -1692,6 +1733,24 @@ fn execute_probe_uninstall_cleanup(
     let input = plan.input;
     let install_metadata = plan.install_metadata;
     let install_metadata_path = plan.install_metadata_path;
+    if install_metadata.schema_version == 3 {
+        for service in OBSERVATION_SERVICES.into_iter().rev() {
+            systemd.stop_service(service).map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_stop_failed",
+                    "stopping an observation role",
+                    error,
+                )
+            })?;
+            systemd.disable_service(service).map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_disable_failed",
+                    "disabling an observation role",
+                    error,
+                )
+            })?;
+        }
+    }
     systemd
         .stop_service(&install_metadata.service_name)
         .map_err(|error| {
@@ -1722,6 +1781,14 @@ fn execute_probe_uninstall_cleanup(
         "probe_uninstall_service_unit_residue",
         "verifying the service unit is absent",
     )?;
+    for path in &install_metadata.observation_unit_paths {
+        remove_path_if_exists(path)?;
+        verify_path_absent(
+            path,
+            "probe_uninstall_service_unit_residue",
+            "verifying an observation role unit is absent",
+        )?;
+    }
     systemd.daemon_reload().map_err(|error| {
         probe_uninstall_cleanup_error(
             "probe_uninstall_daemon_reload_failed",
@@ -1747,7 +1814,34 @@ fn execute_probe_uninstall_cleanup(
                 error,
             )
         })?;
+    if install_metadata.schema_version == 3 {
+        for service in OBSERVATION_SERVICES {
+            systemd.reset_failed(service).map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_reset_failed",
+                    "resetting an observation role failed state",
+                    error,
+                )
+            })?;
+            systemd.verify_service_absent(service).map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying an observation role is absent",
+                    error,
+                )
+            })?;
+        }
+    }
     remove_path_if_exists(&install_metadata.install_path)?;
+    for path in [
+        install_metadata.observation_runtime_path.as_deref(),
+        install_metadata.cpu_provider_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        remove_path_if_exists(path)?;
+    }
     if let Some(path) = &install_metadata.operation_sudoers_path {
         remove_path_if_exists(path)?;
     }
@@ -1849,6 +1943,26 @@ fn verify_probe_uninstall_cleanup(
             path,
             "probe_uninstall_legacy_sudoers_residue",
             "verifying legacy sudoers is absent",
+        )?;
+    }
+    for path in [
+        metadata.observation_runtime_path.as_deref(),
+        metadata.cpu_provider_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        verify_path_absent(
+            path,
+            "probe_uninstall_binary_residue",
+            "verifying an observation role binary is absent",
+        )?;
+    }
+    for path in &metadata.observation_unit_paths {
+        verify_path_absent(
+            path,
+            "probe_uninstall_service_unit_residue",
+            "verifying an observation role unit is absent",
         )?;
     }
     for (path, code, action) in [
@@ -2207,6 +2321,9 @@ struct TrustedProbeInstallMetadata {
     operation_sudoers_path: Option<PathBuf>,
     collector_helper_sudoers_path: Option<PathBuf>,
     old_sudoers_paths: Vec<PathBuf>,
+    observation_runtime_path: Option<PathBuf>,
+    cpu_provider_path: Option<PathBuf>,
+    observation_unit_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2395,7 +2512,7 @@ fn read_trusted_probe_install_metadata_read_only_with_file_metadata(
                 "schema v1 metadata mode must be 0600",
             ));
         }
-    } else if metadata.schema_version == 2 {
+    } else if matches!(metadata.schema_version, 2 | 3) {
         if file_metadata.mode != 0o600 {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "schema v2 metadata mode must be 0600",
@@ -2429,6 +2546,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         None => 0,
         Some(toml::Value::Integer(1)) => 1,
         Some(toml::Value::Integer(2)) => 2,
+        Some(toml::Value::Integer(3)) => 3,
         Some(toml::Value::Integer(_)) => {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "unsupported schema version",
@@ -2449,7 +2567,8 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "old sudoers_path metadata is not supported",
         ));
     }
-    let (operation_sudoers_path, collector_helper_sudoers_path) = if schema_version == 2 {
+    let (operation_sudoers_path, collector_helper_sudoers_path) = if matches!(schema_version, 2 | 3)
+    {
         if value.get("operation_sudoers_path").is_some()
             || value.get("collector_helper_sudoers_path").is_some()
             || value.get("probe_asset_public_key_sha256").is_some()
@@ -2474,41 +2593,42 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
     let service_name = required_install_metadata_string(&value, "service_name")?;
     let service_user = optional_install_metadata_string(&value, "service_user")?
         .unwrap_or_else(|| "enoki-probe".to_string());
-    let identity_path = if matches!(schema_version, 1 | 2) {
+    let identity_path = if matches!(schema_version, 1..=3) {
         required_install_metadata_path(&value, "identity_path")?
     } else {
         legacy_identity_path
             .unwrap_or_else(|| Path::new("/etc/enoki/probe-bootstrap.toml"))
             .to_path_buf()
     };
-    let service_group = if matches!(schema_version, 1 | 2) {
+    let service_group = if matches!(schema_version, 1..=3) {
         required_install_metadata_string(&value, "service_group")?
     } else {
         service_user.clone()
     };
-    let service_unit_path = if matches!(schema_version, 1 | 2) {
+    let service_unit_path = if matches!(schema_version, 1..=3) {
         required_install_metadata_path(&value, "service_unit_path")?
     } else {
         PathBuf::from("/etc/systemd/system/enoki-probe.service")
     };
-    let (probe_asset_public_key_sha256, probe_distribution_root_sha256) = if schema_version == 2 {
-        let root = required_install_metadata_string(&value, "probe_distribution_root_sha256")?;
-        if !is_sha256_hex(&root) {
-            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe distribution root fingerprint is not a valid sha256 value",
-            ));
-        }
-        // Legacy helpers retain a private field so their cleanup plan keeps
-        // fixed paths. It is never serialized or used as daily signing trust.
-        (root.clone(), Some(root))
-    } else {
-        (
-            required_install_metadata_string(&value, "probe_asset_public_key_sha256")?,
-            None,
-        )
-    };
+    let (probe_asset_public_key_sha256, probe_distribution_root_sha256) =
+        if matches!(schema_version, 2 | 3) {
+            let root = required_install_metadata_string(&value, "probe_distribution_root_sha256")?;
+            if !is_sha256_hex(&root) {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Probe distribution root fingerprint is not a valid sha256 value",
+                ));
+            }
+            // Legacy helpers retain a private field so their cleanup plan keeps
+            // fixed paths. It is never serialized or used as daily signing trust.
+            (root.clone(), Some(root))
+        } else {
+            (
+                required_install_metadata_string(&value, "probe_asset_public_key_sha256")?,
+                None,
+            )
+        };
     let (bootstrap_acquirer_path, bootstrap_activator_path, bootstrap_state_dir) =
-        if schema_version == 2 {
+        if matches!(schema_version, 2 | 3) {
             (
                 required_fixed_install_metadata_path(
                     &value,
@@ -2538,6 +2658,47 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             (None, None, None)
         };
 
+    let (observation_runtime_path, cpu_provider_path, observation_unit_paths) =
+        if schema_version == 3 {
+            let runtime = required_fixed_install_metadata_path(
+                &value,
+                "observation_runtime_path",
+                OBSERVATION_RUNTIME_BINARY_PATH,
+            )?;
+            let provider = required_fixed_install_metadata_path(
+                &value,
+                "cpu_provider_path",
+                CPU_PROVIDER_BINARY_PATH,
+            )?;
+            let units = [
+                (
+                    "observation_runtime_service_unit_path",
+                    OBSERVATION_RUNTIME_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "observation_runtime_socket_unit_path",
+                    OBSERVATION_RUNTIME_SOCKET_UNIT_PATH,
+                ),
+                (
+                    "cpu_provider_service_unit_path",
+                    CPU_PROVIDER_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "cpu_provider_socket_unit_path",
+                    CPU_PROVIDER_SOCKET_UNIT_PATH,
+                ),
+            ]
+            .into_iter()
+            .map(|(key, expected)| required_fixed_install_metadata_path(&value, key, expected))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+            (runtime, provider, units)
+        } else {
+            (None, None, Vec::new())
+        };
+
     if service_name != "enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "service name must be enoki-probe",
@@ -2553,7 +2714,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "service group is not safe",
         ));
     }
-    if schema_version != 2 && !is_sha256_hex(&probe_asset_public_key_sha256) {
+    if !matches!(schema_version, 2 | 3) && !is_sha256_hex(&probe_asset_public_key_sha256) {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "trusted Probe asset signing key fingerprint is not a valid sha256 value",
         ));
@@ -2580,11 +2741,14 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         state_dir,
         operation_sudoers_path,
         collector_helper_sudoers_path,
-        old_sudoers_paths: if schema_version == 2 {
+        old_sudoers_paths: if matches!(schema_version, 2 | 3) {
             Vec::new()
         } else {
             vec![PathBuf::from(PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH)]
         },
+        observation_runtime_path,
+        cpu_provider_path,
+        observation_unit_paths,
     })
 }
 
@@ -5013,6 +5177,9 @@ mod tests {
             operation_sudoers_path: None,
             collector_helper_sudoers_path: None,
             old_sudoers_paths: Vec::new(),
+            observation_runtime_path: None,
+            cpu_provider_path: None,
+            observation_unit_paths: Vec::new(),
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: bootstrap_config_path.clone(),
@@ -5045,6 +5212,114 @@ mod tests {
         assert!(!bootstrap_acquirer_path.exists());
         assert!(!bootstrap_activator_path.exists());
         assert!(!bootstrap_state_dir.exists());
+    }
+
+    #[test]
+    fn schema_three_uninstall_removes_every_fixed_observation_role() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let state_dir = root.join("var/lib/enoki-probe");
+        let identity_path = state_dir.join("identity/probe-bootstrap.toml");
+        let install_path = root.join("usr/local/bin/enoki-probe");
+        let metadata_path = root.join("etc/enoki/probe-install.toml");
+        let service_unit_path = root.join("etc/systemd/system/enoki-probe.service");
+        let runtime_path = root.join("usr/local/bin/enoki-observation-runtime");
+        let provider_path = root.join("usr/local/bin/enoki-cpu-resource-provider");
+        let bootstrap_acquirer = root.join("usr/local/bin/enoki-probe-bootstrap-acquire");
+        let bootstrap_activator = root.join("usr/local/bin/enoki-probe-bootstrap-activate");
+        let bootstrap_state = root.join("var/lib/enoki-probe-bootstrap");
+        let observation_units = [
+            root.join("etc/systemd/system/enoki-observation-runtime.service"),
+            root.join("etc/systemd/system/enoki-observation-runtime.socket"),
+            root.join("etc/systemd/system/enoki-cpu-resource-provider@.service"),
+            root.join("etc/systemd/system/enoki-cpu-resource-provider.socket"),
+        ];
+        for path in [
+            identity_path.parent().unwrap(),
+            install_path.parent().unwrap(),
+            metadata_path.parent().unwrap(),
+            service_unit_path.parent().unwrap(),
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        for path in [
+            &identity_path,
+            &install_path,
+            &metadata_path,
+            &service_unit_path,
+            &runtime_path,
+            &provider_path,
+            &bootstrap_acquirer,
+            &bootstrap_activator,
+        ]
+        .into_iter()
+        .chain(observation_units.iter())
+        {
+            fs::write(path, "owned").unwrap();
+        }
+        for path in [&bootstrap_acquirer, &bootstrap_activator] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(bootstrap_state.join("trust")).unwrap();
+        fs::create_dir(bootstrap_state.join("inbox")).unwrap();
+        for path in [
+            &bootstrap_state,
+            &bootstrap_state.join("trust"),
+            &bootstrap_state.join("inbox"),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for entry in ["delegation-generation", ".delegation-generation.lock"] {
+            let path = bootstrap_state.join("trust").join(entry);
+            fs::write(&path, "owned").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let metadata = TrustedProbeInstallMetadata {
+            schema_version: 3,
+            hub_url: "https://hub.example".into(),
+            identity_path: identity_path.clone(),
+            install_path: install_path.clone(),
+            operation_status_path: state_dir.join("probe-operation-status.toml"),
+            probe_asset_public_key_sha256: "a".repeat(64),
+            probe_distribution_root_sha256: Some("a".repeat(64)),
+            bootstrap_acquirer_path: Some(bootstrap_acquirer),
+            bootstrap_activator_path: Some(bootstrap_activator),
+            bootstrap_state_dir: Some(bootstrap_state),
+            service_name: "enoki-probe".into(),
+            service_group: "enoki-probe".into(),
+            service_unit_path: service_unit_path.clone(),
+            service_user: "enoki-probe".into(),
+            state_dir,
+            operation_sudoers_path: None,
+            collector_helper_sudoers_path: None,
+            old_sudoers_paths: Vec::new(),
+            observation_runtime_path: Some(runtime_path.clone()),
+            cpu_provider_path: Some(provider_path.clone()),
+            observation_unit_paths: observation_units.to_vec(),
+        };
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: identity_path,
+        };
+        let mut systemd = RecordingSystemdRunner::default();
+
+        execute_probe_uninstall_with_install_metadata_path(
+            &input,
+            &metadata,
+            &mut systemd,
+            &metadata_path,
+        )
+        .unwrap();
+
+        for path in [install_path, runtime_path, provider_path, service_unit_path]
+            .into_iter()
+            .chain(observation_units)
+        {
+            assert!(!path.exists(), "{} remains", path.display());
+        }
+        for service in OBSERVATION_SERVICES {
+            assert!(systemd.calls.contains(&format!("stop {service}")));
+            assert!(systemd.calls.contains(&format!("disable {service}")));
+        }
     }
 
     #[cfg(unix)]
@@ -5084,6 +5359,9 @@ mod tests {
             operation_sudoers_path: None,
             collector_helper_sudoers_path: None,
             old_sudoers_paths: Vec::new(),
+            observation_runtime_path: None,
+            cpu_provider_path: None,
+            observation_unit_paths: Vec::new(),
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
@@ -5961,7 +6239,7 @@ mod tests {
     #[test]
     fn install_metadata_rejects_unsupported_schema_version_with_stable_repair_code() {
         let contents = [
-            "schema_version = 3",
+            "schema_version = 4",
             "hub_url = \"https://hub.example\"",
             "",
         ]
@@ -6021,6 +6299,47 @@ mod tests {
         assert!(metadata.old_sudoers_paths.is_empty());
         assert!(!contents.contains("sudoers_path"));
         assert!(!contents.contains("probe_asset_public_key_sha256"));
+    }
+
+    #[test]
+    fn schema_three_metadata_owns_the_complete_observation_role_inventory() {
+        let contents = [
+            "schema_version = 3",
+            "hub_url = \"https://hub.example\"",
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "observation_runtime_path = \"/usr/local/bin/enoki-observation-runtime\"",
+            "cpu_provider_path = \"/usr/local/bin/enoki-cpu-resource-provider\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
+            "service_name = \"enoki-probe\"",
+            "service_user = \"enoki-probe\"",
+            "service_group = \"enoki-probe\"",
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+            "observation_runtime_service_unit_path = \"/etc/systemd/system/enoki-observation-runtime.service\"",
+            "observation_runtime_socket_unit_path = \"/etc/systemd/system/enoki-observation-runtime.socket\"",
+            "cpu_provider_service_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider@.service\"",
+            "cpu_provider_socket_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider.socket\"",
+            "",
+        ]
+        .join("\n");
+
+        let metadata = parse_trusted_probe_install_metadata(&contents).unwrap();
+
+        assert_eq!(metadata.schema_version, 3);
+        assert_eq!(
+            metadata.observation_runtime_path.as_deref(),
+            Some(Path::new(OBSERVATION_RUNTIME_BINARY_PATH))
+        );
+        assert_eq!(
+            metadata.cpu_provider_path.as_deref(),
+            Some(Path::new(CPU_PROVIDER_BINARY_PATH))
+        );
+        assert_eq!(metadata.observation_unit_paths.len(), 4);
     }
 
     #[test]
@@ -7737,6 +8056,9 @@ printf '%s\n' '{}'
                     .join("enoki-probe-collector-helpers.sudoers"),
             ),
             old_sudoers_paths: Vec::new(),
+            observation_runtime_path: None,
+            cpu_provider_path: None,
+            observation_unit_paths: Vec::new(),
         }
     }
 

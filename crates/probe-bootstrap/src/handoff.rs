@@ -5,8 +5,8 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-pub const MAGIC: [u8; 8] = *b"ENKBH004";
-pub const SCHEMA_VERSION: u16 = 4;
+pub const MAGIC: [u8; 8] = *b"ENKBH005";
+pub const SCHEMA_VERSION: u16 = 5;
 pub const MAX_COMPONENT_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_METADATA_BYTES: usize = 256 * 1024;
 pub const MAX_ENROLLMENT_BYTES: usize = 8 * 1024;
@@ -192,17 +192,28 @@ pub struct Handoff {
 }
 
 impl Handoff {
+    // Each fixed role carries its own authenticated length; keeping the
+    // ordered fields explicit prevents a caller-supplied role collection.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_from(
         &self,
         enrollment: &Enrollment,
         component: &mut impl Read,
         component_len: u64,
+        runtime: &mut impl Read,
+        runtime_len: u64,
+        cpu_provider: &mut impl Read,
+        cpu_provider_len: u64,
         acquirer: &mut impl Read,
         acquirer_len: u64,
         output: &mut impl Write,
     ) -> Result<(), HandoffError> {
         if component_len == 0
             || component_len > MAX_COMPONENT_BYTES as u64
+            || runtime_len == 0
+            || runtime_len > MAX_COMPONENT_BYTES as u64
+            || cpu_provider_len == 0
+            || cpu_provider_len > MAX_COMPONENT_BYTES as u64
             || acquirer_len == 0
             || acquirer_len > MAX_COMPONENT_BYTES as u64
         {
@@ -212,7 +223,7 @@ impl Handoff {
         output
             .write_all(&SCHEMA_VERSION.to_be_bytes())
             .map_err(|_| HandoffError::Io)?;
-        output.write_all(&[9, 0]).map_err(|_| HandoffError::Io)?;
+        output.write_all(&[11, 0]).map_err(|_| HandoffError::Io)?;
         for (kind, value) in [
             (1, &self.delegation),
             (2, &self.delegation_signature),
@@ -227,7 +238,11 @@ impl Handoff {
         write_value(output, 7, &enrollment, MAX_ENROLLMENT_BYTES)?;
         write_prefix(output, 8, component_len as usize)?;
         stream_exact(component, output, component_len as usize)?;
-        write_prefix(output, 9, acquirer_len as usize)?;
+        write_prefix(output, 9, runtime_len as usize)?;
+        stream_exact(runtime, output, runtime_len as usize)?;
+        write_prefix(output, 10, cpu_provider_len as usize)?;
+        stream_exact(cpu_provider, output, cpu_provider_len as usize)?;
+        write_prefix(output, 11, acquirer_len as usize)?;
         stream_exact(acquirer, output, acquirer_len as usize)
     }
 
@@ -236,7 +251,7 @@ impl Handoff {
         read_exact(input, &mut header)?;
         if header[..8] != MAGIC
             || u16::from_be_bytes([header[8], header[9]]) != SCHEMA_VERSION
-            || header[10] != 9
+            || header[10] != 11
             || header[11] != 0
         {
             return Err(HandoffError::InvalidHeader);
@@ -321,7 +336,7 @@ impl Handoff {
             return Err(HandoffError::TooLarge);
         }
         let (kind, length) = read_prefix(input)?;
-        if kind != 9 || length as u64 != expected_len {
+        if kind != 11 || length as u64 != expected_len {
             return Err(HandoffError::InvalidSection);
         }
         stream_exact(input, acquirer_sink, length)?;
@@ -332,6 +347,37 @@ impl Handoff {
             Err(_) => Err(HandoffError::Io),
         }
     }
+
+    pub fn read_runtime_into(
+        input: &mut impl Read,
+        sink: &mut impl Write,
+        expected_len: u64,
+    ) -> Result<(), HandoffError> {
+        read_role_into(input, sink, expected_len, 9)
+    }
+
+    pub fn read_cpu_provider_into(
+        input: &mut impl Read,
+        sink: &mut impl Write,
+        expected_len: u64,
+    ) -> Result<(), HandoffError> {
+        read_role_into(input, sink, expected_len, 10)
+    }
+}
+fn read_role_into(
+    input: &mut impl Read,
+    sink: &mut impl Write,
+    expected_len: u64,
+    expected_kind: u8,
+) -> Result<(), HandoffError> {
+    if expected_len == 0 || expected_len > MAX_COMPONENT_BYTES as u64 {
+        return Err(HandoffError::TooLarge);
+    }
+    let (kind, length) = read_prefix(input)?;
+    if kind != expected_kind || length as u64 != expected_len {
+        return Err(HandoffError::InvalidSection);
+    }
+    stream_exact(input, sink, length)
 }
 fn write_value(
     output: &mut impl Write,
@@ -411,6 +457,10 @@ mod tests {
                 &enrollment(),
                 &mut &b"abc"[..],
                 3,
+                &mut &b"run"[..],
+                3,
+                &mut &b"cpu"[..],
+                3,
                 &mut &b"def"[..],
                 3,
                 &mut encoded,
@@ -424,6 +474,8 @@ mod tests {
         );
         let mut component = Vec::new();
         Handoff::read_component_into(&mut input, &mut component, 3).unwrap();
+        Handoff::read_runtime_into(&mut input, &mut Vec::new(), 3).unwrap();
+        Handoff::read_cpu_provider_into(&mut input, &mut Vec::new(), 3).unwrap();
         let mut acquirer = Vec::new();
         Handoff::read_acquirer_into(&mut input, &mut acquirer, 3).unwrap();
         assert_eq!(component, b"abc");
@@ -436,6 +488,10 @@ mod tests {
             .write_from(
                 &enrollment(),
                 &mut &b"abc"[..],
+                3,
+                &mut &b"run"[..],
+                3,
+                &mut &b"cpu"[..],
                 3,
                 &mut &b"def"[..],
                 3,

@@ -512,6 +512,26 @@ mod tests {
     }
 
     #[test]
+    fn observation_units_keep_callers_roles_and_deadlines_fixed() {
+        let probe = service_unit();
+        let runtime_socket = observation_runtime_socket_unit();
+        let runtime = observation_runtime_unit();
+        let provider_socket = cpu_provider_socket_unit();
+        let provider = cpu_provider_unit();
+
+        assert!(probe.contains("Requires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket"));
+        assert!(runtime_socket.contains("SocketGroup=enoki-probe"));
+        assert!(runtime.contains("User=enoki-observation-runtime"));
+        assert!(runtime.contains("PrivateNetwork=true"));
+        assert!(provider_socket.contains("SocketGroup=enoki-observation-runtime"));
+        assert!(provider.contains("ExecStart=/usr/local/bin/enoki-cpu-resource-provider\n"));
+        assert!(provider.contains("RuntimeMaxSec=3s"));
+        assert!(provider.contains("KillMode=control-group"));
+        assert!(provider.contains("ReadOnlyPaths=/proc/stat"));
+        assert!(!provider.contains('%'));
+    }
+
+    #[test]
     fn second_bootstrap_role_failure_cleans_the_first_receipt_and_allows_retry() {
         let temporary = tempdir().unwrap();
         for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {

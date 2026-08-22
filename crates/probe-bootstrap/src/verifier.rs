@@ -22,7 +22,21 @@ use tar::Archive;
 
 const DELEGATION_DOMAIN: &[u8] = b"enoki/probe-trust-delegation/v1\0";
 const MAX_BUNDLE_MANIFEST_BYTES: usize = 256 * 1024;
-const COMPONENT_PATH: &str = "enoki-probe";
+const BUNDLE_COMPONENTS: [(&str, &str, &str, &str); 3] = [
+    ("enoki-probe", "probe-v1", "hub-reporting-v1", "probe"),
+    (
+        "enoki-observation-runtime",
+        "observation-runtime-v1",
+        "cpu-observation-v1",
+        "observation-runtime",
+    ),
+    (
+        "enoki-cpu-resource-provider",
+        "cpu-provider-v1",
+        "cpu-counters-v1",
+        "cpu-provider",
+    ),
+];
 pub const MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
 const BUNDLED_BOOTSTRAP_ASSETS: [(&str, &str, &str); 2] = [
     (
@@ -40,7 +54,7 @@ const BUNDLED_BOOTSTRAP_ASSETS: [(&str, &str, &str); 2] = [
 const MAX_TAR_OVERHEAD_BYTES: u64 = 16 * 1024;
 #[cfg(feature = "acquirer")]
 const MAX_UNCOMPRESSED_ARCHIVE_BYTES: u64 =
-    MAX_COMPONENT_BYTES * 3 + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
+    MAX_COMPONENT_BYTES * 5 + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VerificationPolicy<'a> {
@@ -59,6 +73,12 @@ pub struct VerifiedBundle {
     pub(crate) bootstrap_assets: Vec<BundleComponent>,
 }
 impl VerifiedBundle {
+    pub(crate) fn component_receipt(&self, role: &str) -> Option<(&str, u64)> {
+        self.bootstrap_assets
+            .iter()
+            .find(|component| component.role == role)
+            .map(|component| (component.sha256.as_str(), component.size))
+    }
     pub(crate) fn acquirer_receipt(&self) -> Option<(&str, u64)> {
         self.bootstrap_assets
             .iter()
@@ -195,7 +215,15 @@ pub fn verify_archive_and_extract(
     metadata: &VerifiedMetadata,
     sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
-    verify_archive_and_extract_roles(archive, handoff, metadata, sink, &mut std::io::sink())
+    verify_archive_and_extract_roles(
+        archive,
+        handoff,
+        metadata,
+        sink,
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+    )
 }
 
 #[cfg(feature = "acquirer")]
@@ -204,6 +232,8 @@ pub(crate) fn verify_archive_and_extract_roles(
     handoff: &Handoff,
     metadata: &VerifiedMetadata,
     component_sink: &mut impl Write,
+    runtime_sink: &mut impl Write,
+    cpu_provider_sink: &mut impl Write,
     activator_sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
     verify_archive_digest(archive, &metadata.asset)?;
@@ -212,8 +242,25 @@ pub(crate) fn verify_archive_and_extract_roles(
         .map_err(|_| VerificationError::Io)?;
     let mut tar = Archive::new(BoundedRead::new(GzDecoder::new(BufReader::new(archive))));
     let mut saw_manifest = false;
-    let mut saw_component = false;
-    let mut saw_bootstrap_assets = vec![false; metadata.bundle.bootstrap_assets.len()];
+    let components = metadata
+        .bundle
+        .bootstrap_assets
+        .iter()
+        .filter(|component| {
+            matches!(
+                component.role.as_str(),
+                "probe" | "observation-runtime" | "cpu-provider"
+            )
+        })
+        .collect::<Vec<_>>();
+    let bootstrap_assets = metadata
+        .bundle
+        .bootstrap_assets
+        .iter()
+        .filter(|component| component.role.starts_with("bootstrap-"))
+        .collect::<Vec<_>>();
+    let mut saw_components = vec![false; components.len()];
+    let mut saw_bootstrap_assets = vec![false; bootstrap_assets.len()];
     for item in tar
         .entries()
         .map_err(|_| VerificationError::ArchiveStructure)?
@@ -236,20 +283,37 @@ pub(crate) fn verify_archive_and_extract_roles(
                 return Err(VerificationError::BundleManifest);
             }
             saw_manifest = true;
-        } else if path.as_ref() == COMPONENT_PATH.as_bytes() {
-            if saw_component || entry.size() != metadata.bundle.component_len {
+        } else if let Some((index, component)) = components
+            .iter()
+            .enumerate()
+            .find(|(_, component)| path.as_ref() == component.path.as_bytes())
+        {
+            if saw_components[index] || entry.size() != component.size {
                 return Err(VerificationError::ArchiveStructure);
             }
-            stream_component(
-                &mut entry,
-                component_sink,
-                metadata.bundle.component_len,
-                component_digest(&handoff.bundle_manifest)?,
-            )?;
-            saw_component = true;
-        } else if let Some((index, asset)) = metadata
-            .bundle
-            .bootstrap_assets
+            match component.role.as_str() {
+                "probe" => stream_component(
+                    &mut entry,
+                    component_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "observation-runtime" => stream_component(
+                    &mut entry,
+                    runtime_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "cpu-provider" => stream_component(
+                    &mut entry,
+                    cpu_provider_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                _ => return Err(VerificationError::ArchiveStructure),
+            }
+            saw_components[index] = true;
+        } else if let Some((index, asset)) = bootstrap_assets
             .iter()
             .enumerate()
             .find(|(_, asset)| path.as_ref() == asset.path.as_bytes())
@@ -277,7 +341,10 @@ pub(crate) fn verify_archive_and_extract_roles(
             return Err(VerificationError::ArchiveStructure);
         }
     }
-    if !saw_manifest || !saw_component || saw_bootstrap_assets.iter().any(|seen| !seen) {
+    if !saw_manifest
+        || saw_components.iter().any(|seen| !seen)
+        || saw_bootstrap_assets.iter().any(|seen| !seen)
+    {
         return Err(VerificationError::ArchiveStructure);
     }
     require_exact_gzip_and_tar_eof(tar.into_inner())?;
@@ -288,12 +355,22 @@ pub(crate) fn verify_archive_and_extract_roles(
 /// signed component length and digest, with no caller-supplied profile/mode.
 pub fn verify_component(
     component: &mut File,
-    handoff: &Handoff,
+    _handoff: &Handoff,
     bundle: &VerifiedBundle,
 ) -> Result<(), VerificationError> {
-    let expected = component_digest(&handoff.bundle_manifest)?;
+    verify_role_component(component, bundle, "probe")
+}
+
+pub(crate) fn verify_role_component(
+    component: &mut File,
+    bundle: &VerifiedBundle,
+    role: &str,
+) -> Result<(), VerificationError> {
+    let (expected, expected_len) = bundle
+        .component_receipt(role)
+        .ok_or(VerificationError::Component)?;
     let details = component.metadata().map_err(|_| VerificationError::Io)?;
-    if details.len() != bundle.component_len || bundle.component_len == 0 {
+    if details.len() != expected_len || expected_len == 0 {
         return Err(VerificationError::Component);
     }
     component
@@ -314,7 +391,7 @@ pub fn verify_component(
             .ok_or(VerificationError::Component)?;
         hash.update(&buf[..count]);
     }
-    if total != bundle.component_len || format!("{:x}", hash.finalize()) != expected {
+    if total != expected_len || format!("{:x}", hash.finalize()) != expected {
         return Err(VerificationError::Component);
     }
     component
@@ -606,7 +683,24 @@ fn verify_bundle_manifest(
         .get("bootstrapAssets")
         .and_then(Value::as_array)
         .ok_or(VerificationError::BundleManifest)?;
-    if components.iter().chain(bootstrap_assets.iter()).any(|c| {
+    if components.iter().any(|c| {
+        exact(
+            c,
+            &[
+                "path",
+                "permissionProfile",
+                "resourceContract",
+                "role",
+                "sha256",
+                "size",
+                "version",
+            ],
+        )
+        .is_none()
+    }) {
+        return Err(VerificationError::BundleManifest);
+    }
+    if bootstrap_assets.iter().any(|c| {
         exact(
             c,
             &[
@@ -627,22 +721,37 @@ fn verify_bundle_manifest(
     if b.kind != "enoki-probe-bundle"
         || b.target != a.target
         || b.version != version
-        || b.components.len() != 1
+        || b.components.len() != BUNDLE_COMPONENTS.len()
         || b.bootstrap_assets.len() != BUNDLED_BOOTSTRAP_ASSETS.len()
     {
         return Err(VerificationError::BundleManifest);
     }
-    let c = &b.components[0];
-    if c.role != "probe"
-        || c.path != COMPONENT_PATH
-        || c.permission_profile != "probe-v1"
-        || c.version != version
-        || c.size == 0
-        || c.size > MAX_COMPONENT_BYTES
-        || !is_sha256_hex(&c.sha256)
-    {
-        return Err(VerificationError::BundleManifest);
+    for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
+        let matches = b
+            .components
+            .iter()
+            .filter(|component| component.role == role)
+            .collect::<Vec<_>>();
+        let [component] = matches.as_slice() else {
+            return Err(VerificationError::BundleManifest);
+        };
+        if component.path != path
+            || component.permission_profile != permission_profile
+            || component.resource_contract.as_deref() != Some(resource_contract)
+            || component.version != version
+            || component.size == 0
+            || component.size > MAX_COMPONENT_BYTES
+            || !is_sha256_hex(&component.sha256)
+        {
+            return Err(VerificationError::BundleManifest);
+        }
     }
+    let probe = b
+        .components
+        .iter()
+        .find(|component| component.role == "probe")
+        .ok_or(VerificationError::BundleManifest)?;
+    let probe_size = probe.size;
     for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
         let matches = b
             .bootstrap_assets
@@ -662,12 +771,14 @@ fn verify_bundle_manifest(
             return Err(VerificationError::BundleManifest);
         }
     }
+    let mut roles = b.components;
+    roles.extend(b.bootstrap_assets);
     Ok(VerifiedBundle {
         version: version.to_owned(),
         target: a.target.clone(),
         delegation_generation: generation,
-        component_len: c.size,
-        bootstrap_assets: b.bootstrap_assets,
+        component_len: probe_size,
+        bootstrap_assets: roles,
     })
 }
 
@@ -747,15 +858,6 @@ fn require_exact_gzip_and_tar_eof(
         return Err(VerificationError::ArchiveStructure);
     }
     Ok(())
-}
-fn component_digest(bytes: &[u8]) -> Result<String, VerificationError> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|_| VerificationError::BundleManifest)?;
-    let b: BundleManifest =
-        serde_json::from_value(v).map_err(|_| VerificationError::BundleManifest)?;
-    b.components
-        .first()
-        .map(|c| c.sha256.clone())
-        .ok_or(VerificationError::BundleManifest)
 }
 fn canonical_public_key(bytes: &[u8]) -> Option<Vec<u8>> {
     let s = std::str::from_utf8(bytes).ok()?;
@@ -840,6 +942,8 @@ struct AssetManifest {
 pub(crate) struct BundleComponent {
     path: String,
     permission_profile: String,
+    #[serde(default)]
+    resource_contract: Option<String>,
     role: String,
     sha256: String,
     size: u64,
@@ -906,14 +1010,18 @@ mod tests {
             .unwrap()
             .into_bytes();
         let payload = b"probe".to_vec();
+        let runtime = b"runtime".to_vec();
+        let cpu_provider = b"cpu-provider".to_vec();
         let acquirer = b"acquirer".to_vec();
         let activator = b"activator".to_vec();
-        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload)).into_bytes();
+        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len()).into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gzip);
         for (name, data, kind) in [
             ("bundle-manifest.json", bundle.clone(), b'0'),
             ("enoki-probe", payload, b'0'),
+            ("enoki-observation-runtime", runtime, b'0'),
+            ("enoki-cpu-resource-provider", cpu_provider, b'0'),
             ("bootstrap/enoki-probe-bootstrap-acquire", acquirer, b'0'),
             ("bootstrap/enoki-probe-bootstrap-activate", activator, b'0'),
         ] {
@@ -1036,22 +1144,30 @@ mod tests {
             target: TARGET.to_owned(),
         };
         let manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
             "1".repeat(64),
             "2".repeat(64),
             "3".repeat(64),
+            "4".repeat(64),
+            "5".repeat(64),
         );
 
         assert!(verify_bundle_manifest(manifest.as_bytes(), "1.2.3", &asset, 1).is_ok());
     }
 
     #[test]
-    fn accepts_archive_from_official_node_packager() {
+    fn rejects_the_runtime_only_packager_output_until_bootstrap_roles_are_composed() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let temporary = tempdir().unwrap();
         let binary = test_probe_elf();
         let binary_path = temporary.path().join("probe");
         std::fs::write(&binary_path, &binary).unwrap();
+        std::fs::write(temporary.path().join("enoki-observation-runtime"), &binary).unwrap();
+        std::fs::write(
+            temporary.path().join("enoki-cpu-resource-provider"),
+            &binary,
+        )
+        .unwrap();
         let output_dir = temporary.path().join("output");
         let status = Command::new("node")
             .arg(workspace.join("scripts/release-candidate.mjs"))
@@ -1076,34 +1192,17 @@ mod tests {
         let archive_bytes = std::fs::read(&archive_path).unwrap();
         let mut archive = File::open(&archive_path).unwrap();
         let bundle_manifest = read_bundle_manifest(&mut archive).unwrap();
-        let vector = fixture();
-        let handoff = Handoff {
-            bundle_manifest: bundle_manifest.clone(),
-            ..vector.h
+        let asset = Asset {
+            bundle_manifest_sha256: sha256_hex(&bundle_manifest),
+            file: format!("enoki-probe-{TARGET}.tar.gz"),
+            sha256: sha256_hex(&archive_bytes),
+            size: archive_bytes.len() as u64,
+            target: TARGET.to_owned(),
         };
-        let metadata = VerifiedMetadata {
-            asset: Asset {
-                bundle_manifest_sha256: sha256_hex(&bundle_manifest),
-                file: format!("enoki-probe-{TARGET}.tar.gz"),
-                sha256: sha256_hex(&archive_bytes),
-                size: archive_bytes.len() as u64,
-                target: TARGET.to_owned(),
-            },
-            bundle: VerifiedBundle {
-                version: "1.2.3".to_owned(),
-                target: TARGET.to_owned(),
-                delegation_generation: 1,
-                component_len: binary.len() as u64,
-                bootstrap_assets: Vec::new(),
-            },
-        };
-        let mut extracted = Vec::new();
-
         assert_eq!(
-            verify_archive_and_extract(&mut archive, &handoff, &metadata, &mut extracted),
-            Ok(metadata.bundle.clone())
+            verify_bundle_manifest(&bundle_manifest, "1.2.3", &asset, 1),
+            Err(VerificationError::BundleManifest)
         );
-        assert_eq!(extracted, binary);
     }
 
     #[test]

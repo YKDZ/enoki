@@ -464,6 +464,14 @@ pub struct ProbeReportRequest {
     pub snapshots: ::prost::alloc::vec::Vec<Snapshot>,
     #[prost(string, tag = "13")]
     pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "14")]
+    pub observation_window_failure: ::core::option::Option<ObservationWindowFailure>,
+}
+/// 闭合的 Runtime 报告级失败，不携带 Provider、Resource、路径或本机诊断。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ObservationWindowFailure {
+    #[prost(enumeration = "ObservationWindowFailureReason", tag = "1")]
+    pub reason: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeReportResponse {
@@ -505,6 +513,44 @@ impl ProbeEnrollmentTargetKind {
             "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "NEW_HOST" => Some(Self::NewHost),
             "EXISTING_HOST" => Some(Self::ExistingHost),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ObservationWindowFailureReason {
+    Unspecified = 0,
+    ObservationRuntimeUnavailable = 1,
+    ObservationRuntimeInvalidResponse = 2,
+    ProbeAssetBundleIncoherent = 3,
+}
+impl ObservationWindowFailureReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED",
+            Self::ObservationRuntimeUnavailable => "OBSERVATION_RUNTIME_UNAVAILABLE",
+            Self::ObservationRuntimeInvalidResponse => {
+                "OBSERVATION_RUNTIME_INVALID_RESPONSE"
+            }
+            Self::ProbeAssetBundleIncoherent => "PROBE_ASSET_BUNDLE_INCOHERENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "OBSERVATION_RUNTIME_UNAVAILABLE" => {
+                Some(Self::ObservationRuntimeUnavailable)
+            }
+            "OBSERVATION_RUNTIME_INVALID_RESPONSE" => {
+                Some(Self::ObservationRuntimeInvalidResponse)
+            }
+            "PROBE_ASSET_BUNDLE_INCOHERENT" => Some(Self::ProbeAssetBundleIncoherent),
             _ => None,
         }
     }

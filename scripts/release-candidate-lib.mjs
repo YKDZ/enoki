@@ -422,17 +422,27 @@ export async function packageProbeArchive({
   const archivePath = path.join(outputDir, file);
   try {
     await mkdir(outputDir, { recursive: true });
-    const stagedBinary = path.join(stagingDir, "enoki-probe");
-    await copyFile(binaryPath, stagedBinary);
-    await chmod(stagedBinary, 0o755);
-    const binarySha256 = sha256(binary);
+    for (const profile of Object.values(probeBundleComponentProfiles)) {
+      const source =
+        profile.path === "enoki-probe"
+          ? binaryPath
+          : path.join(path.dirname(binaryPath), profile.path);
+      const component = await readFile(source);
+      inspectProbeElf(component, { target, version: stableVersion });
+      const staged = path.join(stagingDir, profile.path);
+      await copyFile(source, staged);
+      await chmod(staged, 0o755);
+    }
+    const componentDetails = await readProbeBundleComponentDetails(
+      stagingDir,
+      probeBundleComponentProfiles,
+    );
     await writeFile(
       path.join(stagingDir, "bundle-manifest.json"),
       `${JSON.stringify(
         {
-          components: renderProbeBundleComponents({
-            binarySha256,
-            binarySize: binary.byteLength,
+          components: renderProbeBundleComponentsFromDetails({
+            componentDetails,
             version: stableVersion.slice(1),
           }),
           kind: "enoki-probe-bundle",
@@ -460,7 +470,7 @@ export async function packageProbeArchive({
         "--directory",
         stagingDir,
         "bundle-manifest.json",
-        "enoki-probe",
+        ...Object.values(probeBundleComponentProfiles).map(({ path }) => path),
       ],
       { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
     );
@@ -1793,6 +1803,7 @@ function validateProbeBundleManifest(
     assertExactKeys(component, [
       "path",
       "permissionProfile",
+      "resourceContract",
       "role",
       "sha256",
       "size",
@@ -1810,6 +1821,7 @@ function validateProbeBundleManifest(
       !component ||
       component.path !== profile.path ||
       component.permissionProfile !== profile.permissionProfile ||
+      component.resourceContract !== profile.resourceContract ||
       component.sha256 !== componentDetails.get(profile.path)?.sha256 ||
       !Number.isSafeInteger(component.size) ||
       component.size <= 0 ||
@@ -1859,18 +1871,6 @@ function validateProbeBundleManifest(
       }
     }
   }
-}
-
-function renderProbeBundleComponents({ binarySha256, binarySize, version }) {
-  return Object.entries(probeBundleComponentProfiles).map(
-    ([role, profile]) => ({
-      ...profile,
-      role,
-      sha256: binarySha256,
-      size: binarySize,
-      version,
-    }),
-  );
 }
 
 function renderProbeBundleComponentsFromDetails({ componentDetails, version }) {

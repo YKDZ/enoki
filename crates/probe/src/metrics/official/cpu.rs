@@ -1,42 +1,10 @@
-use std::{collections::BTreeMap, fs};
+use std::collections::BTreeMap;
 
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
-};
-use crate::protocol::enoki::v1::{CpuCoreMetric, MetricSample};
+use crate::metrics::{CollectorCadence, CollectorDefinition, CollectorId};
+use crate::protocol::enoki::v1::CpuCoreMetric;
 
 pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::EveryTick);
-
-#[derive(Default)]
-pub struct CpuMetricCollector {
-    previous: Option<CpuCounterSnapshot>,
-}
-
-impl MetricCollector for CpuMetricCollector {
-    fn definition(&self) -> CollectorDefinition {
-        DEFINITION
-    }
-
-    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let Some(metrics) = fs::read_to_string("/proc/stat").ok().and_then(|contents| {
-            collect_cpu_metrics_from_proc_stat(&contents, self.previous.as_ref())
-        }) else {
-            return Ok(false);
-        };
-
-        self.previous = Some(metrics.snapshot.clone());
-        sample.cpu_cores = metrics.cores;
-        sample.cpu_percent = Some(metrics.aggregate_percent);
-        sample.cpu_idle_percent = Some(metrics.breakdown.idle_percent);
-        sample.cpu_iowait_percent = Some(metrics.breakdown.iowait_percent);
-        sample.cpu_steal_percent = Some(metrics.breakdown.steal_percent);
-        sample.cpu_system_percent = Some(metrics.breakdown.system_percent);
-        sample.cpu_user_percent = Some(metrics.breakdown.user_percent);
-
-        Ok(true)
-    }
-}
 
 #[derive(Debug)]
 pub struct CpuMetrics {
@@ -44,6 +12,42 @@ pub struct CpuMetrics {
     pub breakdown: CpuBreakdownMetrics,
     pub cores: Vec<CpuCoreMetric>,
     pub snapshot: CpuCounterSnapshot,
+}
+
+/// CPU Provider 返回的有界类型化事实；Linux 文本解析不进入 Runtime。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CpuCounterRecord {
+    pub name: String,
+    pub user: u64,
+    pub nice: u64,
+    pub system: u64,
+    pub idle: u64,
+    pub iowait: u64,
+    pub irq: u64,
+    pub softirq: u64,
+    pub steal: u64,
+}
+
+pub fn parse_linux_proc_stat_cpu_counters(contents: &str) -> Option<Vec<CpuCounterRecord>> {
+    let records = contents
+        .lines()
+        .filter_map(parse_cpu_line)
+        .map(CpuCounters::into_record)
+        .collect::<Vec<_>>();
+    (!records.is_empty()).then_some(records)
+}
+
+pub fn collect_cpu_metrics_from_counter_records(
+    records: &[CpuCounterRecord],
+    previous: Option<&CpuCounterSnapshot>,
+) -> Option<CpuMetrics> {
+    let counters_by_name = records
+        .iter()
+        .cloned()
+        .map(CpuCounters::from_record)
+        .map(|counters| (counters.name.clone(), counters))
+        .collect();
+    collect_cpu_metrics_from_counters(counters_by_name, previous)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -64,16 +68,18 @@ pub fn collect_cpu_metrics_from_proc_stat(
     contents: &str,
     previous: Option<&CpuCounterSnapshot>,
 ) -> Option<CpuMetrics> {
-    let mut counters_by_name = BTreeMap::new();
+    let counters_by_name = parse_linux_proc_stat_cpu_counters(contents)?
+        .into_iter()
+        .map(CpuCounters::from_record)
+        .map(|counters| (counters.name.clone(), counters))
+        .collect();
+    collect_cpu_metrics_from_counters(counters_by_name, previous)
+}
 
-    for line in contents.lines() {
-        let Some(counters) = parse_cpu_line(line) else {
-            continue;
-        };
-
-        counters_by_name.insert(counters.name.clone(), counters);
-    }
-
+fn collect_cpu_metrics_from_counters(
+    counters_by_name: BTreeMap<String, CpuCounters>,
+    previous: Option<&CpuCounterSnapshot>,
+) -> Option<CpuMetrics> {
     let aggregate = counters_by_name.get("cpu")?;
     let aggregate_previous =
         previous.and_then(|snapshot| snapshot.counters_by_name.get(aggregate.name.as_str()));
@@ -135,6 +141,34 @@ struct CpuCounters {
 }
 
 impl CpuCounters {
+    fn into_record(self) -> CpuCounterRecord {
+        CpuCounterRecord {
+            name: self.name,
+            user: self.user,
+            nice: self.nice,
+            system: self.system,
+            idle: self.idle,
+            iowait: self.iowait,
+            irq: self.irq,
+            softirq: self.softirq,
+            steal: self.steal,
+        }
+    }
+
+    fn from_record(record: CpuCounterRecord) -> Self {
+        Self {
+            name: record.name,
+            user: record.user,
+            nice: record.nice,
+            system: record.system,
+            idle: record.idle,
+            iowait: record.iowait,
+            irq: record.irq,
+            softirq: record.softirq,
+            steal: record.steal,
+        }
+    }
+
     fn into_metric(self, previous: Option<&CpuCounters>) -> CpuCoreMetric {
         let usage_percent = self.usage_percent_since(previous);
 

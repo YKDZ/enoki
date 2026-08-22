@@ -303,6 +303,9 @@ export const reportObservations = sqliteTable(
     bootId: text().notNull(),
     sequence: integer().notNull(),
     receivedAtMs: integer().notNull(),
+    observationWindowFailureReason: integer(
+      "observation_window_failure_reason",
+    ),
   },
   (table) => [
     uniqueIndex("report_observations_probe_boot_sequence_idx").on(

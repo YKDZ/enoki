@@ -99,6 +99,7 @@ export type RawMetricSampleInput = {
 export type ReportObservationInput = {
   bootId: string;
   hostId: number;
+  observationWindowFailureReason?: number | null;
   probeId: string;
   receivedAtMs: number;
   sequence: number;
@@ -142,6 +143,11 @@ export type MetricHistorySample = MetricSampleRow & {
 };
 
 export type MetricsRepository = {
+  findObservation: (
+    input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
+  ) => {
+    observationWindowFailureReason: number | null;
+  } | null;
   hasObservation: (
     input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
   ) => boolean;
@@ -170,6 +176,25 @@ export function createMetricsRepository(
   database: MetricsDatabase,
 ): MetricsRepository {
   return {
+    findObservation(input) {
+      return (
+        database
+          .select({
+            observationWindowFailureReason:
+              reportObservations.observationWindowFailureReason,
+          })
+          .from(reportObservations)
+          .where(
+            and(
+              eq(reportObservations.bootId, input.bootId),
+              eq(reportObservations.probeId, input.probeId),
+              eq(reportObservations.sequence, input.sequence),
+            ),
+          )
+          .limit(1)
+          .get() ?? null
+      );
+    },
     hasObservation(input) {
       return Boolean(
         database
@@ -404,6 +429,8 @@ function insertReportObservation(
     .values({
       bootId: input.bootId,
       hostId: input.hostId,
+      observationWindowFailureReason:
+        input.observationWindowFailureReason ?? null,
       probeId: input.probeId,
       receivedAtMs: input.receivedAtMs,
       sequence: input.sequence,
