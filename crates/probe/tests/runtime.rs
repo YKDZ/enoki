@@ -43,6 +43,15 @@ impl ObservationWindowClient for FixedObservationRuntime {
                         sample: Some(enoki_probe::protocol::enoki::v1::MetricSample {
                             collected_at_ms: (cadence.as_millis() as i64) * (tick as i64 + 1),
                             cpu_percent: Some(10.0),
+                            load_1: Some(1.0),
+                            load_5: Some(0.5),
+                            load_15: Some(0.25),
+                            memory_total_bytes: Some(8_192),
+                            memory_used_bytes: Some(4_096),
+                            memory_cache_bytes: Some(512),
+                            swap_total_bytes: Some(1_024),
+                            swap_used_bytes: Some(256),
+                            uptime_seconds: Some(123),
                             ..Default::default()
                         }),
                         cpu_resource_outcome: None,

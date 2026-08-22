@@ -57,7 +57,21 @@ fn run(input: impl Read, mut output: impl Write) -> Result<(), ()> {
         return Err(());
     }
     let counters = parse_linux_proc_stat_cpu_counters(&proc_stat).ok_or(())?;
-    let encoded = encode_records(&counters)?;
+    let cpu = encode_records(&counters)?;
+    let load = fs::read_to_string("/proc/loadavg").map_err(|_| ())?;
+    let memory = fs::read_to_string("/proc/meminfo").map_err(|_| ())?;
+    let uptime = fs::read_to_string("/proc/uptime").map_err(|_| ())?;
+    let mut encoded = Vec::with_capacity(cpu.len() + load.len() + memory.len() + uptime.len() + 6);
+    encoded.extend_from_slice(&u32::try_from(cpu.len()).map_err(|_| ())?.to_be_bytes());
+    encoded.extend_from_slice(&cpu);
+    encoded.extend_from_slice(load.as_bytes());
+    encoded.push(0);
+    encoded.extend_from_slice(memory.as_bytes());
+    encoded.push(0);
+    encoded.extend_from_slice(uptime.as_bytes());
+    if encoded.len() > MAX_CPU_COUNTERS_BYTES {
+        return Err(());
+    }
     let length = u32::try_from(encoded.len()).map_err(|_| ())?;
     output.write_all(&length.to_be_bytes()).map_err(|_| ())?;
     output.write_all(&encoded).map_err(|_| ())?;

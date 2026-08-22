@@ -9,6 +9,7 @@ pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::Load, CollectorCadence::EveryTick);
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct LoadMetricCollector;
 
 impl MetricCollector for LoadMetricCollector {
@@ -32,7 +33,7 @@ impl MetricCollector for LoadMetricCollector {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LoadMetrics {
     pub one: f64,
     pub five: f64,

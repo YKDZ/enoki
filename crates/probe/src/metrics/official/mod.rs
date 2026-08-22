@@ -42,8 +42,13 @@ pub const COLLECTOR_DEFINITIONS: &[CollectorDefinition] = &[
 pub fn collectors() -> Vec<Box<dyn MetricCollector>> {
     COLLECTOR_DEFINITIONS
         .iter()
-        // CPU 已迁入 Observation Runtime，Probe 内注册表不得实例化直接读取器。
-        .filter(|definition| definition.id != CollectorId::Cpu)
+        // 这些 Collector 已迁入 Observation Runtime，Probe 不得直接读取其资源。
+        .filter(|definition| {
+            !matches!(
+                definition.id,
+                CollectorId::Cpu | CollectorId::Memory | CollectorId::Load | CollectorId::Uptime
+            )
+        })
         .map(|definition| collector_for_id(definition.id))
         .collect()
 }
@@ -51,11 +56,11 @@ pub fn collectors() -> Vec<Box<dyn MetricCollector>> {
 fn collector_for_id(collector_id: CollectorId) -> Box<dyn MetricCollector> {
     match collector_id {
         CollectorId::Cpu => unreachable!("CPU is owned by the Observation Runtime"),
-        CollectorId::Memory => Box::<memory::MemoryMetricCollector>::default(),
+        CollectorId::Memory => unreachable!("Memory is owned by the Observation Runtime"),
         CollectorId::Disk => Box::<disk::DiskMetricCollector>::default(),
         CollectorId::Network => Box::<network::NetworkMetricCollector>::default(),
-        CollectorId::Load => Box::<load::LoadMetricCollector>::default(),
-        CollectorId::Uptime => Box::<uptime::UptimeMetricCollector>::default(),
+        CollectorId::Load => unreachable!("Load is owned by the Observation Runtime"),
+        CollectorId::Uptime => unreachable!("Uptime is owned by the Observation Runtime"),
         CollectorId::Temperature => Box::<temperature::TemperatureMetricCollector>::default(),
         CollectorId::Battery => Box::<battery::BatteryMetricCollector>::default(),
         CollectorId::DiskHealth => unreachable!("Disk Health is registered outside official core"),

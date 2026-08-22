@@ -9,6 +9,7 @@ pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::Memory, CollectorCadence::EveryTick);
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct MemoryMetricCollector;
 
 impl MetricCollector for MemoryMetricCollector {
@@ -34,7 +35,7 @@ impl MetricCollector for MemoryMetricCollector {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MemoryMetrics {
     pub cache_bytes: u64,
     pub swap_total_bytes: u64,

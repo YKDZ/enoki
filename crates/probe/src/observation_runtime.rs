@@ -12,11 +12,15 @@ use std::{
 use prost::Message;
 
 use crate::{
-    metrics::{CpuCounterRecord, CpuCounterSnapshot, collect_cpu_metrics_from_counter_records},
+    metrics::{
+        CpuCounterRecord, CpuCounterSnapshot, LoadMetrics, MemoryMetrics,
+        collect_cpu_metrics_from_counter_records,
+    },
     protocol::enoki::v1::MetricSample,
 };
 
 pub const CPU_COUNTERS_RESOURCE: &str = "official.cpu-counters";
+pub const SYSTEM_STATE_RESOURCE: &str = "official.system-state";
 pub const MAX_CPU_COUNTERS_BYTES: usize = 64 * 1024;
 pub const CPU_COUNTERS_PULL: &[u8] = b"enoki.cpu-counters.v1\n";
 pub const OBSERVATION_WINDOW_PULL: &[u8] = b"enoki.observation-window.v2\n";
@@ -48,6 +52,7 @@ impl ObservationRuntimeSleeper for ThreadObservationRuntimeSleeper {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceAccess {
     CpuCounters,
+    SystemState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,13 +71,24 @@ const CPU_COUNTERS_DESCRIPTOR: CollectorResourceDescriptor = CollectorResourceDe
     max_results_per_attempt: 1,
     request_accepts_caller_input: false,
 };
+const SYSTEM_STATE_DESCRIPTOR: CollectorResourceDescriptor = CollectorResourceDescriptor {
+    id: SYSTEM_STATE_RESOURCE,
+    access: ResourceAccess::SystemState,
+    max_result_bytes: MAX_CPU_COUNTERS_BYTES,
+    max_results_per_attempt: 1,
+    request_accepts_caller_input: false,
+};
 
 /// 注册表是闭合的构建产物，不是运行时插件表。
 pub struct StaticCollectorRegistry;
 
 impl StaticCollectorRegistry {
     pub fn resource(&self, id: &str) -> Option<&'static CollectorResourceDescriptor> {
-        (id == CPU_COUNTERS_RESOURCE).then_some(&CPU_COUNTERS_DESCRIPTOR)
+        match id {
+            CPU_COUNTERS_RESOURCE => Some(&CPU_COUNTERS_DESCRIPTOR),
+            SYSTEM_STATE_RESOURCE => Some(&SYSTEM_STATE_DESCRIPTOR),
+            _ => None,
+        }
     }
 }
 
@@ -92,11 +108,31 @@ impl CpuCountersPullRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CpuCountersResourceResult {
     counters: Vec<CpuCounterRecord>,
+    load: Option<LoadMetrics>,
+    memory: Option<MemoryMetrics>,
+    uptime_seconds: Option<u64>,
 }
 
 impl CpuCountersResourceResult {
     pub fn from_records(counters: Vec<CpuCounterRecord>) -> Option<Self> {
-        (!counters.is_empty() && counters.len() <= 4096).then_some(Self { counters })
+        (!counters.is_empty() && counters.len() <= 4096).then_some(Self {
+            counters,
+            load: None,
+            memory: None,
+            uptime_seconds: None,
+        })
+    }
+
+    pub fn with_system_state(
+        mut self,
+        load: Option<LoadMetrics>,
+        memory: Option<MemoryMetrics>,
+        uptime_seconds: Option<u64>,
+    ) -> Self {
+        self.load = load;
+        self.memory = memory;
+        self.uptime_seconds = uptime_seconds;
+        self
     }
 
     fn counters(&self) -> &[CpuCounterRecord] {
@@ -117,6 +153,9 @@ pub enum CpuResourceAcquisitionFailure {
     Malformed,
     Unavailable,
 }
+
+/// 兼容现有 Hub wire 名称；该封闭结果现在覆盖同一次 system-state pull。
+pub type SystemStateResourceAcquisitionFailure = CpuResourceAcquisitionFailure;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObservationWindowRequest {
@@ -232,6 +271,15 @@ where
             cpu_steal_percent: Some(cpu.breakdown.steal_percent),
             cpu_system_percent: Some(cpu.breakdown.system_percent),
             cpu_user_percent: Some(cpu.breakdown.user_percent),
+            load_1: resource.load.as_ref().map(|value| value.one),
+            load_5: resource.load.as_ref().map(|value| value.five),
+            load_15: resource.load.as_ref().map(|value| value.fifteen),
+            memory_total_bytes: resource.memory.as_ref().map(|value| value.total_bytes),
+            memory_used_bytes: resource.memory.as_ref().map(|value| value.used_bytes),
+            memory_cache_bytes: resource.memory.as_ref().map(|value| value.cache_bytes),
+            swap_total_bytes: resource.memory.as_ref().map(|value| value.swap_total_bytes),
+            swap_used_bytes: resource.memory.as_ref().map(|value| value.swap_used_bytes),
+            uptime_seconds: resource.uptime_seconds,
             ..MetricSample::default()
         })
     }
@@ -317,10 +365,7 @@ impl CpuCountersProvider for UnixCpuCountersProvider {
         {
             return Err(CpuResourceAcquisitionFailure::Malformed);
         }
-        let counters =
-            decode_cpu_counter_records(&encoded).ok_or(CpuResourceAcquisitionFailure::Malformed)?;
-        CpuCountersResourceResult::from_records(counters)
-            .ok_or(CpuResourceAcquisitionFailure::Malformed)
+        decode_system_state_result(&encoded).ok_or(CpuResourceAcquisitionFailure::Malformed)
     }
 }
 
@@ -362,6 +407,24 @@ fn decode_cpu_counter_records(bytes: &[u8]) -> Option<Vec<CpuCounterRecord>> {
         });
     }
     (offset == bytes.len()).then_some(records)
+}
+
+fn decode_system_state_result(bytes: &[u8]) -> Option<CpuCountersResourceResult> {
+    let cpu_len = u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+    let cpu = bytes.get(4..4 + cpu_len)?;
+    let state = bytes.get(4 + cpu_len..)?;
+    let mut result = CpuCountersResourceResult::from_records(decode_cpu_counter_records(cpu)?)?;
+    if state.is_empty() {
+        return Some(result);
+    }
+    let text = std::str::from_utf8(state).ok()?;
+    let (load_text, rest) = text.split_once('\0')?;
+    let (memory_text, uptime_text) = rest.split_once('\0')?;
+    let load = crate::metrics::collect_load_metrics_from_proc_loadavg(load_text)?;
+    let memory = crate::metrics::collect_memory_metrics_from_proc_meminfo(memory_text)?;
+    let uptime_seconds = crate::metrics::collect_uptime_seconds_from_proc_uptime(uptime_text)?;
+    result = result.with_system_state(Some(load), Some(memory), Some(uptime_seconds));
+    Some(result)
 }
 
 pub struct ObservationRuntimeServer<P> {

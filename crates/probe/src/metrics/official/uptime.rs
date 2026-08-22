@@ -9,6 +9,7 @@ pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::Uptime, CollectorCadence::EveryTick);
 
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct UptimeMetricCollector;
 
 impl MetricCollector for UptimeMetricCollector {

@@ -32,6 +32,22 @@ fn probe_side_client_gets_a_bounded_cpu_result_over_the_runtime_socket() {
         result.attempts[0].sample.as_ref().unwrap().cpu_cores.len(),
         1
     );
+    assert_eq!(
+        result.attempts[0]
+            .sample
+            .as_ref()
+            .unwrap()
+            .memory_used_bytes,
+        Some(4_096)
+    );
+    assert_eq!(
+        result.attempts[0].sample.as_ref().unwrap().load_1,
+        Some(1.0)
+    );
+    assert_eq!(
+        result.attempts[0].sample.as_ref().unwrap().uptime_seconds,
+        Some(123)
+    );
 }
 
 struct NoopSleeper;
@@ -56,6 +72,23 @@ impl CpuCountersProvider for FixedCpuProvider {
             )
             .expect("typed CPU counters"),
         )
+        .map(|result| {
+            result.with_system_state(
+                Some(enoki_probe::metrics::LoadMetrics {
+                    one: 1.0,
+                    five: 0.5,
+                    fifteen: 0.25,
+                }),
+                Some(enoki_probe::metrics::MemoryMetrics {
+                    cache_bytes: 512,
+                    swap_total_bytes: 1_024,
+                    swap_used_bytes: 256,
+                    total_bytes: 8_192,
+                    used_bytes: 4_096,
+                }),
+                Some(123),
+            )
+        })
         .ok_or(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Malformed)
     }
 }

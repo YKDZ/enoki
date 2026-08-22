@@ -1214,15 +1214,20 @@ fn collect_observation_batch(
         return Ok((sequence_start, *sequence, Vec::new(), Vec::new()));
     }
 
-    let cpu_enabled = active_configuration
-        .metrics_config
-        .collector_enabled(CollectorId::Cpu);
+    let runtime_enabled = [
+        CollectorId::Cpu,
+        CollectorId::Memory,
+        CollectorId::Load,
+        CollectorId::Uptime,
+    ]
+    .into_iter()
+    .any(|id| active_configuration.metrics_config.collector_enabled(id));
 
     let schedule = CollectorCadenceSchedule::for_tick_interval(
         active_configuration.metrics_collection_interval,
     );
     std::thread::scope(|scope| {
-        let cpu_window = cpu_enabled.then(|| {
+        let cpu_window = runtime_enabled.then(|| {
             scope.spawn(|| {
                 observation_runtime.request_finalized_window(
                     active_configuration.metrics_collection_interval,
@@ -1262,7 +1267,7 @@ fn collect_observation_batch(
                 let sample = metrics
                     .get_mut(index)
                     .ok_or(ObservationClientError::InvalidResponse)?;
-                merge_cpu_metrics(sample, cpu_sample);
+                merge_cpu_metrics(sample, cpu_sample, &active_configuration.metrics_config);
             } else if let Some(failure) = attempt.cpu_resource_outcome {
                 outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
                     sequence: attempt.sequence,
@@ -1281,15 +1286,33 @@ fn collect_observation_batch(
 fn merge_cpu_metrics(
     sample: &mut crate::protocol::enoki::v1::MetricSample,
     cpu_sample: crate::protocol::enoki::v1::MetricSample,
+    config: &MetricsCollectionConfig,
 ) {
-    sample.cpu_cores = cpu_sample.cpu_cores;
     sample.collected_at_ms = cpu_sample.collected_at_ms;
-    sample.cpu_percent = cpu_sample.cpu_percent;
-    sample.cpu_idle_percent = cpu_sample.cpu_idle_percent;
-    sample.cpu_iowait_percent = cpu_sample.cpu_iowait_percent;
-    sample.cpu_steal_percent = cpu_sample.cpu_steal_percent;
-    sample.cpu_system_percent = cpu_sample.cpu_system_percent;
-    sample.cpu_user_percent = cpu_sample.cpu_user_percent;
+    if config.collector_enabled(CollectorId::Cpu) {
+        sample.cpu_cores = cpu_sample.cpu_cores;
+        sample.cpu_percent = cpu_sample.cpu_percent;
+        sample.cpu_idle_percent = cpu_sample.cpu_idle_percent;
+        sample.cpu_iowait_percent = cpu_sample.cpu_iowait_percent;
+        sample.cpu_steal_percent = cpu_sample.cpu_steal_percent;
+        sample.cpu_system_percent = cpu_sample.cpu_system_percent;
+        sample.cpu_user_percent = cpu_sample.cpu_user_percent;
+    }
+    if config.collector_enabled(CollectorId::Load) {
+        sample.load_1 = cpu_sample.load_1;
+        sample.load_5 = cpu_sample.load_5;
+        sample.load_15 = cpu_sample.load_15;
+    }
+    if config.collector_enabled(CollectorId::Memory) {
+        sample.memory_total_bytes = cpu_sample.memory_total_bytes;
+        sample.memory_used_bytes = cpu_sample.memory_used_bytes;
+        sample.memory_cache_bytes = cpu_sample.memory_cache_bytes;
+        sample.swap_total_bytes = cpu_sample.swap_total_bytes;
+        sample.swap_used_bytes = cpu_sample.swap_used_bytes;
+    }
+    if config.collector_enabled(CollectorId::Uptime) {
+        sample.uptime_seconds = cpu_sample.uptime_seconds;
+    }
 }
 
 fn apply_newer_configuration_if_needed(

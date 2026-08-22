@@ -1,6 +1,6 @@
 use enoki_probe::observation_runtime::{
     CPU_COUNTERS_RESOURCE, CpuCountersProvider, CpuCountersResourceResult, ObservationRuntime,
-    ObservationWindowRequest, ResourceAccess, static_collector_registry,
+    ObservationWindowRequest, ResourceAccess, SYSTEM_STATE_RESOURCE, static_collector_registry,
 };
 use std::time::Duration;
 
@@ -58,6 +58,65 @@ fn cpu_observation_window_uses_one_fixed_resource_result_and_keeps_delta_state_i
     assert_eq!(provider.calls, 2);
     assert_eq!(first.cpu_percent, Some(0.0));
     assert_eq!(second.cpu_percent, Some(20.0));
+}
+
+#[test]
+fn one_immutable_provider_result_populates_load_memory_and_uptime() {
+    let descriptor = static_collector_registry()
+        .resource(SYSTEM_STATE_RESOURCE)
+        .expect("system state Resource is build-fixed");
+    assert_eq!(descriptor.access, ResourceAccess::SystemState);
+    assert_eq!(descriptor.max_results_per_attempt, 1);
+    assert!(!descriptor.request_accepts_caller_input);
+
+    let mut runtime = ObservationRuntime::new(SystemStateProvider { calls: 0 });
+    let sample = runtime
+        .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
+        .unwrap();
+    assert_eq!(
+        (sample.load_1, sample.load_5, sample.load_15),
+        (Some(1.0), Some(2.0), Some(3.0))
+    );
+    assert_eq!(sample.memory_total_bytes, Some(8_192));
+    assert_eq!(sample.memory_used_bytes, Some(4_096));
+    assert_eq!(sample.uptime_seconds, Some(123));
+    assert_eq!(runtime.into_provider().calls, 1);
+}
+
+struct SystemStateProvider {
+    calls: usize,
+}
+
+impl CpuCountersProvider for SystemStateProvider {
+    fn pull_cpu_counters(
+        &mut self,
+        _request: enoki_probe::observation_runtime::CpuCountersPullRequest,
+    ) -> Result<
+        CpuCountersResourceResult,
+        enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+    > {
+        self.calls += 1;
+        Ok(CpuCountersResourceResult::from_records(
+            enoki_probe::metrics::parse_linux_proc_stat_cpu_counters("cpu 100 0 0 900 0 0 0 0\n")
+                .unwrap(),
+        )
+        .unwrap()
+        .with_system_state(
+            Some(enoki_probe::metrics::LoadMetrics {
+                one: 1.0,
+                five: 2.0,
+                fifteen: 3.0,
+            }),
+            Some(enoki_probe::metrics::MemoryMetrics {
+                cache_bytes: 512,
+                swap_total_bytes: 1024,
+                swap_used_bytes: 256,
+                total_bytes: 8192,
+                used_bytes: 4096,
+            }),
+            Some(123),
+        ))
+    }
 }
 
 #[test]
