@@ -4,10 +4,14 @@ use crate::{
     generation::{DelegationGenerationLease, GenerationStateError, acquire_delegation_generation},
     handoff::{Enrollment, Handoff, HandoffError},
     install::{
-        FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd, activate_current_probe,
+        FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd, VerifiedFreshComponents,
+        activate_fresh_current_probe,
     },
     trust::{BootstrapRole, embedded_production_trust_for},
-    verifier::{VerificationPolicy, VerifiedBundle, verify_component, verify_metadata},
+    verifier::{
+        VerificationPolicy, VerifiedBundle, verify_acquirer_receipt, verify_activator_receipt,
+        verify_component, verify_metadata,
+    },
 };
 use std::{
     ffi::CString,
@@ -51,6 +55,8 @@ pub struct ReceivedRootHandoff {
     pub handoff: Handoff,
     pub bundle: VerifiedBundle,
     component: File,
+    acquirer: Option<File>,
+    activator: Option<File>,
     enrollment: Enrollment,
     _generation_lease: DelegationGenerationLease,
 }
@@ -70,23 +76,34 @@ impl ReceivedRootHandoff {
     /// Production's closed activation route. It owns the generation lease
     /// through the complete filesystem and systemd transaction; neither stdin
     /// nor a candidate component selects an installer command or path.
-    pub fn activate_fixed_current_probe(self) -> Result<(), ActivationError> {
+    pub fn activate_fixed_current_probe(mut self) -> Result<(), ActivationError> {
         let trust = embedded_production_trust_for(BootstrapRole::Activator)
             .ok_or(ActivationError::BuildTrustUnavailable)?;
         let mut accounts = SystemAccounts::default();
         let mut systemd = SystemSystemd::default();
-        self.activate_with(|component, enrollment, bundle| {
-            activate_current_probe(
-                component,
-                enrollment,
-                bundle,
-                &trust,
-                &FixedInstallPaths::production(),
-                &mut accounts,
-                &mut systemd,
-            )
-            .map_err(ActivationError::Install)
-        })
+        self.component()?;
+        let acquirer = self
+            .acquirer
+            .as_mut()
+            .ok_or(ActivationError::Verification)?;
+        let activator = self
+            .activator
+            .as_mut()
+            .ok_or(ActivationError::Verification)?;
+        activate_fresh_current_probe(
+            VerifiedFreshComponents {
+                probe: &mut self.component,
+                bootstrap_acquirer: acquirer,
+                bootstrap_activator: activator,
+            },
+            &self.enrollment,
+            &self.bundle,
+            &trust,
+            &FixedInstallPaths::production(),
+            &mut accounts,
+            &mut systemd,
+        )
+        .map_err(ActivationError::Install)
     }
     pub fn component(&mut self) -> Result<&mut File, ActivationError> {
         validate_regular_file(&self.component, 0, 0o600)?;
@@ -114,9 +131,13 @@ pub(crate) fn receive_root_handoff_with_policy(
     input: &mut impl Read,
     policy: &VerificationPolicy<'_>,
 ) -> Result<ReceivedRootHandoff, ActivationError> {
-    receive_root_handoff(input, policy, 0, |candidate| {
-        acquire_delegation_generation(candidate).map_err(ActivationError::from)
-    })
+    receive_root_handoff(
+        input,
+        policy,
+        0,
+        |candidate| acquire_delegation_generation(candidate).map_err(ActivationError::from),
+        None,
+    )
 }
 
 /// Root-only production receiver. It has no arguments other than stdin and
@@ -139,11 +160,47 @@ pub fn activate_from_stdin(input: &mut impl Read) -> Result<ReceivedRootHandoff,
     )
 }
 
+/// 私有 socket 只承载 metadata/component handoff；fd 0 保留为 sudo 实际
+/// 执行的 sealed activator receipt，并在任何 Host mutation 前复验。
+pub fn activate_from_socket(
+    input: &mut impl Read,
+    activator_receipt: &mut File,
+) -> Result<ReceivedRootHandoff, ActivationError> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(ActivationError::NotRoot);
+    }
+    let trust = embedded_production_trust_for(BootstrapRole::Activator)
+        .ok_or(ActivationError::BuildTrustUnavailable)?;
+    let policy = VerificationPolicy {
+        distribution: trust.distribution,
+        expected_target: trust.target,
+        highest_accepted_delegation_generation: 0,
+        external_root_fingerprint: trust.root_fingerprint.to_owned(),
+        external_root_pem: Some(trust.root_pem.as_bytes()),
+    };
+    receive_root_handoff_with_receipt(input, &policy, activator_receipt)
+}
+
+fn receive_root_handoff_with_receipt(
+    input: &mut impl Read,
+    policy: &VerificationPolicy<'_>,
+    activator_receipt: &mut File,
+) -> Result<ReceivedRootHandoff, ActivationError> {
+    receive_root_handoff(
+        input,
+        policy,
+        0,
+        |candidate| acquire_delegation_generation(candidate).map_err(ActivationError::from),
+        Some(activator_receipt),
+    )
+}
+
 fn receive_root_handoff(
     input: &mut impl Read,
     policy: &VerificationPolicy<'_>,
     expected_uid: u32,
     acquire_generation: impl FnOnce(u64) -> Result<DelegationGenerationLease, ActivationError>,
+    mut activator_receipt: Option<&mut File>,
 ) -> Result<ReceivedRootHandoff, ActivationError> {
     let handoff = Handoff::read_metadata(input)?;
 
@@ -166,6 +223,10 @@ fn receive_root_handoff(
     };
     let metadata =
         verify_metadata(&handoff, &installed_policy).map_err(|_| ActivationError::Verification)?;
+    if let Some(receipt) = activator_receipt.as_deref_mut() {
+        verify_activator_receipt(receipt, metadata.bundle())
+            .map_err(|_| ActivationError::Verification)?;
+    }
     // The enrollment capability is neither signed nor an authority to select
     // assets. It is consumed only after all signed metadata is authoritative.
     // A root-private component sink is staging only, never installed Host
@@ -179,15 +240,44 @@ fn receive_root_handoff(
         expected_uid,
     )?;
     let (temporary_name, mut component) = create_exclusive_component(&inbox, expected_uid)?;
+    let (acquirer_name, mut acquirer) = create_exclusive_component(&inbox, expected_uid)?;
+    let (activator_name, mut activator) = create_exclusive_component(&inbox, expected_uid)?;
+    let has_bootstrap_receipts = activator_receipt.is_some();
     let result = (|| {
         Handoff::read_component_into(input, &mut component, metadata.bundle().component_len)?;
         component.sync_all().map_err(|_| ActivationError::Io)?;
         verify_component(&mut component, &handoff, metadata.bundle())
             .map_err(|_| ActivationError::Verification)?;
+        if let Some(receipt) = activator_receipt {
+            let (_, acquirer_len) = metadata
+                .bundle()
+                .acquirer_receipt()
+                .ok_or(ActivationError::Verification)?;
+            Handoff::read_acquirer_into(input, &mut acquirer, acquirer_len)?;
+            acquirer.sync_all().map_err(|_| ActivationError::Io)?;
+            verify_acquirer_receipt(&mut acquirer, metadata.bundle())
+                .map_err(|_| ActivationError::Verification)?;
+            receipt
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| ActivationError::Io)?;
+            let copied = std::io::copy(receipt, &mut activator).map_err(|_| ActivationError::Io)?;
+            let (_, activator_len) = metadata
+                .bundle()
+                .activator_receipt()
+                .ok_or(ActivationError::Verification)?;
+            if copied != activator_len {
+                return Err(ActivationError::Verification);
+            }
+            activator.sync_all().map_err(|_| ActivationError::Io)?;
+            verify_activator_receipt(&mut activator, metadata.bundle())
+                .map_err(|_| ActivationError::Verification)?;
+        }
         component
             .seek(SeekFrom::Start(0))
             .map_err(|_| ActivationError::Io)?;
         unlink_at(inbox.as_raw_fd(), &temporary_name)?;
+        unlink_at(inbox.as_raw_fd(), &acquirer_name)?;
+        unlink_at(inbox.as_raw_fd(), &activator_name)?;
         // The candidate has now passed every coherence, enrollment, exact
         // byte, digest, and EOF check. Persist immediately before returning
         // the sole object that can invoke a Host-mutating activation adapter.
@@ -196,12 +286,16 @@ fn receive_root_handoff(
             handoff,
             bundle: metadata.bundle().clone(),
             component,
+            acquirer: has_bootstrap_receipts.then_some(acquirer),
+            activator: has_bootstrap_receipts.then_some(activator),
             enrollment,
             _generation_lease: generation_lease,
         })
     })();
     if result.is_err() {
         let _ = unlink_at(inbox.as_raw_fd(), &temporary_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &acquirer_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &activator_name);
     }
     result
 }
@@ -413,7 +507,11 @@ mod tests {
             .read_to_end(&mut bytes)
             .unwrap();
         assert_eq!(bytes, b"probe");
-        assert_eq!(fs::read_dir(state_root.join("inbox")).unwrap().count(), 0);
+        assert!(
+            fs::read_dir(state_root.join("inbox"))
+                .map(|entries| entries.count() == 0)
+                .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -421,7 +519,12 @@ mod tests {
         let temporary = tempdir().unwrap();
         let state_root = temporary.path().join("state");
         let mut fixture = fixture(4);
-        fixture.stream.pop();
+        let component = fixture
+            .stream
+            .windows(b"probe".len())
+            .position(|bytes| bytes == b"probe")
+            .unwrap();
+        fixture.stream.remove(component + b"probe".len() - 1);
 
         assert!(
             receive_for_test(
@@ -433,7 +536,11 @@ mod tests {
         );
         let floor = acquire_delegation_generation_for_test(&state_root, 4).unwrap();
         assert_eq!(floor.current(), 0);
-        assert_eq!(fs::read_dir(state_root.join("inbox")).unwrap().count(), 0);
+        assert!(
+            fs::read_dir(state_root.join("inbox"))
+                .map(|entries| entries.count() == 0)
+                .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -466,7 +573,12 @@ mod tests {
         let temporary = tempdir().unwrap();
         let state_root = temporary.path().join("state");
         let mut fixture = fixture(4);
-        *fixture.stream.last_mut().unwrap() ^= 1;
+        let component = fixture
+            .stream
+            .windows(b"probe".len())
+            .position(|bytes| bytes == b"probe")
+            .unwrap();
+        fixture.stream[component] ^= 1;
 
         assert!(
             receive_for_test(
@@ -546,10 +658,16 @@ mod tests {
         state_root: &std::path::Path,
         policy: &VerificationPolicy<'_>,
     ) -> Result<ReceivedRootHandoff, ActivationError> {
-        receive_root_handoff(input, policy, unsafe { libc::geteuid() }, |candidate| {
-            acquire_delegation_generation_for_test(state_root, candidate)
-                .map_err(ActivationError::from)
-        })
+        receive_root_handoff(
+            input,
+            policy,
+            unsafe { libc::geteuid() },
+            |candidate| {
+                acquire_delegation_generation_for_test(state_root, candidate)
+                    .map_err(ActivationError::from)
+            },
+            None,
+        )
     }
 
     fn invalid_policy() -> VerificationPolicy<'static> {
@@ -637,6 +755,8 @@ mod tests {
                 &crate::handoff::Enrollment::new("https://hub.example", "enk_enroll_test").unwrap(),
                 &mut Cursor::new(component),
                 component.len() as u64,
+                &mut Cursor::new(b"a"),
+                1,
                 &mut stream,
             )
             .unwrap();

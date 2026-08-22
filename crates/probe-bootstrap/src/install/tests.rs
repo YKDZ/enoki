@@ -408,6 +408,48 @@ mod tests {
     }
 
     #[test]
+    fn fresh_machine_installs_bundled_bootstrap_receipts_before_probe_activation() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut component = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        activate_fresh_current_probe(
+            VerifiedFreshComponents {
+                probe: &mut component,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .unwrap();
+
+        for role in [
+            "enoki-probe-bootstrap-acquire",
+            "enoki-probe-bootstrap-activate",
+        ] {
+            let path = temporary.path().join("usr/local/bin").join(role);
+            assert_eq!(fs::read(&path).unwrap(), b"probe");
+            assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o755);
+        }
+    }
+
+    #[test]
     fn fresh_activation_recovers_an_interrupted_owned_layout_before_retrying() {
         let temporary = tempdir().unwrap();
         for parent in [

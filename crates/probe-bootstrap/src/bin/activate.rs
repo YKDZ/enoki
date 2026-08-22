@@ -1,8 +1,22 @@
 //! The separately compiled root-only Bootstrap role.
-use std::{io, process::ExitCode};
+use std::{
+    fs::File,
+    io,
+    os::{fd::FromRawFd, unix::net::UnixStream},
+    process::ExitCode,
+};
 
 fn main() -> ExitCode {
-    match enoki_probe_bootstrap::activation::activate_from_stdin(&mut io::stdin().lock()) {
+    let result = if std::env::args().nth(1).as_deref() == Some("--fd-handoff") {
+        // SAFETY: acquirer transfers sole ownership of the private socket on
+        // fd 1 and the sealed executable receipt on fd 0 across sudo/exec.
+        let mut receipt = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
+        let mut input = unsafe { UnixStream::from_raw_fd(libc::STDOUT_FILENO) };
+        enoki_probe_bootstrap::activation::activate_from_socket(&mut input, &mut receipt)
+    } else {
+        enoki_probe_bootstrap::activation::activate_from_stdin(&mut io::stdin().lock())
+    };
+    match result {
         Ok(verified) => match verified.activate_fixed_current_probe() {
             Ok(()) => ExitCode::SUCCESS,
             Err(enoki_probe_bootstrap::activation::ActivationError::Install(error)) => {

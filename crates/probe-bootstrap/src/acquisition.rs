@@ -10,11 +10,14 @@
 #![allow(dead_code)]
 
 use std::{
+    ffi::CString,
     fs::{self, DirBuilder, File, OpenOptions},
     io::{self, Read, Seek, Write},
+    os::fd::{FromRawFd, OwnedFd},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
-    process,
+    process::{self, Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -27,7 +30,8 @@ use crate::{
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
         MAX_COMPONENT_BYTES, VerificationPolicy, VerifiedBundle, read_bundle_manifest,
-        verify_archive_and_extract, verify_metadata, verify_outer_metadata,
+        verify_archive_and_extract, verify_archive_and_extract_roles, verify_metadata,
+        verify_outer_metadata,
     },
 };
 
@@ -226,30 +230,48 @@ pub(crate) struct ProductionAcquisition<'a> {
 
 /// Production acquire entrypoint. The only caller configuration is the
 /// enrollment capability; the distribution trust and target are compiled in.
-pub fn acquire_from_environment(output: &mut impl Write) -> Result<(), AcquisitionFailure> {
+pub fn acquire_and_activate_from_environment(
+    input: &mut impl Read,
+) -> Result<(), AcquisitionFailure> {
     let hub_origin =
         std::env::var("ENOKI_HUB_URL").map_err(|_| AcquisitionFailure::InvalidOrigin)?;
-    let token = std::env::var("ENOKI_ENROLLMENT_TOKEN")
-        .map_err(|_| AcquisitionFailure::InvalidEnrollment)?;
+    let token = read_enrollment_token(input)?;
     let enrollment =
         Enrollment::new(&hub_origin, &token).map_err(|_| AcquisitionFailure::InvalidEnrollment)?;
     let trust = embedded_production_trust_for(BootstrapRole::Acquirer)
         .ok_or(AcquisitionFailure::BuildTrustUnavailable)?;
-    let mut acquired = acquire_production(ProductionAcquisition {
-        hub_origin: enrollment.hub_origin().to_owned(),
-        staging_dir: PathBuf::from(format!("/tmp/enoki-probe-bootstrap-{}", unsafe {
-            libc::geteuid()
-        })),
-        policy: VerificationPolicy {
-            distribution: trust.distribution,
-            expected_target: trust.target,
-            highest_accepted_delegation_generation: 0,
-            external_root_fingerprint: trust.root_fingerprint.to_owned(),
-            external_root_pem: Some(trust.root_pem.as_bytes()),
-        },
-        deadline_ms: 60_000,
-    })?;
-    acquired.write_handoff_with_enrollment(&enrollment, output)
+    let policy = VerificationPolicy {
+        distribution: trust.distribution,
+        expected_target: trust.target,
+        highest_accepted_delegation_generation: 0,
+        external_root_fingerprint: trust.root_fingerprint.to_owned(),
+        external_root_pem: Some(trust.root_pem.as_bytes()),
+    };
+    let asset_dir = std::env::var_os("ENOKI_PROBE_LOCAL_ASSET_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(AcquisitionFailure::Local)?;
+    let archive_path = std::env::var_os("ENOKI_PROBE_LOCAL_BUNDLE_ARCHIVE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(AcquisitionFailure::Local)?;
+    let mut acquired = acquire_local(&asset_dir, &archive_path, &policy)?;
+    acquired.launch_authenticated_activator(&enrollment)
+}
+
+fn read_enrollment_token(input: &mut impl Read) -> Result<String, AcquisitionFailure> {
+    let mut bytes = Vec::new();
+    input
+        .take(256)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AcquisitionFailure::InvalidEnrollment)?;
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
+        return Err(AcquisitionFailure::InvalidEnrollment);
+    }
+    String::from_utf8(bytes).map_err(|_| AcquisitionFailure::InvalidEnrollment)
 }
 
 /// Production entry point. It consults the process effective uid directly;
@@ -282,6 +304,7 @@ pub(crate) struct VerifiedAcquisition {
     pub handoff: Handoff,
     pub bundle: VerifiedBundle,
     component: File,
+    activator: File,
 }
 
 impl VerifiedAcquisition {
@@ -300,12 +323,83 @@ impl VerifiedAcquisition {
         output: &mut impl Write,
     ) -> Result<(), AcquisitionFailure> {
         let component_len = self.bundle.component_len;
+        let (acquirer_sha256, acquirer_len) = self
+            .bundle
+            .acquirer_receipt()
+            .ok_or(AcquisitionFailure::Permanent)?;
+        let mut acquirer = File::open("/proc/self/exe").map_err(|_| AcquisitionFailure::Local)?;
+        verify_open_file(&mut acquirer, acquirer_sha256, acquirer_len)?;
         let handoff = self.handoff.clone();
         let component = self.component()?;
         handoff
-            .write_from(enrollment, component, component_len, output)
+            .write_from(
+                enrollment,
+                component,
+                component_len,
+                &mut acquirer,
+                acquirer_len,
+                output,
+            )
             .map_err(|_| AcquisitionFailure::Local)
     }
+
+    fn launch_authenticated_activator(
+        &mut self,
+        enrollment: &Enrollment,
+    ) -> Result<(), AcquisitionFailure> {
+        let (expected_sha256, expected_size) = self
+            .bundle
+            .activator_receipt()
+            .ok_or(AcquisitionFailure::Permanent)?;
+        let activator = sealed_activator_fd(&mut self.activator, expected_sha256, expected_size)?;
+        let (mut sender, receiver) = UnixStream::pair().map_err(|_| AcquisitionFailure::Local)?;
+        let receiver: OwnedFd = receiver.into();
+        let mut child = Command::new("/usr/bin/sudo")
+            .args(["--", "/proc/self/fd/0", "--fd-handoff"])
+            .env_clear()
+            .stdin(Stdio::from(activator))
+            .stdout(Stdio::from(receiver))
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|_| AcquisitionFailure::Local)?;
+        let sent = self.write_handoff_with_enrollment(enrollment, &mut sender);
+        let _ = sender.shutdown(std::net::Shutdown::Write);
+        let status = child.wait().map_err(|_| AcquisitionFailure::Local)?;
+        sent?;
+        status
+            .success()
+            .then_some(())
+            .ok_or(AcquisitionFailure::Local)
+    }
+}
+
+fn sealed_activator_fd(
+    source: &mut File,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<File, AcquisitionFailure> {
+    source.rewind().map_err(|_| AcquisitionFailure::Local)?;
+    let name =
+        CString::new("enoki-probe-bootstrap-activate").map_err(|_| AcquisitionFailure::Local)?;
+    let descriptor =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if descriptor < 0 {
+        return Err(AcquisitionFailure::Local);
+    }
+    let mut sealed = unsafe { File::from_raw_fd(descriptor) };
+    let copied = io::copy(source, &mut sealed).map_err(|_| AcquisitionFailure::Local)?;
+    if copied != expected_size {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    sealed.sync_all().map_err(|_| AcquisitionFailure::Local)?;
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    if unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, seals) } != 0
+        || unsafe { libc::fcntl(descriptor, libc::F_GET_SEALS) } != seals
+    {
+        return Err(AcquisitionFailure::Local);
+    }
+    verify_open_file(&mut sealed, expected_sha256, expected_size)?;
+    Ok(sealed)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -317,6 +411,127 @@ pub enum AcquisitionFailure {
     Local,
     Permanent,
     Temporary { retry_after_ms: Option<u64> },
+}
+
+fn acquire_local(
+    asset_dir: &Path,
+    archive_path: &Path,
+    policy: &VerificationPolicy<'_>,
+) -> Result<VerifiedAcquisition, AcquisitionFailure> {
+    if unsafe { libc::geteuid() } == 0 {
+        return Err(AcquisitionFailure::RootRefused);
+    }
+    ensure_private_staging(asset_dir)?;
+    let provisional = Handoff {
+        delegation: read_local_metadata(asset_dir, "trust-delegation.json")?,
+        delegation_signature: read_local_metadata(asset_dir, "trust-delegation.json.sig")?,
+        manifest: read_local_metadata(asset_dir, "manifest.json")?,
+        manifest_signature: read_local_metadata(asset_dir, "manifest.json.sig")?,
+        signing_key: read_local_metadata(asset_dir, "signing-key.pem")?,
+        bundle_manifest: Vec::new(),
+    };
+    let outer =
+        verify_outer_metadata(&provisional, policy).map_err(|_| AcquisitionFailure::Permanent)?;
+    if archive_path.file_name().and_then(|name| name.to_str()) != Some(outer.archive_file()) {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let mut archive = open_local_regular(archive_path, outer.archive_len())?;
+    verify_open_file(&mut archive, outer.archive_sha256(), outer.archive_len())?;
+    let bundle_manifest =
+        read_bundle_manifest(&mut archive).map_err(|_| AcquisitionFailure::Permanent)?;
+    let handoff = Handoff {
+        bundle_manifest,
+        ..provisional
+    };
+    let metadata = verify_metadata(&handoff, policy).map_err(|_| AcquisitionFailure::Permanent)?;
+    let mut component = create_exclusive_staging_file(asset_dir)?;
+    let mut activator = create_exclusive_staging_file(asset_dir)?;
+    let bundle = verify_archive_and_extract_roles(
+        &mut archive,
+        &handoff,
+        &metadata,
+        &mut component,
+        &mut activator,
+    )
+    .map_err(|_| AcquisitionFailure::Permanent)?;
+    component
+        .sync_all()
+        .map_err(|_| AcquisitionFailure::Local)?;
+    activator
+        .sync_all()
+        .map_err(|_| AcquisitionFailure::Local)?;
+    Ok(VerifiedAcquisition {
+        handoff,
+        bundle,
+        component,
+        activator,
+    })
+}
+
+fn read_local_metadata(directory: &Path, name: &str) -> Result<Vec<u8>, AcquisitionFailure> {
+    let path = directory.join(name);
+    let mut file = open_local_regular(&path, MAX_METADATA_BYTES as u64)?;
+    let size = file
+        .metadata()
+        .map_err(|_| AcquisitionFailure::Local)?
+        .len();
+    if size == 0 || size > MAX_METADATA_BYTES as u64 {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let mut bytes = vec![0; size as usize];
+    file.read_exact(&mut bytes)
+        .map_err(|_| AcquisitionFailure::Local)?;
+    Ok(bytes)
+}
+
+fn open_local_regular(path: &Path, maximum: u64) -> Result<File, AcquisitionFailure> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| AcquisitionFailure::Local)?;
+    let details = file.metadata().map_err(|_| AcquisitionFailure::Local)?;
+    if !details.is_file()
+        || details.uid() != unsafe { libc::geteuid() }
+        || details.len() == 0
+        || details.len() > maximum
+    {
+        return Err(AcquisitionFailure::Local);
+    }
+    Ok(file)
+}
+
+fn verify_open_file(
+    file: &mut File,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<(), AcquisitionFailure> {
+    if file
+        .metadata()
+        .map_err(|_| AcquisitionFailure::Local)?
+        .len()
+        != expected_size
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    file.rewind().map_err(|_| AcquisitionFailure::Local)?;
+    let mut hash = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| AcquisitionFailure::Local)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        hash.update(&buffer[..read]);
+    }
+    if total != expected_size || format!("{:x}", hash.finalize()) != expected_sha256 {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    file.rewind().map_err(|_| AcquisitionFailure::Local)
 }
 
 /// Acquires one bundle without allowing a root process to reach transport or
@@ -438,6 +653,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         handoff,
         bundle,
         component,
+        activator: create_exclusive_staging_file(&request.staging_dir)?,
     })
 }
 

@@ -419,6 +419,125 @@ pub fn activate_current_probe(
     )
 }
 
+/// Fresh-machine adapter: publishes only the two verified Bootstrap receipts,
+/// then enters the existing closed Probe transaction. On failure it removes
+/// only the exact inodes created by this attempt.
+pub struct VerifiedFreshComponents<'a> {
+    pub probe: &'a mut File,
+    pub bootstrap_acquirer: &'a mut File,
+    pub bootstrap_activator: &'a mut File,
+}
+
+pub fn activate_fresh_current_probe(
+    components: VerifiedFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    preflight_parent_chains(paths)?;
+    let acquirer =
+        publish_bootstrap_receipt(components.bootstrap_acquirer, &paths.bootstrap_acquirer())?;
+    let activator = match publish_bootstrap_receipt(
+        components.bootstrap_activator,
+        &paths.bootstrap_activator(),
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            remove_published_bootstrap(&acquirer);
+            return Err(error);
+        }
+    };
+    let result = activate_current_probe(
+        components.probe,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        accounts,
+        systemd,
+    );
+    if result.is_err() {
+        remove_published_bootstrap(&activator);
+        remove_published_bootstrap(&acquirer);
+    }
+    result
+}
+
+struct PublishedBootstrap {
+    device: u64,
+    inode: u64,
+    path: PathBuf,
+}
+
+fn publish_bootstrap_receipt(
+    source: &mut File,
+    destination: &Path,
+) -> Result<PublishedBootstrap, InstallError> {
+    match fs::symlink_metadata(destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(InstallError::ExistingResidue),
+        Err(_) => return Err(InstallError::Io),
+    }
+    let parent = destination.parent().ok_or(InstallError::Io)?;
+    let temporary = parent.join(format!(
+        ".enoki-bootstrap-role-{}-{}",
+        std::process::id(),
+        destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(InstallError::Io)?
+    ));
+    let _ = fs::remove_file(&temporary);
+    let result = (|| {
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&temporary)
+            .map_err(|_| InstallError::Io)?;
+        source
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| InstallError::Io)?;
+        std::io::copy(source, &mut output).map_err(|_| InstallError::Io)?;
+        output.sync_all().map_err(|_| InstallError::Io)?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o755))
+            .map_err(|_| InstallError::Io)?;
+        fs::hard_link(&temporary, destination).map_err(|_| InstallError::ExistingResidue)?;
+        let metadata = fs::symlink_metadata(destination).map_err(|_| InstallError::Io)?;
+        fs::remove_file(&temporary).map_err(|_| InstallError::Io)?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| InstallError::Io)?;
+        Ok(PublishedBootstrap {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            path: destination.to_owned(),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn remove_published_bootstrap(receipt: &PublishedBootstrap) {
+    if let Ok(metadata) = fs::symlink_metadata(&receipt.path)
+        && metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.dev() == receipt.device
+        && metadata.ino() == receipt.inode
+    {
+        let _ = fs::remove_file(&receipt.path);
+        if let Some(parent) = receipt.path.parent() {
+            let _ = File::open(parent).and_then(|directory| directory.sync_all());
+        }
+    }
+}
+
 fn activate_current_probe_with_files(
     component: &mut File,
     enrollment: &Enrollment,

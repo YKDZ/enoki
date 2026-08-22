@@ -231,6 +231,31 @@ async function verifyPublicCandidate({
         }
         await writeFile(path.join(probeAssetDir, expected.file), bytes);
       }
+      const recipe = candidateManifest.bootstrapRecipe;
+      const publicRecipe = release.assets[recipe.file];
+      if (!publicRecipe?.downloadUrl) {
+        throw new Error(
+          `public Probe Bootstrap recipe is missing: ${recipe.file}`,
+        );
+      }
+      const recipeResponse = await fetchImpl(publicRecipe.downloadUrl, {
+        credentials: "omit",
+        redirect: "follow",
+      });
+      if (!recipeResponse.ok) {
+        throw new Error(
+          `public Probe Bootstrap recipe ${recipe.file} returned ${recipeResponse.status}`,
+        );
+      }
+      const recipeBytes = Buffer.from(await recipeResponse.arrayBuffer());
+      if (
+        recipeBytes.length !== recipe.size ||
+        sha256(recipeBytes) !== recipe.sha256
+      ) {
+        throw new Error(
+          `public Probe Bootstrap recipe does not match candidate: ${recipe.file}`,
+        );
+      }
       publicAssetsReady = true;
     });
 

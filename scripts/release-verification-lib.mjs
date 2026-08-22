@@ -1321,6 +1321,7 @@ export function createReleaseVerificationSummary({
     hub,
     kind: "enoki-release-verification-evidence",
     missingIdentities,
+    bootstrapRecipe: candidateManifest?.bootstrapRecipe ?? null,
     probeAssetSet,
     promotable: false,
     releaseBaseline,
@@ -1402,6 +1403,7 @@ function isCandidateManifest(candidateManifest) {
     candidateManifest?.kind === "enoki-release-candidate" &&
     candidateManifest?.schemaVersion === 4 &&
     sameKeySet(candidateManifest, {
+      bootstrapRecipe: null,
       candidate: null,
       hub: null,
       kind: null,
@@ -1410,12 +1412,39 @@ function isCandidateManifest(candidateManifest) {
       schemaVersion: null,
     }) &&
     isCandidateIdentity(candidateManifest.candidate) &&
+    isCandidateBootstrapRecipe(
+      candidateManifest.bootstrapRecipe,
+      candidateManifest.candidate,
+    ) &&
     isCandidateHub(candidateManifest.hub, candidateManifest.candidate) &&
     isCandidateProbeAssetSet(
       candidateManifest.probeAssetSet,
       candidateManifest.candidate,
     ) &&
     isReleaseBaselineDescriptor(candidateManifest.releaseBaseline)
+  );
+}
+
+function isCandidateBootstrapRecipe(recipe, candidate) {
+  return (
+    isPlainObject(recipe) &&
+    sameKeySet(recipe, {
+      bundleVersion: null,
+      distribution: null,
+      file: null,
+      rootFingerprint: null,
+      sha256: null,
+      size: null,
+      version: null,
+    }) &&
+    recipe.bundleVersion === candidate.version.slice(1) &&
+    recipe.distribution === "enoki" &&
+    recipe.file === "enoki-probe-bootstrap.py" &&
+    recipe.version === "v1" &&
+    /^[0-9a-f]{64}$/.test(recipe.rootFingerprint ?? "") &&
+    /^[0-9a-f]{64}$/.test(recipe.sha256 ?? "") &&
+    Number.isSafeInteger(recipe.size) &&
+    recipe.size > 0
   );
 }
 

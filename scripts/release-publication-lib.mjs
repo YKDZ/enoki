@@ -180,6 +180,7 @@ export async function reconcilePublication({
       versionedImage: { digest: versionedImage.digest, reference: version },
     },
     probeAssetSet: candidateManifest.probeAssetSet,
+    bootstrapRecipe: candidateManifest.bootstrapRecipe,
     releaseBaseline: verificationSummary.releaseBaseline ?? null,
     schemaVersion: 1,
     smoke,
@@ -368,6 +369,10 @@ function assertPublishAuthorization({
       candidateManifest.probeAssetSet,
     ) ||
     !sameJson(
+      verificationSummary.bootstrapRecipe,
+      candidateManifest.bootstrapRecipe,
+    ) ||
+    !sameJson(
       verificationSummary.releaseBaseline,
       candidateManifest.releaseBaseline,
     ) ||
@@ -412,7 +417,16 @@ function publicReleaseAssets(manifest) {
   if (!group || new Set(files.map(({ file }) => file)).size !== files.length) {
     throw new Error("Candidate public Release assets are malformed");
   }
-  return files;
+  const recipe = manifest.bootstrapRecipe;
+  if (
+    recipe?.file !== "enoki-probe-bootstrap.py" ||
+    !/^[0-9a-f]{64}$/.test(recipe.sha256 ?? "") ||
+    !Number.isSafeInteger(recipe.size) ||
+    recipe.size < 1
+  ) {
+    throw new Error("Candidate public Bootstrap recipe is malformed");
+  }
+  return [...files, { ...recipe, directory: "recipe" }];
 }
 
 async function fileSha256(file) {

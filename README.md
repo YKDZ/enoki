@@ -88,9 +88,9 @@ pnpm dev
 
 探针的可选本机 helper 前置条件只在安装和升级流程中评估。例如主机后来安装了 `smartctl`，Disk Health helper 不会被 Web UI、探针配置或运行时主机概况自动启用；需要重新安装或升级探针，安装/升级流程才会重新渲染 collector-helper sudoers。相反，移除可选前置条件后也应重新安装或升级，避免保留不再需要的 helper sudoers。
 
-先从独立发布渠道下载与目标 Linux 平台匹配的“探针安装包” `.tar.gz`，在目标主机解压，并以管理员权限把其中两个固定角色安装到 `/usr/local/bin/`：非特权的探针获取程序 `enoki-probe-bootstrap-acquire` 和仅用于激活的探针激活程序 `enoki-probe-bootstrap-activate`。安装包本身不由 Hub 下载、替换或升级。
+从对应版本的不可变 GitHub Release 下载 `enoki-probe-bootstrap.py`，并按同一发布记录核对 recipe 版本、SHA-256、探针分发信任根指纹和目标安装包版本。recipe 是一份可审计的静态获取配方，不是第二个签名归档；它只依赖目标 Linux 上的 Python 3、OpenSSL 和 sudo。不要使用当前 Hub 返回的动态脚本或由 Hub 选择信任根来冒充此官方路径。
 
-然后在 Hub Web UI 中生成一次性安装命令并在目标主机以当前非 root 用户执行。命令只把 `ENOKI_HUB_URL` 和 `ENOKI_ENROLLMENT_TOKEN` 交给 acquirer；其输出经管道交给 `sudo -- /usr/local/bin/enoki-probe-bootstrap-activate`。因此网络获取和验证不会以 root 运行，令牌也不会作为 root 的环境变量传递。没有自动升级、旧脚本回退或替代安装路径。
+把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 随后从同一私有归档重验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和 Probe binary 的精确摘要与大小，再完成 fresh install。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
 Hub 只对已安装探针所需的签名安装包提供有界分发。若在主机本机执行“卸载探针”，只会移除本机探针，不会删除 Hub 中的主机；需要两侧一并清理时，请在 Hub 中选择“卸载探针并删除主机”。
 
@@ -174,7 +174,7 @@ services:
 | `ENOKI_METRICS_ARCHIVE_PERIOD`                   | `monthly`                            | 指标归档文件分段，可选 `daily` 或 `monthly`                                                                                                                         |
 | `ENOKI_METRICS_ARCHIVE_DIR`                      | `${ENOKI_DATA_ROOT}/metrics-archive` | 指标归档文件目录。Docker 默认是 `/data/metrics-archive`。                                                                                                           |
 | `ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS`             | `300`                                | 探针时间与 Hub 时间偏移超过此值时记录时钟偏移。                                                                                                                     |
-| `ENOKI_PROBE_ASSET_DIR`                          | `/app/probe-assets`                  | Hub 有界分发已签名探针安装包的目录；不包含 Bootstrap。                                                                                                              |
+| `ENOKI_PROBE_ASSET_DIR`                          | `/app/probe-assets`                  | Hub 有界分发已签名探针安装包及其验证元数据的目录；每个 versioned 单一安装包包含固定 Bootstrap entries。                                                             |
 | `ENOKI_PROBE_OPERATION_ACCEPTED_TIMEOUT_SECONDS` | `300`                                | 探针操作已接收但未开始运行的超时时间。                                                                                                                              |
 | `ENOKI_PROBE_OPERATION_RUNNING_TIMEOUT_SECONDS`  | `900`                                | 探针操作运行中的超时时间。                                                                                                                                          |
 | `ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET`     | 启动时随机生成                       | 探针升级 / 卸载操作 token 签名密钥。多实例或需要跨重启保留未完成操作时应设置为稳定随机值。                                                                          |

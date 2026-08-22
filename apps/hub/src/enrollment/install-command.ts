@@ -11,8 +11,7 @@ export type InstallCommandResult = {
   installCommand: string;
 };
 
-const probeBootstrapAcquirer = "/usr/local/bin/enoki-probe-bootstrap-acquire";
-const probeBootstrapActivator = "/usr/local/bin/enoki-probe-bootstrap-activate";
+const probeBootstrapRecipe = "./enoki-probe-bootstrap.py";
 
 export function createDefaultInstallationCommandConfig(): InstallationCommandConfig {
   return {
@@ -28,13 +27,15 @@ export function renderInstallCommand(
   return {
     hubUrl,
     installCommand: [
-      `ENOKI_HUB_URL=${shellQuote(hubUrl)}`,
-      `ENOKI_ENROLLMENT_TOKEN=${shellQuote(input.enrollmentToken)}`,
-      probeBootstrapAcquirer,
+      "printf",
+      "'%s\\n'",
+      shellQuote(input.enrollmentToken),
       "|",
-      "sudo",
+      "python3",
       "--",
-      probeBootstrapActivator,
+      probeBootstrapRecipe,
+      "--hub-origin",
+      shellQuote(hubUrl),
     ].join(" "),
   };
 }

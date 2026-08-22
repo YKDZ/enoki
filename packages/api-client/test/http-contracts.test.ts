@@ -135,7 +135,7 @@ describe("HTTP API contracts", () => {
       hostId: null,
       hubUrl: "https://hub.example.test",
       installCommand:
-        "ENOKI_HUB_URL='https://hub.example.test' ENOKI_ENROLLMENT_TOKEN='enk_enroll_test' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+        "printf '%s\\n' 'enk_enroll_test' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example.test'",
       readyAtMs: null,
       rejectedAtMs: null,
       rejection: null,

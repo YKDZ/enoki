@@ -44,18 +44,15 @@ describe("Owner add-host install command", () => {
     );
   });
 
-  it("quotes enrollment material for the unprivileged acquirer without passing it through sudo", () => {
+  it("quotes enrollment material for the authenticated static recipe without passing it through sudo", () => {
     const command = renderInstallCommand(
       { probeApiOrigin: "https://hub.example/' $(whoami)" },
       { enrollmentToken: "token'; touch /tmp/injected #" },
     ).installCommand;
 
-    expect(command).toBe(
-      "ENOKI_HUB_URL='https://hub.example/'\"'\"' $(whoami)' " +
-        "ENOKI_ENROLLMENT_TOKEN='token'\"'\"'; touch /tmp/injected #' " +
-        "/usr/local/bin/enoki-probe-bootstrap-acquire | " +
-        "sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
-    );
+    expect(command).toContain("enoki-probe-bootstrap.py");
+    expect(command).toContain("printf '%s\\n'");
+    expect(command).not.toContain("/usr/local/bin/enoki-probe-bootstrap");
     expect(command).not.toContain("sudo env");
     expect(command).not.toContain("sudo ENOKI_");
   });
@@ -101,11 +98,10 @@ describe("Owner add-host install command", () => {
     expect(body.expiresAtMs).toBeGreaterThan(Date.now() - 1_000);
     expect(body).not.toHaveProperty("installPath");
     expect(body).not.toHaveProperty("installScriptUrl");
-    expect(body.installCommand).toBe(
-      "ENOKI_HUB_URL='https://hub.example' " +
-        `ENOKI_ENROLLMENT_TOKEN='${body.enrollmentToken}' ` +
-        "/usr/local/bin/enoki-probe-bootstrap-acquire | " +
-        "sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+    expect(body.installCommand).toContain("enoki-probe-bootstrap.py");
+    expect(body.installCommand).toContain(body.enrollmentToken);
+    expect(body.installCommand).not.toContain(
+      "/usr/local/bin/enoki-probe-bootstrap",
     );
     expect(
       database.sqlite

@@ -5,8 +5,8 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-pub const MAGIC: [u8; 8] = *b"ENKBH003";
-pub const SCHEMA_VERSION: u16 = 3;
+pub const MAGIC: [u8; 8] = *b"ENKBH004";
+pub const SCHEMA_VERSION: u16 = 4;
 pub const MAX_COMPONENT_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_METADATA_BYTES: usize = 256 * 1024;
 pub const MAX_ENROLLMENT_BYTES: usize = 8 * 1024;
@@ -197,16 +197,22 @@ impl Handoff {
         enrollment: &Enrollment,
         component: &mut impl Read,
         component_len: u64,
+        acquirer: &mut impl Read,
+        acquirer_len: u64,
         output: &mut impl Write,
     ) -> Result<(), HandoffError> {
-        if component_len == 0 || component_len > MAX_COMPONENT_BYTES as u64 {
+        if component_len == 0
+            || component_len > MAX_COMPONENT_BYTES as u64
+            || acquirer_len == 0
+            || acquirer_len > MAX_COMPONENT_BYTES as u64
+        {
             return Err(HandoffError::TooLarge);
         }
         output.write_all(&MAGIC).map_err(|_| HandoffError::Io)?;
         output
             .write_all(&SCHEMA_VERSION.to_be_bytes())
             .map_err(|_| HandoffError::Io)?;
-        output.write_all(&[8, 0]).map_err(|_| HandoffError::Io)?;
+        output.write_all(&[9, 0]).map_err(|_| HandoffError::Io)?;
         for (kind, value) in [
             (1, &self.delegation),
             (2, &self.delegation_signature),
@@ -220,7 +226,9 @@ impl Handoff {
         let enrollment = enrollment.encode()?;
         write_value(output, 7, &enrollment, MAX_ENROLLMENT_BYTES)?;
         write_prefix(output, 8, component_len as usize)?;
-        stream_exact(component, output, component_len as usize)
+        stream_exact(component, output, component_len as usize)?;
+        write_prefix(output, 9, acquirer_len as usize)?;
+        stream_exact(acquirer, output, acquirer_len as usize)
     }
 
     pub fn read_metadata(input: &mut impl Read) -> Result<Self, HandoffError> {
@@ -228,7 +236,7 @@ impl Handoff {
         read_exact(input, &mut header)?;
         if header[..8] != MAGIC
             || u16::from_be_bytes([header[8], header[9]]) != SCHEMA_VERSION
-            || header[10] != 8
+            || header[10] != 9
             || header[11] != 0
         {
             return Err(HandoffError::InvalidHeader);
@@ -301,7 +309,22 @@ impl Handoff {
         if kind != 8 || length as u64 != expected_len {
             return Err(HandoffError::InvalidSection);
         }
-        stream_exact(input, component_sink, length)?;
+        stream_exact(input, component_sink, length)
+    }
+
+    pub fn read_acquirer_into(
+        input: &mut impl Read,
+        acquirer_sink: &mut impl Write,
+        expected_len: u64,
+    ) -> Result<(), HandoffError> {
+        if expected_len == 0 || expected_len > MAX_COMPONENT_BYTES as u64 {
+            return Err(HandoffError::TooLarge);
+        }
+        let (kind, length) = read_prefix(input)?;
+        if kind != 9 || length as u64 != expected_len {
+            return Err(HandoffError::InvalidSection);
+        }
+        stream_exact(input, acquirer_sink, length)?;
         let mut extra = [0; 1];
         match input.read(&mut extra) {
             Ok(0) => Ok(()),
@@ -384,7 +407,14 @@ mod tests {
     fn round_trips_ordered_handoff_after_metadata_authentication() {
         let mut encoded = Vec::new();
         handoff()
-            .write_from(&enrollment(), &mut &b"abc"[..], 3, &mut encoded)
+            .write_from(
+                &enrollment(),
+                &mut &b"abc"[..],
+                3,
+                &mut &b"def"[..],
+                3,
+                &mut encoded,
+            )
             .unwrap();
         let mut input = encoded.as_slice();
         assert_eq!(Handoff::read_metadata(&mut input).unwrap(), handoff());
@@ -394,13 +424,23 @@ mod tests {
         );
         let mut component = Vec::new();
         Handoff::read_component_into(&mut input, &mut component, 3).unwrap();
-        assert_eq!(component, b"abc")
+        let mut acquirer = Vec::new();
+        Handoff::read_acquirer_into(&mut input, &mut acquirer, 3).unwrap();
+        assert_eq!(component, b"abc");
+        assert_eq!(acquirer, b"def")
     }
     #[test]
     fn rejects_secret_before_component_for_noncanonical_token_origin_and_trailing_stream() {
         let mut encoded = Vec::new();
         handoff()
-            .write_from(&enrollment(), &mut &b"abc"[..], 3, &mut encoded)
+            .write_from(
+                &enrollment(),
+                &mut &b"abc"[..],
+                3,
+                &mut &b"def"[..],
+                3,
+                &mut encoded,
+            )
             .unwrap();
         let secret_offset = 12
             + (1 + 4 + 1)
@@ -423,8 +463,9 @@ mod tests {
         let mut input = trailing.as_slice();
         let _ = Handoff::read_metadata(&mut input).unwrap();
         let _ = Handoff::read_enrollment(&mut input).unwrap();
+        Handoff::read_component_into(&mut input, &mut Vec::new(), 3).unwrap();
         assert_eq!(
-            Handoff::read_component_into(&mut input, &mut Vec::new(), 3),
+            Handoff::read_acquirer_into(&mut input, &mut Vec::new(), 3),
             Err(HandoffError::InvalidSection)
         );
     }

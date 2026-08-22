@@ -6,7 +6,9 @@ fn main() -> ExitCode {
         eprintln!("Probe Bootstrap acquisition must run as a non-root user");
         return ExitCode::from(2);
     }
-    match enoki_probe_bootstrap::acquisition::acquire_from_environment(&mut io::stdout().lock()) {
+    match enoki_probe_bootstrap::acquisition::acquire_and_activate_from_environment(
+        &mut io::stdin().lock(),
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         // Deliberately never include the environment-provided enrollment token.
         Err(_) => {

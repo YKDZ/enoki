@@ -770,6 +770,16 @@ describe("GitHub and GHCR publication adapter", () => {
           ),
         );
       }
+      publicFiles.set(
+        `https://downloads.example/${fixture.candidateManifest.bootstrapRecipe.file}`,
+        await readFile(
+          path.join(
+            fixture.candidateDir,
+            "recipe",
+            fixture.candidateManifest.bootstrapRecipe.file,
+          ),
+        ),
+      );
       const runCommand = async (command, arguments_, options) => {
         commands.push({ arguments_, command, options });
         if (
@@ -1050,7 +1060,7 @@ function seedMatchingTagAndRelease(
 }
 
 function releaseAssetFiles(manifest) {
-  return manifest.probeAssetSet.files;
+  return [...manifest.probeAssetSet.files, manifest.bootstrapRecipe];
 }
 
 class FakePublicationRemote {
@@ -1137,9 +1147,11 @@ async function createPublicationFixture() {
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-publication-"));
   const candidateDir = path.join(workDir, "candidate");
   const probeAssetDir = path.join(candidateDir, "probe-assets");
+  const recipeDir = path.join(candidateDir, "recipe");
   const hubDir = path.join(candidateDir, "hub");
   await Promise.all([
     mkdir(probeAssetDir, { recursive: true }),
+    mkdir(recipeDir, { recursive: true }),
     mkdir(hubDir, { recursive: true }),
   ]);
   const files = [];
@@ -1160,7 +1172,21 @@ async function createPublicationFixture() {
   const hubArchive = "hub/enoki-hub-v1.2.3.oci.tar";
   const hubBytes = Buffer.from("immutable OCI archive");
   await writeFile(path.join(candidateDir, hubArchive), hubBytes);
+  const recipeBytes = Buffer.from("immutable bootstrap recipe");
+  await writeFile(
+    path.join(recipeDir, "enoki-probe-bootstrap.py"),
+    recipeBytes,
+  );
   const candidateManifest = {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      file: "enoki-probe-bootstrap.py",
+      rootFingerprint: "e".repeat(64),
+      sha256: sha256(recipeBytes),
+      size: recipeBytes.length,
+      version: "v1",
+    },
     candidate: { commit: "a".repeat(40), version: "v1.2.3" },
     hub: {
       archive: hubArchive,
@@ -1191,6 +1217,7 @@ async function createPublicationFixture() {
   };
   const workflowRun = { attempt: 1, id: "123", url: "https://example/run/123" };
   const verificationSummary = {
+    bootstrapRecipe: candidateManifest.bootstrapRecipe,
     candidate: candidateManifest.candidate,
     freshCandidateRequiredForPublish: true,
     hub: candidateManifest.hub,

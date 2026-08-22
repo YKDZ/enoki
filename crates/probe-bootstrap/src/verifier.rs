@@ -58,6 +58,20 @@ pub struct VerifiedBundle {
     pub component_len: u64,
     pub(crate) bootstrap_assets: Vec<BundleComponent>,
 }
+impl VerifiedBundle {
+    pub(crate) fn acquirer_receipt(&self) -> Option<(&str, u64)> {
+        self.bootstrap_assets
+            .iter()
+            .find(|asset| asset.role == "bootstrap-acquirer")
+            .map(|asset| (asset.sha256.as_str(), asset.size))
+    }
+    pub(crate) fn activator_receipt(&self) -> Option<(&str, u64)> {
+        self.bootstrap_assets
+            .iter()
+            .find(|asset| asset.role == "bootstrap-activator")
+            .map(|asset| (asset.sha256.as_str(), asset.size))
+    }
+}
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedMetadata {
     asset: Asset,
@@ -181,6 +195,17 @@ pub fn verify_archive_and_extract(
     metadata: &VerifiedMetadata,
     sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
+    verify_archive_and_extract_roles(archive, handoff, metadata, sink, &mut std::io::sink())
+}
+
+#[cfg(feature = "acquirer")]
+pub(crate) fn verify_archive_and_extract_roles(
+    archive: &mut File,
+    handoff: &Handoff,
+    metadata: &VerifiedMetadata,
+    component_sink: &mut impl Write,
+    activator_sink: &mut impl Write,
+) -> Result<VerifiedBundle, VerificationError> {
     verify_archive_digest(archive, &metadata.asset)?;
     archive
         .seek(SeekFrom::Start(0))
@@ -217,7 +242,7 @@ pub fn verify_archive_and_extract(
             }
             stream_component(
                 &mut entry,
-                sink,
+                component_sink,
                 metadata.bundle.component_len,
                 component_digest(&handoff.bundle_manifest)?,
             )?;
@@ -232,12 +257,21 @@ pub fn verify_archive_and_extract(
             if saw_bootstrap_assets[index] || entry.size() != asset.size {
                 return Err(VerificationError::ArchiveStructure);
             }
-            stream_component(
-                &mut entry,
-                &mut std::io::sink(),
-                asset.size,
-                asset.sha256.clone(),
-            )?;
+            if asset.role == "bootstrap-activator" {
+                stream_component(
+                    &mut entry,
+                    &mut *activator_sink,
+                    asset.size,
+                    asset.sha256.clone(),
+                )?;
+            } else {
+                stream_component(
+                    &mut entry,
+                    &mut std::io::sink(),
+                    asset.size,
+                    asset.sha256.clone(),
+                )?;
+            }
             saw_bootstrap_assets[index] = true;
         } else {
             return Err(VerificationError::ArchiveStructure);
@@ -286,6 +320,53 @@ pub fn verify_component(
     component
         .seek(SeekFrom::Start(0))
         .map_err(|_| VerificationError::Io)?;
+    Ok(())
+}
+
+/// Root 对正在执行的 sealed activator FD 进行独立 receipt 复验。
+pub fn verify_activator_receipt(
+    activator: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), VerificationError> {
+    let expected = bundle.activator_receipt();
+    verify_bootstrap_receipt(activator, expected)
+}
+
+pub fn verify_acquirer_receipt(
+    acquirer: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), VerificationError> {
+    verify_bootstrap_receipt(acquirer, bundle.acquirer_receipt())
+}
+
+fn verify_bootstrap_receipt(
+    receipt: &mut File,
+    expected: Option<(&str, u64)>,
+) -> Result<(), VerificationError> {
+    let (expected_sha256, expected_size) = expected.ok_or(VerificationError::Component)?;
+    let details = receipt.metadata().map_err(|_| VerificationError::Io)?;
+    if !details.is_file() || details.len() != expected_size {
+        return Err(VerificationError::Component);
+    }
+    receipt
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| VerificationError::Io)?;
+    let mut hash = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = receipt
+            .read(&mut buffer)
+            .map_err(|_| VerificationError::Io)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        hash.update(&buffer[..read]);
+    }
+    if total != expected_size || format!("{:x}", hash.finalize()) != expected_sha256 {
+        return Err(VerificationError::Component);
+    }
     Ok(())
 }
 
@@ -1154,6 +1235,25 @@ mod tests {
         f.write_all(b"wrong").unwrap();
         assert_eq!(
             verify_component(f.as_file_mut(), &x.h, m.bundle()),
+            Err(VerificationError::Component)
+        );
+    }
+
+    #[test]
+    fn root_rechecks_the_exact_running_activator_receipt() {
+        let vector = fixture();
+        let metadata = verify_metadata(&vector.h, &vector.policy(0)).unwrap();
+        let mut exact = NamedTempFile::new().unwrap();
+        exact.write_all(b"activator").unwrap();
+        assert_eq!(
+            verify_activator_receipt(exact.as_file_mut(), metadata.bundle()),
+            Ok(())
+        );
+
+        let mut absent = NamedTempFile::new().unwrap();
+        absent.write_all(b"activate").unwrap();
+        assert_eq!(
+            verify_activator_receipt(absent.as_file_mut(), metadata.bundle()),
             Err(VerificationError::Component)
         );
     }

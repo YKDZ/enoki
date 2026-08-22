@@ -1244,6 +1244,15 @@ describe("verify-only release workflow", () => {
 
 function releaseCandidateManifest() {
   return {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      file: "enoki-probe-bootstrap.py",
+      rootFingerprint: "e".repeat(64),
+      sha256: "f".repeat(64),
+      size: 123,
+      version: "v1",
+    },
     candidate: {
       commit: "0123456789abcdef0123456789abcdef01234567",
       version: "v1.2.3",
