@@ -222,7 +222,11 @@ describe("verify-only release workflow", () => {
     expect(firstBuild).toBeGreaterThan(derivation);
     expect(workflow).toContain("--output source/probe-bootstrap-publication");
     expect(dockerfile).toContain(
-      "COPY --from=builder --chown=node:node /app/probe-bootstrap-publication probe-bootstrap-publication",
+      "COPY --from=builder /app/probe-bootstrap-publication probe-bootstrap-publication",
+    );
+    expect(dockerfile).toContain("chmod 0555 /app/probe-bootstrap-publication");
+    expect(dockerfile).toContain(
+      "chmod 0444 /app/probe-bootstrap-publication/enoki-probe-bootstrap-recipe.json",
     );
   });
 

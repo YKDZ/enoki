@@ -105,6 +105,68 @@ mod tests {
         temp.reopen().unwrap()
     }
 
+    struct FailSecondRoleFiles {
+        inner: SystemInstallFiles,
+        installs: usize,
+        replace_first: Option<PathBuf>,
+    }
+    impl InstallFilePort for FailSecondRoleFiles {
+        fn ensure_metadata_directory(
+            &mut self,
+            path: &Path,
+            journal: &mut TransactionJournal,
+        ) -> Result<bool, InstallError> {
+            self.inner.ensure_metadata_directory(path, journal)
+        }
+        fn create_directory(
+            &mut self,
+            path: &Path,
+            mode: u32,
+            identity: ServiceIdentity,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.inner
+                .create_directory(path, mode, identity, journal, step)
+        }
+        fn install_binary(
+            &mut self,
+            component: &mut File,
+            path: &Path,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.installs += 1;
+            if self.installs == 2 {
+                if let Some(first) = &self.replace_first {
+                    fs::remove_file(first).unwrap();
+                    fs::write(first, b"replacement").unwrap();
+                    fs::set_permissions(first, fs::Permissions::from_mode(0o755)).unwrap();
+                }
+                return Err(InstallError::Io);
+            }
+            self.inner.install_binary(component, path, journal, step)
+        }
+        fn write_owned(
+            &mut self,
+            path: &Path,
+            contents: &[u8],
+            mode: u32,
+            owner: ServiceIdentity,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.inner
+                .write_owned(path, contents, mode, owner, journal, step)
+        }
+        fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
+            self.inner.remove_path(path)
+        }
+        fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
+            self.inner.remove_directory(path)
+        }
+    }
+
     #[test]
     fn account_identity_lookup_failure_rolls_back_created_user_and_group() {
         use std::cell::RefCell;
@@ -446,6 +508,333 @@ mod tests {
             let path = temporary.path().join("usr/local/bin").join(role);
             assert_eq!(fs::read(&path).unwrap(), b"probe");
             assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn second_bootstrap_role_failure_cleans_the_first_receipt_and_allows_retry() {
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut probe = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let mut files = FailSecondRoleFiles {
+            inner: SystemInstallFiles,
+            installs: 0,
+            replace_first: None,
+        };
+
+        assert_eq!(
+            activate_current_probe_with_files(
+                &mut probe,
+                Some((&mut acquirer, &mut activator)),
+                &Enrollment::new("https://hub.example", "enk_enroll_failure").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut InstallPorts {
+                    accounts: &mut accounts,
+                    systemd: &mut systemd,
+                    files: &mut files,
+                },
+            ),
+            Err(InstallError::Io)
+        );
+        assert!(!paths.bootstrap_acquirer().exists());
+        assert!(!paths.bootstrap_activator().exists());
+        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+
+        activate_fresh_current_probe(
+            VerifiedFreshComponents {
+                probe: &mut probe,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut Accounts::default(),
+            &mut Systemd::default(),
+        )
+        .expect("ordinary early abort leaves a restart-safe fresh retry");
+    }
+
+    #[test]
+    fn early_abort_preserves_a_replaced_role_and_restart_reports_closed_residue() {
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut probe = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let mut files = FailSecondRoleFiles {
+            inner: SystemInstallFiles,
+            installs: 0,
+            replace_first: Some(paths.bootstrap_acquirer()),
+        };
+
+        let error = activate_current_probe_with_files(
+            &mut probe,
+            Some((&mut acquirer, &mut activator)),
+            &Enrollment::new("https://hub.example", "enk_enroll_replaced").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut InstallPorts {
+                accounts: &mut accounts,
+                systemd: &mut systemd,
+                files: &mut files,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            InstallError::Rollback {
+                cause: InstallErrorKind::Io,
+                failures: vec![RollbackFailure::new(
+                    RollbackStep::RemoveBootstrapAcquirer,
+                    InstallErrorKind::ExistingResidue,
+                )],
+            }
+        );
+        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"replacement");
+        assert_eq!(accounts.calls, ["absent", "remove"]);
+        assert!(
+            fs::read_dir(paths.bootstrap_state())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("activation-stage-")),
+            "a path ownership failure must not skip later staging compensation"
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+
+        assert!(matches!(
+            activate_fresh_current_probe(
+                VerifiedFreshComponents {
+                    probe: &mut probe,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_restart").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut Accounts::default(),
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::Rollback { failures, .. })
+                if failures.contains(&RollbackFailure::new(
+                    RollbackStep::RemoveBootstrapAcquirer,
+                    InstallErrorKind::ExistingResidue,
+                ))
+        ));
+        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn account_creation_failure_cleans_both_roles_and_allows_retry() {
+        struct FailCreation {
+            calls: Vec<&'static str>,
+        }
+        impl AccountPort for FailCreation {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                self.calls.push("absent");
+                Ok(())
+            }
+            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
+                unreachable!()
+            }
+            fn create_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+            ) -> Result<ServiceIdentity, InstallError> {
+                self.calls.push("create");
+                Err(InstallError::Account)
+            }
+            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
+                unreachable!()
+            }
+            fn remove_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+                identity: Option<ServiceIdentity>,
+            ) -> Result<(), InstallError> {
+                assert_eq!(identity, None);
+                self.calls.push("remove");
+                Ok(())
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut probe = component();
+        let mut accounts = FailCreation { calls: Vec::new() };
+
+        assert_eq!(
+            activate_fresh_current_probe(
+                VerifiedFreshComponents {
+                    probe: &mut probe,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_account").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::Account)
+        );
+        assert_eq!(accounts.calls, ["absent", "create", "remove"]);
+        assert!(!paths.bootstrap_acquirer().exists());
+        assert!(!paths.bootstrap_activator().exists());
+        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+
+        activate_fresh_current_probe(
+            VerifiedFreshComponents {
+                probe: &mut probe,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut Accounts::default(),
+            &mut Systemd::default(),
+        )
+        .expect("account abort leaves a restart-safe fresh retry");
+    }
+
+    #[test]
+    fn record_identity_and_layout_staging_failures_clean_every_prepared_receipt() {
+        #[derive(Clone, Copy, Debug)]
+        enum PreparedFailure {
+            RecordIdentity,
+            StageLayout,
+        }
+        struct FailPreparedStep {
+            failure: PreparedFailure,
+            state: PathBuf,
+        }
+        impl AccountPort for FailPreparedStep {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                Ok(())
+            }
+            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
+                unreachable!()
+            }
+            fn create_transaction_identity(
+                &mut self,
+                transaction_id: &str,
+            ) -> Result<ServiceIdentity, InstallError> {
+                match self.failure {
+                    PreparedFailure::RecordIdentity => {
+                        fs::remove_file(self.state.join("activation-journal.json")).unwrap();
+                        fs::create_dir(self.state.join("activation-journal.json")).unwrap();
+                    }
+                    PreparedFailure::StageLayout => {
+                        fs::write(
+                            self.state
+                                .join(format!("activation-stage-{transaction_id}"))
+                                .join("enoki-probe"),
+                            b"collision",
+                        )
+                        .unwrap();
+                    }
+                }
+                Ok(ServiceIdentity {
+                    uid: unsafe { libc::geteuid() },
+                    gid: unsafe { libc::getegid() },
+                })
+            }
+            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
+                unreachable!()
+            }
+            fn remove_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+                _identity: Option<ServiceIdentity>,
+            ) -> Result<(), InstallError> {
+                if matches!(self.failure, PreparedFailure::RecordIdentity) {
+                    fs::remove_dir(self.state.join("activation-journal.json")).unwrap();
+                }
+                Ok(())
+            }
+        }
+
+        for failure in [PreparedFailure::RecordIdentity, PreparedFailure::StageLayout] {
+            let temporary = tempdir().unwrap();
+            for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+                fs::create_dir_all(temporary.path().join(parent)).unwrap();
+            }
+            let paths = FixedInstallPaths::under(temporary.path());
+            let mut acquirer = component();
+            let mut activator = component();
+            let mut probe = component();
+            let mut accounts = FailPreparedStep {
+                failure,
+                state: paths.bootstrap_state(),
+            };
+
+            assert_eq!(
+                activate_fresh_current_probe(
+                    VerifiedFreshComponents {
+                        probe: &mut probe,
+                        bootstrap_acquirer: &mut acquirer,
+                        bootstrap_activator: &mut activator,
+                    },
+                    &Enrollment::new("https://hub.example", "enk_enroll_prepared").unwrap(),
+                    &bundle(),
+                    &trust(),
+                    &paths,
+                    &mut accounts,
+                    &mut Systemd::default(),
+                ),
+                Err(InstallError::Io),
+                "{failure:?}"
+            );
+            assert!(!paths.bootstrap_acquirer().exists(), "{failure:?}");
+            assert!(!paths.bootstrap_activator().exists(), "{failure:?}");
+            assert!(
+                !paths.bootstrap_state().join("activation-journal.json").exists(),
+                "{failure:?}"
+            );
+
+            activate_fresh_current_probe(
+                VerifiedFreshComponents {
+                    probe: &mut probe,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
+                &bundle(),
+                &trust(),
+                &paths,
+                &mut Accounts::default(),
+                &mut Systemd::default(),
+            )
+            .unwrap_or_else(|error| panic!("{failure:?} retry failed: {error:?}"));
         }
     }
 

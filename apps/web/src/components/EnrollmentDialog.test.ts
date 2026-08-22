@@ -20,7 +20,7 @@ const pendingEnrollment: EnrollmentResponse = {
     },
     rootFingerprint: "b".repeat(64),
     schemaVersion: 1,
-    targets: ["x86_64-unknown-linux-gnu"],
+    targets: ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl"],
   },
   createdAtMs: 1_725_000_000_000,
   enrollmentId: "enr_1234567890abcdef",
@@ -106,6 +106,22 @@ describe("Enrollment dialog command control", () => {
 
     expect(command.readOnly).toBe(true);
     expect(command.value).toBe(initialValue);
+    wrapper.unmount();
+  });
+
+  it("shows every exact supported target as a readable verification list", async () => {
+    const wrapper = mount(EnrollmentDialog, {
+      attachTo: document.body,
+      props: dialogProps({ enrollment: pendingEnrollment }),
+    });
+    await flushRender();
+
+    const targets = document.querySelector('[aria-label="支持的目标平台"]');
+    expect(
+      Array.from(targets?.querySelectorAll("li") ?? []).map((item) =>
+        item.textContent?.trim(),
+      ),
+    ).toEqual(pendingEnrollment.bootstrapRecipe.targets);
     wrapper.unmount();
   });
 });

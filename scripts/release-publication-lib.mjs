@@ -18,6 +18,9 @@ export async function reconcilePublication({
   await verifyCandidatePublicationBytes(candidateDir, candidateManifest);
 
   const { commit, version } = candidateManifest.candidate;
+  const releaseBody = renderBootstrapRecipeRecord(
+    candidateManifest.bootstrapRecipe,
+  );
   const actions = [];
   let [tag, release, versionedImage] = await Promise.all([
     remote.getTag({ version }),
@@ -51,7 +54,7 @@ export async function reconcilePublication({
 
   if (!release) {
     release = await remote.createDraftRelease({
-      body: renderBootstrapRecipeRecord(candidateManifest.bootstrapRecipe),
+      body: releaseBody,
       commit,
       version,
     });
@@ -70,6 +73,24 @@ export async function reconcilePublication({
     throw new Error(
       `Release ${version} targets ${release.targetCommit}, expected ${commit}`,
     );
+  }
+  if (release.body !== releaseBody) {
+    if (!release.draft) {
+      throw new Error(
+        `public Release body does not match the Bootstrap recipe record for ${version}`,
+      );
+    }
+    release = await remote.updateDraftReleaseBody({
+      body: releaseBody,
+      version,
+    });
+    actions.push({ action: "updated", stage: "private-release-draft-body" });
+    release ??= await remote.getRelease({ version });
+    if (release?.body !== releaseBody) {
+      throw new Error(
+        `draft Release body does not match the Bootstrap recipe record for ${version}`,
+      );
+    }
   }
 
   assertNoUnexpectedAssets(release, candidateManifest);
@@ -308,6 +329,14 @@ function assertExistingPublicationState({
   }
 
   if (release && !release.draft) {
+    if (
+      release.body !==
+      renderBootstrapRecipeRecord(candidateManifest.bootstrapRecipe)
+    ) {
+      throw new Error(
+        `public Release body does not match the Bootstrap recipe record for ${version}`,
+      );
+    }
     if (!tag) {
       throw new Error(
         `public Release ${version} is terminally inconsistent: immutable version tag is missing`,
@@ -448,7 +477,7 @@ function publicReleaseAssets(manifest) {
   return [...files, { ...recipe, directory: "recipe" }, record];
 }
 
-function renderBootstrapRecipeRecord(recipe) {
+export function renderBootstrapRecipeRecord(recipe) {
   return [
     `Enoki ${recipe.bundleVersion}`,
     "",

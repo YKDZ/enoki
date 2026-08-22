@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
-import { renderInstallCommand } from "../src/enrollment/install-command";
+import {
+  renderInstallCommand,
+  resolveProbeBootstrapRecipeRecord,
+} from "../src/enrollment/install-command";
 
 const tempRoots: string[] = [];
 const bootstrapRecipe = {
@@ -56,6 +59,33 @@ describe("Owner add-host install command", () => {
         .splice(0)
         .map((root) => rm(root, { force: true, recursive: true })),
     );
+  });
+
+  it("uses the explicit development recipe when a local runtime has no image publication", () => {
+    expect(
+      resolveProbeBootstrapRecipeRecord({
+        deployment: undefined,
+        nodeEnvironment: "development",
+      }),
+    ).toMatchObject({
+      bundleVersion: "0.0.0",
+      distribution: "enoki-development",
+      targets: [],
+    });
+  });
+
+  it("requires the fixed publication record in production and image runtimes", () => {
+    for (const runtime of [
+      { deployment: undefined, nodeEnvironment: "production" },
+      { deployment: "docker", nodeEnvironment: "development" },
+    ]) {
+      expect(() =>
+        resolveProbeBootstrapRecipeRecord({
+          ...runtime,
+          filePath: "/definitely/missing/bootstrap-recipe-record.json",
+        }),
+      ).toThrow();
+    }
   });
 
   it("quotes enrollment material for the authenticated static recipe without passing it through sudo", () => {

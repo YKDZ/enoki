@@ -93,6 +93,22 @@ export function createGitHubGhcrPublicationRemote({
       return normalizeGitHubRelease(JSON.parse(response.stdout));
     },
 
+    async updateDraftReleaseBody({ body, version }) {
+      const release = await this.getRelease({ version });
+      if (!release?.draft) {
+        throw new Error(`draft Release ${version} disappeared`);
+      }
+      const response = await command("gh", [
+        "api",
+        "--method",
+        "PATCH",
+        `repos/${repository}/releases/${release.id}`,
+        "-f",
+        `body=${body}`,
+      ]);
+      return normalizeGitHubRelease(JSON.parse(response.stdout));
+    },
+
     async uploadAsset({ filePath, version }) {
       await command("gh", [
         "release",
@@ -517,6 +533,7 @@ function normalizeGitHubRelease(release) {
         },
       ]),
     ),
+    body: release.body,
     draft: release.draft,
     id: release.id,
     targetCommit: release.target_commitish,

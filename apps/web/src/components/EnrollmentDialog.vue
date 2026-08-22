@@ -122,6 +122,21 @@ watch(
             </div>
           </dl>
 
+          <div class="text-sm">
+            <p class="text-muted-foreground">支持的目标平台</p>
+            <ul
+              aria-label="支持的目标平台"
+              class="mt-1 list-inside list-disc font-mono text-xs leading-5"
+            >
+              <li
+                v-for="target in enrollment.bootstrapRecipe.targets"
+                :key="target"
+              >
+                {{ target }}
+              </li>
+            </ul>
+          </div>
+
           <p class="text-muted-foreground text-sm leading-6">
             请先从 GitHub Release 获取配方与公开记录，核对配方 SHA-256
             <code>{{ enrollment.bootstrapRecipe.recipe.sha256 }}</code>

@@ -1,7 +1,7 @@
 import { isHubConfigurationError } from "./config-error.js";
 import { createHubRuntimeConfigFromEnvironment } from "./config.js";
 import { initializeHubDatabase, type HubDatabase } from "./database/index.js";
-import { readProbeBootstrapRecipeRecord } from "./enrollment/install-command.js";
+import { resolveProbeBootstrapRecipeRecord } from "./enrollment/install-command.js";
 import {
   createDelegatingHubLogger,
   createJsonLineHubLogger,
@@ -92,7 +92,10 @@ try {
       hostStatus: config.hostStatus,
       installation: {
         ...config.installation,
-        bootstrapRecipe: readProbeBootstrapRecipeRecord(),
+        bootstrapRecipe: resolveProbeBootstrapRecipeRecord({
+          deployment: process.env.ENOKI_DEPLOYMENT,
+          nodeEnvironment: process.env.NODE_ENV,
+        }),
       },
       logger,
       liveUpdates,

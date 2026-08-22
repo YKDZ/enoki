@@ -14,7 +14,10 @@ import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { reconcilePublication } from "./release-publication-lib.mjs";
+import {
+  reconcilePublication,
+  renderBootstrapRecipeRecord,
+} from "./release-publication-lib.mjs";
 import {
   createGitHubGhcrPublicationRemote,
   createPublicationSmokeService,
@@ -256,6 +259,67 @@ describe("Publication Reconciler", () => {
           stage,
         ).toHaveLength(stage === "smoke:verify" ? 2 : 1);
       }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("repairs a mismatched draft body to the exact Bootstrap recipe record before publishing", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote({
+        failAfter: "release:create-draft",
+      });
+      await expect(
+        reconcilePublication({
+          candidateDir: fixture.candidateDir,
+          candidateManifest: fixture.candidateManifest,
+          remote,
+          verificationSummary: fixture.verificationSummary,
+          workflowRun: fixture.workflowRun,
+        }),
+      ).rejects.toThrow("interrupted after release:create-draft");
+      const expectedBody = remote.release.body;
+      remote.release.body = "stale draft body";
+      remote.failAfter = null;
+
+      await reconcilePublication({
+        candidateDir: fixture.candidateDir,
+        candidateManifest: fixture.candidateManifest,
+        remote,
+        verificationSummary: fixture.verificationSummary,
+        workflowRun: fixture.workflowRun,
+      });
+
+      expect(remote.release.body).toBe(expectedBody);
+      expect(remote.events).toContain("release:update-draft-body");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("fails closed when a public Release body differs from the Bootstrap recipe record", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote();
+      seedMatchingTagAndRelease(remote, fixture, {
+        completeAssets: true,
+        draft: false,
+      });
+      remote.release.body = "wrong public body";
+      remote.images[fixture.candidateManifest.candidate.version] =
+        fixture.candidateManifest.hub.digest;
+
+      await expect(
+        reconcilePublication({
+          candidateDir: fixture.candidateDir,
+          candidateManifest: fixture.candidateManifest,
+          remote,
+          verificationSummary: fixture.verificationSummary,
+          workflowRun: fixture.workflowRun,
+        }),
+      ).rejects.toThrow("public Release body does not match");
+      expect(remote.events).toEqual([]);
     } finally {
       await fixture.cleanup();
     }
@@ -645,6 +709,7 @@ describe("GitHub and GHCR publication adapter", () => {
                     size: 7,
                   },
                 ],
+                body: "exact release body",
                 draft: true,
                 html_url: "https://example/release/v1.2.3",
                 id: 7,
@@ -666,6 +731,23 @@ describe("GitHub and GHCR publication adapter", () => {
             draft: true,
             html_url: "https://example/release/v1.2.3",
             id: 17,
+            tag_name: "v1.2.3",
+            target_commitish: expectedCommit,
+          }),
+        };
+      }
+      if (
+        command === "gh" &&
+        arguments_.includes("PATCH") &&
+        arguments_.includes("repos/acme/enoki/releases/7")
+      ) {
+        return {
+          stdout: JSON.stringify({
+            assets: [],
+            body: "updated release body",
+            draft: true,
+            html_url: "https://example/release/v1.2.3",
+            id: 7,
             tag_name: "v1.2.3",
             target_commitish: expectedCommit,
           }),
@@ -700,6 +782,7 @@ describe("GitHub and GHCR publication adapter", () => {
           size: 42,
         },
       },
+      body: "exact release body",
       draft: true,
       id: 7,
       targetCommit: expectedCommit,
@@ -716,6 +799,16 @@ describe("GitHub and GHCR publication adapter", () => {
       draft: true,
       id: 17,
       targetCommit: expectedCommit,
+    });
+    await expect(
+      remote.updateDraftReleaseBody({
+        body: "updated release body",
+        version: "v1.2.3",
+      }),
+    ).resolves.toMatchObject({
+      body: "updated release body",
+      draft: true,
+      id: 7,
     });
     await remote.uploadAsset({
       filePath: "/candidate/manifest.json",
@@ -1064,6 +1157,9 @@ function seedMatchingTagAndRelease(
           ]),
         )
       : {},
+    body: renderBootstrapRecipeRecord(
+      fixture.candidateManifest.bootstrapRecipe,
+    ),
     draft,
     targetCommit: fixture.candidateManifest.candidate.commit,
   };
@@ -1113,9 +1209,15 @@ class FakePublicationRemote {
     return this.release;
   }
 
-  async createDraftRelease({ commit }) {
-    this.release = { assets: {}, draft: true, targetCommit: commit };
+  async createDraftRelease({ body, commit }) {
+    this.release = { assets: {}, body, draft: true, targetCommit: commit };
     this.#record("release:create-draft");
+    return this.release;
+  }
+
+  async updateDraftReleaseBody({ body }) {
+    this.release.body = body;
+    this.#record("release:update-draft-body");
     return this.release;
   }
 

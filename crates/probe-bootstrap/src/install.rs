@@ -544,7 +544,12 @@ fn activate_current_probe_with_files(
                     .files
                     .install_binary(source, &role.path, &mut journal, role.rollback)
             {
-                return Err(abort_prepared_install(error, &journal, ports.accounts));
+                return Err(abort_prepared_install(
+                    error,
+                    &journal,
+                    ports.accounts,
+                    ports.files,
+                ));
             }
         }
     }
@@ -554,17 +559,32 @@ fn activate_current_probe_with_files(
     {
         Ok(identity) => identity,
         Err(error) => {
-            return Err(abort_prepared_install(error, &journal, ports.accounts));
+            return Err(abort_prepared_install(
+                error,
+                &journal,
+                ports.accounts,
+                ports.files,
+            ));
         }
     };
     if let Err(error) = journal.record_identity(identity.uid, identity.gid) {
-        return Err(abort_prepared_install(error, &journal, ports.accounts));
+        return Err(abort_prepared_install(
+            error,
+            &journal,
+            ports.accounts,
+            ports.files,
+        ));
     }
     let staged =
         match stage_complete_layout(component, enrollment, trust, journal.staging_directory()) {
             Ok(staged) => staged,
             Err(error) => {
-                return Err(abort_prepared_install(error, &journal, ports.accounts));
+                return Err(abort_prepared_install(
+                    error,
+                    &journal,
+                    ports.accounts,
+                    ports.files,
+                ));
             }
         };
     let mut enabled = false;
@@ -688,9 +708,11 @@ fn abort_prepared_install(
     cause: InstallError,
     journal: &TransactionJournal,
     accounts: &mut impl AccountPort,
+    files: &mut impl InstallFilePort,
 ) -> InstallError {
     accounts.set_command_deadline(Instant::now() + ROLLBACK_COMMAND_BUDGET);
     let mut failures = Vec::new();
+    cleanup_owned_paths(files, journal, &mut failures);
     record_rollback(
         &mut failures,
         RollbackStep::RemoveServiceIdentity,
@@ -723,9 +745,7 @@ fn abort_prepared_install(
     }
 }
 
-fn cleanup_failed_install(
-    accounts: &mut impl AccountPort,
-    systemd: &mut impl SystemdPort,
+fn cleanup_owned_paths(
     files: &mut impl InstallFilePort,
     journal: &TransactionJournal,
     failures: &mut Vec<RollbackFailure>,
@@ -749,6 +769,16 @@ fn cleanup_failed_install(
             owned.remove_owned_staging(),
         );
     }
+}
+
+fn cleanup_failed_install(
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+    files: &mut impl InstallFilePort,
+    journal: &TransactionJournal,
+    failures: &mut Vec<RollbackFailure>,
+) {
+    cleanup_owned_paths(files, journal, failures);
     // Systemd must forget the removed unit before another fresh install is
     // allowed to consult its absence state.
     record_rollback(

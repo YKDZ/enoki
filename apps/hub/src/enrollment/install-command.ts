@@ -53,6 +53,21 @@ export function readProbeBootstrapRecipeRecord(
   });
 }
 
+export function resolveProbeBootstrapRecipeRecord({
+  deployment,
+  filePath,
+  nodeEnvironment,
+}: {
+  deployment: string | undefined;
+  filePath?: string;
+  nodeEnvironment: string | undefined;
+}): ProbeBootstrapRecipeRecord {
+  if (deployment === "docker" || nodeEnvironment === "production") {
+    return readProbeBootstrapRecipeRecord(filePath);
+  }
+  return developmentRecipeRecord;
+}
+
 function isProbeBootstrapRecipeRecord(
   value: unknown,
 ): value is ProbeBootstrapRecipeRecord {
