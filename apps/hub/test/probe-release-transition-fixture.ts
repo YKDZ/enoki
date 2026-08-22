@@ -1,4 +1,9 @@
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  sign,
+} from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -6,6 +11,8 @@ import path from "node:path";
 import { createProbeTrustDelegation } from "../../../scripts/release-candidate-lib.mjs";
 // @ts-expect-error JavaScript release transition issuer has no declaration file.
 import { createReleaseTransitionContract } from "../../../scripts/release-transition-contract.mjs";
+// @ts-expect-error JavaScript Trust Epoch authorization issuer has no declaration file.
+import { createTrustEpochMigrationAuthorization } from "../../../scripts/trust-epoch-migration-lib.mjs";
 
 export type TestProbeReleaseAuthority = ReturnType<typeof testKeyPair>;
 
@@ -16,6 +23,7 @@ export async function writeSignedProbeAssetSet(
     sourceVersion: string;
     targetVersion: string;
     transition: "compatible" | "replacement-required";
+    trustEpoch?: boolean;
   },
 ) {
   const authority = input.authority ?? testKeyPair();
@@ -51,13 +59,22 @@ export async function writeSignedProbeAssetSet(
       version: input.targetVersion,
     })}\n`,
   );
-  const contract = createReleaseTransitionContract({
-    distribution: "enoki",
-    rootPrivateKeyPem: authority.privateKey,
-    sourceVersion: input.sourceVersion,
-    targetManifestBytes: manifest,
-    transition: input.transition,
-  });
+  const trustEpoch = input.trustEpoch
+    ? createTrustEpochMigrationFixture({
+        authority,
+        delegation,
+        manifest,
+        targetVersion: input.targetVersion,
+      })
+    : null;
+  const contract =
+    trustEpoch?.contract ??
+    createGenericReleaseTransitionContract({
+      authority,
+      manifest,
+      sourceVersion: input.sourceVersion,
+      transition: input.transition,
+    });
 
   await Promise.all([
     writeFile(path.join(assetDir, "manifest.json"), manifest),
@@ -80,6 +97,18 @@ export async function writeSignedProbeAssetSet(
       path.join(assetDir, "release-transition-contract.json.sig"),
       contract.signature,
     ),
+    ...(trustEpoch
+      ? [
+          writeFile(
+            path.join(assetDir, "trust-epoch-migration-authorization.json"),
+            trustEpoch.authorization.bytes,
+          ),
+          writeFile(
+            path.join(assetDir, "trust-epoch-migration-authorization.json.sig"),
+            trustEpoch.authorization.signature,
+          ),
+        ]
+      : []),
   ]);
 
   return {
@@ -87,6 +116,119 @@ export async function writeSignedProbeAssetSet(
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
   };
+}
+
+function createTrustEpochMigrationFixture({
+  authority,
+  delegation,
+  manifest,
+  targetVersion,
+}: {
+  authority: TestProbeReleaseAuthority;
+  delegation: ReturnType<typeof createProbeTrustDelegation>;
+  manifest: Buffer;
+  targetVersion: string;
+}) {
+  const legacyRelease = {
+    assets: [
+      { name: "manifest.json", sha256: "1".repeat(64), size: 100 },
+      { name: "manifest.json.sig", sha256: "2".repeat(64), size: 256 },
+      { name: "signing-key.pem", sha256: "3".repeat(64), size: 451 },
+    ],
+    githubRelease: {
+      id: 368250351,
+      peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
+      repository: "YKDZ/enoki",
+      tag: "v0.1.74",
+      tagRefSha: "4".repeat(40),
+      targetCommitish: "main",
+    },
+    hub: {
+      digest: `sha256:${"5".repeat(64)}`,
+      image: "ghcr.io/ykdz/enoki-hub",
+    },
+    legacySigningKeySha256: "3".repeat(64),
+  };
+  const authorization = createTrustEpochMigrationAuthorization({
+    candidateVersion: `v${targetVersion}`,
+    distribution: "enoki",
+    legacyRelease,
+    rootPrivateKeyPem: authority.privateKey,
+  });
+  return {
+    authorization,
+    contract: createReleaseTransitionContract({
+      authorizationBytes: authorization.bytes,
+      authorizationSignature: authorization.signature,
+      candidateCommit: "a".repeat(40),
+      delegationBytes: delegation.bytes,
+      delegationSignature: delegation.signature,
+      legacyRelease,
+      rootPrivateKeyPem: authority.privateKey,
+      rootPublicKeyPem: authority.publicKey,
+      targetManifestBytes: manifest,
+      targetVersion,
+    }),
+  };
+}
+
+function createGenericReleaseTransitionContract({
+  authority,
+  manifest,
+  sourceVersion,
+  transition,
+}: {
+  authority: TestProbeReleaseAuthority;
+  manifest: Buffer;
+  sourceVersion: string;
+  transition: "compatible" | "replacement-required";
+}) {
+  const value = JSON.parse(manifest.toString("utf8")) as {
+    assets: unknown;
+    signature: {
+      delegationGeneration: number;
+      delegationKeyId: string;
+    };
+    version: string;
+  };
+  const rootPublicKey = Buffer.from(
+    createPublicKey(authority.publicKey).export({
+      format: "pem",
+      type: "spki",
+    }),
+  );
+  const bytes = Buffer.from(
+    `${JSON.stringify({
+      distribution: "enoki",
+      kind: "enoki-release-transition-contract",
+      rootKeyId: sha256(rootPublicKey),
+      schemaVersion: 1,
+      source: { version: sourceVersion },
+      target: {
+        assetClosure: value.assets,
+        assetSetManifestSha256: sha256(manifest),
+        delegationGeneration: value.signature.delegationGeneration,
+        signingKeyId: value.signature.delegationKeyId,
+        version: value.version,
+      },
+      transition,
+    })}\n`,
+  );
+  return {
+    bytes,
+    signature: sign(
+      "RSA-SHA256",
+      Buffer.concat([
+        Buffer.from("enoki/release-transition-contract/v1\0", "utf8"),
+        bytes,
+      ]),
+      authority.privateKey,
+    ),
+  };
+}
+
+function sha256(value: Buffer) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function testKeyPair() {

@@ -2,7 +2,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { open } from "node:fs/promises";
 
 import type { VerifiedReleaseTransition } from "./asset-set.js";
-import { readBoundedMetadataFilesFromDirectory } from "./assets.js";
+import { readBoundedMetadataSnapshotFromDirectory } from "./assets.js";
 
 const contractDomain = Buffer.from(
   "enoki/release-transition-contract/v1\0",
@@ -10,6 +10,10 @@ const contractDomain = Buffer.from(
 );
 const delegationDomain = Buffer.from(
   "enoki/probe-trust-delegation/v1\0",
+  "utf8",
+);
+const trustEpochAuthorizationDomain = Buffer.from(
+  "enoki/trust-epoch-migration-authorization/v1\0",
   "utf8",
 );
 const digestPattern = /^[0-9a-f]{64}$/;
@@ -21,6 +25,19 @@ const probeTargets = [
   "x86_64-unknown-linux-musl",
 ] as const;
 export const releaseTransitionMetadataFileNames = [
+  "release-transition-contract.json",
+  "release-transition-contract.json.sig",
+  "trust-delegation.json",
+  "trust-delegation.json.sig",
+  "manifest.json",
+  "manifest.json.sig",
+  "root-key.pem",
+  "signing-key.pem",
+  "trust-epoch-migration-authorization.json",
+  "trust-epoch-migration-authorization.json.sig",
+] as const;
+
+const requiredReleaseTransitionMetadataFileNames = [
   "release-transition-contract.json",
   "release-transition-contract.json.sig",
   "trust-delegation.json",
@@ -92,6 +109,34 @@ export function verifiedReleaseTransitionFromMetadata(input: {
   const transition = stringAt(contract, "transition");
   const targetAssetSetDigest = `sha256:${sha256(files.manifest)}`;
   const delegationGeneration = numberAt(delegation, "generation");
+
+  if (
+    !hasVerifiedAssetSetMetadata({
+      assets,
+      delegation,
+      delegationGeneration,
+      manifest,
+      rootKeyId,
+      signingKey,
+      signingKeyId,
+    })
+  ) {
+    return null;
+  }
+
+  const trustEpochTransition = verifiedTrustEpochMigrationTransition({
+    authorization: files.authorization,
+    authorizationSignature: files.authorizationSignature,
+    contract,
+    manifest,
+    manifestBytes: files.manifest,
+    rootKeyId,
+    signingKeyId,
+    targetAssetSetDigest,
+    trustedRoot,
+  });
+  if (trustEpochTransition) return trustEpochTransition;
+  if (files.authorization || files.authorizationSignature) return null;
 
   if (
     !hasExactKeys(delegation, [
@@ -186,9 +231,13 @@ async function readTransitionFiles(input: {
   maxTotalMetadataBytes?: number;
   openFile?: typeof open;
 }) {
-  const files = await readBoundedMetadataFilesFromDirectory({
+  const files = await readBoundedMetadataSnapshotFromDirectory({
     assetDir: input.assetDir,
-    fileNames: releaseTransitionMetadataFileNames,
+    optionalFileNames: [
+      "trust-epoch-migration-authorization.json",
+      "trust-epoch-migration-authorization.json.sig",
+    ],
+    requiredFileNames: requiredReleaseTransitionMetadataFileNames,
     maxFileBytes: input.maxMetadataBytes,
     maxTotalBytes: input.maxTotalMetadataBytes,
     openFile: input.openFile,
@@ -202,7 +251,11 @@ function transitionFilesFromMetadata(
     Record<(typeof releaseTransitionMetadataFileNames)[number], Buffer | null>
   >,
 ) {
-  if (releaseTransitionMetadataFileNames.some((fileName) => !files[fileName])) {
+  if (
+    requiredReleaseTransitionMetadataFileNames.some(
+      (fileName) => !files[fileName],
+    )
+  ) {
     return null;
   }
   return {
@@ -214,7 +267,231 @@ function transitionFilesFromMetadata(
     manifestSignature: files["manifest.json.sig"]!,
     rootKey: files["root-key.pem"]!,
     signingKey: files["signing-key.pem"]!,
+    authorization: files["trust-epoch-migration-authorization.json"] ?? null,
+    authorizationSignature:
+      files["trust-epoch-migration-authorization.json.sig"] ?? null,
   };
+}
+
+function hasVerifiedAssetSetMetadata(input: {
+  assets: ReturnType<typeof assetClosure>;
+  delegation: Record<string, unknown>;
+  delegationGeneration: number | null;
+  manifest: Record<string, unknown>;
+  rootKeyId: string;
+  signingKey: Buffer;
+  signingKeyId: string;
+}) {
+  return !(
+    !hasExactKeys(input.delegation, [
+      "distribution",
+      "generation",
+      "kind",
+      "purpose",
+      "rootKeyId",
+      "schemaVersion",
+      "signingIdentity",
+    ]) ||
+    !hasExactKeys(valueAt(input.delegation, "signingIdentity"), [
+      "algorithm",
+      "keyId",
+      "publicKeyPem",
+    ]) ||
+    !hasExactKeys(input.manifest, ["assets", "kind", "signature", "version"]) ||
+    !hasExactKeys(valueAt(input.manifest, "signature"), [
+      "algorithm",
+      "delegationGeneration",
+      "delegationKeyId",
+      "file",
+      "publicKey",
+    ]) ||
+    stringAt(input.delegation, "kind") !== "enoki-probe-trust-delegation" ||
+    numberAt(input.delegation, "schemaVersion") !== 1 ||
+    stringAt(input.delegation, "distribution") !== "enoki" ||
+    stringAt(input.delegation, "purpose") !== "probe-asset-signing" ||
+    stringAt(input.delegation, "rootKeyId") !== input.rootKeyId ||
+    !Number.isSafeInteger(input.delegationGeneration) ||
+    (input.delegationGeneration ?? 0) < 1 ||
+    stringAt(input.delegation, "signingIdentity", "algorithm") !==
+      "rsa-sha256" ||
+    stringAt(input.delegation, "signingIdentity", "keyId") !==
+      input.signingKeyId ||
+    canonicalPublicKeyOrNull(
+      stringAt(input.delegation, "signingIdentity", "publicKeyPem") ?? "",
+    )?.compare(input.signingKey) !== 0 ||
+    stringAt(input.manifest, "kind") !== "enoki-probe-assets" ||
+    !semverPattern.test(stringAt(input.manifest, "version") ?? "") ||
+    stringAt(input.manifest, "signature", "algorithm") !== "rsa-sha256" ||
+    stringAt(input.manifest, "signature", "file") !== "manifest.json.sig" ||
+    stringAt(input.manifest, "signature", "publicKey") !== "signing-key.pem" ||
+    numberAt(input.manifest, "signature", "delegationGeneration") !==
+      input.delegationGeneration ||
+    stringAt(input.manifest, "signature", "delegationKeyId") !==
+      input.signingKeyId ||
+    !input.assets
+  );
+}
+
+function verifiedTrustEpochMigrationTransition(input: {
+  authorization: Buffer | null;
+  authorizationSignature: Buffer | null;
+  contract: Record<string, unknown>;
+  manifest: Record<string, unknown>;
+  manifestBytes: Buffer;
+  rootKeyId: string;
+  signingKeyId: string;
+  targetAssetSetDigest: string;
+  trustedRoot: Buffer;
+}): VerifiedReleaseTransition | null {
+  const hasAuthorization = Boolean(
+    input.authorization || input.authorizationSignature,
+  );
+  if (!hasAuthorization) return null;
+  if (!input.authorization || !input.authorizationSignature) return null;
+  const authorization = parseCanonicalObject(input.authorization);
+  if (
+    !authorization ||
+    !verifySigned(
+      trustEpochAuthorizationDomain,
+      input.authorization,
+      input.authorizationSignature,
+      input.trustedRoot,
+    ) ||
+    !hasExactKeys(input.contract, [
+      "candidateCommit",
+      "distribution",
+      "kind",
+      "migrationAuthorizationSha256",
+      "migrationGeneration",
+      "rootKeyId",
+      "schemaVersion",
+      "source",
+      "target",
+      "transition",
+    ]) ||
+    !hasExactKeys(authorization, [
+      "candidateVersion",
+      "distribution",
+      "kind",
+      "legacyRelease",
+      "migrationGeneration",
+      "purpose",
+      "rootKeyId",
+      "schemaVersion",
+      "targetRootKeyId",
+    ]) ||
+    input.contract.kind !== "enoki-release-transition-contract" ||
+    input.contract.schemaVersion !== 1 ||
+    input.contract.transition !== "replacement-required" ||
+    !/^[0-9a-f]{40}$/.test(String(input.contract.candidateCommit ?? "")) ||
+    input.contract.distribution !== "enoki" ||
+    input.contract.migrationGeneration !== 1 ||
+    input.contract.rootKeyId !== input.rootKeyId ||
+    input.contract.migrationAuthorizationSha256 !==
+      sha256(input.authorization) ||
+    authorization.kind !== "enoki-trust-epoch-migration-authorization" ||
+    authorization.schemaVersion !== 1 ||
+    authorization.distribution !== "enoki" ||
+    authorization.purpose !== "release-baseline-migration" ||
+    authorization.migrationGeneration !== 1 ||
+    authorization.rootKeyId !== input.rootKeyId ||
+    authorization.targetRootKeyId !== input.rootKeyId ||
+    authorization.candidateVersion !==
+      `v${stringAt(input.contract, "target", "version")}` ||
+    !exactTrustEpochLegacyReleaseMatches(authorization, input.contract) ||
+    !exactTrustEpochTargetMatches(
+      input.contract,
+      input.manifest,
+      input.manifestBytes,
+      input.signingKeyId,
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    classification: "replacement-required",
+    sourceProbeVersion: "0.1.74",
+    targetAssetSetDigest: input.targetAssetSetDigest,
+    targetProbeVersion: stringAt(input.contract, "target", "version")!,
+  };
+}
+
+function exactTrustEpochLegacyReleaseMatches(
+  authorization: Record<string, unknown>,
+  contract: Record<string, unknown>,
+) {
+  const source = valueAt(contract, "source");
+  if (
+    !hasExactKeys(source, [
+      "assets",
+      "commit",
+      "hubDigest",
+      "hubImage",
+      "legacySigningKeySha256",
+      "releaseId",
+      "repository",
+      "tag",
+      "tagRefSha",
+      "targetCommitish",
+    ]) ||
+    stringAt(contract, "source", "tag") !== "v0.1.74"
+  ) {
+    return false;
+  }
+  return (
+    JSON.stringify(valueAt(authorization, "legacyRelease")) ===
+    JSON.stringify({
+      assets: valueAt(contract, "source", "assets"),
+      githubRelease: {
+        id: valueAt(contract, "source", "releaseId"),
+        peeledCommitSha: valueAt(contract, "source", "commit"),
+        repository: valueAt(contract, "source", "repository"),
+        tag: valueAt(contract, "source", "tag"),
+        tagRefSha: valueAt(contract, "source", "tagRefSha"),
+        targetCommitish: valueAt(contract, "source", "targetCommitish"),
+      },
+      hub: {
+        digest: valueAt(contract, "source", "hubDigest"),
+        image: valueAt(contract, "source", "hubImage"),
+      },
+      legacySigningKeySha256: valueAt(
+        contract,
+        "source",
+        "legacySigningKeySha256",
+      ),
+    })
+  );
+}
+
+function exactTrustEpochTargetMatches(
+  contract: Record<string, unknown>,
+  manifest: Record<string, unknown>,
+  manifestBytes: Buffer,
+  signingKeyId: string,
+) {
+  const assets = assetClosure(manifest.assets);
+  const contractAssets = assetClosure(
+    valueAt(contract, "target", "assetClosure"),
+  );
+  return (
+    hasExactKeys(valueAt(contract, "target"), [
+      "assetClosure",
+      "assetSetManifestSha256",
+      "delegationGeneration",
+      "signingKeyId",
+      "version",
+    ]) &&
+    Boolean(assets) &&
+    Boolean(contractAssets) &&
+    stringAt(contract, "target", "version") === manifest.version &&
+    stringAt(contract, "target", "signingKeyId") === signingKeyId &&
+    numberAt(contract, "target", "delegationGeneration") ===
+      numberAt(manifest, "signature", "delegationGeneration") &&
+    stringAt(contract, "target", "assetSetManifestSha256") ===
+      sha256(manifestBytes) &&
+    JSON.stringify(contractAssets) === JSON.stringify(assets)
+  );
 }
 
 function parseCanonicalObject(bytes: Buffer) {

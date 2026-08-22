@@ -8,6 +8,28 @@ import { readVerifiedReleaseTransitionFromDirectory } from "../src/probe/release
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture.js";
 
 describe("verified Probe release transition", () => {
+  it("reads the exact Trust Epoch migration closure as replacement-required", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.74",
+      targetVersion: "1.4.0",
+      transition: "replacement-required",
+      trustEpoch: true,
+    });
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toEqual({
+      classification: "replacement-required",
+      sourceProbeVersion: "0.1.74",
+      targetAssetSetDigest: fixture.targetAssetSetDigest,
+      targetProbeVersion: "1.4.0",
+    });
+  });
+
   it("returns no transition when the release does not declare one", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
     const fixture = await writeSignedProbeAssetSet(assetDir, {
