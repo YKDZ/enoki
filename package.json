@@ -22,6 +22,7 @@
     "check:generated": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
     "test": "vitest run scripts/*.test.mjs --reporter=agent --silent=passed-only",
+    "test:hub-container-logging": "node apps/hub/scripts/hub-container-logging-evidence.mjs",
     "test:e2e": "playwright test",
     "test:e2e:candidate": "node scripts/release-ui-contract.mjs",
     "e2e": "pnpm run test:e2e",

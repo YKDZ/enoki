@@ -87,6 +87,13 @@ jobs:
           --tag "enoki-hub:${{ inputs.version }}"
           source
 
+      - name: Verify Hub container console logging
+        if: ${{ !inputs.package-artifact }}
+        run: >-
+          timeout --signal=TERM --kill-after=10s 3m
+          node source/apps/hub/scripts/hub-container-logging-evidence.mjs
+          --image "enoki-hub:${{ inputs.version }}"
+
       - name: Set up Docker Buildx
         if: inputs.package-artifact
         uses: docker/setup-buildx-action@v4
