@@ -170,7 +170,7 @@ describe("Host Profile storage adapter", () => {
     database.close();
   });
 
-  it("does not update the stored Host Profile when the snapshot hash is unchanged", async () => {
+  it("advances observation freshness without replacing a same-hash Host Profile", async () => {
     const database = await createTemporaryDatabase();
     const host = database.hosts.create({
       clockSkewDetected: false,
@@ -211,8 +211,56 @@ describe("Host Profile storage adapter", () => {
         .get(host.id),
     ).toEqual({
       count: 1,
-      updated_at_ms: 1_725_000_000_100,
+      updated_at_ms: 1_725_000_000_200,
     });
+
+    database.close();
+  });
+
+  it("advances a compact observation only for the current matching snapshot hash", async () => {
+    const database = await createTemporaryDatabase();
+    const host = database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "10.0.0.20",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "adapter-host",
+      displayNameEdited: false,
+      lastClockSkewMs: null,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-adapter-observe",
+      probeSecretHash: "secret-hash-observe",
+    });
+    database.snapshotCollectors.hostProfile.write({
+      hostId: host.id,
+      payload: fakeHostProfile({ hostname: "adapter-host" }),
+      snapshotHash: "hash-current",
+      updatedAtMs: 1_725_000_000_100,
+    });
+
+    expect(
+      database.snapshotCollectors.hostProfile.observe({
+        hostId: host.id,
+        observedAtMs: 1_725_000_000_200,
+        snapshotHash: "hash-stale",
+      }),
+    ).toBe(false);
+    expect(
+      database.snapshotCollectors.hostProfile.observe({
+        hostId: host.id,
+        observedAtMs: 1_725_000_000_050,
+        snapshotHash: "hash-current",
+      }),
+    ).toBe(false);
+    expect(
+      database.snapshotCollectors.hostProfile.observe({
+        hostId: host.id,
+        observedAtMs: 1_725_000_000_300,
+        snapshotHash: "hash-current",
+      }),
+    ).toBe(true);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id),
+    ).toEqual(expect.objectContaining({ observedAtMs: 1_725_000_000_300 }));
 
     database.close();
   });

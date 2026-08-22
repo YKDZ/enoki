@@ -4,7 +4,7 @@ import type {
   HostProfileSnapshot,
 } from "@enoki/api-client/protocol";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, lt } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
@@ -29,6 +29,11 @@ export type SnapshotCollectorStorageAdapter<Payload, View> = {
   readObservation: (
     hostId: number,
   ) => { observedAtMs: number; view: View } | null;
+  observe: (input: {
+    hostId: number;
+    observedAtMs: number;
+    snapshotHash: string;
+  }) => boolean;
   write: (input: {
     hostId: number;
     observedIp?: string | null;
@@ -216,6 +221,22 @@ export function createHostProfileStorageAdapter(
         ? { observedAtMs: row.updatedAtMs, view: viewFromRow(row) }
         : null;
     },
+    observe(input) {
+      return Boolean(
+        database
+          .update(officialHostProfiles)
+          .set({ updatedAtMs: input.observedAtMs })
+          .where(
+            and(
+              eq(officialHostProfiles.hostId, input.hostId),
+              eq(officialHostProfiles.snapshotHash, input.snapshotHash),
+              lt(officialHostProfiles.updatedAtMs, input.observedAtMs),
+            ),
+          )
+          .returning({ hostId: officialHostProfiles.hostId })
+          .get(),
+      );
+    },
     write(input) {
       const view = normalizeHostProfile(input.payload);
       return database.transaction((transaction) => {
@@ -227,6 +248,13 @@ export function createHostProfileStorageAdapter(
             .get() ?? null;
 
         if (existing?.snapshotHash === input.snapshotHash) {
+          if (existing.updatedAtMs < input.updatedAtMs) {
+            transaction
+              .update(officialHostProfiles)
+              .set({ updatedAtMs: input.updatedAtMs })
+              .where(eq(officialHostProfiles.hostId, input.hostId))
+              .run();
+          }
           return { changed: false, view: viewFromRow(existing) };
         }
 

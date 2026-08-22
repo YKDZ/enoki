@@ -18,13 +18,12 @@ import type { HostStatusThresholds } from "./database/hosts.js";
 import type { HubDatabase } from "./database/index.js";
 import type { InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createEnrollmentRoutes } from "./enrollment/routes.js";
-import { hostSummaryResponse } from "./hosts/api-response.js";
-import { probeUpgradeOverviewProblems } from "./hosts/probe-upgrade-overview.js";
 import { defaultProbeOperationTimeouts } from "./hosts/probe-upgrade-timeout.js";
 import {
   createHostRoutes,
   createProbeOperationRoutes,
 } from "./hosts/routes.js";
+import { projectHostSummaries } from "./hosts/summary-projection.js";
 import {
   createHubRequestLoggingMiddleware,
   createNoopHubLogger,
@@ -251,56 +250,15 @@ export function createHubApp(options: HubAppOptions = {}) {
     }
     app.get("/api/web/hosts", (context) => {
       const nowMs = options.now?.() ?? Date.now();
-      const reportedProbeVersions = new Map<
-        number,
-        string | null | undefined
-      >();
-      const hostSummaries =
-        options.database?.hosts.listSummaries({
-          hostProfileForHost: (hostId) => {
-            const hostProfile =
-              options.database?.snapshotCollectors.hostProfile.read(hostId) ??
-              null;
-            reportedProbeVersions.set(hostId, hostProfile?.probeVersion);
-            return hostProfile;
-          },
-          latestMetricForHost: (hostId) =>
-            options.database?.metrics.findLatestSample(hostId) ?? null,
-          nowMs,
-          probeConfigurationForHost: (hostId) => {
-            const effective =
-              options.database?.probeConfigurations.getEffectiveForHost(hostId);
-
-            return {
-              mode: effective?.mode ?? "inherit",
-              version: effective?.configuration.version ?? "default-v1",
-            };
-          },
-          thresholds: options.hostStatus,
-        }) ?? [];
-      const probeUpgradeProblems = probeUpgradeOverviewProblems({
-        audit: options.database?.audit,
-        hostIds: hostSummaries.map((host) => host.id),
-        nowMs,
-        probeOperations: options.database?.probeOperations,
-        reportedProbeVersionForHost: (hostId) =>
-          reportedProbeVersions.get(hostId),
-        timeouts: options.probeOperations ?? defaultProbeOperationTimeouts,
-        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
-      });
-
       const response = {
-        hosts: hostSummaries.map((host) => {
-          const effective =
-            options.database?.probeConfigurations.getEffectiveForHost(host.id);
-          const intervalSeconds =
-            effective?.configuration.metricsCollectionIntervalSeconds ?? 5;
-
-          return hostSummaryResponse(host, {
-            metricsCollectionIntervalSeconds: intervalSeconds,
-            probeUpgradeProblem: probeUpgradeProblems.get(host.id) ?? null,
-          });
-        }),
+        hosts: options.database
+          ? projectHostSummaries(options.database, {
+              nowMs,
+              timeouts:
+                options.probeOperations ?? defaultProbeOperationTimeouts,
+              userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+            }).map((projection) => projection.response)
+          : [],
       } satisfies HostsResponse;
 
       return context.json(response);

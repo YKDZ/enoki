@@ -482,6 +482,17 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         services.snapshotCollectors
           ?.get(hostProfileCollectorId)
           ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
+      if (
+        !reportedHostProfile &&
+        knownHostProfileSnapshot &&
+        reportedSnapshotHash
+      ) {
+        services.snapshotCollectors?.hostProfile.observe({
+          hostId: host.id,
+          observedAtMs: reportReceivedAtMs,
+          snapshotHash: reportedSnapshotHash,
+        });
+      }
       const snapshotReplayRequest =
         !reportedHostProfile &&
         !knownHostProfileSnapshot &&

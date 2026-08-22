@@ -2727,6 +2727,99 @@ describe("Probe report API", () => {
     database.close();
   });
 
+  it("advances Host Profile freshness from validated same-hash full and compact reports", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_001_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const hostProfile = {
+      architecture: "x86_64",
+      cpuCount: 2,
+      hostname: "managed-host-01",
+      kernel: "6.8.0",
+      memoryTotalBytes: 2_147_483_648,
+      os: "linux",
+      probeVersion: "0.1.0",
+    } satisfies root.enoki.v1.IHostProfileSnapshot;
+    const snapshotHash = hashStableHostProfile(hostProfile);
+    const send = (sequence: number, snapshot: root.enoki.v1.ISnapshot) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-same-hash-observation",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots: [snapshot],
+        }),
+      ).finish();
+
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    };
+
+    nowMs = 1_725_000_001_100;
+    const full = await send(1, {
+      collectorId: "official.host-profile",
+      hostProfile,
+      snapshotHash,
+    });
+    expect(full.status).toBe(200);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(nowMs);
+
+    nowMs = 1_725_000_001_200;
+    const compact = await send(2, {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    });
+    expect(compact.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await compact.arrayBuffer()))
+        .requestedSnapshotCollectorIds,
+    ).toEqual([]);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(nowMs);
+
+    nowMs = 1_725_000_001_300;
+    const wrongHash = await send(3, {
+      collectorId: "official.host-profile",
+      snapshotHash: "unknown-host-profile-hash",
+    });
+    expect(wrongHash.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await wrongHash.arrayBuffer()))
+        .requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(1_725_000_001_200);
+
+    database.close();
+  });
+
   it("rejects malformed Probe Operation acknowledgements and statuses with stable errors", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({

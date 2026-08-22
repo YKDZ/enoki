@@ -12,7 +12,7 @@ import {
   liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
-import { probeUpgradeOverviewProblems } from "./probe-upgrade-overview.js";
+import { projectHostSummaries } from "./summary-projection.js";
 
 export function broadcastHostSummaryHint(
   services: {
@@ -40,57 +40,25 @@ export function broadcastHostSummaryHint(
   }
 
   try {
-    const reportedProbeVersions = new Map<number, string | null | undefined>();
-    const hostSummary = services.hosts
-      .listSummaries({
-        hostProfileForHost: (hostId) => {
-          const hostProfile =
-            services.snapshotCollectors?.hostProfile.read(hostId) ?? null;
-          reportedProbeVersions.set(hostId, hostProfile?.probeVersion);
-          return hostProfile;
-        },
-        latestMetricForHost: (hostId) =>
-          services.metrics?.findLatestSample(hostId) ?? null,
-        nowMs: input.nowMs,
-        probeConfigurationForHost: (hostId) => {
-          const effective =
-            services.probeConfigurations?.getEffectiveForHost(hostId);
+    const projection = projectHostSummaries(services, {
+      hostIds: [input.hostId],
+      nowMs: input.nowMs,
+      timeouts: input.timeouts,
+      userAgent: input.userAgent,
+    })[0];
 
-          return {
-            mode: effective?.mode ?? "inherit",
-            version: effective?.configuration.version ?? "default-v1",
-          };
-        },
-        thresholds: services.hostStatus,
-      })
-      .find((summary) => summary.id === input.hostId);
-
-    if (!hostSummary) {
+    if (!projection) {
       return;
     }
 
-    const effectiveConfiguration =
-      services.probeConfigurations?.getEffectiveForHost(input.hostId);
-    const problems = probeUpgradeOverviewProblems({
-      audit: services.audit,
-      hostIds: [input.hostId],
-      nowMs: input.nowMs,
-      probeOperations: services.probeOperations,
-      reportedProbeVersionForHost: (hostId) =>
-        reportedProbeVersions.get(hostId),
-      timeouts: input.timeouts,
-      userAgent: input.userAgent,
-    });
-
     services.liveUpdates.broadcastHostSummary(
-      liveSummaryFromHost(hostSummary, {
+      liveSummaryFromHost(projection.databaseHost, {
         metricsCollectionIntervalSeconds:
-          effectiveConfiguration?.configuration
-            .metricsCollectionIntervalSeconds ?? 5,
-        probeUpgradeProblem: problems.get(input.hostId) ?? null,
+          projection.metricsCollectionIntervalSeconds,
+        probeUpgradeProblem: projection.response.probeUpgradeProblem,
       }),
     );
   } catch {
-    // The committed Host or Probe operation state remains authoritative.
+    // 已提交的 Host 或 Probe Operation 状态仍是权威事实。
   }
 }

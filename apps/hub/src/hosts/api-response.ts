@@ -82,6 +82,7 @@ export function hostSummaryResponse(
 export function probeUpgradeOverviewProblem(input: {
   operation: ProbeUpgradeRequest | null;
   reportedProbeVersion?: string | null;
+  reportedProbeVersionObservedAtMs: number | null | undefined;
 }): ProbeUpgradeOverviewProblem {
   const currentProblem = currentProbeUpgradeProblem(input);
 

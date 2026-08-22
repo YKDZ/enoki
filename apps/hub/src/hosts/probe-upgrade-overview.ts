@@ -1,4 +1,5 @@
 import type { ProbeUpgradeOverviewProblem } from "@enoki/api-client";
+import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 
 import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
@@ -11,7 +12,9 @@ export function probeUpgradeOverviewProblems(input: {
   hostIds: number[];
   nowMs: number;
   probeOperations?: ProbeOperationRepository;
-  reportedProbeVersionForHost: (hostId: number) => string | null | undefined;
+  reportedHostProfileObservationForHost: (
+    hostId: number,
+  ) => { observedAtMs: number; view: HostProfileSnapshot } | null;
   timeouts: Pick<
     ProbeOperationConfig,
     "acceptedTimeoutMs" | "runningTimeoutMs"
@@ -23,6 +26,8 @@ export function probeUpgradeOverviewProblems(input: {
   const problems = new Map<number, ProbeUpgradeOverviewProblem>();
 
   for (const hostId of input.hostIds) {
+    const hostProfileObservation =
+      input.reportedHostProfileObservationForHost(hostId);
     const latestOperation = latestOperations.get(hostId) ?? null;
     const timedOutOperation = latestOperation
       ? persistTimedOutProbeUpgradeRequest({
@@ -39,7 +44,8 @@ export function probeUpgradeOverviewProblems(input: {
       hostId,
       probeUpgradeOverviewProblem({
         operation: timedOutOperation ?? latestOperation,
-        reportedProbeVersion: input.reportedProbeVersionForHost(hostId),
+        reportedProbeVersion: hostProfileObservation?.view.probeVersion,
+        reportedProbeVersionObservedAtMs: hostProfileObservation?.observedAtMs,
       }),
     );
   }

@@ -36,7 +36,7 @@ import {
   succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
 import {
-  currentHostDetailProbeUpgradeProblem,
+  currentProbeUpgradeProblem,
   probeUpgradeRecoveryDisposition,
 } from "../probe/upgrade-recovery.js";
 import {
@@ -142,7 +142,7 @@ export function createHostRoutes(services: HostRouteServices) {
           userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
         });
 
-    const currentOperation = currentHostDetailProbeUpgradeProblem({
+    const currentOperation = currentProbeUpgradeProblem({
       operation:
         succeededOperation ??
         timedOutOperation ??
@@ -157,6 +157,8 @@ export function createHostRoutes(services: HostRouteServices) {
           probeUpgradeProblem: probeUpgradeOverviewProblem({
             operation: currentOperation,
             reportedProbeVersion: hostProfile?.probeVersion,
+            reportedProbeVersionObservedAtMs:
+              hostProfileObservation?.observedAtMs,
           }),
         }),
         hostMetadata: {

@@ -49,6 +49,7 @@ export function probeUpgradeRecoveryDisposition(
 export function currentProbeUpgradeProblem(input: {
   operation: ProbeUpgradeRequest | null;
   reportedProbeVersion?: string | null;
+  reportedProbeVersionObservedAtMs: number | null | undefined;
 }) {
   const { operation } = input;
   if (
@@ -56,6 +57,7 @@ export function currentProbeUpgradeProblem(input: {
     operation.kind !== "probe_upgrade" ||
     ["succeeded", "canceled", "superseded"].includes(operation.state) ||
     (operation.state === "failed" &&
+      recoveryEvidenceIsFresh(input, operation) &&
       normalizeProbeVersion(input.reportedProbeVersion) ===
         normalizeProbeVersion(operation.targetProbeVersion))
   ) {
@@ -63,21 +65,6 @@ export function currentProbeUpgradeProblem(input: {
   }
 
   return operation;
-}
-
-export function currentHostDetailProbeUpgradeProblem(input: {
-  operation: ProbeUpgradeRequest | null;
-  reportedProbeVersion?: string | null;
-  reportedProbeVersionObservedAtMs: number | null | undefined;
-}) {
-  if (
-    input.operation?.state === "failed" &&
-    !recoveryEvidenceIsFresh(input, input.operation)
-  ) {
-    return input.operation;
-  }
-
-  return currentProbeUpgradeProblem(input);
 }
 
 function recoveryEvidenceIsFresh(

@@ -1665,12 +1665,24 @@ describe("Host detail API", () => {
         }),
       }),
     });
+    const staleOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    expect(staleOverviewResponse.status).toBe(200);
+    await expect(staleOverviewResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: { status: "failed" },
+        }),
+      ],
+    });
 
     database.snapshotCollectors.write({
       collectorId: "official.host-profile",
       hostId,
       payload: targetProfile,
-      snapshotHash: "target-profile-after-failure",
+      snapshotHash: "target-profile-before-failure",
       updatedAtMs: 1_725_000_001_600,
     });
     const recoveredDetailResponse = await app.request(
@@ -1680,6 +1692,18 @@ describe("Host detail API", () => {
     expect(recoveredDetailResponse.status).toBe(200);
     await expect(recoveredDetailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+    const recoveredOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    expect(recoveredOverviewResponse.status).toBe(200);
+    await expect(recoveredOverviewResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: null,
+        }),
+      ],
     });
     expect(database.probeOperations.findById(failed.id ?? 0)).toEqual(
       expect.objectContaining({ state: "failed" }),
