@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { chmod, mkdtemp, open, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
-
-import { withVerifiedProbeBootstrapArchive } from "./probe-bootstrap-artifact.mjs";
 
 export async function reconcilePublication({
   candidateDir,
@@ -198,22 +197,71 @@ async function uploadReleaseAsset({
   version,
 }) {
   const sourcePath = path.join(candidateDir, expected.directory, expected.file);
-  if (expected.directory !== candidateManifest.bootstrap.directory) {
+  if (!expected.file.endsWith(".tar.gz")) {
     await remote.uploadAsset({ ...expected, filePath: sourcePath, version });
     return;
   }
-  await withVerifiedProbeBootstrapArchive(
-    {
-      archivePath: sourcePath,
-      expectedArchive: { sha256: expected.sha256, size: expected.size },
-    },
-    ({ archivePath }) =>
-      remote.uploadAsset({
-        ...expected,
-        filePath: archivePath,
-        version,
-      }),
+  await withExactArchiveSnapshot(sourcePath, expected, (filePath) =>
+    remote.uploadAsset({ ...expected, filePath, version }),
   );
+}
+
+async function withExactArchiveSnapshot(sourcePath, expected, callback) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(tmpdir(), "enoki-release-asset-"),
+  );
+  const snapshotPath = path.join(temporaryDirectory, expected.file);
+  let source;
+  let snapshot;
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    source = await open(sourcePath, "r");
+    const details = await source.stat();
+    if (!details.isFile() || details.size !== expected.size) {
+      throw new Error(`candidate Probe asset does not match ${expected.file}`);
+    }
+    snapshot = await open(snapshotPath, "wx", 0o600);
+    const digest = createHash("sha256");
+    const buffer = Buffer.alloc(64 * 1024);
+    let total = 0;
+    while (total < expected.size) {
+      const { bytesRead } = await source.read(
+        buffer,
+        0,
+        Math.min(buffer.length, expected.size - total),
+        total,
+      );
+      if (bytesRead === 0) break;
+      digest.update(buffer.subarray(0, bytesRead));
+      let written = 0;
+      while (written < bytesRead) {
+        const result = await snapshot.write(
+          buffer,
+          written,
+          bytesRead - written,
+          total + written,
+        );
+        if (result.bytesWritten === 0) {
+          throw new Error(
+            `candidate Probe asset does not match ${expected.file}`,
+          );
+        }
+        written += result.bytesWritten;
+      }
+      total += bytesRead;
+    }
+    if (total !== expected.size || digest.digest("hex") !== expected.sha256) {
+      throw new Error(`candidate Probe asset does not match ${expected.file}`);
+    }
+    await snapshot.sync();
+    await snapshot.close();
+    snapshot = undefined;
+    return await callback(snapshotPath);
+  } finally {
+    await snapshot?.close().catch(() => undefined);
+    await source?.close().catch(() => undefined);
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
 }
 
 function assertExistingPublicationState({
@@ -307,7 +355,7 @@ function assertPublishAuthorization({
   const candidate = candidateManifest?.candidate;
   if (
     candidateManifest?.kind !== "enoki-release-candidate" ||
-    candidateManifest?.schemaVersion !== 3 ||
+    candidateManifest?.schemaVersion !== 4 ||
     verificationSummary?.kind !== "enoki-release-verification-evidence" ||
     verificationSummary?.schemaVersion !== 3 ||
     verificationSummary.verified !== true ||
@@ -356,17 +404,12 @@ async function verifyCandidatePublicationBytes(candidateDir, manifest) {
 }
 
 function publicReleaseAssets(manifest) {
-  const groups = [manifest.bootstrap, manifest.probeAssetSet];
-  const files = groups.flatMap((group) =>
-    (group?.files ?? []).map((file) => ({
-      ...file,
-      directory: group.directory,
-    })),
-  );
-  if (
-    !manifest.bootstrap ||
-    new Set(files.map(({ file }) => file)).size !== files.length
-  ) {
+  const group = manifest.probeAssetSet;
+  const files = (group?.files ?? []).map((file) => ({
+    ...file,
+    directory: group.directory,
+  }));
+  if (!group || new Set(files.map(({ file }) => file)).size !== files.length) {
     throw new Error("Candidate public Release assets are malformed");
   }
   return files;

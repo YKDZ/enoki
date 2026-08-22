@@ -210,7 +210,7 @@ jobs:
       version: ${{ inputs.version }}
 
   build-probe-bootstrap:
-    name: Build independent Probe Bootstrap artifacts
+    name: Build constrained Probe Bootstrap inputs
     needs: [validate-candidate-inputs, validate-release-configuration]
     uses: ./.github/workflows/reusable-build-probe-bootstrap.yml
     with:
@@ -220,7 +220,7 @@ jobs:
 
   prepare-unsigned-probe-assets:
     name: Validate and prepare unsigned Probe Asset Set
-    needs: [validate-candidate-inputs, build-probe]
+    needs: [validate-candidate-inputs, build-probe, build-probe-bootstrap]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout candidate data without signing credentials
@@ -243,6 +243,13 @@ jobs:
           path: probe-builds
           merge-multiple: true
 
+      - name: Download all constrained Bootstrap target builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
+          path: probe-bootstrap-builds
+          merge-multiple: true
+
       - name: Deep-validate and prepare unsigned Probe Asset Set
         env:
           CANDIDATE_VERSION: ${{ inputs.version }}
@@ -255,6 +262,7 @@ jobs:
           printf '%s' "$ENOKI_PROBE_TRUST_DELEGATION_SIGNATURE_BASE64" | base64 --decode > trust-delegation.json.sig
           node candidate-source/scripts/release-candidate.mjs prepare-unsigned-probe-assets \
             --version "$CANDIDATE_VERSION" --archives-dir probe-builds \
+            --bootstrap-archives-dir probe-bootstrap-builds \
             --output unsigned-probe-assets \
             --public-key-env ENOKI_PROBE_ASSET_SIGNING_PUBLIC_KEY_PEM \
             --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
@@ -354,7 +362,6 @@ jobs:
         validate-release-configuration,
         resolve-release-baseline,
         sign-probe-assets,
-        build-probe-bootstrap,
         build-hub-oci,
       ]
     runs-on: ubuntu-24.04
@@ -393,13 +400,6 @@ jobs:
         with:
           name: candidate-probe-assets-${{ github.run_id }}
           path: candidate-inputs/probe-assets
-
-      - name: Download all independent Probe Bootstrap artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: enoki-probe-bootstrap-*-${{ github.run_id }}
-          path: candidate-inputs/probe-bootstrap-inputs
-          merge-multiple: true
 
       - name: Download Hub OCI archive
         uses: actions/download-artifact@v8
@@ -441,7 +441,6 @@ jobs:
             --commit "$CANDIDATE_COMMIT" \
             --source-dir candidate-source \
             --version "$CANDIDATE_VERSION" \
-            --bootstrap-artifacts candidate-inputs/probe-bootstrap-inputs \
             --probe-assets candidate-inputs/probe-assets \
             --hub-oci "$hub_archive" \
             --release-baseline candidate-inputs/release-baseline \

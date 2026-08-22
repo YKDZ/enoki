@@ -96,6 +96,7 @@ mod tests {
             target: "x86_64-unknown-linux-gnu".into(),
             delegation_generation: 1,
             component_len: 5,
+            bootstrap_assets: Vec::new(),
         }
     }
     fn component() -> File {

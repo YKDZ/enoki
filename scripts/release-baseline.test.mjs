@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import {
   createHash,
+  createPublicKey,
   generateKeyPairSync,
   sign as signContents,
 } from "node:crypto";
@@ -20,6 +21,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import {
   createGhcrRegistryClient,
   createGitHubReleaseClient,
@@ -531,8 +533,14 @@ async function createProbeAssetSetFixture(
       `${sha256(contents)}  ${file}\n`,
     );
   }
+  const bootstrapArchivesDir = await createBootstrapArchives(
+    workDir,
+    root,
+    version,
+  );
   await prepareProbeAssetSet({
     archivesDir,
+    bootstrapArchivesDir,
     outputDir,
     privateKeyPem: privateKey,
     publicKeyPem: publicKey,
@@ -573,10 +581,127 @@ async function createProbeAssetSetFixture(
   return { outputDir, privateKey, publicKey, root };
 }
 
+async function createBootstrapArchives(workDir, root, version) {
+  const outputDir = path.join(workDir, `probe-bootstrap-${version}`);
+  const rootKeyId = sha256(
+    createPublicKey(root.publicKey).export({ format: "pem", type: "spki" }),
+  );
+  for (const target of probeTargets) {
+    const binariesDir = path.join(workDir, `bootstrap-${target}`);
+    await mkdir(binariesDir, { recursive: true });
+    const identity = {
+      distribution: "enoki",
+      rootFingerprint: rootKeyId,
+      rootKeyId,
+      target,
+      version,
+    };
+    const acquirerPath = path.join(
+      binariesDir,
+      "enoki-probe-bootstrap-acquire",
+    );
+    const activatorPath = path.join(
+      binariesDir,
+      "enoki-probe-bootstrap-activate",
+    );
+    await writeFile(
+      acquirerPath,
+      createBootstrapElf({ ...identity, role: "acquirer" }),
+      { mode: 0o755 },
+    );
+    await writeFile(
+      activatorPath,
+      createBootstrapElf({ ...identity, role: "activator" }),
+      { mode: 0o755 },
+    );
+    await packageProbeBootstrapArtifact({
+      binaries: { acquirerPath, activatorPath },
+      distribution: "enoki",
+      outputDir,
+      rootKeyId,
+      sourceDateEpoch: "0",
+      target,
+      version,
+    });
+  }
+  return outputDir;
+}
+
+function createBootstrapElf(identity) {
+  const machine = identity.target.startsWith("aarch64") ? 183 : 62;
+  const names = Buffer.from("\0.shstrtab\0.enoki_bootstrap\0");
+  const payload = Buffer.from(JSON.stringify(identity));
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(payload.byteLength);
+  const marker = Buffer.concat([
+    Buffer.from("ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0"),
+    length,
+    payload,
+  ]);
+  const sectionOffset = 64;
+  const identityOffset = sectionOffset + 3 * 64;
+  const namesOffset = identityOffset + marker.byteLength;
+  const binary = Buffer.alloc(namesOffset + names.byteLength);
+  binary.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+  binary.writeUInt16LE(machine, 18);
+  binary.writeBigUInt64LE(BigInt(sectionOffset), 40);
+  binary.writeUInt16LE(64, 58);
+  binary.writeUInt16LE(3, 60);
+  binary.writeUInt16LE(1, 62);
+  writeBootstrapSection(
+    binary,
+    sectionOffset + 64,
+    1,
+    namesOffset,
+    names.length,
+  );
+  writeBootstrapSection(
+    binary,
+    sectionOffset + 128,
+    11,
+    identityOffset,
+    marker.length,
+  );
+  marker.copy(binary, identityOffset);
+  names.copy(binary, namesOffset);
+  return binary;
+}
+
+function writeBootstrapSection(binary, at, name, contents, size) {
+  binary.writeUInt32LE(name, at);
+  binary.writeBigUInt64LE(BigInt(contents), at + 24);
+  binary.writeBigUInt64LE(BigInt(size), at + 32);
+}
+
 async function writeProbeArchive(
   archivePath,
   { legacyProbe, target, version },
 ) {
+  const bootstrapAssets = [];
+  for (const [member, permissionProfile, role] of [
+    [
+      "bootstrap/enoki-probe-bootstrap-acquire",
+      "bootstrap-acquirer-v1",
+      "bootstrap-acquirer",
+    ],
+    [
+      "bootstrap/enoki-probe-bootstrap-activate",
+      "bootstrap-activator-v1",
+      "bootstrap-activator",
+    ],
+  ]) {
+    try {
+      const { stdout } = await execFileAsync(
+        "tar",
+        ["-xOzf", archivePath, member],
+        { encoding: "buffer" },
+      );
+      bootstrapAssets.push({ bytes: stdout, member, permissionProfile, role });
+    } catch {
+      bootstrapAssets.length = 0;
+      break;
+    }
+  }
   const binaryDir = `${archivePath}.contents`;
   await mkdir(binaryDir, { recursive: true });
   const binaryPath = path.join(binaryDir, "enoki-probe");
@@ -588,6 +713,20 @@ async function writeProbeArchive(
   const binary = await readFile(binaryPath);
   const bundleManifest = Buffer.from(
     `${JSON.stringify({
+      ...(bootstrapAssets.length
+        ? {
+            bootstrapAssets: bootstrapAssets.map(
+              ({ bytes, member, permissionProfile, role }) => ({
+                path: member,
+                permissionProfile,
+                role,
+                sha256: sha256(bytes),
+                size: bytes.byteLength,
+                version: version.slice(1),
+              }),
+            ),
+          }
+        : {}),
       components: [
         {
           path: "enoki-probe",
@@ -604,6 +743,11 @@ async function writeProbeArchive(
     })}\n`,
   );
   await writeFile(path.join(binaryDir, "bundle-manifest.json"), bundleManifest);
+  for (const { bytes, member } of bootstrapAssets) {
+    const destination = path.join(binaryDir, member);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, bytes, { mode: 0o755 });
+  }
   await execFileAsync("tar", [
     "--create",
     "--gzip",
@@ -613,6 +757,7 @@ async function writeProbeArchive(
     binaryDir,
     "bundle-manifest.json",
     "enoki-probe",
+    ...bootstrapAssets.map(({ member }) => member),
   ]);
   await rm(binaryDir, { force: true, recursive: true });
   return { bundleManifestSha256: sha256(bundleManifest) };

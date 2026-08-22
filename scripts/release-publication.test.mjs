@@ -156,15 +156,17 @@ describe("Publication Reconciler", () => {
     }
   });
 
-  it("uploads the verified Bootstrap snapshot when its source changes after verification", async () => {
+  it("uploads the exact Probe Bundle snapshot when its source changes after verification", async () => {
     const fixture = await createPublicationFixture();
     try {
       const remote = new FakePublicationRemote();
       const uploadAsset = remote.uploadAsset.bind(remote);
-      const bootstrap = fixture.candidateManifest.bootstrap.files[0];
+      const bootstrap = fixture.candidateManifest.probeAssetSet.files.find(
+        ({ file }) => file.endsWith(".tar.gz"),
+      );
       const sourcePath = path.join(
         fixture.candidateDir,
-        fixture.candidateManifest.bootstrap.directory,
+        fixture.candidateManifest.probeAssetSet.directory,
         bootstrap.file,
       );
       const verifiedBytes = await readFile(sourcePath);
@@ -1048,7 +1050,7 @@ function seedMatchingTagAndRelease(
 }
 
 function releaseAssetFiles(manifest) {
-  return [...manifest.bootstrap.files, ...manifest.probeAssetSet.files];
+  return manifest.probeAssetSet.files;
 }
 
 class FakePublicationRemote {
@@ -1134,16 +1136,18 @@ class FakePublicationRemote {
 async function createPublicationFixture() {
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-publication-"));
   const candidateDir = path.join(workDir, "candidate");
-  const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
   const probeAssetDir = path.join(candidateDir, "probe-assets");
   const hubDir = path.join(candidateDir, "hub");
   await Promise.all([
     mkdir(probeAssetDir, { recursive: true }),
-    mkdir(bootstrapDir, { recursive: true }),
     mkdir(hubDir, { recursive: true }),
   ]);
   const files = [];
   for (const [file, content] of [
+    [
+      "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
+      "one signed Probe Bundle with fixed Bootstrap entries",
+    ],
     ["manifest.json", '{"version":"1.2.3"}\n'],
     ["manifest.json.sig", "signature"],
     ["signing-key.pem", "public key"],
@@ -1153,29 +1157,10 @@ async function createPublicationFixture() {
     files.push({ file, sha256: sha256(bytes), size: bytes.length });
   }
   files.sort((left, right) => left.file.localeCompare(right.file));
-  const bootstrapFiles = [];
-  for (const target of ["x86_64-unknown-linux-gnu"]) {
-    const file = `enoki-probe-bootstrap-${target}.tar.gz`;
-    const bytes = Buffer.from(`immutable bootstrap ${target}`);
-    await writeFile(path.join(bootstrapDir, file), bytes);
-    bootstrapFiles.push({
-      file,
-      sha256: sha256(bytes),
-      size: bytes.length,
-      target,
-    });
-  }
   const hubArchive = "hub/enoki-hub-v1.2.3.oci.tar";
   const hubBytes = Buffer.from("immutable OCI archive");
   await writeFile(path.join(candidateDir, hubArchive), hubBytes);
   const candidateManifest = {
-    bootstrap: {
-      directory: "probe-bootstrap",
-      distribution: "enoki",
-      files: bootstrapFiles,
-      rootKeyId: "f".repeat(64),
-      version: "1.2.3",
-    },
     candidate: { commit: "a".repeat(40), version: "v1.2.3" },
     hub: {
       archive: hubArchive,
@@ -1202,7 +1187,7 @@ async function createPublicationFixture() {
       probeAssetSet: { version: "1.2.2" },
       tag: "v1.2.2",
     },
-    schemaVersion: 3,
+    schemaVersion: 4,
   };
   const workflowRun = { attempt: 1, id: "123", url: "https://example/run/123" };
   const verificationSummary = {

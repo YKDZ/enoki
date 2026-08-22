@@ -669,7 +669,7 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir } =
         await createProbeAssetSetFixture(workDir);
       const first = await createOciFixture(workDir, probeAssetSetDir, {
         name: "first",
@@ -725,14 +725,10 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir);
       const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
-      const bootstrapArtifactDir = await createProbeBootstrapArtifactFixture(
-        workDir,
-        { root, version: "v1.2.3" },
-      );
 
       await expect(
         runCandidateCli([
@@ -743,8 +739,6 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
           ".",
           "--version",
           "v1.2.3",
-          "--bootstrap-artifacts",
-          bootstrapArtifactDir,
           "--probe-assets",
           probeAssetSetDir,
           "--hub-oci",
@@ -820,7 +814,33 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
         ])
       ).stdout;
       const bundleManifest = JSON.parse(bundleManifestBytes);
+      const archiveListing = (
+        await execFileAsync("tar", ["--list", "--gzip", "--file", archivePath])
+      ).stdout
+        .trim()
+        .split("\n");
+      expect(archiveListing).toEqual([
+        "bundle-manifest.json",
+        "enoki-probe",
+        "bootstrap/enoki-probe-bootstrap-acquire",
+        "bootstrap/enoki-probe-bootstrap-activate",
+      ]);
+      expect(bundleManifest.bootstrapAssets).toEqual([
+        expect.objectContaining({
+          path: "bootstrap/enoki-probe-bootstrap-acquire",
+          permissionProfile: "bootstrap-acquirer-v1",
+          role: "bootstrap-acquirer",
+          version: "1.2.3",
+        }),
+        expect.objectContaining({
+          path: "bootstrap/enoki-probe-bootstrap-activate",
+          permissionProfile: "bootstrap-activator-v1",
+          role: "bootstrap-activator",
+          version: "1.2.3",
+        }),
+      ]);
       expect(bundleManifest).toEqual({
+        bootstrapAssets: expect.any(Array),
         components: [
           expect.objectContaining({
             path: "enoki-probe",
@@ -1320,7 +1340,6 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
     try {
       const {
         candidateDir,
-        bootstrapArtifactDir: fixtureBootstrapArtifactDir,
         oci,
         probeAssetSetDir,
         publicKey,
@@ -1349,26 +1368,14 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
           },
           version: "1.2.3",
         },
-        bootstrap: {
-          directory: "probe-bootstrap",
-          distribution: "enoki",
-          rootKeyId: expect.stringMatching(/^[0-9a-f]{64}$/),
-          version: "1.2.3",
-          files: expect.arrayContaining([
-            expect.objectContaining({
-              file: "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz",
-              sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
-              size: expect.any(Number),
-              target: "x86_64-unknown-linux-gnu",
-            }),
-          ]),
-        },
         releaseBaseline: {
           kind: "enoki-release-baseline",
           tag: "v1.2.2",
         },
-        schemaVersion: 3,
+        schemaVersion: 4,
       });
+      expect(manifest).not.toHaveProperty("bootstrap");
+      expect(await readdir(candidateDir)).not.toContain("probe-bootstrap");
       expect(manifest.probeAssetSet.files.map(({ file }) => file)).toEqual(
         (await readdir(probeAssetSetDir)).sort(),
       );
@@ -1383,8 +1390,6 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
         ".",
         "--version",
         "v1.2.3",
-        "--bootstrap-artifacts",
-        fixtureBootstrapArtifactDir,
         "--probe-assets",
         probeAssetSetDir,
         "--hub-oci",
@@ -1658,10 +1663,6 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
         ],
       });
       const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
-      const bootstrapArtifactDir = await createProbeBootstrapArtifactFixture(
-        workDir,
-        { root, version: "v1.2.3" },
-      );
 
       await expect(
         runCandidateCli([
@@ -1672,8 +1673,6 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
           ".",
           "--version",
           "v1.2.3",
-          "--bootstrap-artifacts",
-          bootstrapArtifactDir,
           "--probe-assets",
           probeAssetSetDir,
           "--hub-oci",
@@ -1804,6 +1803,10 @@ async function createProbeAssetSetFixture(
     );
   }
   await mutateArchives?.(archivesDir);
+  const bootstrapArchivesDir = await createProbeBootstrapArtifactFixture(
+    workDir,
+    { root, version },
+  );
   await runCandidateCli(
     [
       "prepare-probe-assets",
@@ -1811,6 +1814,8 @@ async function createProbeAssetSetFixture(
       version,
       "--archives-dir",
       archivesDir,
+      "--bootstrap-archives-dir",
+      bootstrapArchivesDir,
       "--output",
       outputDir,
       "--private-key-env",
@@ -1833,7 +1838,14 @@ async function createProbeAssetSetFixture(
     },
   );
 
-  return { archivesDir, outputDir, privateKey, publicKey, root };
+  return {
+    archivesDir,
+    bootstrapArchivesDir,
+    outputDir,
+    privateKey,
+    publicKey,
+    root,
+  };
 }
 
 async function writeProbeArchive(
@@ -1848,6 +1860,43 @@ async function writeProbeArchive(
     version,
   },
 ) {
+  const bundledBootstrap = [];
+  for (const [archiveMember, permissionProfile, role] of [
+    [
+      "bootstrap/enoki-probe-bootstrap-acquire",
+      "bootstrap-acquirer-v1",
+      "bootstrap-acquirer",
+    ],
+    [
+      "bootstrap/enoki-probe-bootstrap-activate",
+      "bootstrap-activator-v1",
+      "bootstrap-activator",
+    ],
+  ]) {
+    try {
+      const { stdout } = await execFileAsync(
+        "tar",
+        [
+          "--extract",
+          "--gzip",
+          "--to-stdout",
+          "--file",
+          archivePath,
+          archiveMember,
+        ],
+        { encoding: "buffer" },
+      );
+      bundledBootstrap.push({
+        archiveMember,
+        bytes: stdout,
+        permissionProfile,
+        role,
+      });
+    } catch {
+      bundledBootstrap.length = 0;
+      break;
+    }
+  }
   const binaryDir = `${archivePath}.contents`;
   const binaryPath = path.join(binaryDir, "enoki-probe");
   await mkdir(binaryDir, { recursive: true });
@@ -1855,6 +1904,20 @@ async function writeProbeArchive(
   await writeFile(binaryPath, binary);
   await chmod(binaryPath, mode);
   const bundleManifest = {
+    ...(bundledBootstrap.length > 0
+      ? {
+          bootstrapAssets: bundledBootstrap.map(
+            ({ archiveMember, bytes, permissionProfile, role }) => ({
+              path: archiveMember,
+              permissionProfile,
+              role,
+              sha256: sha256(bytes),
+              size: bytes.byteLength,
+              version: version.slice(1),
+            }),
+          ),
+        }
+      : {}),
     components: [
       {
         path: "enoki-probe",
@@ -1881,6 +1944,11 @@ async function writeProbeArchive(
   if (extraPayload) {
     await writeFile(path.join(binaryDir, "unexpected"), "not allowlisted");
   }
+  for (const { archiveMember, bytes } of bundledBootstrap) {
+    const destination = path.join(binaryDir, archiveMember);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, bytes, { mode: 0o755 });
+  }
   await execFileAsync("tar", [
     "--create",
     "--gzip",
@@ -1888,7 +1956,13 @@ async function writeProbeArchive(
     archivePath,
     "--directory",
     binaryDir,
-    ...(extraPayload ? ["."] : ["bundle-manifest.json", "enoki-probe"]),
+    ...(extraPayload
+      ? ["."]
+      : [
+          "bundle-manifest.json",
+          "enoki-probe",
+          ...bundledBootstrap.map(({ archiveMember }) => archiveMember),
+        ]),
   ]);
   await rm(binaryDir, { force: true, recursive: true });
 }
@@ -2086,10 +2160,6 @@ async function createCandidateFixture(workDir, { version = "v1.2.3" } = {}) {
     root,
   } = await createProbeAssetSetFixture(workDir, { version });
   const oci = await createOciFixture(workDir, probeAssetSetDir);
-  const bootstrapArtifactDir = await createProbeBootstrapArtifactFixture(
-    workDir,
-    { root, version },
-  );
   const candidateDir = path.join(workDir, "candidate");
   const releaseBaselineDir = await createReleaseBaselineFixture(workDir, {
     root,
@@ -2103,8 +2173,6 @@ async function createCandidateFixture(workDir, { version = "v1.2.3" } = {}) {
     ".",
     "--version",
     version,
-    "--bootstrap-artifacts",
-    bootstrapArtifactDir,
     "--probe-assets",
     probeAssetSetDir,
     "--hub-oci",
@@ -2116,7 +2184,6 @@ async function createCandidateFixture(workDir, { version = "v1.2.3" } = {}) {
   ]);
 
   return {
-    bootstrapArtifactDir,
     candidateDir,
     oci,
     privateKey,
@@ -2194,18 +2261,6 @@ async function writeOciBlob(blobsDir, contents, descriptor) {
 }
 
 async function assembleFixtureCandidate(workDir, probeAssetSetDir, hubOciPath) {
-  const rootKey = await readFile(
-    path.join(probeAssetSetDir, "root-key.pem"),
-    "utf8",
-  );
-  const root = { publicKey: rootKey };
-  const bootstrapArtifactDir = await createProbeBootstrapArtifactFixture(
-    workDir,
-    {
-      root,
-      version: "v1.2.3",
-    },
-  );
   const releaseBaselineDir = await createReleaseBaselineFixture(workDir);
   return runCandidateCli([
     "assemble",
@@ -2215,8 +2270,6 @@ async function assembleFixtureCandidate(workDir, probeAssetSetDir, hubOciPath) {
     ".",
     "--version",
     "v1.2.3",
-    "--bootstrap-artifacts",
-    bootstrapArtifactDir,
     "--probe-assets",
     probeAssetSetDir,
     "--hub-oci",

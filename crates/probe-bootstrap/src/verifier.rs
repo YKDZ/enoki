@@ -24,11 +24,23 @@ const DELEGATION_DOMAIN: &[u8] = b"enoki/probe-trust-delegation/v1\0";
 const MAX_BUNDLE_MANIFEST_BYTES: usize = 256 * 1024;
 const COMPONENT_PATH: &str = "enoki-probe";
 pub const MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
+const BUNDLED_BOOTSTRAP_ASSETS: [(&str, &str, &str); 2] = [
+    (
+        "bootstrap/enoki-probe-bootstrap-acquire",
+        "bootstrap-acquirer-v1",
+        "bootstrap-acquirer",
+    ),
+    (
+        "bootstrap/enoki-probe-bootstrap-activate",
+        "bootstrap-activator-v1",
+        "bootstrap-activator",
+    ),
+];
 #[cfg(feature = "acquirer")]
 const MAX_TAR_OVERHEAD_BYTES: u64 = 16 * 1024;
 #[cfg(feature = "acquirer")]
 const MAX_UNCOMPRESSED_ARCHIVE_BYTES: u64 =
-    MAX_COMPONENT_BYTES + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
+    MAX_COMPONENT_BYTES * 3 + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VerificationPolicy<'a> {
@@ -44,6 +56,7 @@ pub struct VerifiedBundle {
     pub target: String,
     pub delegation_generation: u64,
     pub component_len: u64,
+    pub(crate) bootstrap_assets: Vec<BundleComponent>,
 }
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedMetadata {
@@ -175,6 +188,7 @@ pub fn verify_archive_and_extract(
     let mut tar = Archive::new(BoundedRead::new(GzDecoder::new(BufReader::new(archive))));
     let mut saw_manifest = false;
     let mut saw_component = false;
+    let mut saw_bootstrap_assets = vec![false; metadata.bundle.bootstrap_assets.len()];
     for item in tar
         .entries()
         .map_err(|_| VerificationError::ArchiveStructure)?
@@ -208,11 +222,28 @@ pub fn verify_archive_and_extract(
                 component_digest(&handoff.bundle_manifest)?,
             )?;
             saw_component = true;
+        } else if let Some((index, asset)) = metadata
+            .bundle
+            .bootstrap_assets
+            .iter()
+            .enumerate()
+            .find(|(_, asset)| path.as_ref() == asset.path.as_bytes())
+        {
+            if saw_bootstrap_assets[index] || entry.size() != asset.size {
+                return Err(VerificationError::ArchiveStructure);
+            }
+            stream_component(
+                &mut entry,
+                &mut std::io::sink(),
+                asset.size,
+                asset.sha256.clone(),
+            )?;
+            saw_bootstrap_assets[index] = true;
         } else {
             return Err(VerificationError::ArchiveStructure);
         }
     }
-    if !saw_manifest || !saw_component {
+    if !saw_manifest || !saw_component || saw_bootstrap_assets.iter().any(|seen| !seen) {
         return Err(VerificationError::ArchiveStructure);
     }
     require_exact_gzip_and_tar_eof(tar.into_inner())?;
@@ -481,13 +512,20 @@ fn verify_bundle_manifest(
         return Err(VerificationError::BundleManifest);
     }
     let v: Value = serde_json::from_slice(bytes).map_err(|_| VerificationError::BundleManifest)?;
-    exact(&v, &["components", "kind", "target", "version"])
-        .ok_or(VerificationError::BundleManifest)?;
+    exact(
+        &v,
+        &["bootstrapAssets", "components", "kind", "target", "version"],
+    )
+    .ok_or(VerificationError::BundleManifest)?;
     let components = v
         .get("components")
         .and_then(Value::as_array)
         .ok_or(VerificationError::BundleManifest)?;
-    if components.iter().any(|c| {
+    let bootstrap_assets = v
+        .get("bootstrapAssets")
+        .and_then(Value::as_array)
+        .ok_or(VerificationError::BundleManifest)?;
+    if components.iter().chain(bootstrap_assets.iter()).any(|c| {
         exact(
             c,
             &[
@@ -509,6 +547,7 @@ fn verify_bundle_manifest(
         || b.target != a.target
         || b.version != version
         || b.components.len() != 1
+        || b.bootstrap_assets.len() != BUNDLED_BOOTSTRAP_ASSETS.len()
     {
         return Err(VerificationError::BundleManifest);
     }
@@ -523,11 +562,31 @@ fn verify_bundle_manifest(
     {
         return Err(VerificationError::BundleManifest);
     }
+    for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
+        let matches = b
+            .bootstrap_assets
+            .iter()
+            .filter(|asset| asset.role == role)
+            .collect::<Vec<_>>();
+        let [asset] = matches.as_slice() else {
+            return Err(VerificationError::BundleManifest);
+        };
+        if asset.path != path
+            || asset.permission_profile != permission_profile
+            || asset.version != version
+            || asset.size == 0
+            || asset.size > MAX_COMPONENT_BYTES
+            || !is_sha256_hex(&asset.sha256)
+        {
+            return Err(VerificationError::BundleManifest);
+        }
+    }
     Ok(VerifiedBundle {
         version: version.to_owned(),
         target: a.target.clone(),
         delegation_generation: generation,
         component_len: c.size,
+        bootstrap_assets: b.bootstrap_assets,
     })
 }
 
@@ -695,9 +754,9 @@ struct AssetManifest {
     signature: ManifestSignature,
     version: String,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BundleComponent {
+pub(crate) struct BundleComponent {
     path: String,
     permission_profile: String,
     role: String,
@@ -707,6 +766,8 @@ struct BundleComponent {
 }
 #[derive(Deserialize)]
 struct BundleManifest {
+    #[serde(default, rename = "bootstrapAssets")]
+    bootstrap_assets: Vec<BundleComponent>,
     components: Vec<BundleComponent>,
     kind: String,
     target: String,
@@ -764,12 +825,16 @@ mod tests {
             .unwrap()
             .into_bytes();
         let payload = b"probe".to_vec();
-        let bundle=format!("{{\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&payload)).into_bytes();
+        let acquirer = b"acquirer".to_vec();
+        let activator = b"activator".to_vec();
+        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload)).into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gzip);
         for (name, data, kind) in [
             ("bundle-manifest.json", bundle.clone(), b'0'),
             ("enoki-probe", payload, b'0'),
+            ("bootstrap/enoki-probe-bootstrap-acquire", acquirer, b'0'),
+            ("bootstrap/enoki-probe-bootstrap-activate", activator, b'0'),
         ] {
             let mut h = Header::new_gnu();
             h.set_size(data.len() as u64);
@@ -881,6 +946,25 @@ mod tests {
     }
 
     #[test]
+    fn accepts_only_the_two_fixed_bootstrap_entries_in_the_signed_bundle_manifest() {
+        let asset = Asset {
+            bundle_manifest_sha256: "a".repeat(64),
+            file: format!("enoki-probe-{TARGET}.tar.gz"),
+            sha256: "b".repeat(64),
+            size: 1,
+            target: TARGET.to_owned(),
+        };
+        let manifest = format!(
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+        );
+
+        assert!(verify_bundle_manifest(manifest.as_bytes(), "1.2.3", &asset, 1).is_ok());
+    }
+
+    #[test]
     fn accepts_archive_from_official_node_packager() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let temporary = tempdir().unwrap();
@@ -929,6 +1013,7 @@ mod tests {
                 target: TARGET.to_owned(),
                 delegation_generation: 1,
                 component_len: binary.len() as u64,
+                bootstrap_assets: Vec::new(),
             },
         };
         let mut extracted = Vec::new();
