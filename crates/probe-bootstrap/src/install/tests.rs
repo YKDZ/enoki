@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::account::{
+        account_records_match_transaction, create_transaction_identity_with_commands,
+    };
     use crate::handoff::Enrollment;
     use crate::trust::BootstrapRole;
     use tempfile::tempdir;
@@ -225,6 +228,39 @@ mod tests {
     }
 
     #[test]
+    fn account_creation_commands_bind_both_records_to_one_transaction_marker() {
+        let mut calls = Vec::new();
+        let identity = create_transaction_identity_with_commands(
+            "0123456789abcdef",
+            &mut |program, arguments| {
+                calls.push((program.to_owned(), arguments.join(" ")));
+                Ok(())
+            },
+            &mut |flag| Ok(if flag == "-u" { 123 } else { 456 }),
+        )
+        .unwrap();
+
+        assert_eq!(identity, ServiceIdentity { uid: 123, gid: 456 });
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0]
+            .1
+            .contains("--password !enoki-bootstrap-0123456789abcdef"));
+        assert!(calls[1].1.contains("--comment enoki-bootstrap-0123456789abcdef"));
+    }
+
+    #[test]
+    fn reused_numeric_identity_without_the_transaction_marker_is_not_owned() {
+        assert!(!account_records_match_transaction(
+            "enoki-bootstrap-current",
+            "!enoki-bootstrap-current",
+            Some("enoki-probe:x:456:"),
+            Some("enoki-probe:!enoki-bootstrap-previous::"),
+            Some("enoki-probe:x:123:456:enoki-bootstrap-previous:/var/lib/enoki-probe:/usr/sbin/nologin"),
+            Some(ServiceIdentity { uid: 123, gid: 456 }),
+        ));
+    }
+
+    #[test]
     fn ambiguous_useradd_failure_preserves_the_visible_racing_identity() {
         use std::cell::Cell;
 
@@ -347,6 +383,18 @@ mod tests {
         assert!(
             !temporary
                 .path()
+                .join("etc/enoki/.enoki-bootstrap-transaction")
+                .exists()
+        );
+        assert!(
+            !temporary
+                .path()
+                .join("var/lib/enoki-probe/.enoki-bootstrap-transaction")
+                .exists()
+        );
+        assert!(
+            !temporary
+                .path()
                 .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
                 .exists()
         );
@@ -408,6 +456,66 @@ mod tests {
             systemd.calls,
             ["reload", "absent", "reload", "enable", "start", "ready"]
         );
+    }
+
+    #[test]
+    fn account_mutation_observes_its_durable_transaction_marker() {
+        struct IntentCheckingAccounts {
+            state: PathBuf,
+            checked: bool,
+        }
+        impl AccountPort for IntentCheckingAccounts {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                Ok(())
+            }
+            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
+                unreachable!()
+            }
+            fn create_transaction_identity(
+                &mut self,
+                transaction_id: &str,
+            ) -> Result<ServiceIdentity, InstallError> {
+                let bytes = fs::read(self.state.join("activation-journal.json")).unwrap();
+                let text = String::from_utf8(bytes).unwrap();
+                assert!(text.contains(transaction_id));
+                self.checked = true;
+                Err(InstallError::Account)
+            }
+            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
+                unreachable!()
+            }
+            fn remove_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+                _identity: Option<ServiceIdentity>,
+            ) -> Result<(), InstallError> {
+                Ok(())
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        write_bootstrap_roles(temporary.path());
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut accounts = IntentCheckingAccounts {
+            state: paths.bootstrap_state(),
+            checked: false,
+        };
+        let error = activate_current_probe(
+            &mut component(),
+            &Enrollment::new("https://hub.example", "enk_enroll_intent").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut Systemd::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, InstallError::Account);
+        assert!(accounts.checked);
     }
 
     #[test]
@@ -713,7 +821,10 @@ mod tests {
                 failures: vec![
                     RollbackFailure::new(RollbackStep::StopService, InstallErrorKind::Systemd),
                     RollbackFailure::new(RollbackStep::DisableService, InstallErrorKind::Systemd),
-                    RollbackFailure::new(RollbackStep::RemoveUnit, InstallErrorKind::Io),
+                    RollbackFailure::new(
+                        RollbackStep::RemoveUnit,
+                        InstallErrorKind::ExistingResidue,
+                    ),
                     RollbackFailure::new(RollbackStep::ReloadSystemd, InstallErrorKind::Systemd),
                     RollbackFailure::new(
                         RollbackStep::RemoveServiceIdentity,
@@ -729,6 +840,16 @@ mod tests {
             ]
         );
         assert_eq!(accounts.calls, ["absent", "create", "remove"]);
+        assert!(
+            fs::symlink_metadata(
+                temporary
+                    .path()
+                    .join("etc/systemd/system/enoki-probe.service")
+            )
+            .unwrap()
+            .is_dir(),
+            "a replacement is preserved and reported as closed residue"
+        );
         assert!(
             !temporary.path().join("var/lib/enoki-probe").exists(),
             "a unit cleanup failure must not stop later filesystem compensations"

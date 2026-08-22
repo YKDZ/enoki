@@ -1,3 +1,4 @@
+use super::transaction::OWNERSHIP_MARKER;
 use super::*;
 pub(super) fn ensure_fixed_metadata_directory(
     path: &Path,
@@ -47,7 +48,8 @@ pub(super) fn validate_existing_metadata_directory(path: &Path) -> Result<(), In
 pub(super) fn remove_created_path(path: &Path) -> Result<(), InstallError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            fs::remove_file(path).map_err(|_| InstallError::Io)
+            fs::remove_file(path).map_err(|_| InstallError::Io)?;
+            sync_parent_directory(path)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         _ => Err(InstallError::Io),
@@ -55,11 +57,28 @@ pub(super) fn remove_created_path(path: &Path) -> Result<(), InstallError> {
 }
 
 pub(super) fn remove_created_directory(path: &Path) -> Result<(), InstallError> {
+    let marker = path.join(OWNERSHIP_MARKER);
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            fs::remove_file(&marker).map_err(|_| InstallError::Io)?;
+            File::open(path)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| InstallError::Io)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) | Err(_) => return Err(InstallError::ExistingResidue),
+    }
     match fs::remove_dir(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => sync_parent_directory(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(InstallError::Io),
     }
+}
+
+fn sync_parent_directory(path: &Path) -> Result<(), InstallError> {
+    File::open(path.parent().ok_or(InstallError::Io)?)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| InstallError::Io)
 }
 
 pub(super) fn validate_component(
@@ -141,6 +160,18 @@ pub(super) fn create_private_directory(
             .map_err(|_| InstallError::Io)?;
         let directory = File::open(&temporary).map_err(|_| InstallError::Io)?;
         chown_file(&directory, identity)?;
+        let marker = temporary.join(OWNERSHIP_MARKER);
+        let mut marker_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&marker)
+            .map_err(|_| InstallError::Io)?;
+        marker_file
+            .write_all(journal.transaction_id().as_bytes())
+            .map_err(|_| InstallError::Io)?;
+        marker_file.sync_all().map_err(|_| InstallError::Io)?;
+        chown_file(&marker_file, identity)?;
         verify_directory(&temporary, mode, identity)?;
         directory.sync_all().map_err(|_| InstallError::Io)
     })();
@@ -156,7 +187,10 @@ pub(super) fn create_private_directory(
 
 pub(super) fn cleanup_partial_directory(path: &Path, cause: InstallError) -> InstallError {
     match fs::remove_dir(path) {
-        Ok(()) => cause,
+        Ok(()) => match sync_parent_directory(path) {
+            Ok(()) => cause,
+            Err(error) => error,
+        },
         Err(_) => InstallError::Rollback {
             cause: cause.kind(),
             failures: vec![RollbackFailure::new(
@@ -335,12 +369,12 @@ pub(super) fn rename_new(from: PathBuf, destination: &Path) -> Result<(), Instal
                 record_io_cleanup(
                     &mut failures,
                     RollbackStep::RemovePartiallyInstalledPath,
-                    fs::remove_file(destination),
+                    remove_file_durable_io(destination),
                 );
                 record_io_cleanup(
                     &mut failures,
                     RollbackStep::RemoveTemporary,
-                    fs::remove_file(&from),
+                    remove_file_durable_io(&from),
                 );
                 return if failures.is_empty() {
                     Err(error)
@@ -362,7 +396,10 @@ pub(super) fn rename_new(from: PathBuf, destination: &Path) -> Result<(), Instal
 
 pub(super) fn cleanup_temporary_file(path: &Path, cause: InstallError) -> InstallError {
     match fs::remove_file(path) {
-        Ok(()) => cause,
+        Ok(()) => match sync_parent_directory(path) {
+            Ok(()) => cause,
+            Err(error) => error,
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => cause,
         Err(_) => InstallError::Rollback {
             cause: cause.kind(),
@@ -372,6 +409,15 @@ pub(super) fn cleanup_temporary_file(path: &Path, cause: InstallError) -> Instal
             )],
         },
     }
+}
+
+fn remove_file_durable_io(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)?;
+    File::open(
+        path.parent()
+            .ok_or_else(|| std::io::Error::other("no parent"))?,
+    )?
+    .sync_all()
 }
 
 pub(super) fn record_io_cleanup(

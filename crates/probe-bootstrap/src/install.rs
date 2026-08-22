@@ -193,6 +193,29 @@ pub trait AccountPort {
     ) -> Result<bool, InstallError> {
         Ok(false)
     }
+    fn create_transaction_identity(
+        &mut self,
+        _transaction_id: &str,
+    ) -> Result<ServiceIdentity, InstallError> {
+        self.create_static_service_identity()
+    }
+    fn remove_transaction_identity(
+        &mut self,
+        _transaction_id: &str,
+        _identity: Option<ServiceIdentity>,
+    ) -> Result<(), InstallError> {
+        self.remove_static_service_identity()
+    }
+    fn owns_transaction_identity(
+        &mut self,
+        _transaction_id: &str,
+        identity: Option<ServiceIdentity>,
+    ) -> Result<bool, InstallError> {
+        match identity {
+            Some(identity) => self.owns_static_service_identity(identity),
+            None => Ok(false),
+        }
+    }
 }
 
 /// The only service-manager actions this adapter may request.
@@ -243,18 +266,6 @@ trait InstallFilePort {
 }
 
 struct SystemInstallFiles;
-
-#[derive(Clone, Copy)]
-enum CreatedPathKind {
-    File,
-    Directory,
-}
-
-struct CreatedPath {
-    path: PathBuf,
-    step: RollbackStep,
-    kind: CreatedPathKind,
-}
 
 struct StagedLayout {
     binary: PathBuf,
@@ -443,51 +454,31 @@ fn activate_current_probe_with_files(
     ports.systemd.require_absent()?;
 
     let mut journal = TransactionJournal::begin(&paths.bootstrap_state())?;
-    let identity = match ports.accounts.create_static_service_identity() {
+    let identity = match ports
+        .accounts
+        .create_transaction_identity(journal.transaction_id())
+    {
         Ok(identity) => identity,
         Err(error) => {
-            return Err(abort_prepared_install(
-                error,
-                &journal,
-                ports.accounts,
-                false,
-            ));
+            return Err(abort_prepared_install(error, &journal, ports.accounts));
         }
     };
     if let Err(error) = journal.record_identity(identity.uid, identity.gid) {
-        return Err(abort_prepared_install(
-            error,
-            &journal,
-            ports.accounts,
-            true,
-        ));
+        return Err(abort_prepared_install(error, &journal, ports.accounts));
     }
     let staged =
         match stage_complete_layout(component, enrollment, trust, journal.staging_directory()) {
             Ok(staged) => staged,
             Err(error) => {
-                return Err(abort_prepared_install(
-                    error,
-                    &journal,
-                    ports.accounts,
-                    true,
-                ));
+                return Err(abort_prepared_install(error, &journal, ports.accounts));
             }
         };
-    let mut created_paths = Vec::new();
     let mut enabled = false;
     let mut started = false;
     let result = (|| {
-        if ports
+        ports
             .files
-            .ensure_metadata_directory(&paths.etc_enoki(), &mut journal)?
-        {
-            created_paths.push(CreatedPath {
-                path: paths.etc_enoki(),
-                step: RollbackStep::RemoveMetadataDirectory,
-                kind: CreatedPathKind::Directory,
-            });
-        }
+            .ensure_metadata_directory(&paths.etc_enoki(), &mut journal)?;
         ports.files.create_directory(
             &paths.state(),
             0o750,
@@ -495,11 +486,6 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveStateDirectory,
         )?;
-        created_paths.push(CreatedPath {
-            path: paths.state(),
-            step: RollbackStep::RemoveStateDirectory,
-            kind: CreatedPathKind::Directory,
-        });
         ports.files.create_directory(
             &paths.identity_dir(),
             0o700,
@@ -507,11 +493,6 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveIdentityDirectory,
         )?;
-        created_paths.push(CreatedPath {
-            path: paths.identity_dir(),
-            step: RollbackStep::RemoveIdentityDirectory,
-            kind: CreatedPathKind::Directory,
-        });
         let mut staged_binary = File::open(&staged.binary).map_err(|_| InstallError::Io)?;
         ports.files.install_binary(
             &mut staged_binary,
@@ -519,11 +500,6 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveBinary,
         )?;
-        created_paths.push(CreatedPath {
-            path: paths.binary(),
-            step: RollbackStep::RemoveBinary,
-            kind: CreatedPathKind::File,
-        });
         ports.files.write_owned(
             &paths.identity(),
             &fs::read(&staged.identity).map_err(|_| InstallError::Io)?,
@@ -532,11 +508,6 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveIdentity,
         )?;
-        created_paths.push(CreatedPath {
-            path: paths.identity(),
-            step: RollbackStep::RemoveIdentity,
-            kind: CreatedPathKind::File,
-        });
         ports.files.write_owned(
             &paths.metadata(),
             &fs::read(&staged.metadata).map_err(|_| InstallError::Io)?,
@@ -545,11 +516,6 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveInstallMetadata,
         )?;
-        created_paths.push(CreatedPath {
-            path: paths.metadata(),
-            step: RollbackStep::RemoveInstallMetadata,
-            kind: CreatedPathKind::File,
-        });
         ports.files.write_owned(
             &paths.unit(),
             &fs::read(&staged.unit).map_err(|_| InstallError::Io)?,
@@ -558,11 +524,6 @@ fn activate_current_probe_with_files(
             &mut journal,
             RollbackStep::RemoveUnit,
         )?;
-        created_paths.push(CreatedPath {
-            path: paths.unit(),
-            step: RollbackStep::RemoveUnit,
-            kind: CreatedPathKind::File,
-        });
         ports.systemd.daemon_reload()?;
         journal.record_enabled_intent()?;
         enabled = true;
@@ -601,7 +562,7 @@ fn activate_current_probe_with_files(
                 ports.accounts,
                 ports.systemd,
                 ports.files,
-                &created_paths,
+                &journal,
                 &mut failures,
             );
             if failures.is_empty() {
@@ -634,17 +595,19 @@ fn abort_prepared_install(
     cause: InstallError,
     journal: &TransactionJournal,
     accounts: &mut impl AccountPort,
-    remove_identity: bool,
 ) -> InstallError {
     accounts.set_command_deadline(Instant::now() + ROLLBACK_COMMAND_BUDGET);
     let mut failures = Vec::new();
-    if remove_identity {
-        record_rollback(
-            &mut failures,
-            RollbackStep::RemoveServiceIdentity,
-            accounts.remove_static_service_identity(),
-        );
-    }
+    record_rollback(
+        &mut failures,
+        RollbackStep::RemoveServiceIdentity,
+        accounts.remove_transaction_identity(
+            journal.transaction_id(),
+            journal
+                .identity()
+                .map(|(uid, gid)| ServiceIdentity { uid, gid }),
+        ),
+    );
     record_rollback(
         &mut failures,
         RollbackStep::RemoveTemporary,
@@ -671,15 +634,27 @@ fn cleanup_failed_install(
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
     files: &mut impl InstallFilePort,
-    created_paths: &[CreatedPath],
+    journal: &TransactionJournal,
     failures: &mut Vec<RollbackFailure>,
 ) {
-    for created in created_paths.iter().rev() {
-        let result = match created.kind {
-            CreatedPathKind::File => files.remove_path(&created.path),
-            CreatedPathKind::Directory => files.remove_directory(&created.path),
+    for owned in journal.paths().iter().rev() {
+        let result = if owned.still_owned() {
+            if owned.directory() {
+                files.remove_directory(owned.path())
+            } else {
+                files.remove_path(owned.path())
+            }
+        } else if owned.path().exists() {
+            Err(InstallError::ExistingResidue)
+        } else {
+            Ok(())
         };
-        record_rollback(failures, created.step, result);
+        record_rollback(failures, owned.step(), result);
+        record_rollback(
+            failures,
+            RollbackStep::RemoveTemporary,
+            owned.remove_owned_staging(),
+        );
     }
     // Systemd must forget the removed unit before another fresh install is
     // allowed to consult its absence state.
@@ -691,7 +666,12 @@ fn cleanup_failed_install(
     record_rollback(
         failures,
         RollbackStep::RemoveServiceIdentity,
-        accounts.remove_static_service_identity(),
+        accounts.remove_transaction_identity(
+            journal.transaction_id(),
+            journal
+                .identity()
+                .map(|(uid, gid)| ServiceIdentity { uid, gid }),
+        ),
     );
 }
 
@@ -755,18 +735,26 @@ fn recover_interrupted_install(
         RollbackStep::ReloadSystemd,
         ports.systemd.daemon_reload(),
     );
-    if let Some((uid, gid)) = journal.identity() {
-        let identity = ServiceIdentity { uid, gid };
-        match ports.accounts.owns_static_service_identity(identity) {
+    {
+        let identity = journal
+            .identity()
+            .map(|(uid, gid)| ServiceIdentity { uid, gid });
+        match ports
+            .accounts
+            .owns_transaction_identity(journal.transaction_id(), identity)
+        {
             Ok(true) => record_rollback(
                 &mut failures,
                 RollbackStep::RemoveServiceIdentity,
-                ports.accounts.remove_static_service_identity(),
+                ports
+                    .accounts
+                    .remove_transaction_identity(journal.transaction_id(), identity),
             ),
-            Ok(false) => failures.push(RollbackFailure::new(
+            Ok(false) if identity.is_some() => failures.push(RollbackFailure::new(
                 RollbackStep::RemoveServiceIdentity,
                 InstallErrorKind::ExistingResidue,
             )),
+            Ok(false) => {}
             Err(error) => record_rollback(
                 &mut failures,
                 RollbackStep::RemoveServiceIdentity,

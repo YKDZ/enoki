@@ -1,9 +1,9 @@
 use super::InstallError;
 use std::{
     io::Read,
+    os::fd::AsRawFd,
     os::unix::process::CommandExt,
     process::{Command, ExitStatus, Stdio},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -47,36 +47,63 @@ pub(super) fn run_bounded(
         });
     }
     let mut child = command.spawn().map_err(|_| error.clone())?;
-    let stdout = child.stdout.take().ok_or_else(|| error.clone())?;
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout
-            .take(MAX_STDOUT)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
+    let mut stdout = child.stdout.take().ok_or_else(|| error.clone())?;
+    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
+    {
+        let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let _ = child.wait();
+        return Err(error);
+    }
+    let mut bytes = Vec::new();
+    let mut child_status = None;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = reader
-                    .join()
-                    .ok()
-                    .and_then(Result::ok)
-                    .ok_or_else(|| error.clone())?;
-                if stdout.len() as u64 >= MAX_STDOUT {
-                    return Err(error);
+        let mut chunk = [0_u8; 512];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) if child_status.is_some() => {
+                    return Ok(BoundedOutput {
+                        status: child_status.expect("status was checked"),
+                        stdout: bytes,
+                    });
                 }
-                return Ok(BoundedOutput { status, stdout });
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
-            Ok(None) | Err(_) => {
-                let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return Err(error);
+                Ok(0) => break,
+                Ok(read) => {
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if bytes.len() as u64 >= MAX_STDOUT {
+                        child_status = None;
+                        break;
+                    }
+                }
+                Err(read_error) if read_error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    child_status = None;
+                    break;
+                }
             }
         }
+        if bytes.len() as u64 >= MAX_STDOUT || Instant::now() >= deadline {
+            let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+            let _ = child.kill();
+            drop(stdout);
+            let _ = child.wait();
+            return Err(error);
+        }
+        if child_status.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => child_status = Some(status),
+                Ok(None) => {}
+                Err(_) => {
+                    let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                    let _ = child.kill();
+                    drop(stdout);
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -113,6 +140,23 @@ mod tests {
                 Duration::from_secs(1),
             )
             .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn inherited_stdout_after_command_exit_remains_bounded_by_the_deadline() {
+        let started = Instant::now();
+        assert_eq!(
+            run_bounded(
+                "/bin/sh",
+                &["-c", "sleep 10 &"],
+                InstallError::Systemd,
+                Instant::now() + Duration::from_secs(1),
+                Duration::from_millis(50),
+            )
+            .map(|_| ()),
+            Err(InstallError::Systemd)
         );
         assert!(started.elapsed() < Duration::from_secs(1));
     }

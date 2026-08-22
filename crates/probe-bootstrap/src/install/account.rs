@@ -50,6 +50,211 @@ impl AccountPort for SystemAccounts {
         let gid = numeric_id("-g", deadline)?;
         Ok(uid == identity.uid && gid == identity.gid)
     }
+    fn create_transaction_identity(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<ServiceIdentity, InstallError> {
+        let deadline = self
+            .command_deadline
+            .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+        create_transaction_identity_with_commands(
+            transaction_id,
+            &mut |program, arguments| {
+                require_success(program, arguments, InstallError::Account, deadline)
+            },
+            &mut |flag| numeric_id(flag, deadline),
+        )
+    }
+    fn owns_transaction_identity(
+        &mut self,
+        transaction_id: &str,
+        identity: Option<ServiceIdentity>,
+    ) -> Result<bool, InstallError> {
+        inspect_transaction_identity(transaction_id, identity, self.command_deadline)
+    }
+    fn remove_transaction_identity(
+        &mut self,
+        transaction_id: &str,
+        identity: Option<ServiceIdentity>,
+    ) -> Result<(), InstallError> {
+        remove_transaction_identity(transaction_id, identity, self.command_deadline)
+    }
+}
+
+fn account_marker(transaction_id: &str) -> String {
+    format!("enoki-bootstrap-{transaction_id}")
+}
+
+fn group_account_marker(transaction_id: &str) -> String {
+    format!("!{}", account_marker(transaction_id))
+}
+
+pub(super) fn create_transaction_identity_with_commands(
+    transaction_id: &str,
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+    lookup_id: &mut impl FnMut(&str) -> Result<u32, InstallError>,
+) -> Result<ServiceIdentity, InstallError> {
+    let marker = account_marker(transaction_id);
+    let group_marker = group_account_marker(transaction_id);
+    execute(
+        "/usr/sbin/groupadd",
+        &["--system", "--password", &group_marker, SERVICE_GROUP],
+    )?;
+    execute(
+        "/usr/sbin/useradd",
+        &[
+            "--system",
+            "--gid",
+            SERVICE_GROUP,
+            "--comment",
+            &marker,
+            "--home-dir",
+            STATE,
+            "--shell",
+            "/usr/sbin/nologin",
+            SERVICE_USER,
+        ],
+    )?;
+    Ok(ServiceIdentity {
+        uid: lookup_id("-u")?,
+        gid: lookup_id("-g")?,
+    })
+}
+
+fn inspect_transaction_identity(
+    transaction_id: &str,
+    identity: Option<ServiceIdentity>,
+    deadline: Option<Instant>,
+) -> Result<bool, InstallError> {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+    let marker = account_marker(transaction_id);
+    let group = run_bounded(
+        "/usr/bin/getent",
+        &["group", SERVICE_GROUP],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    let user = run_bounded(
+        "/usr/bin/getent",
+        &["passwd", SERVICE_USER],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    let group_shadow = run_bounded(
+        "/usr/bin/getent",
+        &["gshadow", SERVICE_GROUP],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    let group_text = String::from_utf8(group.stdout).map_err(|_| InstallError::Account)?;
+    let user_text = String::from_utf8(user.stdout).map_err(|_| InstallError::Account)?;
+    let group_shadow_text =
+        String::from_utf8(group_shadow.stdout).map_err(|_| InstallError::Account)?;
+    let group_absent = group.status.code() == Some(2);
+    let user_absent = user.status.code() == Some(2);
+    let group_shadow_absent = group_shadow.status.code() == Some(2);
+    if group_absent && user_absent {
+        return Ok(false);
+    }
+    Ok(account_records_match_transaction(
+        &marker,
+        &group_account_marker(transaction_id),
+        (!group_absent).then_some(group_text.as_str()),
+        (!group_shadow_absent).then_some(group_shadow_text.as_str()),
+        (!user_absent).then_some(user_text.as_str()),
+        identity,
+    ))
+}
+
+pub(super) fn account_records_match_transaction(
+    user_marker: &str,
+    group_marker: &str,
+    group_record: Option<&str>,
+    group_shadow_record: Option<&str>,
+    user_record: Option<&str>,
+    identity: Option<ServiceIdentity>,
+) -> bool {
+    let group_fields = group_record.map(|record| record.trim_end().split(':').collect::<Vec<_>>());
+    let user_fields = user_record.map(|record| record.trim_end().split(':').collect::<Vec<_>>());
+    let group_shadow_fields =
+        group_shadow_record.map(|record| record.trim_end().split(':').collect::<Vec<_>>());
+    let group_owned = group_fields
+        .as_ref()
+        .is_some_and(|fields| fields.len() == 4 && fields[0] == SERVICE_GROUP)
+        && group_shadow_fields.as_ref().is_some_and(|fields| {
+            fields.len() == 4 && fields[0] == SERVICE_GROUP && fields[1] == group_marker
+        });
+    let user_owned = user_fields.as_ref().is_some_and(|fields| {
+        fields.len() == 7 && fields[0] == SERVICE_USER && fields[4] == user_marker
+    });
+    if group_fields.is_some() != group_owned
+        || user_fields.is_some() != user_owned
+        || group_fields.is_some() != group_shadow_fields.is_some()
+        || (!group_owned && !user_owned)
+    {
+        return false;
+    }
+    identity.is_none_or(|identity| {
+        (!group_owned
+            || group_fields
+                .as_ref()
+                .is_some_and(|fields| fields[2].parse::<u32>() == Ok(identity.gid)))
+            && (!user_owned
+                || user_fields.as_ref().is_some_and(|fields| {
+                    fields[2].parse::<u32>() == Ok(identity.uid)
+                        && fields[3].parse::<u32>() == Ok(identity.gid)
+                }))
+    })
+}
+
+fn remove_transaction_identity(
+    transaction_id: &str,
+    identity: Option<ServiceIdentity>,
+    deadline: Option<Instant>,
+) -> Result<(), InstallError> {
+    if !inspect_transaction_identity(transaction_id, identity, deadline)? {
+        return Ok(());
+    }
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+    let marker = account_marker(transaction_id);
+    let user = run_bounded(
+        "/usr/bin/getent",
+        &["passwd", SERVICE_USER],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    if String::from_utf8(user.stdout)
+        .is_ok_and(|record| record.split(':').nth(4) == Some(marker.as_str()))
+    {
+        require_success(
+            "/usr/sbin/userdel",
+            &[SERVICE_USER],
+            InstallError::Account,
+            deadline,
+        )?;
+    }
+    let group = run_bounded(
+        "/usr/bin/getent",
+        &["gshadow", SERVICE_GROUP],
+        InstallError::Account,
+        deadline,
+        COMMAND_STEP_BUDGET,
+    )?;
+    if String::from_utf8(group.stdout).is_ok_and(|record| {
+        record.split(':').nth(1) == Some(group_account_marker(transaction_id).as_str())
+    }) {
+        require_success(
+            "/usr/sbin/groupdel",
+            &[SERVICE_GROUP],
+            InstallError::Account,
+            deadline,
+        )?;
+    }
+    Ok(())
 }
 
 /// account 事务仅补偿由成功命令和持久 journal 共同证明归属的身份。
