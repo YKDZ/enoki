@@ -8693,6 +8693,10 @@ printf '%s\n' '{}'
                 .expect("Provider socket unit")
                 .contains("SocketGroup=enoki-observation-ipc")
         );
+        let target_provider_unit =
+            fs::read_to_string(&unit_paths[2]).expect("target Provider service unit");
+        assert!(target_provider_unit.contains("ReadOnlyPaths=/proc/stat"));
+        assert!(!target_provider_unit.contains("ProcSubset=pid"));
         assert_eq!(
             fs::read_to_string(bootstrap_state.join("trust/delegation-generation"))
                 .expect("generation"),

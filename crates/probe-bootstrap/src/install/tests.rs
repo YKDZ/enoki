@@ -546,6 +546,10 @@ mod tests {
         assert!(provider.contains("RuntimeMaxSec=3s"));
         assert!(provider.contains("KillMode=control-group"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat"));
+        assert!(
+            !provider.contains("ProcSubset=pid"),
+            "CPU Provider 必须能读取非进程类顶层 /proc/stat"
+        );
         assert!(!provider.contains('%'));
     }
 

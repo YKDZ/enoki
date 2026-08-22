@@ -1248,7 +1248,7 @@ fn cpu_provider_socket_unit() -> &'static str {
 }
 
 fn cpu_provider_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki one-shot CPU Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProcSubset=pid\nProtectProc=invisible\nReadOnlyPaths=/proc/stat\n"
+    "[Unit]\nDescription=Enoki one-shot CPU Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=invisible\nReadOnlyPaths=/proc/stat\n"
 }
 
 /// Upgrader 与首次安装共享的固定 systemd integration assets。
