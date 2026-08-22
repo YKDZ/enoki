@@ -3,7 +3,9 @@
 use crate::{
     generation::{DelegationGenerationLease, GenerationStateError, acquire_delegation_generation},
     handoff::{Enrollment, Handoff, HandoffError},
-    install::{FixedInstallPaths, SystemAccounts, SystemSystemd, activate_current_probe},
+    install::{
+        FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd, activate_current_probe,
+    },
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{VerificationPolicy, VerifiedBundle, verify_component, verify_metadata},
 };
@@ -27,7 +29,7 @@ pub enum ActivationError {
     NotRoot,
     Verification,
     Io,
-    LifecycleUnavailable,
+    Install(InstallError),
 }
 
 impl From<HandoffError> for ActivationError {
@@ -71,8 +73,8 @@ impl ReceivedRootHandoff {
     pub fn activate_fixed_current_probe(self) -> Result<(), ActivationError> {
         let trust = embedded_production_trust_for(BootstrapRole::Activator)
             .ok_or(ActivationError::BuildTrustUnavailable)?;
-        let mut accounts = SystemAccounts;
-        let mut systemd = SystemSystemd;
+        let mut accounts = SystemAccounts::default();
+        let mut systemd = SystemSystemd::default();
         self.activate_with(|component, enrollment, bundle| {
             activate_current_probe(
                 component,
@@ -83,7 +85,7 @@ impl ReceivedRootHandoff {
                 &mut accounts,
                 &mut systemd,
             )
-            .map_err(|_| ActivationError::LifecycleUnavailable)
+            .map_err(ActivationError::Install)
         })
     }
     pub fn component(&mut self) -> Result<&mut File, ActivationError> {
