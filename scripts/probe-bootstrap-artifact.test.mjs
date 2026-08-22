@@ -11,7 +11,7 @@ import {
   inspectProbeBootstrapArtifact,
   inspectProbeBootstrapBinary,
   packageProbeBootstrapArtifact,
-  withExtractedProbeBootstrapArtifact,
+  withVerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-artifact.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -175,7 +175,7 @@ describe("Probe Bootstrap build artifact", () => {
         ...identity,
       });
       let extractionDirectory;
-      await withExtractedProbeBootstrapArtifact(
+      await withVerifiedProbeBootstrapArtifact(
         { archivePath: artifact.archivePath, ...identity },
         async ({ extractedRoles, temporaryDirectory }) => {
           extractionDirectory = temporaryDirectory;
@@ -192,6 +192,33 @@ describe("Probe Bootstrap build artifact", () => {
         },
       );
       await expect(readFile(extractionDirectory)).rejects.toThrow();
+    });
+  });
+
+  it("keeps the verified archive snapshot stable when its source changes after verification", async () => {
+    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
+      const artifact = await packageProbeBootstrapArtifact({
+        binaries: { acquirerPath, activatorPath },
+        outputDir: path.join(root, "out"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+      const verifiedBytes = await readFile(artifact.archivePath);
+
+      await withVerifiedProbeBootstrapArtifact(
+        {
+          archivePath: artifact.archivePath,
+          expectedArchive: {
+            sha256: artifact.sha256,
+            size: artifact.size,
+          },
+          ...identity,
+        },
+        async ({ archivePath }) => {
+          await writeFile(artifact.archivePath, Buffer.from("source changed"));
+          await expect(readFile(archivePath)).resolves.toEqual(verifiedBytes);
+        },
+      );
     });
   });
 
@@ -218,7 +245,7 @@ describe("Probe Bootstrap build artifact", () => {
       const unsafe = path.join(root, "unsafe.tar.gz");
       await writeFile(unsafe, mutate(source));
       await expect(
-        withExtractedProbeBootstrapArtifact(
+        withVerifiedProbeBootstrapArtifact(
           { archivePath: unsafe, ...identity },
           () => {
             throw new Error(

@@ -156,6 +156,40 @@ describe("Publication Reconciler", () => {
     }
   });
 
+  it("uploads the verified Bootstrap snapshot when its source changes after verification", async () => {
+    const fixture = await createPublicationFixture();
+    try {
+      const remote = new FakePublicationRemote();
+      const uploadAsset = remote.uploadAsset.bind(remote);
+      const bootstrap = fixture.candidateManifest.bootstrap.files[0];
+      const sourcePath = path.join(
+        fixture.candidateDir,
+        fixture.candidateManifest.bootstrap.directory,
+        bootstrap.file,
+      );
+      const verifiedBytes = await readFile(sourcePath);
+      remote.uploadAsset = async (input) => {
+        if (input.file === bootstrap.file) {
+          await writeFile(sourcePath, Buffer.from("source changed"));
+          await expect(readFile(input.filePath)).resolves.toEqual(
+            verifiedBytes,
+          );
+        }
+        return uploadAsset(input);
+      };
+
+      await reconcilePublication({
+        candidateDir: fixture.candidateDir,
+        candidateManifest: fixture.candidateManifest,
+        remote,
+        verificationSummary: fixture.verificationSummary,
+        workflowRun: fixture.workflowRun,
+      });
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("uses the created draft response while the release list is eventually consistent", async () => {
     const fixture = await createPublicationFixture();
     try {

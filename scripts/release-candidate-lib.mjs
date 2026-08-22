@@ -28,6 +28,7 @@ import { promisify } from "node:util";
 import {
   inspectProbeBootstrapArtifact,
   probeBootstrapTargets,
+  withVerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-artifact.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 
@@ -741,10 +742,24 @@ export async function assembleReleaseCandidate({
     await cp(probeAssetSetDir, path.join(stagingDir, "probe-assets"), {
       recursive: true,
     });
-    for (const { file } of bootstrap.files) {
-      await copyFile(
-        path.join(bootstrapArtifactDir, file),
-        path.join(stagingDir, "probe-bootstrap", file),
+    for (const expected of bootstrap.files) {
+      await withVerifiedProbeBootstrapArtifact(
+        {
+          archivePath: path.join(bootstrapArtifactDir, expected.file),
+          distribution: "enoki",
+          expectedArchive: {
+            sha256: expected.sha256,
+            size: expected.size,
+          },
+          rootKeyId,
+          target: expected.target,
+          version,
+        },
+        ({ archivePath }) =>
+          copyFile(
+            archivePath,
+            path.join(stagingDir, "probe-bootstrap", expected.file),
+          ),
       );
     }
     if (releaseBaseline.kind === "enoki-release-baseline") {

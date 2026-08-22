@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { withVerifiedProbeBootstrapArchive } from "./probe-bootstrap-artifact.mjs";
+
 export async function reconcilePublication({
   candidateDir,
   candidateManifest,
@@ -77,9 +79,11 @@ export async function reconcilePublication({
           `public Release ${version} is missing immutable asset ${expected.file}`,
         );
       }
-      await remote.uploadAsset({
-        ...expected,
-        filePath: path.join(candidateDir, expected.directory, expected.file),
+      await uploadReleaseAsset({
+        candidateDir,
+        candidateManifest,
+        expected,
+        remote,
         version,
       });
       actions.push({
@@ -184,6 +188,32 @@ export async function reconcilePublication({
     verificationRun: verificationSummary.run,
     workflowRun,
   };
+}
+
+async function uploadReleaseAsset({
+  candidateDir,
+  candidateManifest,
+  expected,
+  remote,
+  version,
+}) {
+  const sourcePath = path.join(candidateDir, expected.directory, expected.file);
+  if (expected.directory !== candidateManifest.bootstrap.directory) {
+    await remote.uploadAsset({ ...expected, filePath: sourcePath, version });
+    return;
+  }
+  await withVerifiedProbeBootstrapArchive(
+    {
+      archivePath: sourcePath,
+      expectedArchive: { sha256: expected.sha256, size: expected.size },
+    },
+    ({ archivePath }) =>
+      remote.uploadAsset({
+        ...expected,
+        filePath: archivePath,
+        version,
+      }),
+  );
 }
 
 function assertExistingPublicationState({

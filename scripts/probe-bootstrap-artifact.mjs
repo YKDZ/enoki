@@ -80,6 +80,7 @@ export async function inspectProbeBootstrapArtifact({
 async function inspectProbeBootstrapArchiveInput({
   archivePath,
   distribution,
+  expectedArchive,
   rootKeyId,
   target,
   version,
@@ -89,6 +90,7 @@ async function inspectProbeBootstrapArchiveInput({
     throw new Error("Probe Bootstrap archive path is invalid");
   }
   const archive = await readBoundedArchive(archivePath);
+  assertExpectedArchive(archive, expectedArchive);
   const archiveRoles = parseExactProbeBootstrapArchive(archive);
   const [acquirer, activator] = await Promise.all(
     expectedProbeBootstrapRoles.map(async ({ name, role }) => {
@@ -114,60 +116,107 @@ async function inspectProbeBootstrapArchiveInput({
       },
       sha256: sha256(archive),
     },
+    archive,
     roleBytes: { acquirer: acquirer.binary, activator: activator.binary },
   };
+}
+
+function assertExpectedArchive(archive, expectedArchive) {
+  if (expectedArchive === undefined) return;
+  if (
+    !isPlainObject(expectedArchive) ||
+    Object.keys(expectedArchive).sort().join(",") !== "sha256,size" ||
+    !/^[0-9a-f]{64}$/.test(expectedArchive.sha256 ?? "") ||
+    !Number.isSafeInteger(expectedArchive.size) ||
+    expectedArchive.size <= 0 ||
+    archive.byteLength !== expectedArchive.size ||
+    sha256(archive) !== expectedArchive.sha256
+  ) {
+    throw new Error(
+      "Probe Bootstrap archive does not match the expected release bytes",
+    );
+  }
+}
+
+export async function withVerifiedProbeBootstrapArchive(input, callback) {
+  if (typeof callback !== "function") {
+    throw new Error("Probe Bootstrap archive snapshot requires a callback");
+  }
+  if (typeof input?.archivePath !== "string") {
+    throw new Error("Probe Bootstrap archive path is invalid");
+  }
+  const archive = await readBoundedArchive(input.archivePath);
+  assertExpectedArchive(archive, input.expectedArchive);
+  return withPrivateProbeBootstrapArchive(archive, callback);
+}
+
+async function withPrivateProbeBootstrapArchive(archive, callback) {
+  const temporaryDirectory = await mkdtemp(
+    path.join(tmpdir(), "enoki-probe-bootstrap-verified-"),
+  );
+  try {
+    await chmod(temporaryDirectory, 0o700);
+    const archivePath = path.join(temporaryDirectory, "probe-bootstrap.tar.gz");
+    await writeFile(archivePath, archive, { flag: "wx", mode: 0o600 });
+    return await callback({
+      archivePath,
+      sha256: sha256(archive),
+      size: archive.byteLength,
+      temporaryDirectory,
+    });
+  } finally {
+    await rm(temporaryDirectory, { force: true, recursive: true });
+  }
 }
 
 // Keeps archive parsing outside elevated authority. The callback receives only
 // two digest-checked, regular role binaries in a private controller-owned
 // directory; the directory is removed even when transfer or installation
 // fails.
-export async function withExtractedProbeBootstrapArtifact(input, callback) {
+export async function withVerifiedProbeBootstrapArtifact(input, callback) {
   if (typeof callback !== "function") {
     throw new Error("Probe Bootstrap extraction requires a callback");
   }
   const inspected = await inspectProbeBootstrapArchiveInput(input);
   const inspection = inspected.public;
-  const temporaryDirectory = await mkdtemp(
-    path.join(tmpdir(), "enoki-probe-bootstrap-inspected-"),
-  );
-  try {
-    await chmod(temporaryDirectory, 0o700);
-    const extractedRoles = {};
-    for (const { name, role } of expectedProbeBootstrapRoles) {
-      const binaryPath = path.join(temporaryDirectory, name);
-      await writeFile(binaryPath, inspected.roleBytes[role], {
-        flag: "wx",
-        mode: 0o755,
+  return withPrivateProbeBootstrapArchive(
+    inspected.archive,
+    async ({ archivePath, temporaryDirectory }) => {
+      const extractedRoles = {};
+      for (const { name, role } of expectedProbeBootstrapRoles) {
+        const binaryPath = path.join(temporaryDirectory, name);
+        await writeFile(binaryPath, inspected.roleBytes[role], {
+          flag: "wx",
+          mode: 0o755,
+        });
+        const details = await lstat(binaryPath);
+        if (
+          !details.isFile() ||
+          details.isSymbolicLink() ||
+          (details.mode & 0o777) !== 0o755
+        ) {
+          throw new Error("Probe Bootstrap extracted role binary is unsafe");
+        }
+        const binary = await readFile(binaryPath);
+        const expected = inspection.roles[role];
+        if (
+          binary.byteLength !== expected.size ||
+          sha256(binary) !== expected.sha256
+        ) {
+          throw new Error(
+            "Probe Bootstrap archive changed while extracting inspected roles",
+          );
+        }
+        extractedRoles[role] = { ...expected, binaryPath };
+      }
+      return await callback({
+        ...inspection,
+        archivePath,
+        extractedRoles: Object.freeze(extractedRoles),
+        temporaryDirectory,
       });
-      const details = await lstat(binaryPath);
-      if (
-        !details.isFile() ||
-        details.isSymbolicLink() ||
-        (details.mode & 0o777) !== 0o755
-      ) {
-        throw new Error("Probe Bootstrap extracted role binary is unsafe");
-      }
-      const binary = await readFile(binaryPath);
-      const expected = inspection.roles[role];
-      if (
-        binary.byteLength !== expected.size ||
-        sha256(binary) !== expected.sha256
-      ) {
-        throw new Error(
-          "Probe Bootstrap archive changed while extracting inspected roles",
-        );
-      }
-      extractedRoles[role] = { ...expected, binaryPath };
-    }
-    return await callback({
-      ...inspection,
-      extractedRoles: Object.freeze(extractedRoles),
-      temporaryDirectory,
-    });
-  } finally {
-    await rm(temporaryDirectory, { force: true, recursive: true });
-  }
+    },
+  );
 }
 
 async function readBoundedArchive(archivePath) {
