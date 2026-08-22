@@ -540,13 +540,37 @@ mod tests {
         assert!(runtime.contains("PrivateNetwork=true"));
         assert!(runtime.contains("SupplementaryGroups=enoki-observation-ipc"));
         assert!(provider_socket.contains("SocketGroup=enoki-observation-ipc"));
-        assert!(provider_socket.contains("MaxConnections=8"));
+        assert!(provider_socket.contains("MaxConnections=1"));
         assert!(provider_socket.contains("TriggerLimitBurst=12"));
         assert!(provider.contains("ExecStart=/usr/local/bin/enoki-cpu-resource-provider\n"));
         assert!(provider.contains("RuntimeMaxSec=3s"));
         assert!(provider.contains("KillMode=control-group"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat"));
         assert!(!provider.contains('%'));
+    }
+
+    #[test]
+    fn schema_three_persists_the_trusted_operation_launcher_and_authority_paths() {
+        let config = bootstrap_config(
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &trust(),
+            true,
+        );
+        assert!(config.contains("upgrader_launch = \"systemd\""));
+        assert!(config.contains(
+            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\""
+        ));
+
+        let metadata = install_metadata(
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &trust(),
+            true,
+        );
+        assert!(metadata.contains(
+            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\""
+        ));
+        assert!(operation_sudoers().contains("internal-upgrader --config"));
+        assert!(operation_sudoers().contains("internal-uninstaller --config"));
     }
 
     #[test]
@@ -593,6 +617,51 @@ mod tests {
             .path()
             .join("usr/local/bin/enoki-observation-runtime")
             .exists());
+    }
+
+    #[test]
+    fn complete_fresh_install_publishes_the_real_operation_entrypoint_transactionally() {
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let mut probe = component();
+        let mut runtime = component();
+        let mut provider = component();
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .unwrap();
+
+        let config = fs::read_to_string(
+            temporary.path().join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+        )
+        .unwrap();
+        let sudoers = fs::read_to_string(
+            temporary.path().join("etc/sudoers.d/enoki-probe-operations"),
+        )
+        .unwrap();
+        assert!(config.contains("upgrader_launch = \"systemd\""));
+        assert!(sudoers.contains("systemd-run --collect --pipe --wait"));
+        assert!(sudoers.contains("internal-upgrader --config /var/lib/enoki-probe/identity/probe-bootstrap.toml"));
+        assert!(sudoers.contains("internal-uninstaller --config /var/lib/enoki-probe/identity/probe-bootstrap.toml"));
+        assert_eq!(fs::metadata(temporary.path().join("etc/sudoers.d/enoki-probe-operations")).unwrap().mode() & 0o777, 0o440);
     }
 
     #[test]

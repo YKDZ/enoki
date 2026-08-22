@@ -597,8 +597,8 @@ export namespace enoki {
             /** ProbeReportRequest observationWindowFailure */
             observationWindowFailure?: (enoki.v1.IObservationWindowFailure|null);
 
-            /** ProbeReportRequest cpuResourceCollectionOutcome */
-            cpuResourceCollectionOutcome?: (enoki.v1.ICpuResourceCollectionOutcome|null);
+            /** ProbeReportRequest cpuResourceCollectionOutcomes */
+            cpuResourceCollectionOutcomes?: (enoki.v1.ICpuResourceCollectionOutcome[]|null);
         }
 
         /** Represents a ProbeReportRequest. */
@@ -646,8 +646,8 @@ export namespace enoki {
             /** ProbeReportRequest observationWindowFailure. */
             public observationWindowFailure?: (enoki.v1.IObservationWindowFailure|null);
 
-            /** ProbeReportRequest cpuResourceCollectionOutcome. */
-            public cpuResourceCollectionOutcome?: (enoki.v1.ICpuResourceCollectionOutcome|null);
+            /** ProbeReportRequest cpuResourceCollectionOutcomes. */
+            public cpuResourceCollectionOutcomes: enoki.v1.ICpuResourceCollectionOutcome[];
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.
@@ -730,6 +730,9 @@ export namespace enoki {
         /** Properties of a CpuResourceCollectionOutcome. */
         interface ICpuResourceCollectionOutcome {
 
+            /** CpuResourceCollectionOutcome sequence */
+            sequence?: (number|Long|null);
+
             /** CpuResourceCollectionOutcome reason */
             reason?: (enoki.v1.CpuResourceCollectionOutcomeReason|null);
         }
@@ -742,6 +745,9 @@ export namespace enoki {
              * @param [properties] Properties to set
              */
             constructor(properties?: enoki.v1.ICpuResourceCollectionOutcome);
+
+            /** CpuResourceCollectionOutcome sequence. */
+            public sequence: (number|Long);
 
             /** CpuResourceCollectionOutcome reason. */
             public reason: enoki.v1.CpuResourceCollectionOutcomeReason;

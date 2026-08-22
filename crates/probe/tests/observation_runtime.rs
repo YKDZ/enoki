@@ -19,12 +19,12 @@ fn runtime_owns_cpu_window_cadence_and_returns_one_finalized_batch() {
         &mut sleeper,
     );
 
-    assert_eq!(batch.samples.len(), 3);
+    assert_eq!(batch.attempts.len(), 3);
     assert_eq!(
         batch
-            .samples
+            .attempts
             .iter()
-            .map(|sample| sample.collected_at_ms)
+            .map(|attempt| attempt.sample.as_ref().unwrap().collected_at_ms)
             .collect::<Vec<_>>(),
         [5_000, 10_000, 15_000]
     );
@@ -58,6 +58,66 @@ fn cpu_observation_window_uses_one_fixed_resource_result_and_keeps_delta_state_i
     assert_eq!(provider.calls, 2);
     assert_eq!(first.cpu_percent, Some(0.0));
     assert_eq!(second.cpu_percent, Some(20.0));
+}
+
+#[test]
+fn every_due_attempt_has_its_own_immutable_success_or_typed_outcome() {
+    struct MixedProvider {
+        attempts: std::collections::VecDeque<
+            Result<&'static str, enoki_probe::observation_runtime::CpuResourceAcquisitionFailure>,
+        >,
+    }
+    impl CpuCountersProvider for MixedProvider {
+        fn pull_cpu_counters(
+            &mut self,
+            _request: enoki_probe::observation_runtime::CpuCountersPullRequest,
+        ) -> Result<
+            CpuCountersResourceResult,
+            enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+        > {
+            let counters = self
+                .attempts
+                .pop_front()
+                .expect("one result per due attempt")?;
+            CpuCountersResourceResult::from_records(
+                enoki_probe::metrics::parse_linux_proc_stat_cpu_counters(counters).unwrap(),
+            )
+            .ok_or(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Malformed)
+        }
+    }
+    let mut runtime = ObservationRuntime::new(MixedProvider {
+        attempts: [
+            Ok("cpu 100 0 0 900 0 0 0 0\n"),
+            Err(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Unavailable),
+            Ok("cpu 130 0 0 970 0 0 0 0\n"),
+        ]
+        .into_iter()
+        .collect(),
+    });
+    let mut sleeper = RecordingSleeper::default();
+    let result = runtime.collect_next_window(
+        ObservationWindowRequest::new(Duration::from_secs(1))
+            .unwrap()
+            .with_sequence_start(41)
+            .unwrap(),
+        &mut sleeper,
+    );
+
+    assert_eq!(
+        result
+            .attempts
+            .iter()
+            .map(|attempt| attempt.sequence)
+            .collect::<Vec<_>>(),
+        [41, 42, 43]
+    );
+    assert!(result.attempts[0].sample.is_some());
+    assert_eq!(
+        result.attempts[1].cpu_resource_outcome,
+        Some(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Unavailable)
+    );
+    assert!(result.attempts[2].sample.is_some());
+    assert_eq!(sleeper.sleeps, vec![Duration::from_secs(1); 3]);
 }
 
 struct RecordingCpuProvider {

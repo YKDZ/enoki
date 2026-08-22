@@ -352,8 +352,24 @@ function copyMetricsClosure(
 
   insertRows(archive, "metric_samples", samples);
   const sampleIds = samples.map((sample) => Number(sample.id));
+  const archivedSampleFilter = sampleIdentityFilter(plan.samples);
+  const observations = hot
+    .prepare(
+      `
+        select ro.*
+        from report_observations ro
+        where ${archivedSampleFilter.sql
+          .replaceAll("probe_id", "ro.probe_id")
+          .replaceAll("boot_id", "ro.boot_id")
+          .replaceAll("sequence", "ro.sequence")}
+        order by ro.received_at_ms, ro.id
+      `,
+    )
+    .all(...archivedSampleFilter.parameters) as SqlRow[];
   const hostIds = [
-    ...new Set(samples.map((sample) => Number(sample.managed_host_id))),
+    ...new Set(
+      [...samples, ...observations].map((row) => Number(row.managed_host_id)),
+    ),
   ];
   const hostSnapshots = selectRowsByIds(
     hot,
@@ -389,20 +405,6 @@ function copyMetricsClosure(
     );
   }
 
-  const archivedSampleFilter = sampleIdentityFilter(plan.samples);
-  const observations = hot
-    .prepare(
-      `
-        select ro.*
-        from report_observations ro
-        where ${archivedSampleFilter.sql
-          .replaceAll("probe_id", "ro.probe_id")
-          .replaceAll("boot_id", "ro.boot_id")
-          .replaceAll("sequence", "ro.sequence")}
-        order by ro.received_at_ms, ro.id
-      `,
-    )
-    .all(...archivedSampleFilter.parameters) as SqlRow[];
   insertRows(archive, "report_observations", observations);
 }
 
@@ -415,22 +417,6 @@ function sampleIdentityFilter(samples: MetricsArchivePlannedSample[]) {
     ]),
     sql: samples
       .map(() => "(probe_id = ? and boot_id = ? and sequence = ?)")
-      .join(" or "),
-  };
-}
-
-function sampleRowsIdentityFilter(tableAlias: string, samples: SqlRow[]) {
-  return {
-    parameters: samples.flatMap((sample) => [
-      sample.probe_id ?? null,
-      sample.boot_id ?? null,
-      sample.sequence ?? null,
-    ]),
-    sql: samples
-      .map(
-        () =>
-          `(${tableAlias}.probe_id = ? and ${tableAlias}.boot_id = ? and ${tableAlias}.sequence = ?)`,
-      )
       .join(" or "),
   };
 }

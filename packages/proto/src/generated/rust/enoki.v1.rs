@@ -466,15 +466,17 @@ pub struct ProbeReportRequest {
     pub enrollment_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "14")]
     pub observation_window_failure: ::core::option::Option<ObservationWindowFailure>,
-    #[prost(message, optional, tag = "15")]
-    pub cpu_resource_collection_outcome: ::core::option::Option<
+    #[prost(message, repeated, tag = "15")]
+    pub cpu_resource_collection_outcomes: ::prost::alloc::vec::Vec<
         CpuResourceCollectionOutcome,
     >,
 }
 /// CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CpuResourceCollectionOutcome {
-    #[prost(enumeration = "CpuResourceCollectionOutcomeReason", tag = "1")]
+    #[prost(uint64, tag = "1")]
+    pub sequence: u64,
+    #[prost(enumeration = "CpuResourceCollectionOutcomeReason", tag = "2")]
     pub reason: i32,
 }
 /// 闭合的 Runtime 报告级失败，不携带 Provider、Resource、路径或本机诊断。

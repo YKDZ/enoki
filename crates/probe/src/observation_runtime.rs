@@ -24,7 +24,8 @@ pub const OBSERVATION_RUNTIME_SOCKET: &str = "/run/enoki-observation-runtime.soc
 pub const CPU_PROVIDER_SOCKET: &str = "/run/enoki-cpu-resource-provider.sock";
 const MAX_RUNTIME_RESPONSE_BYTES: usize = 256 * 1024;
 const PROVIDER_DEADLINE: Duration = Duration::from_secs(2);
-const RUNTIME_WINDOW_DEADLINE: Duration = Duration::from_secs(20);
+const RUNTIME_REQUEST_DEADLINE: Duration = Duration::from_secs(3);
+const RUNTIME_WINDOW_HEADROOM: Duration = Duration::from_secs(5);
 const CPU_SAMPLES_PER_WINDOW: usize = 3;
 const MIN_COLLECTION_CADENCE_SECONDS: u16 = 1;
 const MAX_COLLECTION_CADENCE_SECONDS: u16 = 200;
@@ -120,6 +121,7 @@ pub enum CpuResourceAcquisitionFailure {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObservationWindowRequest {
     cadence_seconds: u16,
+    sequence_start: u64,
 }
 
 impl ObservationWindowRequest {
@@ -130,12 +132,27 @@ impl ObservationWindowRequest {
             && seconds <= u64::from(MAX_COLLECTION_CADENCE_SECONDS))
         .then_some(Self {
             cadence_seconds: seconds as u16,
+            sequence_start: 1,
+        })
+    }
+
+    pub fn with_sequence_start(mut self, sequence_start: u64) -> Option<Self> {
+        (sequence_start > 0 && sequence_start <= u64::MAX - 2).then(|| {
+            self.sequence_start = sequence_start;
+            self
         })
     }
 
     pub fn cadence(self) -> Duration {
         Duration::from_secs(u64::from(self.cadence_seconds))
     }
+}
+
+fn runtime_window_deadline(cadence: Duration) -> Option<Duration> {
+    cadence
+        .checked_mul(CPU_SAMPLES_PER_WINDOW as u32)?
+        .checked_add(PROVIDER_DEADLINE.checked_mul(CPU_SAMPLES_PER_WINDOW as u32)?)?
+        .checked_add(RUNTIME_WINDOW_HEADROOM)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,8 +163,14 @@ pub enum ObservationRuntimeFailure {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationWindowResult {
+    pub attempts: Vec<ObservationAttemptResult>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObservationAttemptResult {
+    pub sequence: u64,
+    pub sample: Option<MetricSample>,
     pub cpu_resource_outcome: Option<CpuResourceAcquisitionFailure>,
-    pub samples: Vec<MetricSample>,
 }
 
 /// Runtime 持有 Collector cadence、计算和跨窗口采样状态。
@@ -218,23 +241,23 @@ where
         request: ObservationWindowRequest,
         sleeper: &mut impl ObservationRuntimeSleeper,
     ) -> ObservationWindowResult {
-        let mut samples = Vec::with_capacity(CPU_SAMPLES_PER_WINDOW);
-        for _ in 0..CPU_SAMPLES_PER_WINDOW {
+        let mut attempts = Vec::with_capacity(CPU_SAMPLES_PER_WINDOW);
+        for offset in 0..CPU_SAMPLES_PER_WINDOW {
             sleeper.sleep(request.cadence());
             match self.observe_at(request, sleeper.now_ms()) {
-                Ok(sample) => samples.push(sample),
-                Err(outcome) => {
-                    return ObservationWindowResult {
-                        cpu_resource_outcome: Some(outcome),
-                        samples: Vec::new(),
-                    };
-                }
+                Ok(sample) => attempts.push(ObservationAttemptResult {
+                    sequence: request.sequence_start + offset as u64,
+                    sample: Some(sample),
+                    cpu_resource_outcome: None,
+                }),
+                Err(outcome) => attempts.push(ObservationAttemptResult {
+                    sequence: request.sequence_start + offset as u64,
+                    sample: None,
+                    cpu_resource_outcome: Some(outcome),
+                }),
             }
         }
-        ObservationWindowResult {
-            cpu_resource_outcome: None,
-            samples,
-        }
+        ObservationWindowResult { attempts }
     }
 
     pub fn into_provider(self) -> P {
@@ -365,10 +388,16 @@ where
         mut stream: UnixStream,
         sleeper: &mut impl ObservationRuntimeSleeper,
     ) -> io::Result<()> {
-        configure_deadline(&stream, RUNTIME_WINDOW_DEADLINE)?;
+        configure_deadline(&stream, RUNTIME_REQUEST_DEADLINE)?;
         let Some(request) = read_window_request(&mut stream)? else {
             return write_window_failure(&mut stream);
         };
+        configure_deadline(
+            &stream,
+            runtime_window_deadline(request.cadence()).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "bounded Runtime deadline")
+            })?,
+        )?;
         let result = self.runtime.collect_next_window(request, sleeper);
         write_window_success(&mut stream, crate::version::probe_version(), &result)
     }
@@ -382,10 +411,24 @@ where
         listener: &UnixListener,
         maximum_connections: Option<usize>,
     ) -> io::Result<()> {
-        for (index, connection) in listener.incoming().enumerate() {
-            let connection = connection?;
+        self.serve_incoming(listener.incoming(), maximum_connections)
+    }
+
+    fn serve_incoming(
+        &mut self,
+        incoming: impl IntoIterator<Item = io::Result<UnixStream>>,
+        maximum_connections: Option<usize>,
+    ) -> io::Result<()> {
+        let mut accepted = 0_usize;
+        for connection in incoming {
+            let connection = match connection {
+                Ok(connection) => connection,
+                Err(error) if recoverable_accept_error(&error) => continue,
+                Err(error) => return Err(error),
+            };
             let _ = self.serve_connection(connection);
-            if maximum_connections == Some(index + 1) {
+            accepted += 1;
+            if maximum_connections == Some(accepted) {
                 break;
             }
         }
@@ -394,7 +437,11 @@ where
 
     pub fn serve_fixed_probe_listener(&mut self, listener: &UnixListener) -> io::Result<()> {
         for connection in listener.incoming() {
-            let connection = connection?;
+            let connection = match connection {
+                Ok(connection) => connection,
+                Err(error) if recoverable_accept_error(&error) => continue,
+                Err(error) => return Err(error),
+            };
             if require_peer_uid(connection.as_raw_fd(), c"enoki-probe").is_err() {
                 continue;
             }
@@ -402,6 +449,16 @@ where
         }
         Ok(())
     }
+}
+
+fn recoverable_accept_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::WouldBlock
+    )
 }
 
 /// 在接管 FD 所有权前闭合校验 systemd socket activation 合同。
@@ -518,6 +575,7 @@ pub trait ObservationWindowClient: Sync {
     fn request_finalized_window(
         &self,
         cadence: Duration,
+        sequence_start: u64,
     ) -> Result<ObservationWindowResult, ObservationClientError>;
 }
 
@@ -525,8 +583,9 @@ impl ObservationWindowClient for UnixObservationRuntimeClient {
     fn request_finalized_window(
         &self,
         cadence: Duration,
+        sequence_start: u64,
     ) -> Result<ObservationWindowResult, ObservationClientError> {
-        UnixObservationRuntimeClient::request_finalized_window(self, cadence)
+        UnixObservationRuntimeClient::request_finalized_window(self, cadence, sequence_start)
     }
 }
 
@@ -548,13 +607,18 @@ impl UnixObservationRuntimeClient {
     pub fn request_finalized_window(
         &self,
         cadence: Duration,
+        sequence_start: u64,
     ) -> Result<ObservationWindowResult, ObservationClientError> {
-        let request =
-            ObservationWindowRequest::new(cadence).ok_or(ObservationClientError::InvalidRequest)?;
+        let request = ObservationWindowRequest::new(cadence)
+            .and_then(|request| request.with_sequence_start(sequence_start))
+            .ok_or(ObservationClientError::InvalidRequest)?;
         let mut stream = UnixStream::connect(&self.socket_path)
             .map_err(|_| ObservationClientError::Unavailable)?;
-        configure_deadline(&stream, RUNTIME_WINDOW_DEADLINE)
-            .map_err(|_| ObservationClientError::Unavailable)?;
+        configure_deadline(
+            &stream,
+            runtime_window_deadline(cadence).ok_or(ObservationClientError::InvalidRequest)?,
+        )
+        .map_err(|_| ObservationClientError::Unavailable)?;
         stream
             .write_all(&encode_window_request(request))
             .map_err(|_| ObservationClientError::Unavailable)?;
@@ -582,41 +646,52 @@ impl UnixObservationRuntimeClient {
         {
             return Err(ObservationClientError::BundleIncoherent);
         }
-        let sample_count =
+        let attempt_count =
             read_u16(&mut stream).map_err(|_| ObservationClientError::InvalidResponse)?;
-        let mut outcome = [0; 1];
-        stream
-            .read_exact(&mut outcome)
-            .map_err(|_| ObservationClientError::InvalidResponse)?;
-        let cpu_resource_outcome = match outcome[0] {
-            0 => None,
-            1 => Some(CpuResourceAcquisitionFailure::Unavailable),
-            2 => Some(CpuResourceAcquisitionFailure::Malformed),
-            3 => Some(CpuResourceAcquisitionFailure::ActivationBudgetExhausted),
-            _ => return Err(ObservationClientError::InvalidResponse),
-        };
-        if sample_count as usize > CPU_SAMPLES_PER_WINDOW
-            || (cpu_resource_outcome.is_none() && sample_count as usize != CPU_SAMPLES_PER_WINDOW)
-            || (cpu_resource_outcome.is_some() && sample_count != 0)
-        {
+        if attempt_count as usize != CPU_SAMPLES_PER_WINDOW {
             return Err(ObservationClientError::InvalidResponse);
         }
-        let mut samples = Vec::with_capacity(sample_count as usize);
-        for _ in 0..sample_count {
-            let encoded_len = read_u32(&mut stream)
-                .map_err(|_| ObservationClientError::InvalidResponse)?
-                as usize;
-            if encoded_len == 0 || encoded_len > MAX_RUNTIME_RESPONSE_BYTES {
+        let mut attempts = Vec::with_capacity(attempt_count as usize);
+        for offset in 0..attempt_count {
+            let sequence =
+                read_u64(&mut stream).map_err(|_| ObservationClientError::InvalidResponse)?;
+            if sequence != sequence_start + u64::from(offset) {
                 return Err(ObservationClientError::InvalidResponse);
             }
-            let mut encoded = vec![0; encoded_len];
+            let mut outcome = [0; 1];
             stream
-                .read_exact(&mut encoded)
+                .read_exact(&mut outcome)
                 .map_err(|_| ObservationClientError::InvalidResponse)?;
-            samples.push(
-                MetricSample::decode(encoded.as_slice())
-                    .map_err(|_| ObservationClientError::InvalidResponse)?,
-            );
+            let cpu_resource_outcome = match outcome[0] {
+                0 => None,
+                1 => Some(CpuResourceAcquisitionFailure::Unavailable),
+                2 => Some(CpuResourceAcquisitionFailure::Malformed),
+                3 => Some(CpuResourceAcquisitionFailure::ActivationBudgetExhausted),
+                _ => return Err(ObservationClientError::InvalidResponse),
+            };
+            let sample = if cpu_resource_outcome.is_none() {
+                let encoded_len = read_u32(&mut stream)
+                    .map_err(|_| ObservationClientError::InvalidResponse)?
+                    as usize;
+                if encoded_len == 0 || encoded_len > MAX_RUNTIME_RESPONSE_BYTES {
+                    return Err(ObservationClientError::InvalidResponse);
+                }
+                let mut encoded = vec![0; encoded_len];
+                stream
+                    .read_exact(&mut encoded)
+                    .map_err(|_| ObservationClientError::InvalidResponse)?;
+                Some(
+                    MetricSample::decode(encoded.as_slice())
+                        .map_err(|_| ObservationClientError::InvalidResponse)?,
+                )
+            } else {
+                None
+            };
+            attempts.push(ObservationAttemptResult {
+                sequence,
+                sample,
+                cpu_resource_outcome,
+            });
         }
         if stream
             .read(&mut [0; 1])
@@ -625,10 +700,7 @@ impl UnixObservationRuntimeClient {
         {
             return Err(ObservationClientError::InvalidResponse);
         }
-        Ok(ObservationWindowResult {
-            cpu_resource_outcome,
-            samples,
-        })
+        Ok(ObservationWindowResult { attempts })
     }
 }
 
@@ -647,24 +719,32 @@ fn configure_deadline(stream: &UnixStream, deadline: Duration) -> io::Result<()>
 }
 
 fn read_window_request(stream: &mut UnixStream) -> io::Result<Option<ObservationWindowRequest>> {
-    let mut request = Vec::with_capacity(OBSERVATION_WINDOW_PULL.len() + 2);
+    let mut request = Vec::with_capacity(OBSERVATION_WINDOW_PULL.len() + 10);
     stream
-        .take((OBSERVATION_WINDOW_PULL.len() + 3) as u64)
+        .take((OBSERVATION_WINDOW_PULL.len() + 11) as u64)
         .read_to_end(&mut request)?;
-    if request.len() != OBSERVATION_WINDOW_PULL.len() + 2
+    if request.len() != OBSERVATION_WINDOW_PULL.len() + 10
         || !request.starts_with(OBSERVATION_WINDOW_PULL)
     {
         return Ok(None);
     }
-    let seconds = u16::from_be_bytes(request[OBSERVATION_WINDOW_PULL.len()..].try_into().unwrap());
-    Ok(ObservationWindowRequest::new(Duration::from_secs(
-        u64::from(seconds),
-    )))
+    let cadence_offset = OBSERVATION_WINDOW_PULL.len();
+    let seconds = u16::from_be_bytes(
+        request[cadence_offset..cadence_offset + 2]
+            .try_into()
+            .unwrap(),
+    );
+    let sequence_start = u64::from_be_bytes(request[cadence_offset + 2..].try_into().unwrap());
+    Ok(
+        ObservationWindowRequest::new(Duration::from_secs(u64::from(seconds)))
+            .and_then(|request| request.with_sequence_start(sequence_start)),
+    )
 }
 
 fn encode_window_request(request: ObservationWindowRequest) -> Vec<u8> {
     let mut encoded = OBSERVATION_WINDOW_PULL.to_vec();
     encoded.extend_from_slice(&request.cadence_seconds.to_be_bytes());
+    encoded.extend_from_slice(&request.sequence_start.to_be_bytes());
     encoded
 }
 
@@ -675,17 +755,24 @@ fn write_window_success(
 ) -> io::Result<()> {
     let version = version.as_bytes();
     let encoded = result
-        .samples
+        .attempts
         .iter()
-        .map(Message::encode_to_vec)
+        .map(|attempt| attempt.sample.as_ref().map(Message::encode_to_vec))
         .collect::<Vec<_>>();
     if version.is_empty()
         || version.len() > u16::MAX as usize
-        || encoded.len() > CPU_SAMPLES_PER_WINDOW
-        || (result.cpu_resource_outcome.is_none() && encoded.len() != CPU_SAMPLES_PER_WINDOW)
-        || (result.cpu_resource_outcome.is_some() && !encoded.is_empty())
+        || encoded.len() != CPU_SAMPLES_PER_WINDOW
+        || result
+            .attempts
+            .windows(2)
+            .any(|pair| pair[1].sequence != pair[0].sequence + 1)
+        || result
+            .attempts
+            .iter()
+            .any(|attempt| attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some())
         || encoded
             .iter()
+            .flatten()
             .any(|sample| sample.is_empty() || sample.len() > MAX_RUNTIME_RESPONSE_BYTES)
     {
         return Err(io::Error::new(
@@ -696,16 +783,19 @@ fn write_window_success(
     stream.write_all(&[0])?;
     stream.write_all(&(version.len() as u16).to_be_bytes())?;
     stream.write_all(version)?;
-    stream.write_all(&(encoded.len() as u16).to_be_bytes())?;
-    stream.write_all(&[match result.cpu_resource_outcome {
-        None => 0,
-        Some(CpuResourceAcquisitionFailure::Unavailable) => 1,
-        Some(CpuResourceAcquisitionFailure::Malformed) => 2,
-        Some(CpuResourceAcquisitionFailure::ActivationBudgetExhausted) => 3,
-    }])?;
-    for sample in encoded {
-        stream.write_all(&(sample.len() as u32).to_be_bytes())?;
-        stream.write_all(&sample)?;
+    stream.write_all(&(result.attempts.len() as u16).to_be_bytes())?;
+    for (attempt, sample) in result.attempts.iter().zip(encoded) {
+        stream.write_all(&attempt.sequence.to_be_bytes())?;
+        stream.write_all(&[match attempt.cpu_resource_outcome {
+            None => 0,
+            Some(CpuResourceAcquisitionFailure::Unavailable) => 1,
+            Some(CpuResourceAcquisitionFailure::Malformed) => 2,
+            Some(CpuResourceAcquisitionFailure::ActivationBudgetExhausted) => 3,
+        }])?;
+        if let Some(sample) = sample {
+            stream.write_all(&(sample.len() as u32).to_be_bytes())?;
+            stream.write_all(&sample)?;
+        }
     }
     stream.flush()
 }
@@ -734,6 +824,12 @@ fn read_u32(stream: &mut UnixStream) -> io::Result<u32> {
     let mut bytes = [0; 4];
     stream.read_exact(&mut bytes)?;
     Ok(u32::from_be_bytes(bytes))
+}
+
+fn read_u64(stream: &mut UnixStream) -> io::Result<u64> {
+    let mut bytes = [0; 8];
+    stream.read_exact(&mut bytes)?;
+    Ok(u64::from_be_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -787,6 +883,36 @@ mod tests {
     }
 
     #[test]
+    fn recoverable_accept_errors_continue_but_listener_failures_exit() {
+        let accepted = UnixStream::pair().expect("Unix stream pair");
+        let mut peer = accepted.1;
+        peer.write_all(b"malformed").expect("request");
+        peer.shutdown(std::net::Shutdown::Write)
+            .expect("finish request");
+        ObservationRuntimeServer::new(UnusedProvider)
+            .serve_incoming(
+                [
+                    Err(io::Error::from(io::ErrorKind::Interrupted)),
+                    Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+                    Ok(accepted.0),
+                ],
+                Some(1),
+            )
+            .expect("recoverable accept errors are connection-local");
+
+        let failure = ObservationRuntimeServer::new(UnusedProvider)
+            .serve_incoming(
+                [Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "listener is invalid",
+                ))],
+                None,
+            )
+            .expect_err("listener-level errors stop the runtime");
+        assert_eq!(failure.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn activation_fd_must_be_the_single_listening_unix_stream() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let listener =
@@ -802,5 +928,19 @@ mod tests {
         assert!(validate_systemd_listener_fd(stream.as_raw_fd(), std::process::id(), 1).is_err());
         let tcp = TcpListener::bind("127.0.0.1:0").expect("TCP listener");
         assert!(validate_systemd_listener_fd(tcp.as_raw_fd(), std::process::id(), 1).is_err());
+    }
+
+    #[test]
+    fn window_deadline_covers_all_attempts_at_both_valid_cadence_bounds() {
+        assert_eq!(
+            runtime_window_deadline(Duration::from_secs(1)),
+            Some(Duration::from_secs(14))
+        );
+        assert_eq!(
+            runtime_window_deadline(Duration::from_secs(200)),
+            Some(Duration::from_secs(611))
+        );
+        assert!(ObservationWindowRequest::new(Duration::from_secs(1)).is_some());
+        assert!(ObservationWindowRequest::new(Duration::from_secs(200)).is_some());
     }
 }

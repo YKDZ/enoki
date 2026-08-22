@@ -65,12 +65,13 @@ message ProbeReportRequest {
   repeated Snapshot snapshots = 12;
   string enrollment_id = 13;
   ObservationWindowFailure observation_window_failure = 14;
-  CpuResourceCollectionOutcome cpu_resource_collection_outcome = 15;
+  repeated CpuResourceCollectionOutcome cpu_resource_collection_outcomes = 15;
 }
 
 // CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。
 message CpuResourceCollectionOutcome {
-  CpuResourceCollectionOutcomeReason reason = 1;
+  uint64 sequence = 1;
+  CpuResourceCollectionOutcomeReason reason = 2;
 }
 
 enum CpuResourceCollectionOutcomeReason {

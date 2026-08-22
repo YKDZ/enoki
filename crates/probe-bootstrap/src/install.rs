@@ -420,6 +420,9 @@ impl FixedInstallPaths {
     fn bootstrap_state(&self) -> PathBuf {
         self.map(BOOTSTRAP_STATE)
     }
+    fn operation_sudoers(&self) -> PathBuf {
+        self.map(OPERATION_SUDOERS)
+    }
 
     fn expected_root_uid(&self) -> u32 {
         if self.root == Path::new("/") {
@@ -774,6 +777,16 @@ fn activate_current_probe_with_observation_files(
             &mut journal,
             RollbackStep::RemoveUnit,
         )?;
+        if install_observation {
+            ports.files.write_owned(
+                &paths.operation_sudoers(),
+                operation_sudoers().as_bytes(),
+                0o440,
+                ServiceIdentity { uid: 0, gid: 0 },
+                &mut journal,
+                RollbackStep::RemoveUnit,
+            )?;
+        }
         for (path, contents) in install_observation
             .then_some([
                 (paths.observation_runtime_unit(), observation_runtime_unit()),
@@ -1093,7 +1106,10 @@ fn stage_complete_layout(
     let metadata = staging.join("probe-install.toml");
     let unit = staging.join("enoki-probe.service");
     for (path, contents) in [
-        (&identity, bootstrap_config(enrollment, trust)),
+        (
+            &identity,
+            bootstrap_config(enrollment, trust, install_observation),
+        ),
         (
             &metadata,
             install_metadata(enrollment, trust, install_observation),
@@ -1136,9 +1152,17 @@ fn record_rollback(
     }
 }
 
-fn bootstrap_config(enrollment: &Enrollment, trust: &BuildTrust) -> String {
+fn bootstrap_config(
+    enrollment: &Enrollment,
+    trust: &BuildTrust,
+    install_observation: bool,
+) -> String {
+    let operation = install_observation.then_some(format!(
+        "operation_sudoers_path = {:?}\nupgrader_launch = \"systemd\"\n",
+        OPERATION_SUDOERS
+    ));
     format!(
-        "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nprobe_distribution_root_sha256 = {:?}\nlog_level = \"info\"\n",
+        "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\n{}probe_distribution_root_sha256 = {:?}\nlog_level = \"info\"\n",
         enrollment.hub_origin(),
         enrollment.enrollment_token(),
         STATE,
@@ -1146,6 +1170,7 @@ fn bootstrap_config(enrollment: &Enrollment, trust: &BuildTrust) -> String {
         BINARY,
         SERVICE_NAME,
         SERVICE_USER,
+        operation.unwrap_or_default(),
         trust.root_fingerprint,
     )
 }
@@ -1174,7 +1199,7 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\n",
+        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\noperation_sudoers_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1195,6 +1220,14 @@ fn install_metadata(
         OBSERVATION_RUNTIME_SOCKET_UNIT,
         CPU_PROVIDER_UNIT,
         CPU_PROVIDER_SOCKET_UNIT,
+        OPERATION_SUDOERS,
+        COLLECTOR_SUDOERS,
+    )
+}
+
+fn operation_sudoers() -> String {
+    format!(
+        "# Managed by Enoki Probe installer.\n{SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={SERVICE_NAME}-upgrader --property=Type=exec -- {BINARY} internal-upgrader --config {IDENTITY}\n{SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={SERVICE_NAME}-uninstaller --property=Type=exec -- {BINARY} internal-uninstaller --config {IDENTITY}\n"
     )
 }
 
@@ -1211,7 +1244,7 @@ fn observation_runtime_unit() -> &'static str {
 }
 
 fn cpu_provider_socket_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nMaxConnections=8\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=12\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nMaxConnections=1\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=12\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
 fn cpu_provider_unit() -> &'static str {
@@ -1226,6 +1259,17 @@ pub fn fixed_observation_unit_contents() -> [&'static [u8]; 4] {
         cpu_provider_unit().as_bytes(),
         cpu_provider_socket_unit().as_bytes(),
     ]
+}
+
+/// 目标 Activator 的无输入固定协议；旧 Upgrader 只能取得该已验证目标版本编译的集成资产。
+pub fn render_observation_integration_v1() -> Vec<u8> {
+    let mut output = b"enoki.observation-integration.v1\n".to_vec();
+    for unit in fixed_observation_unit_contents() {
+        output.extend_from_slice(unit.len().to_string().as_bytes());
+        output.push(b'\n');
+        output.extend_from_slice(unit);
+    }
+    output
 }
 
 fn command_presence(

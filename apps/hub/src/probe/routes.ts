@@ -568,8 +568,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       );
       const observationWindowFailureReason =
         validatedReport.observationWindowFailureReason;
-      const cpuResourceCollectionOutcomeReason =
-        validatedReport.cpuResourceCollectionOutcomeReason;
+      const cpuResourceCollectionOutcomeReasons =
+        validatedReport.cpuResourceCollectionOutcomeReasons;
       const detailSamples: HostDetailSample[] = [];
 
       for (
@@ -583,7 +583,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           const inserted = services.metrics.recordObservationSample({
             observation: {
               bootId: request.bootId,
-              cpuResourceCollectionOutcomeReason,
+              cpuResourceCollectionOutcomeReason:
+                cpuResourceCollectionOutcomeReasons.get(sequence) ?? null,
               hostId: host.id,
               observationWindowFailureReason,
               probeId: host.probeId,
@@ -709,7 +710,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           services.metrics.recordObservationSample({
             observation: {
               bootId: request.bootId,
-              cpuResourceCollectionOutcomeReason,
+              cpuResourceCollectionOutcomeReason:
+                cpuResourceCollectionOutcomeReasons.get(sequence) ?? null,
               hostId: host.id,
               observationWindowFailureReason,
               probeId: host.probeId,
@@ -2009,8 +2011,9 @@ function validateReportEnvelope(request: ProtoMessage) {
   const observationWindowFailureReason = observationWindowFailureReasonFor(
     request.observationWindowFailure,
   );
-  const cpuResourceCollectionOutcomeReason =
-    cpuResourceCollectionOutcomeReasonFor(request.cpuResourceCollectionOutcome);
+  const cpuResourceCollectionOutcomeReasons = new Map<number, number>();
+  const cpuResourceCollectionOutcomes =
+    (request.cpuResourceCollectionOutcomes as ProtoMessage[] | undefined) ?? [];
   const sequenceCount = sequenceEnd - sequenceStart + 1;
 
   if (
@@ -2020,14 +2023,8 @@ function validateReportEnvelope(request: ProtoMessage) {
     return null;
   }
   if (
-    request.cpuResourceCollectionOutcome != null &&
-    cpuResourceCollectionOutcomeReason === null
-  ) {
-    return null;
-  }
-  if (
     observationWindowFailureReason !== null &&
-    cpuResourceCollectionOutcomeReason !== null
+    cpuResourceCollectionOutcomes.length > 0
   ) {
     return null;
   }
@@ -2036,7 +2033,12 @@ function validateReportEnvelope(request: ProtoMessage) {
     return null;
   }
 
-  if (samples.length === 0 && sequenceCount !== 1) {
+  if (
+    samples.length === 0 &&
+    sequenceCount !== 1 &&
+    observationWindowFailureReason === null &&
+    cpuResourceCollectionOutcomes.length === 0
+  ) {
     return null;
   }
 
@@ -2045,6 +2047,28 @@ function validateReportEnvelope(request: ProtoMessage) {
   }
 
   const sampleSequences = new Set<number>();
+
+  for (const outcome of cpuResourceCollectionOutcomes) {
+    const sequence = unsignedNumber(outcome.sequence);
+    const reason = cpuResourceCollectionOutcomeReasonFor(outcome);
+    if (
+      sequence < sequenceStart ||
+      sequence > sequenceEnd ||
+      reason === null ||
+      cpuResourceCollectionOutcomeReasons.has(sequence)
+    ) {
+      return null;
+    }
+    cpuResourceCollectionOutcomeReasons.set(sequence, reason);
+  }
+  if (
+    samples.length === 0 &&
+    observationWindowFailureReason === null &&
+    cpuResourceCollectionOutcomes.length > 0 &&
+    cpuResourceCollectionOutcomeReasons.size !== sequenceCount
+  ) {
+    return null;
+  }
 
   for (const sample of samples) {
     const sequence = unsignedNumber(sample.sequence);
@@ -2078,7 +2102,7 @@ function validateReportEnvelope(request: ProtoMessage) {
   }
 
   return {
-    cpuResourceCollectionOutcomeReason,
+    cpuResourceCollectionOutcomeReasons,
     observationWindowFailureReason,
     sequenceEnd,
     sequenceStart,

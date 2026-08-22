@@ -244,6 +244,7 @@ pub fn verify_archive_and_extract(
         &mut std::io::sink(),
         &mut std::io::sink(),
         &mut std::io::sink(),
+        &mut std::io::sink(),
     )
 }
 
@@ -257,7 +258,7 @@ pub fn verify_archive_and_extract_upgrade_roles(
     runtime_sink: &mut impl Write,
     cpu_provider_sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
-    verify_archive_and_extract_roles(
+    verify_archive_and_extract_lifecycle_roles(
         archive,
         handoff,
         metadata,
@@ -265,10 +266,37 @@ pub fn verify_archive_and_extract_upgrade_roles(
         runtime_sink,
         cpu_provider_sink,
         &mut std::io::sink(),
+        &mut std::io::sink(),
+    )
+}
+
+/// 升级生命周期一次提取并校验三个运行时角色与两个 Bootstrap 角色。
+#[cfg(feature = "acquirer")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_archive_and_extract_lifecycle_roles(
+    archive: &mut File,
+    handoff: &Handoff,
+    metadata: &VerifiedMetadata,
+    probe_sink: &mut impl Write,
+    runtime_sink: &mut impl Write,
+    cpu_provider_sink: &mut impl Write,
+    bootstrap_acquirer_sink: &mut impl Write,
+    bootstrap_activator_sink: &mut impl Write,
+) -> Result<VerifiedBundle, VerificationError> {
+    verify_archive_and_extract_roles(
+        archive,
+        handoff,
+        metadata,
+        probe_sink,
+        runtime_sink,
+        cpu_provider_sink,
+        bootstrap_acquirer_sink,
+        bootstrap_activator_sink,
     )
 }
 
 #[cfg(feature = "acquirer")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_archive_and_extract_roles(
     archive: &mut File,
     handoff: &Handoff,
@@ -276,6 +304,7 @@ pub(crate) fn verify_archive_and_extract_roles(
     component_sink: &mut impl Write,
     runtime_sink: &mut impl Write,
     cpu_provider_sink: &mut impl Write,
+    acquirer_sink: &mut impl Write,
     activator_sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
     verify_archive_digest(archive, &metadata.asset)?;
@@ -363,20 +392,20 @@ pub(crate) fn verify_archive_and_extract_roles(
             if saw_bootstrap_assets[index] || entry.size() != asset.size {
                 return Err(VerificationError::ArchiveStructure);
             }
-            if asset.role == "bootstrap-activator" {
-                stream_component(
+            match asset.role.as_str() {
+                "bootstrap-acquirer" => stream_component(
+                    &mut entry,
+                    &mut *acquirer_sink,
+                    asset.size,
+                    asset.sha256.clone(),
+                )?,
+                "bootstrap-activator" => stream_component(
                     &mut entry,
                     &mut *activator_sink,
                     asset.size,
                     asset.sha256.clone(),
-                )?;
-            } else {
-                stream_component(
-                    &mut entry,
-                    &mut std::io::sink(),
-                    asset.size,
-                    asset.sha256.clone(),
-                )?;
+                )?,
+                _ => return Err(VerificationError::ArchiveStructure),
             }
             saw_bootstrap_assets[index] = true;
         } else {

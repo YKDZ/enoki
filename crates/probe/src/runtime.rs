@@ -595,7 +595,7 @@ fn run_reporting_loop(
             sequence_start,
             sequence_end,
             metrics,
-            cpu_resource_collection_outcome,
+            cpu_resource_collection_outcomes,
             observation_window_failure,
         ) = match collected {
             Ok((sequence_start, sequence_end, metrics, cpu_outcome)) => {
@@ -616,7 +616,7 @@ fn run_reporting_loop(
                     sequence_start,
                     sequence,
                     Vec::new(),
-                    None,
+                    Vec::new(),
                     Some(crate::protocol::enoki::v1::ObservationWindowFailure {
                         reason: reason as i32,
                     }),
@@ -629,7 +629,7 @@ fn run_reporting_loop(
 
         let request = observation_batch_report(ObservationBatchInput {
             boot_id: &boot_id,
-            cpu_resource_collection_outcome,
+            cpu_resource_collection_outcomes,
             host_profile: &host_profile,
             metrics,
             observation_window_failure,
@@ -1201,7 +1201,7 @@ fn collect_observation_batch(
         u64,
         u64,
         Vec<crate::protocol::enoki::v1::MetricSample>,
-        Option<crate::protocol::enoki::v1::CpuResourceCollectionOutcome>,
+        Vec<crate::protocol::enoki::v1::CpuResourceCollectionOutcome>,
     ),
     ObservationClientError,
 > {
@@ -1211,7 +1211,7 @@ fn collect_observation_batch(
         sleeper.sleep(active_configuration.reporting_interval);
         *sequence += 1;
 
-        return Ok((sequence_start, *sequence, Vec::new(), None));
+        return Ok((sequence_start, *sequence, Vec::new(), Vec::new()));
     }
 
     let cpu_enabled = active_configuration
@@ -1224,8 +1224,10 @@ fn collect_observation_batch(
     std::thread::scope(|scope| {
         let cpu_window = cpu_enabled.then(|| {
             scope.spawn(|| {
-                observation_runtime
-                    .request_finalized_window(active_configuration.metrics_collection_interval)
+                observation_runtime.request_finalized_window(
+                    active_configuration.metrics_collection_interval,
+                    sequence_start,
+                )
             })
         });
         let mut metrics = Vec::new();
@@ -1240,29 +1242,39 @@ fn collect_observation_batch(
             ));
         }
         let Some(cpu_window) = cpu_window else {
-            return Ok((sequence_start, *sequence, metrics, None));
+            return Ok((sequence_start, *sequence, metrics, Vec::new()));
         };
         let cpu_window = cpu_window
             .join()
             .map_err(|_| ObservationClientError::Unavailable)??;
-        let outcome = cpu_window.cpu_resource_outcome.map(|failure| {
-            crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
-                reason: match failure {
-                    CpuResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
-                    CpuResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
-                    CpuResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
-                },
-            }
-        });
-        if outcome.is_none() {
-            if cpu_window.samples.len() != metrics.len() {
+        if cpu_window.attempts.len() != metrics.len() {
+            return Err(ObservationClientError::InvalidResponse);
+        }
+        let mut outcomes = Vec::new();
+        for (index, attempt) in cpu_window.attempts.into_iter().enumerate() {
+            let expected_sequence = sequence_start + index as u64;
+            if attempt.sequence != expected_sequence
+                || attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some()
+            {
                 return Err(ObservationClientError::InvalidResponse);
             }
-            for (sample, cpu_sample) in metrics.iter_mut().zip(cpu_window.samples) {
+            if let Some(cpu_sample) = attempt.sample {
+                let sample = metrics
+                    .get_mut(index)
+                    .ok_or(ObservationClientError::InvalidResponse)?;
                 merge_cpu_metrics(sample, cpu_sample);
+            } else if let Some(failure) = attempt.cpu_resource_outcome {
+                outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
+                    sequence: attempt.sequence,
+                    reason: match failure {
+                        CpuResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
+                        CpuResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
+                        CpuResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
+                    },
+                });
             }
         }
-        Ok((sequence_start, *sequence, metrics, outcome))
+        Ok((sequence_start, *sequence, metrics, outcomes))
     })
 }
 
@@ -1685,6 +1697,7 @@ mod tests {
         fn request_finalized_window(
             &self,
             cadence: Duration,
+            _sequence_start: u64,
         ) -> Result<ObservationWindowResult, ObservationClientError> {
             self.cadences.lock().expect("cadences").push(cadence);
             Ok(self.result.clone())
@@ -1705,13 +1718,19 @@ mod tests {
         let client = FakeObservationWindowClient {
             cadences: Mutex::new(Vec::new()),
             result: ObservationWindowResult {
-                cpu_resource_outcome: None,
-                samples: [7_000, 14_000, 21_000]
+                attempts: [7_000, 14_000, 21_000]
                     .into_iter()
-                    .map(|collected_at_ms| crate::protocol::enoki::v1::MetricSample {
-                        collected_at_ms,
-                        cpu_percent: Some(12.5),
-                        ..Default::default()
+                    .enumerate()
+                    .map(|(index, collected_at_ms)| {
+                        crate::observation_runtime::ObservationAttemptResult {
+                            sequence: index as u64 + 1,
+                            sample: Some(crate::protocol::enoki::v1::MetricSample {
+                                collected_at_ms,
+                                cpu_percent: Some(12.5),
+                                ..Default::default()
+                            }),
+                            cpu_resource_outcome: None,
+                        }
                     })
                     .collect(),
             },
@@ -1756,7 +1775,7 @@ mod tests {
                 .iter()
                 .all(|sample| sample.memory_used_bytes == Some(42))
         );
-        assert!(outcome.is_none());
+        assert!(outcome.is_empty());
     }
 
     #[test]
@@ -1773,8 +1792,15 @@ mod tests {
         let client = FakeObservationWindowClient {
             cadences: Mutex::new(Vec::new()),
             result: ObservationWindowResult {
-                cpu_resource_outcome: Some(CpuResourceAcquisitionFailure::Unavailable),
-                samples: Vec::new(),
+                attempts: (1..=3)
+                    .map(
+                        |sequence| crate::observation_runtime::ObservationAttemptResult {
+                            sequence,
+                            sample: None,
+                            cpu_resource_outcome: Some(CpuResourceAcquisitionFailure::Unavailable),
+                        },
+                    )
+                    .collect(),
             },
         };
         let mut sequence = 0;
@@ -1804,11 +1830,12 @@ mod tests {
         );
         assert!(samples.iter().all(|sample| sample.cpu_percent.is_none()));
         assert_eq!(
-            outcome.map(|outcome| outcome.reason),
-            Some(
+            outcome.iter().map(|outcome| outcome.reason).collect::<Vec<_>>(),
+            vec![
                 crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable
-                    as i32
-            )
+                    as i32;
+                3
+            ]
         );
     }
 

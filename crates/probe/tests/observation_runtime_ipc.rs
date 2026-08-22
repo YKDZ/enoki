@@ -19,13 +19,19 @@ fn probe_side_client_gets_a_bounded_cpu_result_over_the_runtime_socket() {
     });
 
     let result = UnixObservationRuntimeClient::new(&socket, "dev")
-        .request_finalized_window(std::time::Duration::from_secs(7))
+        .request_finalized_window(std::time::Duration::from_secs(7), 1)
         .expect("Probe receives Runtime result");
     server.join().expect("Runtime exits cleanly");
 
-    assert_eq!(result.samples.len(), 3);
-    assert_eq!(result.samples[0].cpu_percent, Some(0.0));
-    assert_eq!(result.samples[0].cpu_cores.len(), 1);
+    assert_eq!(result.attempts.len(), 3);
+    assert_eq!(
+        result.attempts[0].sample.as_ref().unwrap().cpu_percent,
+        Some(0.0)
+    );
+    assert_eq!(
+        result.attempts[0].sample.as_ref().unwrap().cpu_cores.len(),
+        1
+    );
 }
 
 struct NoopSleeper;

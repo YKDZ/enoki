@@ -942,6 +942,12 @@ async function writeProbeArchive(
   );
   await chmod(binaryPath, 0o755);
   const binary = await readFile(binaryPath);
+  for (const rolePath of [
+    "enoki-observation-runtime",
+    "enoki-cpu-resource-provider",
+  ]) {
+    await writeFile(path.join(binaryDir, rolePath), binary, { mode: 0o755 });
+  }
   const bundleManifest = Buffer.from(
     `${JSON.stringify({
       ...(bootstrapAssets.length
@@ -962,7 +968,26 @@ async function writeProbeArchive(
         {
           path: "enoki-probe",
           permissionProfile: "probe-v1",
+          resourceContract: "hub-reporting-v1",
           role: "probe",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+        {
+          path: "enoki-observation-runtime",
+          permissionProfile: "observation-runtime-v1",
+          resourceContract: "cpu-observation-v1",
+          role: "observation-runtime",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+        {
+          path: "enoki-cpu-resource-provider",
+          permissionProfile: "cpu-provider-v1",
+          resourceContract: "cpu-counters-v1",
+          role: "cpu-provider",
           sha256: sha256(binary),
           size: binary.byteLength,
           version: version.slice(1),
@@ -988,6 +1013,8 @@ async function writeProbeArchive(
     binaryDir,
     "bundle-manifest.json",
     "enoki-probe",
+    "enoki-observation-runtime",
+    "enoki-cpu-resource-provider",
     ...bootstrapAssets.map(({ member }) => member),
   ]);
   await rm(binaryDir, { force: true, recursive: true });

@@ -45,7 +45,7 @@ fn probe_report_startup_sends_full_host_profile_and_regular_reports_send_hash_on
             sequence: 2,
             ..MetricSample::default()
         }],
-        cpu_resource_collection_outcome: None,
+        cpu_resource_collection_outcomes: Vec::new(),
         observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
         probe_configuration_error: None,
@@ -111,7 +111,7 @@ fn observation_batch_sends_host_profile_snapshot_hash_without_payload() {
             sequence: 2,
             ..MetricSample::default()
         }],
-        cpu_resource_collection_outcome: None,
+        cpu_resource_collection_outcomes: Vec::new(),
         observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
         probe_configuration_error: None,
@@ -161,7 +161,7 @@ fn observation_batch_keeps_metrics_and_incremental_state_compact() {
             sequence: 2,
             ..MetricSample::default()
         }],
-        cpu_resource_collection_outcome: None,
+        cpu_resource_collection_outcomes: Vec::new(),
         observation_window_failure: None,
         operation_progress: OperationReportProgress::from_statuses(vec![
             ProbeOperationStatus {
@@ -223,7 +223,7 @@ fn recurring_observation_payload_is_materially_smaller_than_lifecycle_frames() {
             sequence: 2,
             ..MetricSample::default()
         }],
-        cpu_resource_collection_outcome: None,
+        cpu_resource_collection_outcomes: Vec::new(),
         observation_window_failure: None,
         operation_progress: OperationReportProgress::default(),
         probe_configuration_error: None,

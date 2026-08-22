@@ -121,6 +121,11 @@ describe("Metrics Archive maintenance service", () => {
         )
         .get(),
     ).toEqual({ cpu_resource_collection_outcome_reason: 1 });
+    expect(
+      archive
+        .prepare("select count(*) as count from archive_host_snapshots")
+        .get(),
+    ).toEqual({ count: 1 });
     archive.close();
 
     database.close();

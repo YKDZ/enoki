@@ -385,11 +385,14 @@ describe("Probe report API", () => {
     const body = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-cpu-acquisition-outcome",
-        cpuResourceCollectionOutcome: {
-          reason:
-            root.enoki.v1.CpuResourceCollectionOutcomeReason
-              .CPU_RESOURCE_UNAVAILABLE,
-        },
+        cpuResourceCollectionOutcomes: [
+          {
+            sequence: 2,
+            reason:
+              root.enoki.v1.CpuResourceCollectionOutcomeReason
+                .CPU_RESOURCE_UNAVAILABLE,
+          },
+        ],
         probeId: registration.probeId,
         sequenceEnd: 2,
         sequenceStart: 2,
@@ -414,6 +417,72 @@ describe("Probe report API", () => {
       cpuResourceCollectionOutcomeReason: 1,
       observationWindowFailureReason: null,
     });
+    database.close();
+  });
+
+  it("binds CPU acquisition outcomes to their exact sequence and rejects unknown reasons", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const report = (reason: number) =>
+      ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-cpu-sequence-outcome",
+          cpuResourceCollectionOutcomes: [{ sequence: 2, reason }],
+          metrics: [1, 2, 3].map((sequence) => ({
+            collectedAtMs: sequence * 1_000,
+            memoryUsedBytes: sequence,
+            sequence,
+          })),
+          probeId: registration.probeId,
+          sequenceEnd: 3,
+          sequenceStart: 1,
+        }),
+      ).finish();
+
+    for (let retry = 0; retry < 2; retry += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "/api/probe/report",
+          report(
+            root.enoki.v1.CpuResourceCollectionOutcomeReason
+              .CPU_RESOURCE_UNAVAILABLE,
+          ),
+        ),
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(
+      database.sqlite
+        .prepare(
+          "select sequence, cpu_resource_collection_outcome_reason as reason from report_observations order by sequence",
+        )
+        .all(),
+    ).toEqual([
+      { reason: null, sequence: 1 },
+      { reason: 1, sequence: 2 },
+      { reason: null, sequence: 3 },
+    ]);
+
+    const unknown = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", report(99)),
+    );
+    expect(unknown.status).toBe(400);
     database.close();
   });
 

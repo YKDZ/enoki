@@ -1,18 +1,19 @@
 use std::{
     error::Error,
     fmt, fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use enoki_probe_bootstrap::{
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
-    install::fixed_observation_unit_contents,
     verifier::{
-        VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_upgrade_roles,
+        VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
         verify_metadata, verify_outer_metadata,
     },
 };
@@ -214,6 +215,9 @@ impl From<ProbeUpgraderRunError> for ProbeRepairRunError {
 
 const PRODUCTION_INSTALL_METADATA_PATH: &str = "/etc/enoki/probe-install.toml";
 const PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-upgrader";
+const PRODUCTION_OPERATION_SUDOERS_PATH: &str = "/etc/sudoers.d/enoki-probe-operations";
+const PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH: &str =
+    "/etc/sudoers.d/enoki-probe-collector-helpers";
 const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
@@ -544,6 +548,10 @@ pub trait ProbeUpgraderSystemdRunner {
         Ok(())
     }
 
+    fn verify_service_active(&mut self, _service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        Ok(())
+    }
+
     fn verify_service_absent(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError>;
 
     fn remove_service_identity(
@@ -673,6 +681,10 @@ impl ProbeUpgraderSystemdRunner for SystemProbeUpgraderSystemdRunner {
             "probe_uninstall_service_reset_failed",
             "resetting the failed service state",
         )
+    }
+
+    fn verify_service_active(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+        run_required_command("systemctl", &["is-active", "--quiet", service_name])
     }
 
     fn verify_service_absent(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
@@ -2610,8 +2622,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "old sudoers_path metadata is not supported",
         ));
     }
-    let (operation_sudoers_path, collector_helper_sudoers_path) = if matches!(schema_version, 2 | 3)
-    {
+    let (operation_sudoers_path, collector_helper_sudoers_path) = if schema_version == 2 {
         if value.get("operation_sudoers_path").is_some()
             || value.get("collector_helper_sudoers_path").is_some()
             || value.get("probe_asset_public_key_sha256").is_some()
@@ -2621,6 +2632,19 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             ));
         }
         (None, None)
+    } else if schema_version == 3 {
+        (
+            required_fixed_install_metadata_path(
+                &value,
+                "operation_sudoers_path",
+                PRODUCTION_OPERATION_SUDOERS_PATH,
+            )?,
+            required_fixed_install_metadata_path(
+                &value,
+                "collector_helper_sudoers_path",
+                PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH,
+            )?,
+        )
     } else {
         (
             Some(required_install_metadata_path(
@@ -3207,37 +3231,26 @@ fn execute_schema_three_probe_upgrade(
     let mut probe = Vec::new();
     let mut runtime = Vec::new();
     let mut provider = Vec::new();
-    let verified_bundle = verify_archive_and_extract_upgrade_roles(
+    let mut bootstrap_acquirer = Vec::new();
+    let mut bootstrap_activator = Vec::new();
+    let verified_bundle = verify_archive_and_extract_lifecycle_roles(
         &mut archive,
         &handoff,
         &metadata,
         &mut probe,
         &mut runtime,
         &mut provider,
+        &mut bootstrap_acquirer,
+        &mut bootstrap_activator,
     )
     .map_err(|_| ProbeUpgraderRunError::UnsafeArchive("Bundle role verification failed"))?;
 
-    let mut generation = acquire_delegation_generation_at_owned_root(
-        bootstrap_state,
-        0,
-        verified_bundle.delegation_generation(),
-    )
-    .map_err(|_| ProbeUpgraderRunError::SignatureFailure)?;
-    generation
-        .persist_before_mutation()
-        .map_err(|_| ProbeUpgraderRunError::SignatureFailure)?;
     preflight_local_operation_status_writable(install_metadata)?;
-
-    for service in OBSERVATION_SERVICES.into_iter().rev() {
-        systemd.stop_service(service)?;
-    }
-    systemd.stop_service(&install_metadata.service_name)?;
     if install_metadata.observation_unit_paths.len() != 4 {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "schema 3 observation unit inventory is incomplete",
         ));
     }
-    let unit_contents = fixed_observation_unit_contents();
     let mut replacements = vec![
         (
             install_metadata.install_path.as_path(),
@@ -3247,58 +3260,420 @@ fn execute_schema_three_probe_upgrade(
         (runtime_path, runtime.as_slice(), 0o755),
         (provider_path, provider.as_slice(), 0o755),
     ];
+    let bootstrap_acquirer_path = install_metadata.bootstrap_acquirer_path.as_deref().ok_or(
+        ProbeUpgraderRunError::InvalidInstallMetadata(
+            "schema 3 Bootstrap Acquirer path is missing",
+        ),
+    )?;
+    let bootstrap_activator_path = install_metadata.bootstrap_activator_path.as_deref().ok_or(
+        ProbeUpgraderRunError::InvalidInstallMetadata(
+            "schema 3 Bootstrap Activator path is missing",
+        ),
+    )?;
+    let target_units =
+        render_target_observation_integration(bootstrap_state, &bootstrap_activator)?;
     replacements.extend(
         install_metadata
             .observation_unit_paths
             .iter()
             .map(PathBuf::as_path)
-            .zip(unit_contents)
-            .map(|(path, contents)| (path, contents, 0o644)),
+            .zip(target_units.iter())
+            .map(|(path, contents)| (path, contents.as_slice(), 0o644)),
     );
-    replace_complete_probe_bundle(&replacements)?;
-    systemd.daemon_reload()?;
-    write_probe_operation_sudoers(install_metadata, bootstrap_config_path)?;
-    write_collector_helper_sudoers_from_installed_probe(install_metadata)?;
-    write_local_operation_status(operation, install_metadata).map_err(|error| {
-        ProbeUpgraderRunError::PostReplacementStatusWriteFailure(error.to_string())
-    })?;
-    for service in OBSERVATION_SERVICES.into_iter().rev() {
-        systemd.restart_service(service)?;
+    replacements.extend([
+        (
+            bootstrap_acquirer_path,
+            bootstrap_acquirer.as_slice(),
+            0o755,
+        ),
+        (
+            bootstrap_activator_path,
+            bootstrap_activator.as_slice(),
+            0o755,
+        ),
+    ]);
+
+    recover_schema_three_activation(bootstrap_state, &replacements, systemd, install_metadata)?;
+    // 全部目标、备份和 candidate bytes 已在 stop 之前持久化。
+    let transaction = prepare_schema_three_activation(bootstrap_state, &replacements)?;
+    let generation_result = acquire_delegation_generation_at_owned_root(
+        bootstrap_state,
+        0,
+        verified_bundle.delegation_generation(),
+    );
+    let mut generation = match generation_result {
+        Ok(generation) => generation,
+        Err(_) => {
+            transaction.rollback()?;
+            return Err(ProbeUpgraderRunError::SignatureFailure);
+        }
+    };
+    if generation.persist_before_mutation().is_err() {
+        transaction.rollback()?;
+        return Err(ProbeUpgraderRunError::SignatureFailure);
     }
-    systemd
-        .restart_service(&install_metadata.service_name)
-        .map_err(|error| ProbeUpgraderRunError::PostReplacementRestartFailure(error.to_string()))
+
+    let activation = (|| {
+        stop_schema_three_services(systemd, install_metadata)?;
+        transaction.activate()?;
+        systemd.daemon_reload()?;
+        write_probe_operation_sudoers(install_metadata, bootstrap_config_path)?;
+        write_collector_helper_sudoers_from_installed_probe(install_metadata)?;
+        write_local_operation_status(operation, install_metadata).map_err(|error| {
+            ProbeUpgraderRunError::PostReplacementStatusWriteFailure(error.to_string())
+        })?;
+        restart_schema_three_services(systemd, install_metadata)?;
+        Ok(())
+    })();
+    match activation {
+        Ok(()) => transaction.commit(),
+        Err(error) => {
+            let rollback = transaction.rollback();
+            // 旧 units 在 systemd 中仍已加载；reload 失败不能阻止恢复旧角色。
+            let _reload = systemd.daemon_reload();
+            let recovery = restart_schema_three_services(systemd, install_metadata);
+            if rollback.is_err() || recovery.is_err() {
+                return Err(ProbeUpgraderRunError::PostReplacementRestartFailure(
+                    "Bundle activation rollback or service recovery failed".to_string(),
+                ));
+            }
+            Err(match error {
+                ProbeUpgraderRunError::PostReplacementStatusWriteFailure(_) => error,
+                _ => ProbeUpgraderRunError::PostReplacementRestartFailure(error.to_string()),
+            })
+        }
+    }
 }
 
-fn replace_complete_probe_bundle(
+fn render_target_observation_integration(
+    bootstrap_state: &Path,
+    verified_activator: &[u8],
+) -> Result<[Vec<u8>; 4], ProbeUpgraderRunError> {
+    const MAX_INTEGRATION_BYTES: u64 = 256 * 1024;
+    let mut activator =
+        tempfile::NamedTempFile::new_in(bootstrap_state).map_err(ProbeUpgraderRunError::Io)?;
+    activator
+        .write_all(verified_activator)
+        .map_err(ProbeUpgraderRunError::Io)?;
+    activator
+        .as_file()
+        .sync_all()
+        .map_err(ProbeUpgraderRunError::Io)?;
+    activator
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .map_err(ProbeUpgraderRunError::Io)?;
+    let activator_path = activator.into_temp_path();
+    let mut output = tempfile::tempfile().map_err(ProbeUpgraderRunError::Io)?;
+    let stdout = output.try_clone().map_err(ProbeUpgraderRunError::Io)?;
+    let mut child = Command::new(&activator_path)
+        .arg("--render-observation-integration-v1")
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(ProbeUpgraderRunError::Io)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(ProbeUpgraderRunError::Io)? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ProbeUpgraderRunError::UnsafeArchive(
+                "target Activator integration renderer exceeded its deadline",
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if !status.success()
+        || output.metadata().map_err(ProbeUpgraderRunError::Io)?.len() > MAX_INTEGRATION_BYTES
+    {
+        return Err(ProbeUpgraderRunError::UnsafeArchive(
+            "target Activator integration renderer failed",
+        ));
+    }
+    output
+        .seek(SeekFrom::Start(0))
+        .map_err(ProbeUpgraderRunError::Io)?;
+    let mut rendered = Vec::new();
+    output
+        .take(MAX_INTEGRATION_BYTES + 1)
+        .read_to_end(&mut rendered)
+        .map_err(ProbeUpgraderRunError::Io)?;
+    parse_observation_integration_v1(&rendered)
+}
+
+fn parse_observation_integration_v1(bytes: &[u8]) -> Result<[Vec<u8>; 4], ProbeUpgraderRunError> {
+    const MAGIC: &[u8] = b"enoki.observation-integration.v1\n";
+    if !bytes.starts_with(MAGIC) {
+        return Err(ProbeUpgraderRunError::UnsafeArchive(
+            "target Activator integration response is malformed",
+        ));
+    }
+    let mut offset = MAGIC.len();
+    let mut units = Vec::with_capacity(4);
+    for _ in 0..4 {
+        let line_end = bytes[offset..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|position| offset + position)
+            .ok_or(ProbeUpgraderRunError::UnsafeArchive(
+                "target Activator integration response is malformed",
+            ))?;
+        let length = std::str::from_utf8(&bytes[offset..line_end])
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|length| *length > 0 && *length <= 64 * 1024)
+            .ok_or(ProbeUpgraderRunError::UnsafeArchive(
+                "target Activator integration response is malformed",
+            ))?;
+        offset = line_end + 1;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or(ProbeUpgraderRunError::UnsafeArchive(
+                "target Activator integration response is malformed",
+            ))?;
+        units.push(bytes[offset..end].to_vec());
+        offset = end;
+    }
+    if offset != bytes.len() {
+        return Err(ProbeUpgraderRunError::UnsafeArchive(
+            "target Activator integration response has trailing bytes",
+        ));
+    }
+    units.try_into().map_err(|_| {
+        ProbeUpgraderRunError::UnsafeArchive("target Activator integration response is malformed")
+    })
+}
+
+struct SchemaThreeActivation {
+    directory: PathBuf,
+    entries: Vec<SchemaThreeActivationEntry>,
+}
+
+struct SchemaThreeActivationEntry {
+    destination: PathBuf,
+    staged: PathBuf,
+    backup: PathBuf,
+    mode: u32,
+}
+
+struct SchemaThreePreparationGuard {
+    directory: PathBuf,
+    staged: Vec<PathBuf>,
+    complete: bool,
+}
+
+impl Drop for SchemaThreePreparationGuard {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        for path in &self.staged {
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn prepare_schema_three_activation(
+    bootstrap_state: &Path,
     components: &[(&Path, &[u8], u32)],
-) -> Result<(), ProbeUpgraderRunError> {
-    let mut staged = Vec::with_capacity(components.len());
-    for &(path, bytes, mode) in components {
+) -> Result<SchemaThreeActivation, ProbeUpgraderRunError> {
+    let directory = bootstrap_state.join("upgrade-transaction");
+    fs::create_dir(&directory).map_err(ProbeUpgraderRunError::Io)?;
+    let mut guard = SchemaThreePreparationGuard {
+        directory: directory.clone(),
+        staged: Vec::new(),
+        complete: false,
+    };
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .map_err(ProbeUpgraderRunError::Io)?;
+    let mut entries = Vec::with_capacity(components.len());
+    for (index, &(path, bytes, mode)) in components.iter().enumerate() {
         if bytes.is_empty() {
             return Err(ProbeUpgraderRunError::UnsafeArchive(
                 "verified Bundle component is empty",
             ));
         }
+        let metadata = fs::symlink_metadata(path).map_err(ProbeUpgraderRunError::Io)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Bundle destination must be an existing regular file",
+            ));
+        }
         let parent = path.parent().ok_or(ProbeUpgraderRunError::InvalidConfig(
             "Bundle role path has no parent",
         ))?;
-        let mut file =
-            tempfile::NamedTempFile::new_in(parent).map_err(ProbeUpgraderRunError::Io)?;
-        file.write_all(bytes).map_err(ProbeUpgraderRunError::Io)?;
-        file.as_file()
-            .sync_all()
-            .map_err(ProbeUpgraderRunError::Io)?;
-        file.as_file()
-            .set_permissions(fs::Permissions::from_mode(mode))
-            .map_err(ProbeUpgraderRunError::Io)?;
-        staged.push((path.to_path_buf(), file));
+        let file_name = path.file_name().and_then(|name| name.to_str()).ok_or(
+            ProbeUpgraderRunError::InvalidInstallMetadata("Bundle role filename is invalid"),
+        )?;
+        let staged = parent.join(format!(".{file_name}.enoki-upgrade-{index}"));
+        let backup = directory.join(format!("backup-{index}"));
+        write_new_synced_file(&staged, bytes, mode)?;
+        guard.staged.push(staged.clone());
+        write_new_synced_file(
+            &backup,
+            &fs::read(path).map_err(ProbeUpgraderRunError::Io)?,
+            metadata.mode() & 0o777,
+        )?;
+        entries.push(SchemaThreeActivationEntry {
+            destination: path.to_path_buf(),
+            staged,
+            backup,
+            mode: metadata.mode() & 0o777,
+        });
     }
-    for (path, file) in staged {
-        file.persist(path)
-            .map_err(|error| ProbeUpgraderRunError::Io(error.error))?;
+    let journal = entries
+        .iter()
+        .map(|entry| entry.destination.display().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_new_synced_file(&directory.join("journal"), journal.as_bytes(), 0o600)?;
+    sync_directory(&directory)?;
+    sync_directory(bootstrap_state)?;
+    guard.complete = true;
+    Ok(SchemaThreeActivation { directory, entries })
+}
+
+impl SchemaThreeActivation {
+    fn activate(&self) -> Result<(), ProbeUpgraderRunError> {
+        for entry in &self.entries {
+            fs::rename(&entry.staged, &entry.destination).map_err(ProbeUpgraderRunError::Io)?;
+            sync_directory(entry.destination.parent().expect("preflighted parent"))?;
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn rollback(&self) -> Result<(), ProbeUpgraderRunError> {
+        for entry in &self.entries {
+            let bytes = fs::read(&entry.backup).map_err(ProbeUpgraderRunError::Io)?;
+            let parent = entry.destination.parent().expect("preflighted parent");
+            let file_name = entry
+                .destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "Bundle role filename is invalid",
+                ))?;
+            let rollback = parent.join(format!(".{file_name}.enoki-rollback"));
+            let _ = fs::remove_file(&rollback);
+            write_new_synced_file(&rollback, &bytes, entry.mode)?;
+            fs::rename(&rollback, &entry.destination).map_err(ProbeUpgraderRunError::Io)?;
+            sync_directory(parent)?;
+            let _ = fs::remove_file(&entry.staged);
+        }
+        self.remove()
+    }
+
+    fn commit(self) -> Result<(), ProbeUpgraderRunError> {
+        self.remove()
+    }
+
+    fn remove(&self) -> Result<(), ProbeUpgraderRunError> {
+        fs::remove_dir_all(&self.directory).map_err(ProbeUpgraderRunError::Io)?;
+        sync_directory(self.directory.parent().expect("transaction parent"))
+    }
+}
+
+fn write_new_synced_file(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), ProbeUpgraderRunError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)
+        .map_err(ProbeUpgraderRunError::Io)?;
+    file.write_all(bytes).map_err(ProbeUpgraderRunError::Io)?;
+    file.sync_all().map_err(ProbeUpgraderRunError::Io)
+}
+
+fn sync_directory(path: &Path) -> Result<(), ProbeUpgraderRunError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(ProbeUpgraderRunError::Io)
+}
+
+fn stop_schema_three_services(
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    install_metadata: &TrustedProbeInstallMetadata,
+) -> Result<(), ProbeUpgraderRunError> {
+    for service in OBSERVATION_SERVICES.into_iter().rev() {
+        systemd.stop_service(service)?;
+    }
+    systemd.stop_service(&install_metadata.service_name)
+}
+
+fn restart_schema_three_services(
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    install_metadata: &TrustedProbeInstallMetadata,
+) -> Result<(), ProbeUpgraderRunError> {
+    for service in OBSERVATION_SERVICES.into_iter().rev() {
+        systemd.restart_service(service)?;
+        systemd.verify_service_active(service)?;
+    }
+    systemd.restart_service(&install_metadata.service_name)?;
+    systemd.verify_service_active(&install_metadata.service_name)
+}
+
+fn recover_schema_three_activation(
+    bootstrap_state: &Path,
+    components: &[(&Path, &[u8], u32)],
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+    install_metadata: &TrustedProbeInstallMetadata,
+) -> Result<(), ProbeUpgraderRunError> {
+    let directory = bootstrap_state.join("upgrade-transaction");
+    if !directory.exists() {
+        return Ok(());
+    }
+    if !directory.join("journal").is_file() {
+        // journal 发布前从未停止服务或替换目标；只清理固定 candidate 临时名。
+        for (index, &(destination, _, _)) in components.iter().enumerate() {
+            if let (Some(parent), Some(file_name)) = (
+                destination.parent(),
+                destination.file_name().and_then(|name| name.to_str()),
+            ) {
+                let _ = fs::remove_file(parent.join(format!(".{file_name}.enoki-upgrade-{index}")));
+            }
+        }
+        fs::remove_dir_all(&directory).map_err(ProbeUpgraderRunError::Io)?;
+        return sync_directory(bootstrap_state);
+    }
+    let mut entries = Vec::with_capacity(components.len());
+    for (index, &(destination, _, _)) in components.iter().enumerate() {
+        let backup = directory.join(format!("backup-{index}"));
+        entries.push(SchemaThreeActivationEntry {
+            destination: destination.to_path_buf(),
+            staged: destination
+                .parent()
+                .expect("preflighted parent")
+                .join(format!(
+                    ".{}.enoki-upgrade-{index}",
+                    destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("invalid")
+                )),
+            mode: fs::metadata(&backup)
+                .map_err(ProbeUpgraderRunError::Io)?
+                .mode()
+                & 0o777,
+            backup,
+        });
+    }
+    let transaction = SchemaThreeActivation { directory, entries };
+    stop_schema_three_services(systemd, install_metadata)?;
+    transaction.rollback()?;
+    systemd.daemon_reload()?;
+    restart_schema_three_services(systemd, install_metadata)
 }
 
 fn write_probe_operation_sudoers(
@@ -4498,6 +4873,19 @@ mod tests {
             if self.failure_step == Some("reset-failed") {
                 return Err(ProbeUpgraderRunError::RestartFailure(
                     "reset-failed failed".to_string(),
+                ));
+            }
+            Ok(())
+        }
+
+        fn verify_service_active(
+            &mut self,
+            service_name: &str,
+        ) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("verify-active {service_name}"));
+            if self.failure_step == Some("verify-active") {
+                return Err(ProbeUpgraderRunError::RestartFailure(
+                    "service is not active".to_string(),
                 ));
             }
             Ok(())
@@ -6576,6 +6964,8 @@ mod tests {
             "observation_runtime_socket_unit_path = \"/etc/systemd/system/enoki-observation-runtime.socket\"",
             "cpu_provider_service_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider@.service\"",
             "cpu_provider_socket_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider.socket\"",
+            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\"",
+            "collector_helper_sudoers_path = \"/etc/sudoers.d/enoki-probe-collector-helpers\"",
             "",
         ]
         .join("\n");
@@ -6596,6 +6986,10 @@ mod tests {
             Some(Path::new(CPU_PROVIDER_BINARY_PATH))
         );
         assert_eq!(metadata.observation_unit_paths.len(), 4);
+        assert_eq!(
+            metadata.operation_sudoers_path.as_deref(),
+            Some(Path::new(PRODUCTION_OPERATION_SUDOERS_PATH))
+        );
     }
 
     #[test]
@@ -8069,6 +8463,7 @@ printf '%s\n' '{}'
         files: HashMap<String, Vec<u8>>,
         manifest: Vec<u8>,
         root_fingerprint: String,
+        target_units: [Vec<u8>; 4],
     }
 
     fn complete_bundle_assets(version: &str) -> CompleteBundleAssets {
@@ -8090,7 +8485,21 @@ printf '%s\n' '{}'
         let runtime = b"new runtime".to_vec();
         let provider = b"new provider".to_vec();
         let acquirer = b"acquirer".to_vec();
-        let activator = b"activator".to_vec();
+        let target_units = enoki_probe_bootstrap::install::fixed_observation_unit_contents()
+            .map(|unit| [unit, b"# target-version-integration\n"].concat());
+        let mut integration = b"enoki.observation-integration.v1\n".to_vec();
+        for unit in &target_units {
+            integration.extend_from_slice(unit.len().to_string().as_bytes());
+            integration.push(b'\n');
+            integration.extend_from_slice(unit);
+        }
+        let quoted = String::from_utf8(integration)
+            .expect("integration UTF-8")
+            .replace('\'', "'\\''");
+        let activator = format!(
+            "#!/bin/sh\n[ \"${{1:-}}\" = \"--render-observation-integration-v1\" ] || exit 64\nprintf '%s' '{quoted}'\n"
+        )
+        .into_bytes();
         let bundle_manifest = format!(
             "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
             hex_sha256(&acquirer),
@@ -8173,6 +8582,7 @@ printf '%s\n' '{}'
             files,
             manifest,
             root_fingerprint: root_id,
+            target_units,
         }
     }
 
@@ -8190,6 +8600,8 @@ printf '%s\n' '{}'
         let probe_path = binary_dir.join("enoki-probe");
         let runtime_path = binary_dir.join("enoki-observation-runtime");
         let provider_path = binary_dir.join("enoki-cpu-resource-provider");
+        let bootstrap_acquirer_path = binary_dir.join("enoki-probe-bootstrap-acquire");
+        let bootstrap_activator_path = binary_dir.join("enoki-probe-bootstrap-activate");
         let unit_dir = temporary.path().join("systemd");
         fs::create_dir_all(&unit_dir).expect("unit directory");
         let unit_paths = [
@@ -8199,7 +8611,13 @@ printf '%s\n' '{}'
             "enoki-cpu-resource-provider.socket",
         ]
         .map(|name| unit_dir.join(name));
-        for path in [&probe_path, &runtime_path, &provider_path] {
+        for path in [
+            &probe_path,
+            &runtime_path,
+            &provider_path,
+            &bootstrap_acquirer_path,
+            &bootstrap_activator_path,
+        ] {
             fs::write(path, b"old").expect("old role");
         }
         for path in &unit_paths {
@@ -8208,11 +8626,14 @@ printf '%s\n' '{}'
         let status_path = state_dir.join("probe-operation-status.toml");
         let assets = complete_bundle_assets("0.2.0");
         let archive_file = assets.archive_file.clone();
+        let expected_target_units = assets.target_units.clone();
         let mut install_metadata =
             trusted_install_metadata(&probe_path, &status_path, String::new());
         install_metadata.schema_version = 3;
         install_metadata.probe_distribution_root_sha256 = Some(assets.root_fingerprint.clone());
         install_metadata.bootstrap_state_dir = Some(bootstrap_state.clone());
+        install_metadata.bootstrap_acquirer_path = Some(bootstrap_acquirer_path.clone());
+        install_metadata.bootstrap_activator_path = Some(bootstrap_activator_path.clone());
         install_metadata.observation_runtime_path = Some(runtime_path.clone());
         install_metadata.cpu_provider_path = Some(provider_path.clone());
         install_metadata.observation_ipc_group = Some(OBSERVATION_IPC_GROUP.to_string());
@@ -8254,6 +8675,19 @@ printf '%s\n' '{}'
         assert_eq!(fs::read(&probe_path).expect("probe"), b"new probe");
         assert_eq!(fs::read(&runtime_path).expect("runtime"), b"new runtime");
         assert_eq!(fs::read(&provider_path).expect("provider"), b"new provider");
+        assert_eq!(
+            fs::read(&bootstrap_acquirer_path).expect("Bootstrap Acquirer"),
+            b"acquirer"
+        );
+        assert!(
+            fs::read(&bootstrap_activator_path)
+                .expect("Bootstrap Activator")
+                .starts_with(b"#!/bin/sh")
+        );
+        for (path, expected) in unit_paths.iter().zip(expected_target_units) {
+            assert_eq!(fs::read(path).expect("target integration unit"), expected);
+            assert_ne!(expected.as_slice(), b"old unit");
+        }
         assert!(
             fs::read_to_string(&unit_paths[3])
                 .expect("Provider socket unit")
@@ -8279,6 +8713,95 @@ printf '%s\n' '{}'
                 "stop enoki-probe",
             ]
         );
+    }
+
+    #[test]
+    fn schema_three_activation_rolls_back_every_partial_persist_and_is_retryable() {
+        for failed_index in 0..9 {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let state = temporary.path().join("state");
+            let targets = temporary.path().join("targets");
+            fs::create_dir_all(&state).expect("state");
+            fs::create_dir_all(&targets).expect("targets");
+            let paths = (0..9)
+                .map(|index| {
+                    let path = targets.join(format!("role-{index}"));
+                    fs::write(&path, format!("old-{index}")).expect("old role");
+                    path
+                })
+                .collect::<Vec<_>>();
+            let candidates = (0..9)
+                .map(|index| format!("new-{index}").into_bytes())
+                .collect::<Vec<_>>();
+            let replacements = paths
+                .iter()
+                .zip(&candidates)
+                .map(|(path, bytes)| (path.as_path(), bytes.as_slice(), 0o755))
+                .collect::<Vec<_>>();
+            let transaction =
+                prepare_schema_three_activation(&state, &replacements).expect("prepared");
+            fs::remove_file(&transaction.entries[failed_index].staged)
+                .expect("inject persist failure");
+
+            transaction.activate().expect_err("persist fails");
+            transaction.rollback().expect("rollback succeeds");
+            for (index, path) in paths.iter().enumerate() {
+                assert_eq!(
+                    fs::read(path).expect("restored role"),
+                    format!("old-{index}").as_bytes()
+                );
+            }
+            assert!(!state.join("upgrade-transaction").exists());
+        }
+    }
+
+    #[test]
+    fn schema_three_crash_recovery_restores_every_role_before_restarting_services() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state = temporary.path().join("state");
+        let targets = temporary.path().join("targets");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&targets).unwrap();
+        let paths = (0..9)
+            .map(|index| {
+                let path = targets.join(format!("role-{index}"));
+                fs::write(&path, format!("old-{index}")).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let candidates = (0..9)
+            .map(|index| format!("new-{index}").into_bytes())
+            .collect::<Vec<_>>();
+        let replacements = paths
+            .iter()
+            .zip(&candidates)
+            .map(|(path, bytes)| (path.as_path(), bytes.as_slice(), 0o755))
+            .collect::<Vec<_>>();
+        let transaction = prepare_schema_three_activation(&state, &replacements).unwrap();
+        transaction.activate().unwrap();
+        assert_eq!(fs::read(&paths[0]).unwrap(), b"new-0");
+
+        let status_path = temporary.path().join("operation-status.toml");
+        let mut metadata = trusted_install_metadata(&paths[0], &status_path, String::new());
+        metadata.service_name = "enoki-probe".into();
+        let mut systemd = RecordingSystemdRunner::default();
+        recover_schema_three_activation(&state, &replacements, &mut systemd, &metadata)
+            .expect("recovery");
+
+        for (index, path) in paths.iter().enumerate() {
+            assert_eq!(fs::read(path).unwrap(), format!("old-{index}").as_bytes());
+        }
+        let first_restart = systemd
+            .calls
+            .iter()
+            .position(|call| call.starts_with("restart "))
+            .unwrap();
+        assert!(
+            systemd.calls[..first_restart]
+                .iter()
+                .any(|call| call == "stop enoki-probe")
+        );
+        assert!(!state.join("upgrade-transaction").exists());
     }
 
     fn trusted_install_metadata(

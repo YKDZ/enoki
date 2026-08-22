@@ -33,15 +33,21 @@ impl ObservationWindowClient for FixedObservationRuntime {
     fn request_finalized_window(
         &self,
         cadence: Duration,
+        sequence_start: u64,
     ) -> Result<ObservationWindowResult, ObservationClientError> {
         Ok(ObservationWindowResult {
-            cpu_resource_outcome: None,
-            samples: (1..=3)
-                .map(|tick| enoki_probe::protocol::enoki::v1::MetricSample {
-                    collected_at_ms: (cadence.as_millis() as i64) * i64::from(tick),
-                    cpu_percent: Some(10.0),
-                    ..Default::default()
-                })
+            attempts: (0..3)
+                .map(
+                    |tick| enoki_probe::observation_runtime::ObservationAttemptResult {
+                        sequence: sequence_start + tick,
+                        sample: Some(enoki_probe::protocol::enoki::v1::MetricSample {
+                            collected_at_ms: (cadence.as_millis() as i64) * (tick as i64 + 1),
+                            cpu_percent: Some(10.0),
+                            ..Default::default()
+                        }),
+                        cpu_resource_outcome: None,
+                    },
+                )
                 .collect(),
         })
     }

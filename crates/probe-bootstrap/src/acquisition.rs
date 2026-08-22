@@ -476,6 +476,7 @@ fn acquire_local(
         &mut component,
         &mut runtime,
         &mut cpu_provider,
+        &mut std::io::sink(),
         &mut activator,
     )
     .map_err(|_| AcquisitionFailure::Permanent)?;
@@ -685,6 +686,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut component,
         &mut runtime,
         &mut cpu_provider,
+        &mut std::io::sink(),
         &mut activator,
     )
     .map_err(|_| AcquisitionFailure::Permanent)?;

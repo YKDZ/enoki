@@ -7,6 +7,16 @@ use std::{
 };
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--render-observation-integration-v1") {
+        use std::io::Write;
+        return match std::io::stdout()
+            .lock()
+            .write_all(&enoki_probe_bootstrap::install::render_observation_integration_v1())
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    }
     let result = if std::env::args().nth(1).as_deref() == Some("--fd-handoff") {
         // SAFETY: acquirer transfers sole ownership of the private socket on
         // fd 1 and the sealed executable receipt on fd 0 across sudo/exec.

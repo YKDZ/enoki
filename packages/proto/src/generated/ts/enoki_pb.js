@@ -1494,7 +1494,7 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeReportRequest snapshots
              * @property {string|null} [enrollmentId] ProbeReportRequest enrollmentId
              * @property {enoki.v1.IObservationWindowFailure|null} [observationWindowFailure] ProbeReportRequest observationWindowFailure
-             * @property {enoki.v1.ICpuResourceCollectionOutcome|null} [cpuResourceCollectionOutcome] ProbeReportRequest cpuResourceCollectionOutcome
+             * @property {Array.<enoki.v1.ICpuResourceCollectionOutcome>|null} [cpuResourceCollectionOutcomes] ProbeReportRequest cpuResourceCollectionOutcomes
              */
 
             /**
@@ -1510,6 +1510,7 @@ export const enoki = $root.enoki = (() => {
                 this.operationAcknowledgements = [];
                 this.operationStatuses = [];
                 this.snapshots = [];
+                this.cpuResourceCollectionOutcomes = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -1613,12 +1614,12 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.observationWindowFailure = null;
 
             /**
-             * ProbeReportRequest cpuResourceCollectionOutcome.
-             * @member {enoki.v1.ICpuResourceCollectionOutcome|null|undefined} cpuResourceCollectionOutcome
+             * ProbeReportRequest cpuResourceCollectionOutcomes.
+             * @member {Array.<enoki.v1.ICpuResourceCollectionOutcome>} cpuResourceCollectionOutcomes
              * @memberof enoki.v1.ProbeReportRequest
              * @instance
              */
-            ProbeReportRequest.prototype.cpuResourceCollectionOutcome = null;
+            ProbeReportRequest.prototype.cpuResourceCollectionOutcomes = $util.emptyArray;
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.
@@ -1676,8 +1677,9 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 13, wireType 2 =*/106).string(message.enrollmentId);
                 if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure"))
                     $root.enoki.v1.ObservationWindowFailure.encode(message.observationWindowFailure, writer.uint32(/* id 14, wireType 2 =*/114).fork(), q + 1).ldelim();
-                if (message.cpuResourceCollectionOutcome != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcome"))
-                    $root.enoki.v1.CpuResourceCollectionOutcome.encode(message.cpuResourceCollectionOutcome, writer.uint32(/* id 15, wireType 2 =*/122).fork(), q + 1).ldelim();
+                if (message.cpuResourceCollectionOutcomes != null && message.cpuResourceCollectionOutcomes.length)
+                    for (let i = 0; i < message.cpuResourceCollectionOutcomes.length; ++i)
+                        $root.enoki.v1.CpuResourceCollectionOutcome.encode(message.cpuResourceCollectionOutcomes[i], writer.uint32(/* id 15, wireType 2 =*/122).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -1775,7 +1777,9 @@ export const enoki = $root.enoki = (() => {
                             break;
                         }
                     case 15: {
-                            message.cpuResourceCollectionOutcome = $root.enoki.v1.CpuResourceCollectionOutcome.decode(reader, reader.uint32(), undefined, long + 1);
+                            if (!(message.cpuResourceCollectionOutcomes && message.cpuResourceCollectionOutcomes.length))
+                                message.cpuResourceCollectionOutcomes = [];
+                            message.cpuResourceCollectionOutcomes.push($root.enoki.v1.CpuResourceCollectionOutcome.decode(reader, reader.uint32(), undefined, long + 1));
                             break;
                         }
                     default:
@@ -1881,10 +1885,14 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "observationWindowFailure." + error;
                 }
-                if (message.cpuResourceCollectionOutcome != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcome")) {
-                    let error = $root.enoki.v1.CpuResourceCollectionOutcome.verify(message.cpuResourceCollectionOutcome, long + 1);
-                    if (error)
-                        return "cpuResourceCollectionOutcome." + error;
+                if (message.cpuResourceCollectionOutcomes != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcomes")) {
+                    if (!Array.isArray(message.cpuResourceCollectionOutcomes))
+                        return "cpuResourceCollectionOutcomes: array expected";
+                    for (let i = 0; i < message.cpuResourceCollectionOutcomes.length; ++i) {
+                        let error = $root.enoki.v1.CpuResourceCollectionOutcome.verify(message.cpuResourceCollectionOutcomes[i], long + 1);
+                        if (error)
+                            return "cpuResourceCollectionOutcomes." + error;
+                    }
                 }
                 return null;
             };
@@ -1983,10 +1991,15 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeReportRequest.observationWindowFailure: object expected");
                     message.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.fromObject(object.observationWindowFailure, long + 1);
                 }
-                if (object.cpuResourceCollectionOutcome != null) {
-                    if (!$util.isObject(object.cpuResourceCollectionOutcome))
-                        throw TypeError(".enoki.v1.ProbeReportRequest.cpuResourceCollectionOutcome: object expected");
-                    message.cpuResourceCollectionOutcome = $root.enoki.v1.CpuResourceCollectionOutcome.fromObject(object.cpuResourceCollectionOutcome, long + 1);
+                if (object.cpuResourceCollectionOutcomes) {
+                    if (!Array.isArray(object.cpuResourceCollectionOutcomes))
+                        throw TypeError(".enoki.v1.ProbeReportRequest.cpuResourceCollectionOutcomes: array expected");
+                    message.cpuResourceCollectionOutcomes = [];
+                    for (let i = 0; i < object.cpuResourceCollectionOutcomes.length; ++i) {
+                        if (!$util.isObject(object.cpuResourceCollectionOutcomes[i]))
+                            throw TypeError(".enoki.v1.ProbeReportRequest.cpuResourceCollectionOutcomes: object expected");
+                        message.cpuResourceCollectionOutcomes[i] = $root.enoki.v1.CpuResourceCollectionOutcome.fromObject(object.cpuResourceCollectionOutcomes[i], long + 1);
+                    }
                 }
                 return message;
             };
@@ -2013,6 +2026,7 @@ export const enoki = $root.enoki = (() => {
                     object.operationAcknowledgements = [];
                     object.operationStatuses = [];
                     object.snapshots = [];
+                    object.cpuResourceCollectionOutcomes = [];
                 }
                 if (options.defaults) {
                     object.probeId = "";
@@ -2031,7 +2045,6 @@ export const enoki = $root.enoki = (() => {
                     object.probeConfigurationError = null;
                     object.enrollmentId = "";
                     object.observationWindowFailure = null;
-                    object.cpuResourceCollectionOutcome = null;
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -2079,8 +2092,11 @@ export const enoki = $root.enoki = (() => {
                     object.enrollmentId = message.enrollmentId;
                 if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure"))
                     object.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.toObject(message.observationWindowFailure, options, q + 1);
-                if (message.cpuResourceCollectionOutcome != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcome"))
-                    object.cpuResourceCollectionOutcome = $root.enoki.v1.CpuResourceCollectionOutcome.toObject(message.cpuResourceCollectionOutcome, options, q + 1);
+                if (message.cpuResourceCollectionOutcomes && message.cpuResourceCollectionOutcomes.length) {
+                    object.cpuResourceCollectionOutcomes = [];
+                    for (let j = 0; j < message.cpuResourceCollectionOutcomes.length; ++j)
+                        object.cpuResourceCollectionOutcomes[j] = $root.enoki.v1.CpuResourceCollectionOutcome.toObject(message.cpuResourceCollectionOutcomes[j], options, q + 1);
+                }
                 return object;
             };
 
@@ -2119,6 +2135,7 @@ export const enoki = $root.enoki = (() => {
              * Properties of a CpuResourceCollectionOutcome.
              * @memberof enoki.v1
              * @interface ICpuResourceCollectionOutcome
+             * @property {Long|null} [sequence] CpuResourceCollectionOutcome sequence
              * @property {enoki.v1.CpuResourceCollectionOutcomeReason|null} [reason] CpuResourceCollectionOutcome reason
              */
 
@@ -2136,6 +2153,14 @@ export const enoki = $root.enoki = (() => {
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
                             this[keys[i]] = properties[keys[i]];
             }
+
+            /**
+             * CpuResourceCollectionOutcome sequence.
+             * @member {Long} sequence
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @instance
+             */
+            CpuResourceCollectionOutcome.prototype.sequence = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
 
             /**
              * CpuResourceCollectionOutcome reason.
@@ -2173,8 +2198,10 @@ export const enoki = $root.enoki = (() => {
                     q = 0;
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
+                if (message.sequence != null && Object.hasOwnProperty.call(message, "sequence"))
+                    writer.uint32(/* id 1, wireType 0 =*/8).uint64(message.sequence);
                 if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
-                    writer.uint32(/* id 1, wireType 0 =*/8).int32(message.reason);
+                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.reason);
                 return writer;
             };
 
@@ -2216,6 +2243,10 @@ export const enoki = $root.enoki = (() => {
                         break;
                     switch (tag >>> 3) {
                     case 1: {
+                            message.sequence = reader.uint64();
+                            break;
+                        }
+                    case 2: {
                             message.reason = reader.int32();
                             break;
                         }
@@ -2258,6 +2289,9 @@ export const enoki = $root.enoki = (() => {
                     long = 0;
                 if (long > $util.recursionLimit)
                     return "maximum nesting depth exceeded";
+                if (message.sequence != null && Object.hasOwnProperty.call(message, "sequence"))
+                    if (!$util.isInteger(message.sequence) && !(message.sequence && $util.isInteger(message.sequence.low) && $util.isInteger(message.sequence.high)))
+                        return "sequence: integer|Long expected";
                 if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
                     switch (message.reason) {
                     default:
@@ -2289,6 +2323,15 @@ export const enoki = $root.enoki = (() => {
                 if (long > $util.recursionLimit)
                     throw Error("maximum nesting depth exceeded");
                 let message = new $root.enoki.v1.CpuResourceCollectionOutcome();
+                if (object.sequence != null)
+                    if ($util.Long)
+                        message.sequence = $util.Long.fromValue(object.sequence, true);
+                    else if (typeof object.sequence === "string")
+                        message.sequence = parseInt(object.sequence, 10);
+                    else if (typeof object.sequence === "number")
+                        message.sequence = object.sequence;
+                    else if (typeof object.sequence === "object")
+                        message.sequence = new $util.LongBits(object.sequence.low >>> 0, object.sequence.high >>> 0).toNumber(true);
                 switch (object.reason) {
                 default:
                     if (typeof object.reason === "number") {
@@ -2333,8 +2376,21 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
-                if (options.defaults)
+                if (options.defaults) {
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.sequence = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.sequence = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
                     object.reason = options.enums === String ? "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED" : 0;
+                }
+                if (message.sequence != null && Object.hasOwnProperty.call(message, "sequence"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.sequence = typeof message.sequence === "number" ? BigInt(message.sequence) : $util.Long.fromBits(message.sequence.low >>> 0, message.sequence.high >>> 0, true).toBigInt();
+                    else if (typeof message.sequence === "number")
+                        object.sequence = options.longs === String ? String(message.sequence) : message.sequence;
+                    else
+                        object.sequence = options.longs === String ? $util.Long.prototype.toString.call(message.sequence) : options.longs === Number ? new $util.LongBits(message.sequence.low >>> 0, message.sequence.high >>> 0).toNumber(true) : message.sequence;
                 if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
                     object.reason = options.enums === String ? $root.enoki.v1.CpuResourceCollectionOutcomeReason[message.reason] === undefined ? message.reason : $root.enoki.v1.CpuResourceCollectionOutcomeReason[message.reason] : message.reason;
                 return object;
