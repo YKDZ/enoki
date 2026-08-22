@@ -1,4 +1,4 @@
-//! 固定的一次性 CPU Resource Provider。
+//! 固定的一次性 System State Resource Provider。
 
 use std::{
     fs,
@@ -8,16 +8,23 @@ use std::{
 };
 
 use enoki_probe::{
-    metrics::parse_linux_proc_stat_cpu_counters,
-    observation_runtime::{CPU_COUNTERS_PULL, MAX_CPU_COUNTERS_BYTES, require_peer_uid},
+    host_profile::collect_local_host_profile_resource_facts_with_memory_total,
+    metrics::{collect_memory_metrics_from_proc_meminfo, parse_linux_proc_stat_cpu_counters},
+    observation_runtime::{MAX_SYSTEM_STATE_BYTES, SYSTEM_STATE_PULL, require_peer_uid},
+    system_state_resource_sandbox::enforce_system_state_resource_read_allowlist,
 };
+use prost::Message;
 
 const MAX_REQUEST_BYTES: usize = 128;
 
 fn main() -> ExitCode {
+    if std::env::args_os().len() != 1 {
+        return ExitCode::from(2);
+    }
     let input = io::stdin();
     if !stdin_is_socket(input.as_raw_fd())
         || require_peer_uid(input.as_raw_fd(), c"enoki-observation-runtime").is_err()
+        || enforce_system_state_resource_read_allowlist().is_err()
     {
         return ExitCode::from(2);
     }
@@ -43,24 +50,28 @@ fn stdin_is_socket(fd: std::os::fd::RawFd) -> bool {
 }
 
 fn run(input: impl Read, mut output: impl Write) -> Result<(), ()> {
-    let mut request = Vec::with_capacity(CPU_COUNTERS_PULL.len());
+    let mut request = Vec::with_capacity(SYSTEM_STATE_PULL.len());
     input
         .take((MAX_REQUEST_BYTES + 1) as u64)
         .read_to_end(&mut request)
         .map_err(|_| ())?;
-    if request.len() > MAX_REQUEST_BYTES || request.as_slice() != CPU_COUNTERS_PULL {
+    if request.len() > MAX_REQUEST_BYTES {
         return Err(());
     }
 
-    let proc_stat = fs::read_to_string("/proc/stat").map_err(|_| ())?;
-    if proc_stat.is_empty() || proc_stat.len() > MAX_CPU_COUNTERS_BYTES {
+    if request.as_slice() != SYSTEM_STATE_PULL {
         return Err(());
     }
-    let counters = parse_linux_proc_stat_cpu_counters(&proc_stat).ok_or(())?;
+
+    let proc_stat = fs::read_to_string("/proc/stat").unwrap_or_default();
+    if proc_stat.len() > MAX_SYSTEM_STATE_BYTES {
+        return Err(());
+    }
+    let counters = parse_linux_proc_stat_cpu_counters(&proc_stat).unwrap_or_default();
     let cpu = encode_records(&counters)?;
-    let load = fs::read_to_string("/proc/loadavg").map_err(|_| ())?;
-    let memory = fs::read_to_string("/proc/meminfo").map_err(|_| ())?;
-    let uptime = fs::read_to_string("/proc/uptime").map_err(|_| ())?;
+    let load = fs::read_to_string("/proc/loadavg").unwrap_or_default();
+    let memory = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
     let mut encoded = Vec::with_capacity(cpu.len() + load.len() + memory.len() + uptime.len() + 6);
     encoded.extend_from_slice(&u32::try_from(cpu.len()).map_err(|_| ())?.to_be_bytes());
     encoded.extend_from_slice(&cpu);
@@ -69,7 +80,18 @@ fn run(input: impl Read, mut output: impl Write) -> Result<(), ()> {
     encoded.extend_from_slice(memory.as_bytes());
     encoded.push(0);
     encoded.extend_from_slice(uptime.as_bytes());
-    if encoded.len() > MAX_CPU_COUNTERS_BYTES {
+    encoded.push(0);
+    let memory_total_bytes =
+        collect_memory_metrics_from_proc_meminfo(&memory).map_or(0, |metrics| metrics.total_bytes);
+    let host_profile_facts =
+        collect_local_host_profile_resource_facts_with_memory_total(memory_total_bytes)
+            .encode_to_vec();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in host_profile_facts {
+        encoded.push(HEX[(byte >> 4) as usize]);
+        encoded.push(HEX[(byte & 0x0f) as usize]);
+    }
+    if encoded.len() > MAX_SYSTEM_STATE_BYTES {
         return Err(());
     }
     let length = u32::try_from(encoded.len()).map_err(|_| ())?;
@@ -79,7 +101,7 @@ fn run(input: impl Read, mut output: impl Write) -> Result<(), ()> {
 }
 
 fn encode_records(records: &[enoki_probe::metrics::CpuCounterRecord]) -> Result<Vec<u8>, ()> {
-    if records.is_empty() || records.len() > 4096 {
+    if records.len() > 4096 {
         return Err(());
     }
     let mut bytes = Vec::with_capacity(records.len() * 80);
@@ -104,7 +126,7 @@ fn encode_records(records: &[enoki_probe::metrics::CpuCounterRecord]) -> Result<
             bytes.extend_from_slice(&value.to_be_bytes());
         }
     }
-    (bytes.len() <= MAX_CPU_COUNTERS_BYTES)
+    (bytes.len() <= MAX_SYSTEM_STATE_BYTES)
         .then_some(bytes)
         .ok_or(())
 }

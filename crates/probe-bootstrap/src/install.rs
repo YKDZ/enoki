@@ -607,7 +607,7 @@ fn activate_current_probe_with_observation_files(
 ) -> Result<(), InstallError> {
     let trust_version = trust.version.strip_prefix('v').unwrap_or(trust.version);
     let runtime_receipt = bundle.component_receipt("observation-runtime");
-    let cpu_provider_receipt = bundle.component_receipt("cpu-provider");
+    let cpu_provider_receipt = bundle.component_receipt("system-state-provider");
     if !trust.is_for(BootstrapRole::Activator)
         || bundle.target != trust.target
         || bundle.version != trust_version
@@ -1232,7 +1232,7 @@ fn operation_sudoers() -> String {
 }
 
 fn service_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+    "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /etc/os-release /usr/lib/os-release\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
 }
 
 fn observation_runtime_socket_unit() -> &'static str {
@@ -1240,7 +1240,7 @@ fn observation_runtime_socket_unit() -> &'static str {
 }
 
 fn observation_runtime_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\n"
+    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictAddressFamilies=AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /etc/os-release /usr/lib/os-release\n"
 }
 
 fn cpu_provider_socket_unit() -> &'static str {
@@ -1248,7 +1248,7 @@ fn cpu_provider_socket_unit() -> &'static str {
 }
 
 fn cpu_provider_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki one-shot System State Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=invisible\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime\n"
+    "[Unit]\nDescription=Enoki one-shot System State Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nRestrictAddressFamilies=AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=ptraceable\nInaccessiblePaths=/boot /home /media /mnt /opt /root /srv /var\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
 }
 
 /// Upgrader 与首次安装共享的固定 systemd integration assets。

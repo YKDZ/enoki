@@ -1,0 +1,1 @@
+ALTER TABLE `managed_hosts` ADD `probe_asset_bundle_version` text;

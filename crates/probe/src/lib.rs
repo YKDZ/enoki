@@ -12,6 +12,7 @@ pub mod registration;
 pub mod report;
 pub mod runtime;
 pub mod secure_file;
+pub mod system_state_resource_sandbox;
 pub mod transport;
 pub mod upgrader;
 pub mod version;

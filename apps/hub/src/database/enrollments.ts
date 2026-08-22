@@ -44,7 +44,7 @@ export type InstallationRejectionResult = {
 
 export type RegisterNewHostEnrollmentInput = {
   host: NewHostRow;
-  hostProfile: HostProfilePersistenceValues;
+  hostProfile: HostProfilePersistenceValues | null;
   registeredAtMs: number;
   tokenHash: string;
   verificationDeadlineAtMs: number;
@@ -595,13 +595,15 @@ function createNewHostForEnrollment(
     throw new Error("Failed to create Host for Probe Enrollment.");
   }
 
-  transaction
-    .insert(officialHostProfiles)
-    .values({
-      ...input.hostProfile,
-      hostId: host.id,
-    })
-    .run();
+  if (input.hostProfile) {
+    transaction
+      .insert(officialHostProfiles)
+      .values({
+        ...input.hostProfile,
+        hostId: host.id,
+      })
+      .run();
+  }
   return host;
 }
 
@@ -655,17 +657,19 @@ function replaceExistingHostProbeIdentity(
     throw new ExistingHostEnrollmentTargetUnavailable();
   }
 
-  transaction
-    .insert(officialHostProfiles)
-    .values({
-      ...input.hostProfile,
-      hostId: host.id,
-    })
-    .onConflictDoUpdate({
-      set: input.hostProfile,
-      target: officialHostProfiles.hostId,
-    })
-    .run();
+  if (input.hostProfile) {
+    transaction
+      .insert(officialHostProfiles)
+      .values({
+        ...input.hostProfile,
+        hostId: host.id,
+      })
+      .onConflictDoUpdate({
+        set: input.hostProfile,
+        target: officialHostProfiles.hostId,
+      })
+      .run();
+  }
 
   return host;
 }

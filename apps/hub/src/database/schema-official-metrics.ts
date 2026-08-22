@@ -1,5 +1,6 @@
 export {
   metricCpuCores,
+  metricCollectorOutcomes,
   metricDisks,
   metricNetworkInterfaces,
   officialMetricCpu,

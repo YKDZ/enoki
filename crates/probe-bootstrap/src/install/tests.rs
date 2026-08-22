@@ -8,6 +8,21 @@ mod tests {
     use crate::trust::BootstrapRole;
     use tempfile::tempdir;
 
+    #[test]
+    fn system_state_boundary_assigns_host_facts_only_to_the_fixed_provider() {
+        for unit in [service_unit(), observation_runtime_unit()] {
+            assert!(unit.contains("InaccessiblePaths=/proc/stat"));
+            assert!(unit.contains("/proc/cpuinfo"));
+            assert!(unit.contains("/etc/os-release"));
+        }
+        let provider = cpu_provider_unit();
+        assert!(provider.contains("RestrictAddressFamilies=AF_NETLINK"));
+        assert!(provider.contains("IPAddressDeny=any"));
+        assert!(provider.contains("InaccessiblePaths=/boot /home /media /mnt /opt /root /srv /var"));
+        assert!(provider.contains("BindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu"));
+        assert!(provider.contains("ReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts"));
+    }
+
     #[derive(Default)]
     struct Accounts {
         calls: Vec<&'static str>,
@@ -545,6 +560,10 @@ mod tests {
         assert!(provider.contains("ExecStart=/usr/local/bin/enoki-cpu-resource-provider\n"));
         assert!(provider.contains("RuntimeMaxSec=3s"));
         assert!(provider.contains("KillMode=control-group"));
+        assert!(provider.contains("RestrictAddressFamilies=AF_NETLINK"));
+        assert!(provider.contains("IPAddressDeny=any"));
+        assert!(provider.contains("SocketBindDeny=ipv4:any"));
+        assert!(provider.contains("SocketBindDeny=ipv6:any"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat"));
         assert!(
             !provider.contains("ProcSubset=pid"),

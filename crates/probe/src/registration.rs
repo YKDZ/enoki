@@ -13,14 +13,12 @@ use rsa::{
 
 use crate::{
     collectors::is_owner_configurable_collector_id,
-    host_profile::collect_local_host_profile,
     hub_url,
     metrics::MetricsCollectionConfig,
     protocol::enoki::v1::{
-        HostProfileSnapshot, ProbeEnrollmentTargetKind, ProbeInstallationInspection,
-        ProbeInstallationRejection, ProbeRegistrationRequest, ProbeRegistrationResponse,
+        ProbeEnrollmentTargetKind, ProbeInstallationInspection, ProbeInstallationRejection,
+        ProbeRegistrationRequest, ProbeRegistrationResponse,
     },
-    report::full_host_profile_snapshot,
     secure_file::{atomic_write, read_regular_file},
     transport::{HttpAttemptError, post_protobuf},
 };
@@ -132,10 +130,8 @@ pub fn register_probe(
     transport: &mut impl RegistrationTransport,
 ) -> Result<ProbeRegistrationOutcome, RegistrationError> {
     let signing_key = generate_probe_signing_key()?;
-    let host_profile = collect_local_host_profile();
     let request = registration_request(RegistrationRequestInput {
         enrollment_token: input.enrollment_token,
-        host_profile,
         probe_public_key_pem: signing_key.public_key_pem.clone(),
     });
     let response_body =
@@ -264,7 +260,6 @@ struct GeneratedProbeSigningKey {
 
 struct RegistrationRequestInput {
     enrollment_token: String,
-    host_profile: HostProfileSnapshot,
     probe_public_key_pem: String,
 }
 
@@ -274,7 +269,7 @@ fn registration_request(input: RegistrationRequestInput) -> ProbeRegistrationReq
         installation_inspection: None,
         installation_rejection: None,
         probe_public_key_pem: input.probe_public_key_pem,
-        snapshots: vec![full_host_profile_snapshot(input.host_profile)],
+        snapshots: Vec::new(),
     }
 }
 

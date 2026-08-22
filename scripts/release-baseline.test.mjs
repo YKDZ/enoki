@@ -977,7 +977,7 @@ async function writeProbeArchive(
         {
           path: "enoki-observation-runtime",
           permissionProfile: "observation-runtime-v1",
-          resourceContract: "cpu-observation-v1",
+          resourceContract: "official-observation-v2",
           role: "observation-runtime",
           sha256: sha256(binary),
           size: binary.byteLength,
@@ -985,9 +985,9 @@ async function writeProbeArchive(
         },
         {
           path: "enoki-cpu-resource-provider",
-          permissionProfile: "cpu-provider-v1",
-          resourceContract: "cpu-counters-v1",
-          role: "cpu-provider",
+          permissionProfile: "system-state-provider-v1",
+          resourceContract: "system-state-v1",
+          role: "system-state-provider",
           sha256: sha256(binary),
           size: binary.byteLength,
           version: version.slice(1),

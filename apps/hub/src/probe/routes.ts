@@ -221,51 +221,51 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    if (!hostProfileSnapshot || !hostProfile) {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
 
     const registeredAtMs = now();
     const probeId = createProbeId();
     const probeSecretPlaceholder = createProbeSecret();
-    const hostProfileHash = hostProfileSnapshot.canonicalHash;
+    const hostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const observedIp = observedIpFromContext(
       context,
       services.trustedProxyCidrs,
     );
     const displayName =
-      hostProfile.hostname?.trim() || fallbackDisplayName(probeId);
+      hostProfile?.hostname?.trim() || fallbackDisplayName(probeId);
     const registration = services.enrollments.registerNewHost({
       host: {
-        architecture: hostProfile.architecture || null,
+        architecture: hostProfile?.architecture || null,
         clockSkewDetected: false,
         connectAddress:
           firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
         createdAtMs: registeredAtMs,
-        cpuCount: hostProfile.cpuCount || null,
-        cpuModel: hostProfile.cpuModel?.trim() || null,
+        cpuCount: hostProfile?.cpuCount || null,
+        cpuModel: hostProfile?.cpuModel?.trim() || null,
         displayName,
         displayNameEdited: false,
-        hostname: hostProfile.hostname || null,
-        kernel: hostProfile.kernel || null,
+        hostname: hostProfile?.hostname || null,
+        kernel: hostProfile?.kernel || null,
         lastClockSkewMs: null,
         lastReportAtMs: null,
-        memoryTotalBytes: hostProfile.memoryTotalBytes
+        memoryTotalBytes: hostProfile?.memoryTotalBytes
           ? Number(hostProfile.memoryTotalBytes)
           : null,
         observedIp,
         probePublicKeyPem: request.probePublicKeyPem,
-        os: hostProfile.os || null,
+        os: hostProfile?.os || null,
         probeConfigurationVersion: defaultProbeConfiguration.version,
         probeId,
         probeSecretHash: hashSecret(probeSecretPlaceholder),
-        probeVersion: hostProfile.probeVersion || null,
+        probeVersion: hostProfile?.probeVersion || null,
       },
-      hostProfile: hostProfilePersistenceValues({
-        payload: hostProfile,
-        snapshotHash: hostProfileHash,
-        updatedAtMs: registeredAtMs,
-      }),
+      hostProfile:
+        hostProfile && hostProfileHash
+          ? hostProfilePersistenceValues({
+              payload: hostProfile,
+              snapshotHash: hostProfileHash,
+              updatedAtMs: registeredAtMs,
+            })
+          : null,
       registeredAtMs,
       tokenHash: hashSecret(request.enrollmentToken),
       verificationDeadlineAtMs: registeredAtMs + enrollmentVerificationTtlMs,
@@ -336,6 +336,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
       return probeJsonError("malformed_probe_report", 400);
     }
+    if (!hostProfileOutcomeWindowIsCoherent(request)) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
 
     const hostProfileSnapshot = hostProfileSnapshotFromReport(request);
 
@@ -370,6 +373,27 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     const ingestReport = (reportServices: ProbeRouteServices) => {
       const services = reportServices;
+      const transactionalHost = services.hosts.findActiveById(host.id);
+      if (!transactionalHost) {
+        throw new ReportBusinessRejection("probe_identity_required", 400);
+      }
+      const bootBundleVersion =
+        reportResponsibility === "startup"
+          ? nonemptyString(request.probeAssetBundleVersion)
+          : null;
+      const reportedBundleVersion = nonemptyString(
+        hostProfileSnapshot?.hostProfile?.probeAssetBundleVersion,
+      );
+      const storedBootBundleVersion = nonemptyString(
+        transactionalHost.probeAssetBundleVersion,
+      );
+      if (
+        hostProfileSnapshot?.hostProfile &&
+        storedBootBundleVersion &&
+        reportedBundleVersion !== storedBootBundleVersion
+      ) {
+        throw new ReportBusinessRejection("probe_asset_bundle_incoherent", 409);
+      }
       let snapshotReplayToFulfill: SnapshotReplayRequestKey | null = null;
       const replaySequenceAlreadyAccepted = services.metrics.hasObservation({
         bootId: request.bootId,
@@ -424,11 +448,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       }
       const startupEnrollment =
         !isSnapshotReplay &&
-        isProbeStartupReport({
+        (isProbeStartupReport({
           report: validatedReport,
           reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
           request,
-        })
+        }) || hasProducedHostProfile(request))
           ? services.enrollments.resolveStartupReport({
               enrollmentId: nonemptyString(request.enrollmentId),
               hostId: host.id,
@@ -550,6 +574,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             }
           : null,
         probeVersion: reportedHostProfile?.probeVersion || undefined,
+        probeAssetBundleVersion:
+          bootBundleVersion ?? reportedBundleVersion ?? undefined,
       });
       if (
         snapshotReplayToFulfill &&
@@ -594,6 +620,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             sample: {
               bootId: request.bootId,
               collectedAtMs: signedNumber(sample.collectedAtMs),
+              collectorOutcomes: validatedCollectorOutcomes(sample),
               cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map(
                 (core) => ({
                   idle: unsignedNumber(core.idle),
@@ -1131,6 +1158,29 @@ function isProbeStartupReport(input: {
     input.report.sequenceEnd === 1 &&
     input.reportedHostProfile !== null &&
     (input.request.metrics ?? []).length === 0
+  );
+}
+
+function isStartupReportShape(
+  report: { sequenceEnd: number; sequenceStart: number },
+  request: ProtoMessage,
+) {
+  return (
+    report.sequenceStart === 1 &&
+    report.sequenceEnd === 1 &&
+    (request.metrics ?? []).length === 0 &&
+    !request.observationWindowFailure
+  );
+}
+
+function hasProducedHostProfile(request: ProtoMessage) {
+  return ((request.metrics ?? []) as ProtoMessage[]).some((sample) =>
+    ((sample.collectorOutcomes ?? []) as ProtoMessage[]).some(
+      (outcome) =>
+        outcome.collectorId === hostProfileCollectorId &&
+        Number(outcome.state) === 1 &&
+        !outcome.failure,
+    ),
   );
 }
 
@@ -1683,9 +1733,10 @@ function validRegistrationResponsibilities(request: ProtoMessage) {
   const snapshots = (request.snapshots ?? []) as ProtoMessage[];
 
   return (
-    snapshots.length === 1 &&
-    snapshots[0]?.collectorId === hostProfileCollectorId &&
-    Boolean(snapshots[0]?.hostProfile)
+    snapshots.length === 0 ||
+    (snapshots.length === 1 &&
+      snapshots[0]?.collectorId === hostProfileCollectorId &&
+      Boolean(snapshots[0]?.hostProfile))
   );
 }
 
@@ -1969,8 +2020,9 @@ function hashHostProfile(hostProfile: ProtoMessage) {
 }
 
 function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
+  const { probeAssetBundleVersion: _bundleVersion, ...stable } = hostProfile;
   return {
-    ...hostProfile,
+    ...stable,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
         compareProtoStrings(left.mountPoint, right.mountPoint) ||
@@ -2146,7 +2198,10 @@ function reportResponsibilityFor(input: {
   // batch that was never a Probe Startup Report, while requiring current
   // Probes to use the typed constructor shape below.
   if (snapshots.length === 0) {
-    return "legacy_observation";
+    return isStartupReportShape(input.report, input.request) &&
+      nonemptyString(input.request.probeAssetBundleVersion)
+      ? "startup"
+      : "legacy_observation";
   }
 
   if (
@@ -2175,6 +2230,9 @@ function reportResponsibilityFor(input: {
   }
 
   if (snapshot.hostProfile !== null) {
+    if (hasProducedHostProfile(input.request)) {
+      return "observation";
+    }
     return hasSnapshotReplayOnlyContents(input.request)
       ? "snapshot_replay"
       : null;
@@ -2222,6 +2280,65 @@ function firstHostProfileAddress(hostProfile: ProtoMessage | null | undefined) {
   }
 
   return null;
+}
+
+const officialOutcomeCollectors = new Set([
+  "official.cpu",
+  "official.load",
+  "official.memory",
+  "official.uptime",
+  "official.host-profile",
+]);
+
+function validatedCollectorOutcomes(sample: ProtoMessage) {
+  const seen = new Set<string>();
+  return ((sample.collectorOutcomes ?? []) as ProtoMessage[]).map((outcome) => {
+    const collectorId = outcome.collectorId ?? "";
+    const state = Number(outcome.state ?? 0);
+    const failure = outcome.failure as ProtoMessage | null | undefined;
+    const failurePhase = failure ? Number(failure.phase ?? 0) : null;
+    const failureCode = failure ? Number(failure.code ?? 0) : null;
+    if (
+      !officialOutcomeCollectors.has(collectorId) ||
+      seen.has(collectorId) ||
+      ![1, 2, 3].includes(state) ||
+      (state === 3
+        ? ![1, 2].includes(failurePhase ?? 0) ||
+          !Number.isInteger(failureCode) ||
+          (failureCode ?? 0) < 1 ||
+          (failureCode ?? 0) > 65_535
+        : failure !== null && failure !== undefined)
+    ) {
+      throw new ReportBusinessRejection("malformed_probe_report", 400);
+    }
+    seen.add(collectorId);
+    return {
+      collectorId,
+      failureCode,
+      failurePhase: failurePhase as 1 | 2 | null,
+      state: state as 1 | 2 | 3,
+    };
+  });
+}
+
+function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
+  const samples = (request.metrics ?? []) as ProtoMessage[];
+  const snapshots = ((request.snapshots ?? []) as ProtoMessage[]).filter(
+    (snapshot) => snapshot.collectorId === hostProfileCollectorId,
+  );
+  let outcome: ProtoMessage | undefined;
+  for (const [index, sample] of samples.entries()) {
+    const matches = ((sample.collectorOutcomes ?? []) as ProtoMessage[]).filter(
+      (candidate) => candidate.collectorId === hostProfileCollectorId,
+    );
+    if (matches.length > 1 || (matches.length === 1 && index !== 0)) return false;
+    outcome ??= matches[0];
+  }
+  if (!outcome) return true;
+  if (Number(outcome.state) === 1 && !outcome.failure) {
+    return snapshots.length === 1 && Boolean(snapshots[0]?.snapshotHash);
+  }
+  return snapshots.length === 0 && [2, 3].includes(Number(outcome.state));
 }
 
 function reportConnectAddress(

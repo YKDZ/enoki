@@ -330,7 +330,7 @@ impl VerifiedAcquisition {
             .ok_or(AcquisitionFailure::Permanent)?;
         let (_, cpu_provider_len) = self
             .bundle
-            .component_receipt("cpu-provider")
+            .component_receipt("system-state-provider")
             .ok_or(AcquisitionFailure::Permanent)?;
         let (acquirer_sha256, acquirer_len) = self
             .bundle

@@ -221,8 +221,9 @@ function hashStableHostProfile(
 function stableHostProfile<T extends root.enoki.v1.IHostProfileSnapshot>(
   hostProfile: T,
 ): T {
+  const { probeAssetBundleVersion: _bundleVersion, ...stable } = hostProfile;
   return {
-    ...hostProfile,
+    ...stable,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
         compareProtoStrings(left.mountPoint, right.mountPoint) ||
@@ -483,6 +484,60 @@ describe("Probe report API", () => {
       signedProbeRequest(registration, "/api/probe/report", report(99)),
     );
     expect(unknown.status).toBe(400);
+    database.close();
+  });
+
+  it("persists typed collector outcomes idempotently with their exact sample", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: { failureDelayMs: 0, ownerPassword: "correct horse battery staple", sessionCookieName: "enoki_owner_session" },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(app, await createEnrollmentToken(app, ownerSession));
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const runtimeProfile = sampleHostProfileSnapshot({ probeAssetBundleVersion: "1.2.3" });
+    const boot = ReportRequest.encode(ReportRequest.create({
+      bootId: "boot-collector-outcomes",
+      metrics: [],
+      probeAssetBundleVersion: "1.2.3",
+      probeConfigurationVersion: "default-v1",
+      probeId: registration.probeId,
+      sequenceStart: 1,
+      sequenceEnd: 1,
+    })).finish();
+    expect((await app.request("/api/probe/report", signedProbeRequest(registration, "/api/probe/report", boot))).status).toBe(200);
+    const body = ReportRequest.encode(ReportRequest.create({
+      bootId: "boot-collector-outcomes",
+      metrics: [{
+        collectedAtMs: 1_725_000_000_000,
+        collectorOutcomes: [
+          {
+            collectorId: "official.memory",
+            state: 3,
+            failure: { phase: 2, code: 6 },
+          },
+          { collectorId: "official.host-profile", state: 1 },
+        ],
+        sequence: 2,
+      }],
+      probeId: registration.probeId,
+      sequenceStart: 2,
+      sequenceEnd: 2,
+      snapshots: [{
+        collectorId: "official.host-profile",
+        hostProfile: runtimeProfile,
+        snapshotHash: hashStableHostProfile(runtimeProfile),
+      }],
+    })).finish();
+    for (let retry = 0; retry < 2; retry += 1) {
+      const response = await app.request("/api/probe/report", signedProbeRequest(registration, "/api/probe/report", body));
+      expect(response.status).toBe(200);
+    }
+    expect(database.sqlite.prepare("select collector_id, state, failure_phase, failure_code from metric_collector_outcomes order by collector_id").all()).toEqual([
+      { collector_id: "official.host-profile", state: 1, failure_phase: null, failure_code: null },
+      { collector_id: "official.memory", state: 3, failure_phase: 2, failure_code: 6 },
+    ]);
     database.close();
   });
 
@@ -1966,6 +2021,7 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
     const hostProfile = hostProfileCrossRuntimeCanonicalFixture();
+    expect(hashStableHostProfile(hostProfile)).toBe(hostProfileCrossRuntimeCanonicalHash);
     const body = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-cross-runtime-host-profile",

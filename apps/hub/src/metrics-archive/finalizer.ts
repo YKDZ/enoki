@@ -23,6 +23,7 @@ const archiveTables = [
   "archive_metadata",
   "archive_host_snapshots",
   "metric_samples",
+  "metric_collector_outcomes",
   "official_metric_cpu",
   "official_metric_memory",
   "official_metric_load",

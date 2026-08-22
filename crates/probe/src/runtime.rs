@@ -11,11 +11,10 @@ use crate::registration::{
 };
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
-    host_profile::collect_local_host_profile,
     hub_url,
     metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
     observation_runtime::{
-        CpuResourceAcquisitionFailure, ObservationClientError, ObservationWindowClient,
+        ObservationClientError, ObservationWindowClient, SystemStateResourceAcquisitionFailure,
         UnixObservationRuntimeClient,
     },
     protocol::enoki::v1::{
@@ -39,6 +38,13 @@ use crate::{
 use prost::Message;
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
+type FinalizedObservationBatch = (
+    u64,
+    u64,
+    Vec<crate::protocol::enoki::v1::MetricSample>,
+    Vec<crate::protocol::enoki::v1::CpuResourceCollectionOutcome>,
+    Option<HostProfileSnapshot>,
+);
 pub const PERMANENT_REPORT_EXIT_STATUS: i32 = 78;
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRunInput {
@@ -122,18 +128,6 @@ pub trait ProbeTransport: RegistrationTransport + ReportTransport {}
 
 pub trait ProbeRuntimeSleeper {
     fn sleep(&mut self, duration: Duration);
-}
-
-pub trait HostProfileProvider {
-    fn collect_host_profile(&mut self) -> HostProfileSnapshot;
-}
-
-pub struct LocalHostProfileProvider;
-
-impl HostProfileProvider for LocalHostProfileProvider {
-    fn collect_host_profile(&mut self) -> HostProfileSnapshot {
-        collect_local_host_profile()
-    }
 }
 
 pub struct ThreadProbeRuntimeSleeper;
@@ -275,53 +269,15 @@ pub fn run_probe_with_loop_control(
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
 ) -> Result<(), ProbeRunError> {
-    let mut host_profile_provider = LocalHostProfileProvider;
-
-    run_probe_with_loop_control_and_host_profile_provider(
-        input,
-        transport,
-        sleeper,
-        control,
-        &mut host_profile_provider,
-    )
-}
-
-pub fn run_probe_with_loop_control_and_host_profile_provider(
-    input: ProbeRunInput,
-    transport: &mut impl ProbeTransport,
-    sleeper: &mut impl ProbeRuntimeSleeper,
-    control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
-) -> Result<(), ProbeRunError> {
     let observation_runtime = UnixObservationRuntimeClient::production();
-    run_probe_with_loop_control_and_host_profile_provider_and_observation_client(
-        input,
-        transport,
-        sleeper,
-        control,
-        host_profile_provider,
-        &observation_runtime,
-    )
-}
-
-#[doc(hidden)]
-pub fn run_probe_with_loop_control_and_host_profile_provider_and_observation_client(
-    input: ProbeRunInput,
-    transport: &mut impl ProbeTransport,
-    sleeper: &mut impl ProbeRuntimeSleeper,
-    control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
-    observation_runtime: &impl ObservationWindowClient,
-) -> Result<(), ProbeRunError> {
     run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_client(
         input,
         transport,
         sleeper,
         control,
-        host_profile_provider,
         InstalledProbeOperationRunner::from_bootstrap,
         notify_systemd_ready,
-        observation_runtime,
+        &observation_runtime,
     )
 }
 
@@ -333,13 +289,13 @@ pub fn run_probe_with_loop_control_and_observation_client(
     control: RunLoopControl,
     observation_runtime: &impl ObservationWindowClient,
 ) -> Result<(), ProbeRunError> {
-    let mut host_profile_provider = LocalHostProfileProvider;
-    run_probe_with_loop_control_and_host_profile_provider_and_observation_client(
+    run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_client(
         input,
         transport,
         sleeper,
         control,
-        &mut host_profile_provider,
+        InstalledProbeOperationRunner::from_bootstrap,
+        notify_systemd_ready,
         observation_runtime,
     )
 }
@@ -350,7 +306,6 @@ fn run_probe_with_loop_control_and_runner_factory<Runner>(
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
 ) -> Result<(), ProbeRunError>
 where
@@ -362,7 +317,6 @@ where
         transport,
         sleeper,
         control,
-        host_profile_provider,
         runner_factory,
         notify_systemd_ready,
         &observation_runtime,
@@ -375,7 +329,6 @@ fn run_probe_with_loop_control_and_runner_factory_and_notifier_and_observation_c
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
     notify_ready: impl FnMut() -> Result<(), std::io::Error>,
     observation_runtime: &impl ObservationWindowClient,
@@ -388,7 +341,6 @@ where
         transport,
         sleeper,
         control,
-        host_profile_provider,
         runner_factory,
         notify_ready,
         observation_runtime,
@@ -401,7 +353,6 @@ fn run_probe_with_loop_control_and_runner_factory_and_notifier<Runner>(
     transport: &mut impl ProbeTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     mut runner_factory: impl FnMut(&BootstrapConfig, PathBuf) -> Runner,
     mut notify_ready: impl FnMut() -> Result<(), std::io::Error>,
     observation_runtime: &impl ObservationWindowClient,
@@ -419,7 +370,6 @@ where
             transport,
             sleeper,
             control,
-            host_profile_provider,
             &mut operation_runner,
             &mut notify_ready,
             observation_runtime,
@@ -453,7 +403,6 @@ where
         transport,
         sleeper,
         control,
-        host_profile_provider,
         &mut operation_runner,
         &mut notify_ready,
         observation_runtime,
@@ -468,7 +417,6 @@ fn run_reporting_loop(
     transport: &mut impl ReportTransport,
     sleeper: &mut impl ProbeRuntimeSleeper,
     control: RunLoopControl,
-    host_profile_provider: &mut impl HostProfileProvider,
     operation_runner: &mut impl ProbeOperationRunner,
     notify_ready: &mut impl FnMut() -> Result<(), std::io::Error>,
     observation_runtime: &impl ObservationWindowClient,
@@ -497,7 +445,8 @@ fn run_reporting_loop(
         .probe_configuration_version
         .as_deref()
         .unwrap_or("");
-    let mut host_profile = host_profile_provider.collect_host_profile();
+    let mut host_profile: Option<HostProfileSnapshot> = None;
+    let mut full_host_profile_reported = false;
     let boot_id = new_boot_id();
     let local_operation_statuses = read_local_operation_statuses(bootstrap_config);
     let mut active_configuration =
@@ -513,7 +462,6 @@ fn run_reporting_loop(
             .enrollment_id
             .as_deref()
             .unwrap_or_default(),
-        host_profile: host_profile.clone(),
         operation_progress: OperationReportProgress::from_statuses(local_operation_statuses),
         probe_configuration_version: &active_configuration.version,
         probe_id,
@@ -542,47 +490,6 @@ fn run_reporting_loop(
         operation_reports.observe_response(&response, operation_runner);
     }
 
-    if host_profile_snapshot_requested(&response) {
-        if report_limit_reached(reports_sent, control) {
-            return Ok(());
-        }
-
-        // Snapshot Replay supplements the accepted Startup Report rather than
-        // creating another Metrics time slice, so it reuses sequence one.
-        host_profile = host_profile_provider.collect_host_profile();
-        let request = snapshot_replay_report(SnapshotReplayInput {
-            boot_id: &boot_id,
-            host_profile: host_profile.clone(),
-            probe_configuration_version: &active_configuration.version,
-            probe_id,
-            sequence,
-        });
-        let response = post_report_with_transient_retry(
-            transport,
-            hub_url,
-            &request_auth,
-            request.encode_to_vec(),
-            sequence,
-            sleeper,
-            active_configuration.reporting_interval,
-        )?;
-        refresh_probe_request_auth(&mut request_auth, &response);
-        reports_sent += 1;
-        if !report_limit_reached(reports_sent, control) {
-            let outcome = apply_newer_configuration_if_needed(
-                transport,
-                hub_url,
-                probe_id,
-                &request_auth,
-                active_configuration,
-                &response,
-            )?;
-            active_configuration = outcome.active_configuration;
-            pending_configuration_error = outcome.configuration_error;
-            operation_reports.observe_response(&response, operation_runner);
-        }
-    }
-
     while !report_limit_reached(reports_sent, control) {
         let collected = collect_observation_batch(
             sleeper,
@@ -596,11 +503,17 @@ fn run_reporting_loop(
             sequence_end,
             metrics,
             cpu_resource_collection_outcomes,
+            runtime_host_profile,
             observation_window_failure,
         ) = match collected {
-            Ok((sequence_start, sequence_end, metrics, cpu_outcome)) => {
-                (sequence_start, sequence_end, metrics, cpu_outcome, None)
-            }
+            Ok((sequence_start, sequence_end, metrics, cpu_outcome, profile)) => (
+                sequence_start,
+                sequence_end,
+                metrics,
+                cpu_outcome,
+                profile,
+                None,
+            ),
             Err(error) => {
                 // Runtime failure closes the same elapsed three-tick window;
                 // it must not allocate a fourth timestamp-free observation.
@@ -617,6 +530,7 @@ fn run_reporting_loop(
                     sequence,
                     Vec::new(),
                     Vec::new(),
+                    None,
                     Some(crate::protocol::enoki::v1::ObservationWindowFailure {
                         reason: reason as i32,
                     }),
@@ -624,13 +538,20 @@ fn run_reporting_loop(
             }
         };
 
-        let latest_host_profile = host_profile_provider.collect_host_profile();
-        host_profile = latest_host_profile;
+        if let Some(profile) = runtime_host_profile {
+            host_profile = Some(profile);
+        }
+        let send_full_host_profile = host_profile.is_some() && !full_host_profile_reported;
 
         let request = observation_batch_report(ObservationBatchInput {
             boot_id: &boot_id,
+            enrollment_id: bootstrap_config
+                .enrollment_id
+                .as_deref()
+                .unwrap_or_default(),
             cpu_resource_collection_outcomes,
-            host_profile: &host_profile,
+            host_profile: host_profile.as_ref(),
+            host_profile_is_full: send_full_host_profile,
             metrics,
             observation_window_failure,
             operation_progress: operation_reports.take_progress(),
@@ -651,6 +572,7 @@ fn run_reporting_loop(
             active_configuration.reporting_interval,
         )?;
         refresh_probe_request_auth(&mut request_auth, &response);
+        full_host_profile_reported |= send_full_host_profile;
         reports_sent += 1;
         if !report_limit_reached(reports_sent, control) {
             let outcome = apply_newer_configuration_if_needed(
@@ -671,10 +593,12 @@ fn run_reporting_loop(
         {
             // Replay supplements the accepted Observation Batch and preserves
             // its sequence end; the next collection advances from that batch.
-            host_profile = host_profile_provider.collect_host_profile();
+            let Some(host_profile) = host_profile.clone() else {
+                continue;
+            };
             let request = snapshot_replay_report(SnapshotReplayInput {
                 boot_id: &boot_id,
-                host_profile: host_profile.clone(),
+                host_profile,
                 probe_configuration_version: &active_configuration.version,
                 probe_id,
                 sequence,
@@ -1196,44 +1120,18 @@ fn collect_observation_batch(
     sequence: &mut u64,
     metrics_collector: &mut MetricsCollector,
     observation_runtime: &impl ObservationWindowClient,
-) -> Result<
-    (
-        u64,
-        u64,
-        Vec<crate::protocol::enoki::v1::MetricSample>,
-        Vec<crate::protocol::enoki::v1::CpuResourceCollectionOutcome>,
-    ),
-    ObservationClientError,
-> {
+) -> Result<FinalizedObservationBatch, ObservationClientError> {
     let sequence_start = *sequence + 1;
-
-    if !active_configuration.metrics_config.any_enabled() {
-        sleeper.sleep(active_configuration.reporting_interval);
-        *sequence += 1;
-
-        return Ok((sequence_start, *sequence, Vec::new(), Vec::new()));
-    }
-
-    let runtime_enabled = [
-        CollectorId::Cpu,
-        CollectorId::Memory,
-        CollectorId::Load,
-        CollectorId::Uptime,
-    ]
-    .into_iter()
-    .any(|id| active_configuration.metrics_config.collector_enabled(id));
 
     let schedule = CollectorCadenceSchedule::for_tick_interval(
         active_configuration.metrics_collection_interval,
     );
     std::thread::scope(|scope| {
-        let cpu_window = runtime_enabled.then(|| {
-            scope.spawn(|| {
-                observation_runtime.request_finalized_window(
-                    active_configuration.metrics_collection_interval,
-                    sequence_start,
-                )
-            })
+        let runtime_window = scope.spawn(|| {
+            observation_runtime.request_finalized_window(
+                active_configuration.metrics_collection_interval,
+                sequence_start,
+            )
         });
         let mut metrics = Vec::new();
         for _ in 0..REPORTING_WINDOW_TICKS {
@@ -1246,17 +1144,15 @@ fn collect_observation_batch(
                 &active_configuration.metrics_config,
             ));
         }
-        let Some(cpu_window) = cpu_window else {
-            return Ok((sequence_start, *sequence, metrics, Vec::new()));
-        };
-        let cpu_window = cpu_window
+        let runtime_window = runtime_window
             .join()
             .map_err(|_| ObservationClientError::Unavailable)??;
-        if cpu_window.attempts.len() != metrics.len() {
+        if runtime_window.attempts.len() != metrics.len() {
             return Err(ObservationClientError::InvalidResponse);
         }
+        let host_profile = runtime_window.host_profile;
         let mut outcomes = Vec::new();
-        for (index, attempt) in cpu_window.attempts.into_iter().enumerate() {
+        for (index, attempt) in runtime_window.attempts.into_iter().enumerate() {
             let expected_sequence = sequence_start + index as u64;
             if attempt.sequence != expected_sequence
                 || attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some()
@@ -1272,14 +1168,14 @@ fn collect_observation_batch(
                 outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
                     sequence: attempt.sequence,
                     reason: match failure {
-                        CpuResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
-                        CpuResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
-                        CpuResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
+                        SystemStateResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
+                        SystemStateResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
+                        SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
                     },
                 });
             }
         }
-        Ok((sequence_start, *sequence, metrics, outcomes))
+        Ok((sequence_start, *sequence, metrics, outcomes, host_profile))
     })
 }
 
@@ -1289,6 +1185,17 @@ fn merge_cpu_metrics(
     config: &MetricsCollectionConfig,
 ) {
     sample.collected_at_ms = cpu_sample.collected_at_ms;
+    sample.collector_outcomes = cpu_sample
+        .collector_outcomes
+        .into_iter()
+        .filter(|outcome| {
+            if outcome.collector_id == crate::collectors::HOST_PROFILE_COLLECTOR_ID {
+                return true;
+            }
+            CollectorId::from_config_id(&outcome.collector_id)
+                .is_some_and(|id| config.collector_enabled(id))
+        })
+        .collect();
     if config.collector_enabled(CollectorId::Cpu) {
         sample.cpu_cores = cpu_sample.cpu_cores;
         sample.cpu_percent = cpu_sample.cpu_percent;
@@ -1741,6 +1648,7 @@ mod tests {
         let client = FakeObservationWindowClient {
             cadences: Mutex::new(Vec::new()),
             result: ObservationWindowResult {
+                host_profile: None,
                 attempts: [7_000, 14_000, 21_000]
                     .into_iter()
                     .enumerate()
@@ -1768,7 +1676,7 @@ mod tests {
                 })],
             ));
 
-        let (_, _, samples, outcome) = collect_observation_batch(
+        let (_, _, samples, outcome, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -1815,12 +1723,15 @@ mod tests {
         let client = FakeObservationWindowClient {
             cadences: Mutex::new(Vec::new()),
             result: ObservationWindowResult {
+                host_profile: None,
                 attempts: (1..=3)
                     .map(
                         |sequence| crate::observation_runtime::ObservationAttemptResult {
                             sequence,
                             sample: None,
-                            cpu_resource_outcome: Some(CpuResourceAcquisitionFailure::Unavailable),
+                            cpu_resource_outcome: Some(
+                                SystemStateResourceAcquisitionFailure::Unavailable,
+                            ),
                         },
                     )
                     .collect(),
@@ -1836,7 +1747,7 @@ mod tests {
                 })],
             ));
 
-        let (_, _, samples, outcome) = collect_observation_batch(
+        let (_, _, samples, outcome, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -1891,7 +1802,7 @@ mod tests {
             ]),
         );
 
-        let (_, _, metrics, _) = collect_observation_batch(
+        let (_, _, metrics, _, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -1933,7 +1844,7 @@ mod tests {
                 })],
             ));
 
-        let (_, _, first_metrics, _) = collect_observation_batch(
+        let (_, _, first_metrics, _, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -1941,7 +1852,7 @@ mod tests {
             &UnixObservationRuntimeClient::production(),
         )
         .expect("first non-CPU Observation Batch succeeds");
-        let (_, _, second_metrics, _) = collect_observation_batch(
+        let (_, _, second_metrics, _, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -1949,7 +1860,7 @@ mod tests {
             &UnixObservationRuntimeClient::production(),
         )
         .expect("second non-CPU Observation Batch succeeds");
-        let (_, _, third_metrics, _) = collect_observation_batch(
+        let (_, _, third_metrics, _, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -1957,7 +1868,7 @@ mod tests {
             &UnixObservationRuntimeClient::production(),
         )
         .expect("third non-CPU Observation Batch succeeds");
-        let (_, _, fourth_metrics, _) = collect_observation_batch(
+        let (_, _, fourth_metrics, _, _) = collect_observation_batch(
             &mut sleeper,
             &active_configuration,
             &mut sequence,
@@ -2361,7 +2272,6 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(1),
             },
-            &mut LocalHostProfileProvider,
             InstalledProbeOperationRunner::from_bootstrap,
             || {
                 Err(std::io::Error::new(
@@ -2525,8 +2435,6 @@ mod tests {
         let observed_launches = Rc::new(RefCell::new(Vec::new()));
         let observed_launches_for_factory = Rc::clone(&observed_launches);
         let mut sleeper = NoopSleeper;
-        let mut host_profile_provider = LocalHostProfileProvider;
-
         run_probe_with_loop_control_and_runner_factory(
             ProbeRunInput {
                 bootstrap_config_path: bootstrap_config_path.clone(),
@@ -2536,7 +2444,6 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(2),
             },
-            &mut host_profile_provider,
             move |bootstrap_config, _bootstrap_config_path| {
                 assert_eq!(
                     bootstrap_config.install_path.as_deref(),

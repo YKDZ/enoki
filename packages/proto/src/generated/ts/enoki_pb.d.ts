@@ -599,6 +599,9 @@ export namespace enoki {
 
             /** ProbeReportRequest cpuResourceCollectionOutcomes */
             cpuResourceCollectionOutcomes?: (enoki.v1.ICpuResourceCollectionOutcome[]|null);
+
+            /** ProbeReportRequest probeAssetBundleVersion */
+            probeAssetBundleVersion?: (string|null);
         }
 
         /** Represents a ProbeReportRequest. */
@@ -648,6 +651,9 @@ export namespace enoki {
 
             /** ProbeReportRequest cpuResourceCollectionOutcomes. */
             public cpuResourceCollectionOutcomes: enoki.v1.ICpuResourceCollectionOutcome[];
+
+            /** ProbeReportRequest probeAssetBundleVersion. */
+            public probeAssetBundleVersion: string;
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.
@@ -1438,6 +1444,9 @@ export namespace enoki {
 
             /** HostProfileSnapshot collectorCapabilities */
             collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
+
+            /** HostProfileSnapshot probeAssetBundleVersion */
+            probeAssetBundleVersion?: (string|null);
         }
 
         /** Represents a HostProfileSnapshot. */
@@ -1499,6 +1508,9 @@ export namespace enoki {
 
             /** HostProfileSnapshot collectorCapabilities. */
             public collectorCapabilities?: (enoki.v1.ICollectorCapabilities|null);
+
+            /** HostProfileSnapshot probeAssetBundleVersion. */
+            public probeAssetBundleVersion: string;
 
             /**
              * Creates a new HostProfileSnapshot instance using the specified properties.
@@ -1572,6 +1584,187 @@ export namespace enoki {
 
             /**
              * Gets the default type url for HostProfileSnapshot
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a HostProfileResourceFacts. */
+        interface IHostProfileResourceFacts {
+
+            /** HostProfileResourceFacts hostname */
+            hostname?: (string|null);
+
+            /** HostProfileResourceFacts os */
+            os?: (string|null);
+
+            /** HostProfileResourceFacts kernel */
+            kernel?: (string|null);
+
+            /** HostProfileResourceFacts architecture */
+            architecture?: (string|null);
+
+            /** HostProfileResourceFacts cpuCount */
+            cpuCount?: (number|null);
+
+            /** HostProfileResourceFacts memoryTotalBytes */
+            memoryTotalBytes?: (number|Long|null);
+
+            /** HostProfileResourceFacts filesystems */
+            filesystems?: (enoki.v1.IFilesystemProfile[]|null);
+
+            /** HostProfileResourceFacts networkInterfaces */
+            networkInterfaces?: (enoki.v1.INetworkInterfaceProfile[]|null);
+
+            /** HostProfileResourceFacts cpuModel */
+            cpuModel?: (string|null);
+
+            /** HostProfileResourceFacts processCount */
+            processCount?: (number|null);
+
+            /** HostProfileResourceFacts threadCount */
+            threadCount?: (number|null);
+
+            /** HostProfileResourceFacts cpuCacheL3Bytes */
+            cpuCacheL3Bytes?: (number|Long|null);
+
+            /** HostProfileResourceFacts cpuBaseFrequencyMhz */
+            cpuBaseFrequencyMhz?: (number|null);
+
+            /** HostProfileResourceFacts cpuSocketCount */
+            cpuSocketCount?: (number|null);
+
+            /** HostProfileResourceFacts cpuPhysicalCount */
+            cpuPhysicalCount?: (number|null);
+        }
+
+        /** Represents a HostProfileResourceFacts. */
+        class HostProfileResourceFacts implements IHostProfileResourceFacts {
+
+            /**
+             * Constructs a new HostProfileResourceFacts.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IHostProfileResourceFacts);
+
+            /** HostProfileResourceFacts hostname. */
+            public hostname: string;
+
+            /** HostProfileResourceFacts os. */
+            public os: string;
+
+            /** HostProfileResourceFacts kernel. */
+            public kernel: string;
+
+            /** HostProfileResourceFacts architecture. */
+            public architecture: string;
+
+            /** HostProfileResourceFacts cpuCount. */
+            public cpuCount: number;
+
+            /** HostProfileResourceFacts memoryTotalBytes. */
+            public memoryTotalBytes: (number|Long);
+
+            /** HostProfileResourceFacts filesystems. */
+            public filesystems: enoki.v1.IFilesystemProfile[];
+
+            /** HostProfileResourceFacts networkInterfaces. */
+            public networkInterfaces: enoki.v1.INetworkInterfaceProfile[];
+
+            /** HostProfileResourceFacts cpuModel. */
+            public cpuModel: string;
+
+            /** HostProfileResourceFacts processCount. */
+            public processCount: number;
+
+            /** HostProfileResourceFacts threadCount. */
+            public threadCount: number;
+
+            /** HostProfileResourceFacts cpuCacheL3Bytes. */
+            public cpuCacheL3Bytes: (number|Long);
+
+            /** HostProfileResourceFacts cpuBaseFrequencyMhz. */
+            public cpuBaseFrequencyMhz: number;
+
+            /** HostProfileResourceFacts cpuSocketCount. */
+            public cpuSocketCount: number;
+
+            /** HostProfileResourceFacts cpuPhysicalCount. */
+            public cpuPhysicalCount: number;
+
+            /**
+             * Creates a new HostProfileResourceFacts instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns HostProfileResourceFacts instance
+             */
+            public static create(properties?: enoki.v1.IHostProfileResourceFacts): enoki.v1.HostProfileResourceFacts;
+
+            /**
+             * Encodes the specified HostProfileResourceFacts message. Does not implicitly {@link enoki.v1.HostProfileResourceFacts.verify|verify} messages.
+             * @param message HostProfileResourceFacts message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IHostProfileResourceFacts, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified HostProfileResourceFacts message, length delimited. Does not implicitly {@link enoki.v1.HostProfileResourceFacts.verify|verify} messages.
+             * @param message HostProfileResourceFacts message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IHostProfileResourceFacts, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a HostProfileResourceFacts message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns HostProfileResourceFacts
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.HostProfileResourceFacts;
+
+            /**
+             * Decodes a HostProfileResourceFacts message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns HostProfileResourceFacts
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.HostProfileResourceFacts;
+
+            /**
+             * Verifies a HostProfileResourceFacts message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a HostProfileResourceFacts message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns HostProfileResourceFacts
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.HostProfileResourceFacts;
+
+            /**
+             * Creates a plain object from a HostProfileResourceFacts message. Also converts values to other types if specified.
+             * @param message HostProfileResourceFacts
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.HostProfileResourceFacts, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this HostProfileResourceFacts to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for HostProfileResourceFacts
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */
@@ -2442,6 +2635,9 @@ export namespace enoki {
 
             /** MetricSample diskHealth */
             diskHealth?: (enoki.v1.IDiskHealthMetric[]|null);
+
+            /** MetricSample collectorOutcomes */
+            collectorOutcomes?: (enoki.v1.ICollectorOutcome[]|null);
         }
 
         /** Represents a MetricSample. */
@@ -2525,6 +2721,9 @@ export namespace enoki {
             /** MetricSample diskHealth. */
             public diskHealth: enoki.v1.IDiskHealthMetric[];
 
+            /** MetricSample collectorOutcomes. */
+            public collectorOutcomes: enoki.v1.ICollectorOutcome[];
+
             /**
              * Creates a new MetricSample instance using the specified properties.
              * @param [properties] Properties to set
@@ -2601,6 +2800,248 @@ export namespace enoki {
              * @returns The default type url
              */
             public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a CollectorOutcome. */
+        interface ICollectorOutcome {
+
+            /** CollectorOutcome collectorId */
+            collectorId?: (string|null);
+
+            /** CollectorOutcome state */
+            state?: (enoki.v1.CollectorOutcomeState|null);
+
+            /** CollectorOutcome failure */
+            failure?: (enoki.v1.ICollectorFailure|null);
+        }
+
+        /** Represents a CollectorOutcome. */
+        class CollectorOutcome implements ICollectorOutcome {
+
+            /**
+             * Constructs a new CollectorOutcome.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ICollectorOutcome);
+
+            /** CollectorOutcome collectorId. */
+            public collectorId: string;
+
+            /** CollectorOutcome state. */
+            public state: enoki.v1.CollectorOutcomeState;
+
+            /** CollectorOutcome failure. */
+            public failure?: (enoki.v1.ICollectorFailure|null);
+
+            /**
+             * Creates a new CollectorOutcome instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns CollectorOutcome instance
+             */
+            public static create(properties?: enoki.v1.ICollectorOutcome): enoki.v1.CollectorOutcome;
+
+            /**
+             * Encodes the specified CollectorOutcome message. Does not implicitly {@link enoki.v1.CollectorOutcome.verify|verify} messages.
+             * @param message CollectorOutcome message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ICollectorOutcome, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified CollectorOutcome message, length delimited. Does not implicitly {@link enoki.v1.CollectorOutcome.verify|verify} messages.
+             * @param message CollectorOutcome message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ICollectorOutcome, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a CollectorOutcome message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns CollectorOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CollectorOutcome;
+
+            /**
+             * Decodes a CollectorOutcome message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns CollectorOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CollectorOutcome;
+
+            /**
+             * Verifies a CollectorOutcome message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a CollectorOutcome message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns CollectorOutcome
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.CollectorOutcome;
+
+            /**
+             * Creates a plain object from a CollectorOutcome message. Also converts values to other types if specified.
+             * @param message CollectorOutcome
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.CollectorOutcome, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this CollectorOutcome to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for CollectorOutcome
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** CollectorOutcomeState enum. */
+        enum CollectorOutcomeState {
+            COLLECTOR_OUTCOME_STATE_UNSPECIFIED = 0,
+            COLLECTOR_OUTCOME_STATE_PRODUCED = 1,
+            COLLECTOR_OUTCOME_STATE_NO_DATA = 2,
+            COLLECTOR_OUTCOME_STATE_FAILED = 3
+        }
+
+        /** Properties of a CollectorFailure. */
+        interface ICollectorFailure {
+
+            /** CollectorFailure phase */
+            phase?: (enoki.v1.CollectorFailurePhase|null);
+
+            /** CollectorFailure code */
+            code?: (enoki.v1.CollectorFailureCode|null);
+        }
+
+        /** Represents a CollectorFailure. */
+        class CollectorFailure implements ICollectorFailure {
+
+            /**
+             * Constructs a new CollectorFailure.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ICollectorFailure);
+
+            /** CollectorFailure phase. */
+            public phase: enoki.v1.CollectorFailurePhase;
+
+            /** CollectorFailure code. */
+            public code: enoki.v1.CollectorFailureCode;
+
+            /**
+             * Creates a new CollectorFailure instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns CollectorFailure instance
+             */
+            public static create(properties?: enoki.v1.ICollectorFailure): enoki.v1.CollectorFailure;
+
+            /**
+             * Encodes the specified CollectorFailure message. Does not implicitly {@link enoki.v1.CollectorFailure.verify|verify} messages.
+             * @param message CollectorFailure message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ICollectorFailure, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified CollectorFailure message, length delimited. Does not implicitly {@link enoki.v1.CollectorFailure.verify|verify} messages.
+             * @param message CollectorFailure message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ICollectorFailure, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a CollectorFailure message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns CollectorFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CollectorFailure;
+
+            /**
+             * Decodes a CollectorFailure message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns CollectorFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CollectorFailure;
+
+            /**
+             * Verifies a CollectorFailure message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a CollectorFailure message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns CollectorFailure
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.CollectorFailure;
+
+            /**
+             * Creates a plain object from a CollectorFailure message. Also converts values to other types if specified.
+             * @param message CollectorFailure
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.CollectorFailure, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this CollectorFailure to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for CollectorFailure
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** CollectorFailurePhase enum. */
+        enum CollectorFailurePhase {
+            COLLECTOR_FAILURE_PHASE_UNSPECIFIED = 0,
+            COLLECTOR_FAILURE_PHASE_RESOURCE = 1,
+            COLLECTOR_FAILURE_PHASE_CALCULATION = 2
+        }
+
+        /** CollectorFailureCode enum. */
+        enum CollectorFailureCode {
+            COLLECTOR_FAILURE_CODE_UNSPECIFIED = 0,
+            COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE = 1,
+            COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED = 2,
+            COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED = 3,
+            COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED = 4,
+            COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED = 5,
+            COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED = 6,
+            COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED = 7,
+            COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED = 8,
+            COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE = 9,
+            COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED = 10
         }
 
         /** Properties of a CpuCoreMetric. */

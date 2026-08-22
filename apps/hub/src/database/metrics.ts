@@ -3,6 +3,7 @@ import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import {
   metricCpuCores,
+  metricCollectorOutcomes,
   metricDisks,
   metricNetworkInterfaces,
   metricSamples,
@@ -24,6 +25,12 @@ type MetricsWriteDatabase = Pick<MetricsDatabase, "insert">;
 export type RawMetricSampleInput = {
   bootId: string;
   collectedAtMs: number;
+  collectorOutcomes?: Array<{
+    collectorId: string;
+    state: 1 | 2 | 3;
+    failureCode: number | null;
+    failurePhase: 1 | 2 | null;
+  }>;
   cpuCores?: Array<{
     idle: number;
     iowait: number;
@@ -480,6 +487,19 @@ function insertMetricSample(
 
   if (!sample) {
     return;
+  }
+
+  for (const outcome of input.collectorOutcomes ?? []) {
+    database
+      .insert(metricCollectorOutcomes)
+      .values({
+        collectorId: outcome.collectorId,
+        failureCode: outcome.failureCode,
+        failurePhase: outcome.failurePhase,
+        metricSampleId: sample.id,
+        state: outcome.state,
+      })
+      .run();
   }
 
   if (

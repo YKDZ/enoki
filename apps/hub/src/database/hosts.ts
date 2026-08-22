@@ -176,6 +176,7 @@ export type HostRepository = {
         reportedAtMs: number;
       } | null;
       probeVersion?: string | null;
+      probeAssetBundleVersion?: string | null;
     },
   ) => HostRow;
   softDelete: (id: number, deletedAtMs: number) => HostRow | null;
@@ -385,6 +386,7 @@ export function createHostRepository(database: HostDatabase): HostRepository {
             ? null
             : input.probeConfigurationError?.reportedAtMs,
         probeVersion: input.probeVersion,
+        probeAssetBundleVersion: input.probeAssetBundleVersion,
       };
       const row = database
         .update(hosts)

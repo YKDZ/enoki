@@ -16,13 +16,15 @@ use crate::{
         CpuCounterRecord, CpuCounterSnapshot, LoadMetrics, MemoryMetrics,
         collect_cpu_metrics_from_counter_records,
     },
-    protocol::enoki::v1::MetricSample,
+    protocol::enoki::v1::{
+        CollectorFailure, CollectorFailureCode, CollectorFailurePhase, CollectorOutcome,
+        CollectorOutcomeState, HostProfileResourceFacts, HostProfileSnapshot, MetricSample,
+    },
 };
 
-pub const CPU_COUNTERS_RESOURCE: &str = "official.cpu-counters";
 pub const SYSTEM_STATE_RESOURCE: &str = "official.system-state";
-pub const MAX_CPU_COUNTERS_BYTES: usize = 64 * 1024;
-pub const CPU_COUNTERS_PULL: &[u8] = b"enoki.cpu-counters.v1\n";
+pub const MAX_SYSTEM_STATE_BYTES: usize = 64 * 1024;
+pub const SYSTEM_STATE_PULL: &[u8] = b"enoki.system-state.v1\n";
 pub const OBSERVATION_WINDOW_PULL: &[u8] = b"enoki.observation-window.v2\n";
 pub const OBSERVATION_RUNTIME_SOCKET: &str = "/run/enoki-observation-runtime.sock";
 pub const CPU_PROVIDER_SOCKET: &str = "/run/enoki-cpu-resource-provider.sock";
@@ -51,7 +53,6 @@ impl ObservationRuntimeSleeper for ThreadObservationRuntimeSleeper {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceAccess {
-    CpuCounters,
     SystemState,
 }
 
@@ -64,17 +65,10 @@ pub struct CollectorResourceDescriptor {
     pub request_accepts_caller_input: bool,
 }
 
-const CPU_COUNTERS_DESCRIPTOR: CollectorResourceDescriptor = CollectorResourceDescriptor {
-    id: CPU_COUNTERS_RESOURCE,
-    access: ResourceAccess::CpuCounters,
-    max_result_bytes: MAX_CPU_COUNTERS_BYTES,
-    max_results_per_attempt: 1,
-    request_accepts_caller_input: false,
-};
 const SYSTEM_STATE_DESCRIPTOR: CollectorResourceDescriptor = CollectorResourceDescriptor {
     id: SYSTEM_STATE_RESOURCE,
     access: ResourceAccess::SystemState,
-    max_result_bytes: MAX_CPU_COUNTERS_BYTES,
+    max_result_bytes: MAX_SYSTEM_STATE_BYTES,
     max_results_per_attempt: 1,
     request_accepts_caller_input: false,
 };
@@ -85,7 +79,6 @@ pub struct StaticCollectorRegistry;
 impl StaticCollectorRegistry {
     pub fn resource(&self, id: &str) -> Option<&'static CollectorResourceDescriptor> {
         match id {
-            CPU_COUNTERS_RESOURCE => Some(&CPU_COUNTERS_DESCRIPTOR),
             SYSTEM_STATE_RESOURCE => Some(&SYSTEM_STATE_DESCRIPTOR),
             _ => None,
         }
@@ -97,29 +90,31 @@ pub fn static_collector_registry() -> StaticCollectorRegistry {
 }
 
 /// CPU Provider 唯一接受的空请求，调用者无法注入路径、命令或次数。
-pub struct CpuCountersPullRequest(());
+pub struct SystemStatePullRequest(());
 
-impl CpuCountersPullRequest {
+impl SystemStatePullRequest {
     fn fixed() -> Self {
         Self(())
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CpuCountersResourceResult {
-    counters: Vec<CpuCounterRecord>,
+pub struct SystemStateResourceResult {
+    counters: Option<Vec<CpuCounterRecord>>,
     load: Option<LoadMetrics>,
     memory: Option<MemoryMetrics>,
     uptime_seconds: Option<u64>,
+    host_profile_facts: Option<HostProfileResourceFacts>,
 }
 
-impl CpuCountersResourceResult {
+impl SystemStateResourceResult {
     pub fn from_records(counters: Vec<CpuCounterRecord>) -> Option<Self> {
         (!counters.is_empty() && counters.len() <= 4096).then_some(Self {
-            counters,
+            counters: Some(counters),
             load: None,
             memory: None,
             uptime_seconds: None,
+            host_profile_facts: None,
         })
     }
 
@@ -135,27 +130,29 @@ impl CpuCountersResourceResult {
         self
     }
 
-    fn counters(&self) -> &[CpuCounterRecord] {
-        &self.counters
+    pub fn with_host_profile_facts(mut self, facts: HostProfileResourceFacts) -> Self {
+        self.host_profile_facts = Some(facts);
+        self
+    }
+
+    fn counters(&self) -> Option<&[CpuCounterRecord]> {
+        self.counters.as_deref()
     }
 }
 
-pub trait CpuCountersProvider {
-    fn pull_cpu_counters(
+pub trait SystemStateProvider {
+    fn pull_system_state(
         &mut self,
-        request: CpuCountersPullRequest,
-    ) -> Result<CpuCountersResourceResult, CpuResourceAcquisitionFailure>;
+        request: SystemStatePullRequest,
+    ) -> Result<SystemStateResourceResult, SystemStateResourceAcquisitionFailure>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CpuResourceAcquisitionFailure {
+pub enum SystemStateResourceAcquisitionFailure {
     ActivationBudgetExhausted,
     Malformed,
     Unavailable,
 }
-
-/// 兼容现有 Hub wire 名称；该封闭结果现在覆盖同一次 system-state pull。
-pub type SystemStateResourceAcquisitionFailure = CpuResourceAcquisitionFailure;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ObservationWindowRequest {
@@ -203,29 +200,32 @@ pub enum ObservationRuntimeFailure {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationWindowResult {
     pub attempts: Vec<ObservationAttemptResult>,
+    pub host_profile: Option<HostProfileSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservationAttemptResult {
     pub sequence: u64,
     pub sample: Option<MetricSample>,
-    pub cpu_resource_outcome: Option<CpuResourceAcquisitionFailure>,
+    pub cpu_resource_outcome: Option<SystemStateResourceAcquisitionFailure>,
 }
 
 /// Runtime 持有 Collector cadence、计算和跨窗口采样状态。
 pub struct ObservationRuntime<P> {
     provider: P,
     previous_cpu_counters: Option<CpuCounterSnapshot>,
+    host_profile: Option<HostProfileSnapshot>,
 }
 
 impl<P> ObservationRuntime<P>
 where
-    P: CpuCountersProvider,
+    P: SystemStateProvider,
 {
     pub fn new(provider: P) -> Self {
         Self {
             provider,
             previous_cpu_counters: None,
+            host_profile: None,
         }
     }
 
@@ -235,11 +235,11 @@ where
     ) -> Result<MetricSample, ObservationRuntimeFailure> {
         self.observe_at(request, unix_time_ms())
             .map_err(|failure| match failure {
-                CpuResourceAcquisitionFailure::Malformed => {
+                SystemStateResourceAcquisitionFailure::Malformed => {
                     ObservationRuntimeFailure::CpuResourceMalformed
                 }
-                CpuResourceAcquisitionFailure::ActivationBudgetExhausted
-                | CpuResourceAcquisitionFailure::Unavailable => {
+                SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted
+                | SystemStateResourceAcquisitionFailure::Unavailable => {
                     ObservationRuntimeFailure::CpuResourceUnavailable
                 }
             })
@@ -249,28 +249,14 @@ where
         &mut self,
         _request: ObservationWindowRequest,
         collected_at_ms: i64,
-    ) -> Result<MetricSample, CpuResourceAcquisitionFailure> {
+    ) -> Result<MetricSample, SystemStateResourceAcquisitionFailure> {
         // 一次尝试只激活一次 Provider；同一不可变结果同时派生 CPU 汇总、
         // 分项和每核心结果。
         let resource = self
             .provider
-            .pull_cpu_counters(CpuCountersPullRequest::fixed())?;
-        let cpu = collect_cpu_metrics_from_counter_records(
-            resource.counters(),
-            self.previous_cpu_counters.as_ref(),
-        )
-        .ok_or(CpuResourceAcquisitionFailure::Malformed)?;
-        self.previous_cpu_counters = Some(cpu.snapshot.clone());
-
-        Ok(MetricSample {
+            .pull_system_state(SystemStatePullRequest::fixed())?;
+        let mut sample = MetricSample {
             collected_at_ms,
-            cpu_cores: cpu.cores,
-            cpu_percent: Some(cpu.aggregate_percent),
-            cpu_idle_percent: Some(cpu.breakdown.idle_percent),
-            cpu_iowait_percent: Some(cpu.breakdown.iowait_percent),
-            cpu_steal_percent: Some(cpu.breakdown.steal_percent),
-            cpu_system_percent: Some(cpu.breakdown.system_percent),
-            cpu_user_percent: Some(cpu.breakdown.user_percent),
             load_1: resource.load.as_ref().map(|value| value.one),
             load_5: resource.load.as_ref().map(|value| value.five),
             load_15: resource.load.as_ref().map(|value| value.fifteen),
@@ -281,7 +267,56 @@ where
             swap_used_bytes: resource.memory.as_ref().map(|value| value.swap_used_bytes),
             uptime_seconds: resource.uptime_seconds,
             ..MetricSample::default()
-        })
+        };
+        if let Some(cpu) = resource.counters().and_then(|counters| {
+            collect_cpu_metrics_from_counter_records(counters, self.previous_cpu_counters.as_ref())
+        }) {
+            self.previous_cpu_counters = Some(cpu.snapshot.clone());
+            sample.cpu_cores = cpu.cores;
+            sample.cpu_percent = Some(cpu.aggregate_percent);
+            sample.cpu_idle_percent = Some(cpu.breakdown.idle_percent);
+            sample.cpu_iowait_percent = Some(cpu.breakdown.iowait_percent);
+            sample.cpu_steal_percent = Some(cpu.breakdown.steal_percent);
+            sample.cpu_system_percent = Some(cpu.breakdown.system_percent);
+            sample.cpu_user_percent = Some(cpu.breakdown.user_percent);
+            sample.collector_outcomes.push(produced("official.cpu"));
+        } else {
+            sample.collector_outcomes.push(calculation_failed(
+                "official.cpu",
+                CollectorFailureCode::CpuCountersMalformed,
+            ));
+        }
+        for (id, produced_value, code) in [
+            (
+                "official.load",
+                resource.load.is_some(),
+                CollectorFailureCode::LoadFactsMalformed,
+            ),
+            (
+                "official.memory",
+                resource.memory.is_some(),
+                CollectorFailureCode::MemoryFactsMalformed,
+            ),
+            (
+                "official.uptime",
+                resource.uptime_seconds.is_some(),
+                CollectorFailureCode::UptimeFactsMalformed,
+            ),
+        ] {
+            sample.collector_outcomes.push(if produced_value {
+                produced(id)
+            } else {
+                calculation_failed(id, code)
+            });
+        }
+        if self.host_profile.is_none()
+            && let Some(facts) = resource
+                .host_profile_facts
+                .filter(crate::host_profile::valid_host_profile_resource_facts)
+        {
+            self.host_profile = Some(crate::host_profile::host_profile_from_resource_facts(facts));
+        }
+        Ok(sample)
     }
 
     pub fn collect_next_window(
@@ -289,23 +324,49 @@ where
         request: ObservationWindowRequest,
         sleeper: &mut impl ObservationRuntimeSleeper,
     ) -> ObservationWindowResult {
+        let host_profile_due = self.host_profile.is_none();
         let mut attempts = Vec::with_capacity(CPU_SAMPLES_PER_WINDOW);
         for offset in 0..CPU_SAMPLES_PER_WINDOW {
             sleeper.sleep(request.cadence());
             match self.observe_at(request, sleeper.now_ms()) {
-                Ok(sample) => attempts.push(ObservationAttemptResult {
-                    sequence: request.sequence_start + offset as u64,
-                    sample: Some(sample),
-                    cpu_resource_outcome: None,
-                }),
-                Err(outcome) => attempts.push(ObservationAttemptResult {
-                    sequence: request.sequence_start + offset as u64,
-                    sample: None,
-                    cpu_resource_outcome: Some(outcome),
-                }),
+                Ok(mut sample) => {
+                    if offset == 0 && host_profile_due {
+                        sample
+                            .collector_outcomes
+                            .push(if self.host_profile.is_some() {
+                                produced("official.host-profile")
+                            } else {
+                                calculation_failed(
+                                    "official.host-profile",
+                                    CollectorFailureCode::HostProfileFactsMalformed,
+                                )
+                            });
+                    }
+                    attempts.push(ObservationAttemptResult {
+                        sequence: request.sequence_start + offset as u64,
+                        sample: Some(sample),
+                        cpu_resource_outcome: None,
+                    })
+                }
+                Err(outcome) => {
+                    let mut sample = resource_failure_sample(sleeper.now_ms(), outcome);
+                    if offset == 0 && host_profile_due {
+                        sample
+                            .collector_outcomes
+                            .push(host_profile_resource_failed(outcome));
+                    }
+                    attempts.push(ObservationAttemptResult {
+                        sequence: request.sequence_start + offset as u64,
+                        sample: Some(sample),
+                        cpu_resource_outcome: None,
+                    })
+                }
             }
         }
-        ObservationWindowResult { attempts }
+        ObservationWindowResult {
+            attempts,
+            host_profile: self.host_profile.clone(),
+        }
     }
 
     pub fn into_provider(self) -> P {
@@ -313,11 +374,11 @@ where
     }
 }
 
-pub struct UnixCpuCountersProvider {
+pub struct UnixSystemStateProvider {
     socket_path: PathBuf,
 }
 
-impl UnixCpuCountersProvider {
+impl UnixSystemStateProvider {
     pub fn new(socket_path: impl Into<PathBuf>) -> Self {
         Self {
             socket_path: socket_path.into(),
@@ -325,52 +386,53 @@ impl UnixCpuCountersProvider {
     }
 }
 
-impl CpuCountersProvider for UnixCpuCountersProvider {
-    fn pull_cpu_counters(
+impl SystemStateProvider for UnixSystemStateProvider {
+    fn pull_system_state(
         &mut self,
-        _request: CpuCountersPullRequest,
-    ) -> Result<CpuCountersResourceResult, CpuResourceAcquisitionFailure> {
+        _request: SystemStatePullRequest,
+    ) -> Result<SystemStateResourceResult, SystemStateResourceAcquisitionFailure> {
         let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
             if matches!(
                 error.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::ConnectionRefused
             ) {
-                CpuResourceAcquisitionFailure::ActivationBudgetExhausted
+                SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted
             } else {
-                CpuResourceAcquisitionFailure::Unavailable
+                SystemStateResourceAcquisitionFailure::Unavailable
             }
         })?;
         configure_deadline(&stream, PROVIDER_DEADLINE)
-            .map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?;
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?;
         stream
-            .write_all(CPU_COUNTERS_PULL)
-            .map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?;
+            .write_all(SYSTEM_STATE_PULL)
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?;
         stream
             .shutdown(std::net::Shutdown::Write)
-            .map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?;
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?;
 
-        let len =
-            read_u32(&mut stream).map_err(|_| CpuResourceAcquisitionFailure::Unavailable)? as usize;
-        if len == 0 || len > MAX_CPU_COUNTERS_BYTES {
-            return Err(CpuResourceAcquisitionFailure::Malformed);
+        let len = read_u32(&mut stream)
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?
+            as usize;
+        if len == 0 || len > MAX_SYSTEM_STATE_BYTES {
+            return Err(SystemStateResourceAcquisitionFailure::Malformed);
         }
         let mut encoded = vec![0; len];
         stream
             .read_exact(&mut encoded)
-            .map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?;
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?;
         if stream
             .read(&mut [0; 1])
-            .map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?
             != 0
         {
-            return Err(CpuResourceAcquisitionFailure::Malformed);
+            return Err(SystemStateResourceAcquisitionFailure::Malformed);
         }
-        decode_system_state_result(&encoded).ok_or(CpuResourceAcquisitionFailure::Malformed)
+        decode_system_state_result(&encoded).ok_or(SystemStateResourceAcquisitionFailure::Malformed)
     }
 }
 
 fn decode_cpu_counter_records(bytes: &[u8]) -> Option<Vec<CpuCounterRecord>> {
-    if bytes.len() < 2 || bytes.len() > MAX_CPU_COUNTERS_BYTES {
+    if bytes.len() < 2 || bytes.len() > MAX_SYSTEM_STATE_BYTES {
         return None;
     }
     let count = u16::from_be_bytes(bytes[..2].try_into().ok()?) as usize;
@@ -409,22 +471,132 @@ fn decode_cpu_counter_records(bytes: &[u8]) -> Option<Vec<CpuCounterRecord>> {
     (offset == bytes.len()).then_some(records)
 }
 
-fn decode_system_state_result(bytes: &[u8]) -> Option<CpuCountersResourceResult> {
+fn decode_system_state_result(bytes: &[u8]) -> Option<SystemStateResourceResult> {
     let cpu_len = u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
     let cpu = bytes.get(4..4 + cpu_len)?;
     let state = bytes.get(4 + cpu_len..)?;
-    let mut result = CpuCountersResourceResult::from_records(decode_cpu_counter_records(cpu)?)?;
+    let counters = decode_cpu_counter_records(cpu);
     if state.is_empty() {
-        return Some(result);
+        return Some(SystemStateResourceResult {
+            counters,
+            load: None,
+            memory: None,
+            uptime_seconds: None,
+            host_profile_facts: None,
+        });
     }
     let text = std::str::from_utf8(state).ok()?;
     let (load_text, rest) = text.split_once('\0')?;
-    let (memory_text, uptime_text) = rest.split_once('\0')?;
-    let load = crate::metrics::collect_load_metrics_from_proc_loadavg(load_text)?;
-    let memory = crate::metrics::collect_memory_metrics_from_proc_meminfo(memory_text)?;
-    let uptime_seconds = crate::metrics::collect_uptime_seconds_from_proc_uptime(uptime_text)?;
-    result = result.with_system_state(Some(load), Some(memory), Some(uptime_seconds));
-    Some(result)
+    let (memory_text, rest) = rest.split_once('\0')?;
+    let (uptime_text, profile_bytes) = rest.split_once('\0')?;
+    let load = crate::metrics::collect_load_metrics_from_proc_loadavg(load_text);
+    let memory = crate::metrics::collect_memory_metrics_from_proc_meminfo(memory_text);
+    let uptime_seconds = crate::metrics::collect_uptime_seconds_from_proc_uptime(uptime_text);
+    let profile_bytes = decode_hex(profile_bytes)?;
+    let host_profile_facts = (!profile_bytes.is_empty())
+        .then(|| HostProfileResourceFacts::decode(profile_bytes.as_slice()).ok())
+        .flatten();
+    Some(SystemStateResourceResult {
+        counters,
+        load,
+        memory,
+        uptime_seconds,
+        host_profile_facts,
+    })
+}
+
+fn produced(id: &str) -> CollectorOutcome {
+    CollectorOutcome {
+        collector_id: id.to_owned(),
+        state: CollectorOutcomeState::Produced as i32,
+        failure: None,
+    }
+}
+fn calculation_failed(id: &str, code: CollectorFailureCode) -> CollectorOutcome {
+    CollectorOutcome {
+        collector_id: id.to_owned(),
+        state: CollectorOutcomeState::Failed as i32,
+        failure: Some(CollectorFailure {
+            phase: CollectorFailurePhase::Calculation as i32,
+            code: code as i32,
+        }),
+    }
+}
+
+fn resource_failure_sample(
+    collected_at_ms: i64,
+    failure: SystemStateResourceAcquisitionFailure,
+) -> MetricSample {
+    let code = match failure {
+        SystemStateResourceAcquisitionFailure::Unavailable => {
+            CollectorFailureCode::SystemStateUnavailable
+        }
+        SystemStateResourceAcquisitionFailure::Malformed => {
+            CollectorFailureCode::SystemStateMalformed
+        }
+        SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted => {
+            CollectorFailureCode::SystemStateActivationBudgetExhausted
+        }
+    };
+    MetricSample {
+        collected_at_ms,
+        collector_outcomes: [
+            "official.cpu",
+            "official.load",
+            "official.memory",
+            "official.uptime",
+        ]
+        .into_iter()
+        .map(|id| CollectorOutcome {
+            collector_id: id.to_owned(),
+            state: CollectorOutcomeState::Failed as i32,
+            failure: Some(CollectorFailure {
+                phase: CollectorFailurePhase::Resource as i32,
+                code: code as i32,
+            }),
+        })
+        .collect(),
+        ..MetricSample::default()
+    }
+}
+
+fn host_profile_resource_failed(
+    failure: SystemStateResourceAcquisitionFailure,
+) -> CollectorOutcome {
+    let code = match failure {
+        SystemStateResourceAcquisitionFailure::Unavailable => {
+            CollectorFailureCode::HostProfileResourceUnavailable
+        }
+        SystemStateResourceAcquisitionFailure::Malformed => {
+            CollectorFailureCode::HostProfileFactsMalformed
+        }
+        SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted => {
+            CollectorFailureCode::HostProfileActivationBudgetExhausted
+        }
+    };
+    CollectorOutcome {
+        collector_id: "official.host-profile".to_owned(),
+        state: CollectorOutcomeState::Failed as i32,
+        failure: Some(CollectorFailure {
+            phase: CollectorFailurePhase::Resource as i32,
+            code: code as i32,
+        }),
+    }
+}
+
+fn decode_hex(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 pub struct ObservationRuntimeServer<P> {
@@ -433,7 +605,7 @@ pub struct ObservationRuntimeServer<P> {
 
 impl<P> ObservationRuntimeServer<P>
 where
-    P: CpuCountersProvider,
+    P: SystemStateProvider,
 {
     pub fn new(provider: P) -> Self {
         Self {
@@ -452,9 +624,10 @@ where
         sleeper: &mut impl ObservationRuntimeSleeper,
     ) -> io::Result<()> {
         configure_deadline(&stream, RUNTIME_REQUEST_DEADLINE)?;
-        let Some(request) = read_window_request(&mut stream)? else {
+        let Some(request) = read_runtime_request(&mut stream)? else {
             return write_window_failure(&mut stream);
         };
+        let RuntimeRequest::Window(request) = request;
         configure_deadline(
             &stream,
             runtime_window_deadline(request.cadence()).ok_or_else(|| {
@@ -709,6 +882,23 @@ impl UnixObservationRuntimeClient {
         {
             return Err(ObservationClientError::BundleIncoherent);
         }
+        let host_profile_len =
+            read_u32(&mut stream).map_err(|_| ObservationClientError::InvalidResponse)? as usize;
+        let host_profile = if host_profile_len == 0 {
+            None
+        } else {
+            if host_profile_len > MAX_RUNTIME_RESPONSE_BYTES {
+                return Err(ObservationClientError::InvalidResponse);
+            }
+            let mut encoded = vec![0; host_profile_len];
+            stream
+                .read_exact(&mut encoded)
+                .map_err(|_| ObservationClientError::InvalidResponse)?;
+            Some(
+                HostProfileSnapshot::decode(encoded.as_slice())
+                    .map_err(|_| ObservationClientError::InvalidResponse)?,
+            )
+        };
         let attempt_count =
             read_u16(&mut stream).map_err(|_| ObservationClientError::InvalidResponse)?;
         if attempt_count as usize != CPU_SAMPLES_PER_WINDOW {
@@ -727,9 +917,9 @@ impl UnixObservationRuntimeClient {
                 .map_err(|_| ObservationClientError::InvalidResponse)?;
             let cpu_resource_outcome = match outcome[0] {
                 0 => None,
-                1 => Some(CpuResourceAcquisitionFailure::Unavailable),
-                2 => Some(CpuResourceAcquisitionFailure::Malformed),
-                3 => Some(CpuResourceAcquisitionFailure::ActivationBudgetExhausted),
+                1 => Some(SystemStateResourceAcquisitionFailure::Unavailable),
+                2 => Some(SystemStateResourceAcquisitionFailure::Malformed),
+                3 => Some(SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted),
                 _ => return Err(ObservationClientError::InvalidResponse),
             };
             let sample = if cpu_resource_outcome.is_none() {
@@ -763,7 +953,10 @@ impl UnixObservationRuntimeClient {
         {
             return Err(ObservationClientError::InvalidResponse);
         }
-        Ok(ObservationWindowResult { attempts })
+        Ok(ObservationWindowResult {
+            attempts,
+            host_profile,
+        })
     }
 }
 
@@ -781,10 +974,16 @@ fn configure_deadline(stream: &UnixStream, deadline: Duration) -> io::Result<()>
     stream.set_write_timeout(Some(deadline))
 }
 
-fn read_window_request(stream: &mut UnixStream) -> io::Result<Option<ObservationWindowRequest>> {
-    let mut request = Vec::with_capacity(OBSERVATION_WINDOW_PULL.len() + 10);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeRequest {
+    Window(ObservationWindowRequest),
+}
+
+fn read_runtime_request(stream: &mut UnixStream) -> io::Result<Option<RuntimeRequest>> {
+    let max_request = OBSERVATION_WINDOW_PULL.len() + 10;
+    let mut request = Vec::with_capacity(max_request);
     stream
-        .take((OBSERVATION_WINDOW_PULL.len() + 11) as u64)
+        .take((max_request + 1) as u64)
         .read_to_end(&mut request)?;
     if request.len() != OBSERVATION_WINDOW_PULL.len() + 10
         || !request.starts_with(OBSERVATION_WINDOW_PULL)
@@ -800,7 +999,8 @@ fn read_window_request(stream: &mut UnixStream) -> io::Result<Option<Observation
     let sequence_start = u64::from_be_bytes(request[cadence_offset + 2..].try_into().unwrap());
     Ok(
         ObservationWindowRequest::new(Duration::from_secs(u64::from(seconds)))
-            .and_then(|request| request.with_sequence_start(sequence_start)),
+            .and_then(|request| request.with_sequence_start(sequence_start))
+            .map(RuntimeRequest::Window),
     )
 }
 
@@ -822,6 +1022,7 @@ fn write_window_success(
         .iter()
         .map(|attempt| attempt.sample.as_ref().map(Message::encode_to_vec))
         .collect::<Vec<_>>();
+    let host_profile = result.host_profile.as_ref().map(Message::encode_to_vec);
     if version.is_empty()
         || version.len() > u16::MAX as usize
         || encoded.len() != CPU_SAMPLES_PER_WINDOW
@@ -837,6 +1038,9 @@ fn write_window_success(
             .iter()
             .flatten()
             .any(|sample| sample.is_empty() || sample.len() > MAX_RUNTIME_RESPONSE_BYTES)
+        || host_profile
+            .as_ref()
+            .is_some_and(|profile| profile.is_empty() || profile.len() > MAX_RUNTIME_RESPONSE_BYTES)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -846,14 +1050,22 @@ fn write_window_success(
     stream.write_all(&[0])?;
     stream.write_all(&(version.len() as u16).to_be_bytes())?;
     stream.write_all(version)?;
+    stream.write_all(
+        &u32::try_from(host_profile.as_ref().map_or(0, Vec::len))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bounded Host Profile"))?
+            .to_be_bytes(),
+    )?;
+    if let Some(host_profile) = host_profile {
+        stream.write_all(&host_profile)?;
+    }
     stream.write_all(&(result.attempts.len() as u16).to_be_bytes())?;
     for (attempt, sample) in result.attempts.iter().zip(encoded) {
         stream.write_all(&attempt.sequence.to_be_bytes())?;
         stream.write_all(&[match attempt.cpu_resource_outcome {
             None => 0,
-            Some(CpuResourceAcquisitionFailure::Unavailable) => 1,
-            Some(CpuResourceAcquisitionFailure::Malformed) => 2,
-            Some(CpuResourceAcquisitionFailure::ActivationBudgetExhausted) => 3,
+            Some(SystemStateResourceAcquisitionFailure::Unavailable) => 1,
+            Some(SystemStateResourceAcquisitionFailure::Malformed) => 2,
+            Some(SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted) => 3,
         }])?;
         if let Some(sample) = sample {
             stream.write_all(&(sample.len() as u32).to_be_bytes())?;
@@ -908,12 +1120,12 @@ mod tests {
 
     struct UnusedProvider;
 
-    impl CpuCountersProvider for UnusedProvider {
-        fn pull_cpu_counters(
+    impl SystemStateProvider for UnusedProvider {
+        fn pull_system_state(
             &mut self,
-            _request: CpuCountersPullRequest,
-        ) -> Result<CpuCountersResourceResult, CpuResourceAcquisitionFailure> {
-            Err(CpuResourceAcquisitionFailure::Unavailable)
+            _request: SystemStatePullRequest,
+        ) -> Result<SystemStateResourceResult, SystemStateResourceAcquisitionFailure> {
+            Err(SystemStateResourceAcquisitionFailure::Unavailable)
         }
     }
 

@@ -1,4 +1,6 @@
-use enoki_probe::host_profile::collect_local_host_profile;
+use enoki_probe::host_profile::{
+    collect_local_host_profile_resource_facts_with_memory_total, host_profile_from_resource_facts,
+};
 use enoki_probe::local_privilege_boundary::PrivilegedCollectorHelperId;
 use enoki_probe::metrics::{
     CollectorCadence, CollectorCadenceSchedule, CollectorDefinition, CollectorError, CollectorId,
@@ -651,6 +653,12 @@ impl DiskHealthMetricsRunner for FakeDiskHealthRunner {
 struct FailingDiskHealthRunner {
     status: DiskHealthCollectorCapabilityStatus,
     diagnostic: &'static str,
+}
+
+fn collect_local_host_profile() -> enoki_probe::protocol::enoki::v1::HostProfileSnapshot {
+    host_profile_from_resource_facts(collect_local_host_profile_resource_facts_with_memory_total(
+        0,
+    ))
 }
 
 impl DiskHealthMetricsRunner for FailingDiskHealthRunner {

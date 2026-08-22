@@ -8,8 +8,8 @@ use std::{
 use enoki_probe::{
     metrics::parse_linux_proc_stat_cpu_counters,
     observation_runtime::{
-        CpuCountersProvider, CpuCountersPullRequest, CpuCountersResourceResult,
-        CpuResourceAcquisitionFailure, ObservationRuntimeServer, ObservationRuntimeSleeper,
+        ObservationRuntimeServer, ObservationRuntimeSleeper, SystemStateProvider,
+        SystemStatePullRequest, SystemStateResourceAcquisitionFailure, SystemStateResourceResult,
         UnixObservationRuntimeClient,
     },
     protocol::enoki::v1::{
@@ -95,10 +95,13 @@ fn probe_runtime_provider_process_chain_reports_sequence_outcomes_idempotently()
             .cpu_idle_percent
             .is_some()
     );
-    assert_eq!(
-        window.attempts[1].cpu_resource_outcome,
-        Some(CpuResourceAcquisitionFailure::Unavailable)
-    );
+    assert!(window.attempts[1].sample.as_ref().is_some_and(|sample| {
+        sample.collector_outcomes.iter().any(|outcome| {
+            outcome.collector_id == "official.memory"
+                && outcome.state
+                    == enoki_probe::protocol::enoki::v1::CollectorOutcomeState::Failed as i32
+        })
+    }));
     assert!(window.attempts[2].sample.is_some());
 
     let metrics = window
@@ -114,6 +117,7 @@ fn probe_runtime_provider_process_chain_reports_sequence_outcomes_idempotently()
             if let Some(cpu) = &attempt.sample {
                 sample.cpu_percent = cpu.cpu_percent;
                 sample.cpu_idle_percent = cpu.cpu_idle_percent;
+                sample.collector_outcomes = cpu.collector_outcomes.clone();
             }
             sample
         })
@@ -146,7 +150,12 @@ fn probe_runtime_provider_process_chain_reports_sequence_outcomes_idempotently()
     assert!(hub.report(&registration.token, &body));
     assert_eq!(hub.receipts.len(), 1);
     let stored = hub.receipts.values().next().unwrap();
-    assert_eq!(stored.cpu_resource_collection_outcomes[0].sequence, 102);
+    assert!(stored.cpu_resource_collection_outcomes.is_empty());
+    assert!(stored.metrics[1].collector_outcomes.iter().any(|outcome| {
+        outcome.collector_id == "official.memory"
+            && outcome.state
+                == enoki_probe::protocol::enoki::v1::CollectorOutcomeState::Failed as i32
+    }));
     assert!(
         stored
             .metrics
@@ -181,11 +190,11 @@ struct ProcessProvider {
     output_directory: tempfile::TempDir,
 }
 
-impl CpuCountersProvider for ProcessProvider {
-    fn pull_cpu_counters(
+impl SystemStateProvider for ProcessProvider {
+    fn pull_system_state(
         &mut self,
-        _request: CpuCountersPullRequest,
-    ) -> Result<CpuCountersResourceResult, CpuResourceAcquisitionFailure> {
+        _request: SystemStatePullRequest,
+    ) -> Result<SystemStateResourceResult, SystemStateResourceAcquisitionFailure> {
         self.attempt += 1;
         let output = self
             .output_directory
@@ -199,20 +208,20 @@ impl CpuCountersProvider for ProcessProvider {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?;
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?;
         if !status.success() {
-            return Err(CpuResourceAcquisitionFailure::Unavailable);
+            return Err(SystemStateResourceAcquisitionFailure::Unavailable);
         }
-        let value =
-            fs::read_to_string(output).map_err(|_| CpuResourceAcquisitionFailure::Unavailable)?;
+        let value = fs::read_to_string(output)
+            .map_err(|_| SystemStateResourceAcquisitionFailure::Unavailable)?;
         if value == "unavailable" {
-            return Err(CpuResourceAcquisitionFailure::Unavailable);
+            return Err(SystemStateResourceAcquisitionFailure::Unavailable);
         }
-        CpuCountersResourceResult::from_records(
+        SystemStateResourceResult::from_records(
             parse_linux_proc_stat_cpu_counters(&value)
-                .ok_or(CpuResourceAcquisitionFailure::Malformed)?,
+                .ok_or(SystemStateResourceAcquisitionFailure::Malformed)?,
         )
-        .ok_or(CpuResourceAcquisitionFailure::Malformed)
+        .ok_or(SystemStateResourceAcquisitionFailure::Malformed)
     }
 }
 

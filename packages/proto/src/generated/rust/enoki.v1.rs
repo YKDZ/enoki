@@ -166,6 +166,44 @@ pub struct HostProfileSnapshot {
     pub cpu_physical_count: u32,
     #[prost(message, optional, tag = "17")]
     pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
+    /// Runtime-produced bundle evidence; Resource Providers cannot set it.
+    #[prost(string, tag = "18")]
+    pub probe_asset_bundle_version: ::prost::alloc::string::String,
+}
+/// Internal immutable facts returned by the fixed Host Profile Resource pull.
+/// This message never crosses the authenticated Probe--Hub reporting boundary.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HostProfileResourceFacts {
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub os: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub kernel: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub architecture: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub cpu_count: u32,
+    #[prost(uint64, tag = "6")]
+    pub memory_total_bytes: u64,
+    #[prost(message, repeated, tag = "7")]
+    pub filesystems: ::prost::alloc::vec::Vec<FilesystemProfile>,
+    #[prost(message, repeated, tag = "8")]
+    pub network_interfaces: ::prost::alloc::vec::Vec<NetworkInterfaceProfile>,
+    #[prost(string, tag = "9")]
+    pub cpu_model: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "10")]
+    pub process_count: u32,
+    #[prost(uint32, tag = "11")]
+    pub thread_count: u32,
+    #[prost(uint64, tag = "12")]
+    pub cpu_cache_l3_bytes: u64,
+    #[prost(uint32, tag = "13")]
+    pub cpu_base_frequency_mhz: u32,
+    #[prost(uint32, tag = "14")]
+    pub cpu_socket_count: u32,
+    #[prost(uint32, tag = "15")]
+    pub cpu_physical_count: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Snapshot {
@@ -313,6 +351,168 @@ pub struct MetricSample {
     pub battery_state: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "24")]
     pub disk_health: ::prost::alloc::vec::Vec<DiskHealthMetric>,
+    #[prost(message, repeated, tag = "25")]
+    pub collector_outcomes: ::prost::alloc::vec::Vec<CollectorOutcome>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorOutcome {
+    #[prost(string, tag = "1")]
+    pub collector_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "CollectorOutcomeState", tag = "2")]
+    pub state: i32,
+    #[prost(message, optional, tag = "3")]
+    pub failure: ::core::option::Option<CollectorFailure>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorFailure {
+    #[prost(enumeration = "CollectorFailurePhase", tag = "1")]
+    pub phase: i32,
+    #[prost(enumeration = "CollectorFailureCode", tag = "2")]
+    pub code: i32,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CollectorOutcomeState {
+    Unspecified = 0,
+    Produced = 1,
+    NoData = 2,
+    Failed = 3,
+}
+impl CollectorOutcomeState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "COLLECTOR_OUTCOME_STATE_UNSPECIFIED",
+            Self::Produced => "COLLECTOR_OUTCOME_STATE_PRODUCED",
+            Self::NoData => "COLLECTOR_OUTCOME_STATE_NO_DATA",
+            Self::Failed => "COLLECTOR_OUTCOME_STATE_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "COLLECTOR_OUTCOME_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "COLLECTOR_OUTCOME_STATE_PRODUCED" => Some(Self::Produced),
+            "COLLECTOR_OUTCOME_STATE_NO_DATA" => Some(Self::NoData),
+            "COLLECTOR_OUTCOME_STATE_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CollectorFailurePhase {
+    Unspecified = 0,
+    Resource = 1,
+    Calculation = 2,
+}
+impl CollectorFailurePhase {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "COLLECTOR_FAILURE_PHASE_UNSPECIFIED",
+            Self::Resource => "COLLECTOR_FAILURE_PHASE_RESOURCE",
+            Self::Calculation => "COLLECTOR_FAILURE_PHASE_CALCULATION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "COLLECTOR_FAILURE_PHASE_UNSPECIFIED" => Some(Self::Unspecified),
+            "COLLECTOR_FAILURE_PHASE_RESOURCE" => Some(Self::Resource),
+            "COLLECTOR_FAILURE_PHASE_CALCULATION" => Some(Self::Calculation),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CollectorFailureCode {
+    Unspecified = 0,
+    SystemStateUnavailable = 1,
+    SystemStateMalformed = 2,
+    SystemStateActivationBudgetExhausted = 3,
+    CpuCountersMalformed = 4,
+    LoadFactsMalformed = 5,
+    MemoryFactsMalformed = 6,
+    UptimeFactsMalformed = 7,
+    HostProfileFactsMalformed = 8,
+    HostProfileResourceUnavailable = 9,
+    HostProfileActivationBudgetExhausted = 10,
+}
+impl CollectorFailureCode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "COLLECTOR_FAILURE_CODE_UNSPECIFIED",
+            Self::SystemStateUnavailable => {
+                "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE"
+            }
+            Self::SystemStateMalformed => "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED",
+            Self::SystemStateActivationBudgetExhausted => {
+                "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED"
+            }
+            Self::CpuCountersMalformed => "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED",
+            Self::LoadFactsMalformed => "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED",
+            Self::MemoryFactsMalformed => "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED",
+            Self::UptimeFactsMalformed => "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED",
+            Self::HostProfileFactsMalformed => {
+                "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED"
+            }
+            Self::HostProfileResourceUnavailable => {
+                "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE"
+            }
+            Self::HostProfileActivationBudgetExhausted => {
+                "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "COLLECTOR_FAILURE_CODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE" => {
+                Some(Self::SystemStateUnavailable)
+            }
+            "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED" => {
+                Some(Self::SystemStateMalformed)
+            }
+            "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED" => {
+                Some(Self::SystemStateActivationBudgetExhausted)
+            }
+            "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED" => {
+                Some(Self::CpuCountersMalformed)
+            }
+            "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED" => {
+                Some(Self::LoadFactsMalformed)
+            }
+            "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED" => {
+                Some(Self::MemoryFactsMalformed)
+            }
+            "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED" => {
+                Some(Self::UptimeFactsMalformed)
+            }
+            "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED" => {
+                Some(Self::HostProfileFactsMalformed)
+            }
+            "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE" => {
+                Some(Self::HostProfileResourceUnavailable)
+            }
+            "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED" => {
+                Some(Self::HostProfileActivationBudgetExhausted)
+            }
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeOperation {
@@ -470,6 +670,9 @@ pub struct ProbeReportRequest {
     pub cpu_resource_collection_outcomes: ::prost::alloc::vec::Vec<
         CpuResourceCollectionOutcome,
     >,
+    /// Present on the observation-free sequence-one Boot Report.
+    #[prost(string, tag = "16")]
+    pub probe_asset_bundle_version: ::prost::alloc::string::String,
 }
 /// CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]

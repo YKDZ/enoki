@@ -36,6 +36,7 @@ fn generated_rust_protocol_encodes_probe_registration() {
         os: "linux".to_string(),
         process_count: 123,
         probe_version: "0.1.0".to_string(),
+        probe_asset_bundle_version: "0.1.0".to_string(),
         thread_count: 456,
     };
     let request = ProbeRegistrationRequest {
@@ -131,6 +132,7 @@ fn generated_rust_protocol_encodes_repeated_metric_samples() {
         sequence_end: 8,
         sequence_start: 7,
         snapshots: Vec::new(),
+        probe_asset_bundle_version: String::new(),
     };
 
     let encoded = request.encode_to_vec();
@@ -261,6 +263,7 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
         sequence_end: 1,
         sequence_start: 1,
         snapshots: Vec::new(),
+        probe_asset_bundle_version: String::new(),
     };
 
     let decoded_request = ProbeReportRequest::decode(request.encode_to_vec().as_slice())

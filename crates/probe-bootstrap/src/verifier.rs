@@ -27,14 +27,14 @@ const BUNDLE_COMPONENTS: [(&str, &str, &str, &str); 3] = [
     (
         "enoki-observation-runtime",
         "observation-runtime-v1",
-        "cpu-observation-v1",
+        "official-observation-v2",
         "observation-runtime",
     ),
     (
         "enoki-cpu-resource-provider",
-        "cpu-provider-v1",
-        "cpu-counters-v1",
-        "cpu-provider",
+        "system-state-provider-v1",
+        "system-state-v1",
+        "system-state-provider",
     ),
 ];
 pub const MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
@@ -79,7 +79,7 @@ impl VerifiedBundle {
     #[cfg(test)]
     pub(crate) fn with_test_observation_receipts(mut self, size: u64) -> Self {
         for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
-            if matches!(role, "observation-runtime" | "cpu-provider") {
+            if matches!(role, "observation-runtime" | "system-state-provider") {
                 self.bootstrap_assets.push(BundleComponent {
                     path: path.to_string(),
                     permission_profile: permission_profile.to_string(),
@@ -320,7 +320,7 @@ pub(crate) fn verify_archive_and_extract_roles(
         .filter(|component| {
             matches!(
                 component.role.as_str(),
-                "probe" | "observation-runtime" | "cpu-provider"
+                "probe" | "observation-runtime" | "system-state-provider"
             )
         })
         .collect::<Vec<_>>();
@@ -375,7 +375,7 @@ pub(crate) fn verify_archive_and_extract_roles(
                     component.size,
                     component.sha256.clone(),
                 )?,
-                "cpu-provider" => stream_component(
+                "system-state-provider" => stream_component(
                     &mut entry,
                     cpu_provider_sink,
                     component.size,
@@ -1082,10 +1082,10 @@ mod tests {
             .into_bytes();
         let payload = b"probe".to_vec();
         let runtime = b"runtime".to_vec();
-        let cpu_provider = b"cpu-provider".to_vec();
+        let cpu_provider = b"system-state-provider".to_vec();
         let acquirer = b"acquirer".to_vec();
         let activator = b"activator".to_vec();
-        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len()).into_bytes();
+        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v1\",\"resourceContract\":\"system-state-v1\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len()).into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gzip);
         for (name, data, kind) in [
@@ -1215,7 +1215,7 @@ mod tests {
             target: TARGET.to_owned(),
         };
         let manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v1\",\"resourceContract\":\"system-state-v1\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
             "1".repeat(64),
             "2".repeat(64),
             "3".repeat(64),
@@ -1224,6 +1224,12 @@ mod tests {
         );
 
         assert!(verify_bundle_manifest(manifest.as_bytes(), "1.2.3", &asset, 1).is_ok());
+
+        let mixed_contract = manifest.replace("system-state-v1", "cpu-counters-v1");
+        assert!(
+            verify_bundle_manifest(mixed_contract.as_bytes(), "1.2.3", &asset, 1).is_err(),
+            "a current manifest must reject the legacy CPU-only provider contract",
+        );
     }
 
     #[test]

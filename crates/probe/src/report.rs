@@ -51,7 +51,6 @@ impl OperationReportProgress {
 pub struct StartupReportInput<'a> {
     pub boot_id: &'a str,
     pub enrollment_id: &'a str,
-    pub host_profile: HostProfileSnapshot,
     pub operation_progress: OperationReportProgress,
     pub probe_configuration_version: &'a str,
     pub probe_id: &'a str,
@@ -67,7 +66,9 @@ pub struct SnapshotReplayInput<'a> {
 
 pub struct ObservationBatchInput<'a> {
     pub boot_id: &'a str,
-    pub host_profile: &'a HostProfileSnapshot,
+    pub enrollment_id: &'a str,
+    pub host_profile: Option<&'a HostProfileSnapshot>,
+    pub host_profile_is_full: bool,
     pub metrics: Vec<MetricSample>,
     pub cpu_resource_collection_outcomes: Vec<CpuResourceCollectionOutcome>,
     pub observation_window_failure: Option<ObservationWindowFailure>,
@@ -95,7 +96,8 @@ pub fn startup_report(input: StartupReportInput<'_>) -> ProbeReportRequest {
         probe_id: input.probe_id.to_string(),
         sequence_end: 1,
         sequence_start: 1,
-        snapshots: vec![full_host_profile_snapshot(input.host_profile)],
+        snapshots: Vec::new(),
+        probe_asset_bundle_version: crate::version::probe_version().to_string(),
     }
 }
 
@@ -114,6 +116,7 @@ pub fn snapshot_replay_report(input: SnapshotReplayInput<'_>) -> ProbeReportRequ
         sequence_end: input.sequence,
         sequence_start: input.sequence,
         snapshots: vec![full_host_profile_snapshot(input.host_profile)],
+        probe_asset_bundle_version: String::new(),
     }
 }
 
@@ -122,7 +125,7 @@ pub fn observation_batch_report(input: ObservationBatchInput<'_>) -> ProbeReport
 
     ProbeReportRequest {
         boot_id: input.boot_id.to_string(),
-        enrollment_id: String::new(),
+        enrollment_id: input.enrollment_id.to_string(),
         metrics: input.metrics,
         cpu_resource_collection_outcomes: input.cpu_resource_collection_outcomes,
         observation_window_failure: input.observation_window_failure,
@@ -133,7 +136,18 @@ pub fn observation_batch_report(input: ObservationBatchInput<'_>) -> ProbeReport
         probe_id: input.probe_id.to_string(),
         sequence_end: input.sequence_end,
         sequence_start: input.sequence_start,
-        snapshots: vec![hash_only_host_profile_snapshot(input.host_profile)],
+        snapshots: input
+            .host_profile
+            .map(|profile| {
+                if input.host_profile_is_full {
+                    full_host_profile_snapshot(profile.clone())
+                } else {
+                    hash_only_host_profile_snapshot(profile)
+                }
+            })
+            .into_iter()
+            .collect(),
+        probe_asset_bundle_version: String::new(),
     }
 }
 

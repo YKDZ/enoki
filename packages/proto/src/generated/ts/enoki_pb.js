@@ -1495,6 +1495,7 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [enrollmentId] ProbeReportRequest enrollmentId
              * @property {enoki.v1.IObservationWindowFailure|null} [observationWindowFailure] ProbeReportRequest observationWindowFailure
              * @property {Array.<enoki.v1.ICpuResourceCollectionOutcome>|null} [cpuResourceCollectionOutcomes] ProbeReportRequest cpuResourceCollectionOutcomes
+             * @property {string|null} [probeAssetBundleVersion] ProbeReportRequest probeAssetBundleVersion
              */
 
             /**
@@ -1622,6 +1623,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.cpuResourceCollectionOutcomes = $util.emptyArray;
 
             /**
+             * ProbeReportRequest probeAssetBundleVersion.
+             * @member {string} probeAssetBundleVersion
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.probeAssetBundleVersion = "";
+
+            /**
              * Creates a new ProbeReportRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportRequest
@@ -1680,6 +1689,8 @@ export const enoki = $root.enoki = (() => {
                 if (message.cpuResourceCollectionOutcomes != null && message.cpuResourceCollectionOutcomes.length)
                     for (let i = 0; i < message.cpuResourceCollectionOutcomes.length; ++i)
                         $root.enoki.v1.CpuResourceCollectionOutcome.encode(message.cpuResourceCollectionOutcomes[i], writer.uint32(/* id 15, wireType 2 =*/122).fork(), q + 1).ldelim();
+                if (message.probeAssetBundleVersion != null && Object.hasOwnProperty.call(message, "probeAssetBundleVersion"))
+                    writer.uint32(/* id 16, wireType 2 =*/130).string(message.probeAssetBundleVersion);
                 return writer;
             };
 
@@ -1780,6 +1791,10 @@ export const enoki = $root.enoki = (() => {
                             if (!(message.cpuResourceCollectionOutcomes && message.cpuResourceCollectionOutcomes.length))
                                 message.cpuResourceCollectionOutcomes = [];
                             message.cpuResourceCollectionOutcomes.push($root.enoki.v1.CpuResourceCollectionOutcome.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 16: {
+                            message.probeAssetBundleVersion = reader.string();
                             break;
                         }
                     default:
@@ -1894,6 +1909,9 @@ export const enoki = $root.enoki = (() => {
                             return "cpuResourceCollectionOutcomes." + error;
                     }
                 }
+                if (message.probeAssetBundleVersion != null && Object.hasOwnProperty.call(message, "probeAssetBundleVersion"))
+                    if (!$util.isString(message.probeAssetBundleVersion))
+                        return "probeAssetBundleVersion: string expected";
                 return null;
             };
 
@@ -2001,6 +2019,8 @@ export const enoki = $root.enoki = (() => {
                         message.cpuResourceCollectionOutcomes[i] = $root.enoki.v1.CpuResourceCollectionOutcome.fromObject(object.cpuResourceCollectionOutcomes[i], long + 1);
                     }
                 }
+                if (object.probeAssetBundleVersion != null)
+                    message.probeAssetBundleVersion = String(object.probeAssetBundleVersion);
                 return message;
             };
 
@@ -2045,6 +2065,7 @@ export const enoki = $root.enoki = (() => {
                     object.probeConfigurationError = null;
                     object.enrollmentId = "";
                     object.observationWindowFailure = null;
+                    object.probeAssetBundleVersion = "";
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -2097,6 +2118,8 @@ export const enoki = $root.enoki = (() => {
                     for (let j = 0; j < message.cpuResourceCollectionOutcomes.length; ++j)
                         object.cpuResourceCollectionOutcomes[j] = $root.enoki.v1.CpuResourceCollectionOutcome.toObject(message.cpuResourceCollectionOutcomes[j], options, q + 1);
                 }
+                if (message.probeAssetBundleVersion != null && Object.hasOwnProperty.call(message, "probeAssetBundleVersion"))
+                    object.probeAssetBundleVersion = message.probeAssetBundleVersion;
                 return object;
             };
 
@@ -3930,6 +3953,7 @@ export const enoki = $root.enoki = (() => {
              * @property {number|null} [cpuSocketCount] HostProfileSnapshot cpuSocketCount
              * @property {number|null} [cpuPhysicalCount] HostProfileSnapshot cpuPhysicalCount
              * @property {enoki.v1.ICollectorCapabilities|null} [collectorCapabilities] HostProfileSnapshot collectorCapabilities
+             * @property {string|null} [probeAssetBundleVersion] HostProfileSnapshot probeAssetBundleVersion
              */
 
             /**
@@ -4086,6 +4110,14 @@ export const enoki = $root.enoki = (() => {
             HostProfileSnapshot.prototype.collectorCapabilities = null;
 
             /**
+             * HostProfileSnapshot probeAssetBundleVersion.
+             * @member {string} probeAssetBundleVersion
+             * @memberof enoki.v1.HostProfileSnapshot
+             * @instance
+             */
+            HostProfileSnapshot.prototype.probeAssetBundleVersion = "";
+
+            /**
              * Creates a new HostProfileSnapshot instance using the specified properties.
              * @function create
              * @memberof enoki.v1.HostProfileSnapshot
@@ -4149,6 +4181,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 16, wireType 0 =*/128).uint32(message.cpuPhysicalCount);
                 if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities"))
                     $root.enoki.v1.CollectorCapabilities.encode(message.collectorCapabilities, writer.uint32(/* id 17, wireType 2 =*/138).fork(), q + 1).ldelim();
+                if (message.probeAssetBundleVersion != null && Object.hasOwnProperty.call(message, "probeAssetBundleVersion"))
+                    writer.uint32(/* id 18, wireType 2 =*/146).string(message.probeAssetBundleVersion);
                 return writer;
             };
 
@@ -4261,6 +4295,10 @@ export const enoki = $root.enoki = (() => {
                             message.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
+                    case 18: {
+                            message.probeAssetBundleVersion = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -4365,6 +4403,9 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "collectorCapabilities." + error;
                 }
+                if (message.probeAssetBundleVersion != null && Object.hasOwnProperty.call(message, "probeAssetBundleVersion"))
+                    if (!$util.isString(message.probeAssetBundleVersion))
+                        return "probeAssetBundleVersion: string expected";
                 return null;
             };
 
@@ -4453,6 +4494,8 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.HostProfileSnapshot.collectorCapabilities: object expected");
                     message.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.fromObject(object.collectorCapabilities, long + 1);
                 }
+                if (object.probeAssetBundleVersion != null)
+                    message.probeAssetBundleVersion = String(object.probeAssetBundleVersion);
                 return message;
             };
 
@@ -4501,6 +4544,7 @@ export const enoki = $root.enoki = (() => {
                     object.cpuSocketCount = 0;
                     object.cpuPhysicalCount = 0;
                     object.collectorCapabilities = null;
+                    object.probeAssetBundleVersion = "";
                 }
                 if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
                     object.hostname = message.hostname;
@@ -4552,6 +4596,8 @@ export const enoki = $root.enoki = (() => {
                     object.cpuPhysicalCount = message.cpuPhysicalCount;
                 if (message.collectorCapabilities != null && Object.hasOwnProperty.call(message, "collectorCapabilities"))
                     object.collectorCapabilities = $root.enoki.v1.CollectorCapabilities.toObject(message.collectorCapabilities, options, q + 1);
+                if (message.probeAssetBundleVersion != null && Object.hasOwnProperty.call(message, "probeAssetBundleVersion"))
+                    object.probeAssetBundleVersion = message.probeAssetBundleVersion;
                 return object;
             };
 
@@ -4582,6 +4628,632 @@ export const enoki = $root.enoki = (() => {
             };
 
             return HostProfileSnapshot;
+        })();
+
+        v1.HostProfileResourceFacts = (function() {
+
+            /**
+             * Properties of a HostProfileResourceFacts.
+             * @memberof enoki.v1
+             * @interface IHostProfileResourceFacts
+             * @property {string|null} [hostname] HostProfileResourceFacts hostname
+             * @property {string|null} [os] HostProfileResourceFacts os
+             * @property {string|null} [kernel] HostProfileResourceFacts kernel
+             * @property {string|null} [architecture] HostProfileResourceFacts architecture
+             * @property {number|null} [cpuCount] HostProfileResourceFacts cpuCount
+             * @property {Long|null} [memoryTotalBytes] HostProfileResourceFacts memoryTotalBytes
+             * @property {Array.<enoki.v1.IFilesystemProfile>|null} [filesystems] HostProfileResourceFacts filesystems
+             * @property {Array.<enoki.v1.INetworkInterfaceProfile>|null} [networkInterfaces] HostProfileResourceFacts networkInterfaces
+             * @property {string|null} [cpuModel] HostProfileResourceFacts cpuModel
+             * @property {number|null} [processCount] HostProfileResourceFacts processCount
+             * @property {number|null} [threadCount] HostProfileResourceFacts threadCount
+             * @property {Long|null} [cpuCacheL3Bytes] HostProfileResourceFacts cpuCacheL3Bytes
+             * @property {number|null} [cpuBaseFrequencyMhz] HostProfileResourceFacts cpuBaseFrequencyMhz
+             * @property {number|null} [cpuSocketCount] HostProfileResourceFacts cpuSocketCount
+             * @property {number|null} [cpuPhysicalCount] HostProfileResourceFacts cpuPhysicalCount
+             */
+
+            /**
+             * Constructs a new HostProfileResourceFacts.
+             * @memberof enoki.v1
+             * @classdesc Represents a HostProfileResourceFacts.
+             * @implements IHostProfileResourceFacts
+             * @constructor
+             * @param {enoki.v1.IHostProfileResourceFacts=} [properties] Properties to set
+             */
+            function HostProfileResourceFacts(properties) {
+                this.filesystems = [];
+                this.networkInterfaces = [];
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * HostProfileResourceFacts hostname.
+             * @member {string} hostname
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.hostname = "";
+
+            /**
+             * HostProfileResourceFacts os.
+             * @member {string} os
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.os = "";
+
+            /**
+             * HostProfileResourceFacts kernel.
+             * @member {string} kernel
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.kernel = "";
+
+            /**
+             * HostProfileResourceFacts architecture.
+             * @member {string} architecture
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.architecture = "";
+
+            /**
+             * HostProfileResourceFacts cpuCount.
+             * @member {number} cpuCount
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.cpuCount = 0;
+
+            /**
+             * HostProfileResourceFacts memoryTotalBytes.
+             * @member {Long} memoryTotalBytes
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.memoryTotalBytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * HostProfileResourceFacts filesystems.
+             * @member {Array.<enoki.v1.IFilesystemProfile>} filesystems
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.filesystems = $util.emptyArray;
+
+            /**
+             * HostProfileResourceFacts networkInterfaces.
+             * @member {Array.<enoki.v1.INetworkInterfaceProfile>} networkInterfaces
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.networkInterfaces = $util.emptyArray;
+
+            /**
+             * HostProfileResourceFacts cpuModel.
+             * @member {string} cpuModel
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.cpuModel = "";
+
+            /**
+             * HostProfileResourceFacts processCount.
+             * @member {number} processCount
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.processCount = 0;
+
+            /**
+             * HostProfileResourceFacts threadCount.
+             * @member {number} threadCount
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.threadCount = 0;
+
+            /**
+             * HostProfileResourceFacts cpuCacheL3Bytes.
+             * @member {Long} cpuCacheL3Bytes
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.cpuCacheL3Bytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * HostProfileResourceFacts cpuBaseFrequencyMhz.
+             * @member {number} cpuBaseFrequencyMhz
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.cpuBaseFrequencyMhz = 0;
+
+            /**
+             * HostProfileResourceFacts cpuSocketCount.
+             * @member {number} cpuSocketCount
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.cpuSocketCount = 0;
+
+            /**
+             * HostProfileResourceFacts cpuPhysicalCount.
+             * @member {number} cpuPhysicalCount
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             */
+            HostProfileResourceFacts.prototype.cpuPhysicalCount = 0;
+
+            /**
+             * Creates a new HostProfileResourceFacts instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {enoki.v1.IHostProfileResourceFacts=} [properties] Properties to set
+             * @returns {enoki.v1.HostProfileResourceFacts} HostProfileResourceFacts instance
+             */
+            HostProfileResourceFacts.create = function create(properties) {
+                return new HostProfileResourceFacts(properties);
+            };
+
+            /**
+             * Encodes the specified HostProfileResourceFacts message. Does not implicitly {@link enoki.v1.HostProfileResourceFacts.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {enoki.v1.IHostProfileResourceFacts} message HostProfileResourceFacts message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            HostProfileResourceFacts.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.hostname);
+                if (message.os != null && Object.hasOwnProperty.call(message, "os"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.os);
+                if (message.kernel != null && Object.hasOwnProperty.call(message, "kernel"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.kernel);
+                if (message.architecture != null && Object.hasOwnProperty.call(message, "architecture"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.architecture);
+                if (message.cpuCount != null && Object.hasOwnProperty.call(message, "cpuCount"))
+                    writer.uint32(/* id 5, wireType 0 =*/40).uint32(message.cpuCount);
+                if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
+                    writer.uint32(/* id 6, wireType 0 =*/48).uint64(message.memoryTotalBytes);
+                if (message.filesystems != null && message.filesystems.length)
+                    for (let i = 0; i < message.filesystems.length; ++i)
+                        $root.enoki.v1.FilesystemProfile.encode(message.filesystems[i], writer.uint32(/* id 7, wireType 2 =*/58).fork(), q + 1).ldelim();
+                if (message.networkInterfaces != null && message.networkInterfaces.length)
+                    for (let i = 0; i < message.networkInterfaces.length; ++i)
+                        $root.enoki.v1.NetworkInterfaceProfile.encode(message.networkInterfaces[i], writer.uint32(/* id 8, wireType 2 =*/66).fork(), q + 1).ldelim();
+                if (message.cpuModel != null && Object.hasOwnProperty.call(message, "cpuModel"))
+                    writer.uint32(/* id 9, wireType 2 =*/74).string(message.cpuModel);
+                if (message.processCount != null && Object.hasOwnProperty.call(message, "processCount"))
+                    writer.uint32(/* id 10, wireType 0 =*/80).uint32(message.processCount);
+                if (message.threadCount != null && Object.hasOwnProperty.call(message, "threadCount"))
+                    writer.uint32(/* id 11, wireType 0 =*/88).uint32(message.threadCount);
+                if (message.cpuCacheL3Bytes != null && Object.hasOwnProperty.call(message, "cpuCacheL3Bytes"))
+                    writer.uint32(/* id 12, wireType 0 =*/96).uint64(message.cpuCacheL3Bytes);
+                if (message.cpuBaseFrequencyMhz != null && Object.hasOwnProperty.call(message, "cpuBaseFrequencyMhz"))
+                    writer.uint32(/* id 13, wireType 0 =*/104).uint32(message.cpuBaseFrequencyMhz);
+                if (message.cpuSocketCount != null && Object.hasOwnProperty.call(message, "cpuSocketCount"))
+                    writer.uint32(/* id 14, wireType 0 =*/112).uint32(message.cpuSocketCount);
+                if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
+                    writer.uint32(/* id 15, wireType 0 =*/120).uint32(message.cpuPhysicalCount);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified HostProfileResourceFacts message, length delimited. Does not implicitly {@link enoki.v1.HostProfileResourceFacts.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {enoki.v1.IHostProfileResourceFacts} message HostProfileResourceFacts message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            HostProfileResourceFacts.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a HostProfileResourceFacts message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.HostProfileResourceFacts} HostProfileResourceFacts
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            HostProfileResourceFacts.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.HostProfileResourceFacts();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.hostname = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.os = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.kernel = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.architecture = reader.string();
+                            break;
+                        }
+                    case 5: {
+                            message.cpuCount = reader.uint32();
+                            break;
+                        }
+                    case 6: {
+                            message.memoryTotalBytes = reader.uint64();
+                            break;
+                        }
+                    case 7: {
+                            if (!(message.filesystems && message.filesystems.length))
+                                message.filesystems = [];
+                            message.filesystems.push($root.enoki.v1.FilesystemProfile.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 8: {
+                            if (!(message.networkInterfaces && message.networkInterfaces.length))
+                                message.networkInterfaces = [];
+                            message.networkInterfaces.push($root.enoki.v1.NetworkInterfaceProfile.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 9: {
+                            message.cpuModel = reader.string();
+                            break;
+                        }
+                    case 10: {
+                            message.processCount = reader.uint32();
+                            break;
+                        }
+                    case 11: {
+                            message.threadCount = reader.uint32();
+                            break;
+                        }
+                    case 12: {
+                            message.cpuCacheL3Bytes = reader.uint64();
+                            break;
+                        }
+                    case 13: {
+                            message.cpuBaseFrequencyMhz = reader.uint32();
+                            break;
+                        }
+                    case 14: {
+                            message.cpuSocketCount = reader.uint32();
+                            break;
+                        }
+                    case 15: {
+                            message.cpuPhysicalCount = reader.uint32();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a HostProfileResourceFacts message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.HostProfileResourceFacts} HostProfileResourceFacts
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            HostProfileResourceFacts.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a HostProfileResourceFacts message.
+             * @function verify
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            HostProfileResourceFacts.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
+                    if (!$util.isString(message.hostname))
+                        return "hostname: string expected";
+                if (message.os != null && Object.hasOwnProperty.call(message, "os"))
+                    if (!$util.isString(message.os))
+                        return "os: string expected";
+                if (message.kernel != null && Object.hasOwnProperty.call(message, "kernel"))
+                    if (!$util.isString(message.kernel))
+                        return "kernel: string expected";
+                if (message.architecture != null && Object.hasOwnProperty.call(message, "architecture"))
+                    if (!$util.isString(message.architecture))
+                        return "architecture: string expected";
+                if (message.cpuCount != null && Object.hasOwnProperty.call(message, "cpuCount"))
+                    if (!$util.isInteger(message.cpuCount))
+                        return "cpuCount: integer expected";
+                if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
+                    if (!$util.isInteger(message.memoryTotalBytes) && !(message.memoryTotalBytes && $util.isInteger(message.memoryTotalBytes.low) && $util.isInteger(message.memoryTotalBytes.high)))
+                        return "memoryTotalBytes: integer|Long expected";
+                if (message.filesystems != null && Object.hasOwnProperty.call(message, "filesystems")) {
+                    if (!Array.isArray(message.filesystems))
+                        return "filesystems: array expected";
+                    for (let i = 0; i < message.filesystems.length; ++i) {
+                        let error = $root.enoki.v1.FilesystemProfile.verify(message.filesystems[i], long + 1);
+                        if (error)
+                            return "filesystems." + error;
+                    }
+                }
+                if (message.networkInterfaces != null && Object.hasOwnProperty.call(message, "networkInterfaces")) {
+                    if (!Array.isArray(message.networkInterfaces))
+                        return "networkInterfaces: array expected";
+                    for (let i = 0; i < message.networkInterfaces.length; ++i) {
+                        let error = $root.enoki.v1.NetworkInterfaceProfile.verify(message.networkInterfaces[i], long + 1);
+                        if (error)
+                            return "networkInterfaces." + error;
+                    }
+                }
+                if (message.cpuModel != null && Object.hasOwnProperty.call(message, "cpuModel"))
+                    if (!$util.isString(message.cpuModel))
+                        return "cpuModel: string expected";
+                if (message.processCount != null && Object.hasOwnProperty.call(message, "processCount"))
+                    if (!$util.isInteger(message.processCount))
+                        return "processCount: integer expected";
+                if (message.threadCount != null && Object.hasOwnProperty.call(message, "threadCount"))
+                    if (!$util.isInteger(message.threadCount))
+                        return "threadCount: integer expected";
+                if (message.cpuCacheL3Bytes != null && Object.hasOwnProperty.call(message, "cpuCacheL3Bytes"))
+                    if (!$util.isInteger(message.cpuCacheL3Bytes) && !(message.cpuCacheL3Bytes && $util.isInteger(message.cpuCacheL3Bytes.low) && $util.isInteger(message.cpuCacheL3Bytes.high)))
+                        return "cpuCacheL3Bytes: integer|Long expected";
+                if (message.cpuBaseFrequencyMhz != null && Object.hasOwnProperty.call(message, "cpuBaseFrequencyMhz"))
+                    if (!$util.isInteger(message.cpuBaseFrequencyMhz))
+                        return "cpuBaseFrequencyMhz: integer expected";
+                if (message.cpuSocketCount != null && Object.hasOwnProperty.call(message, "cpuSocketCount"))
+                    if (!$util.isInteger(message.cpuSocketCount))
+                        return "cpuSocketCount: integer expected";
+                if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
+                    if (!$util.isInteger(message.cpuPhysicalCount))
+                        return "cpuPhysicalCount: integer expected";
+                return null;
+            };
+
+            /**
+             * Creates a HostProfileResourceFacts message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.HostProfileResourceFacts} HostProfileResourceFacts
+             */
+            HostProfileResourceFacts.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.HostProfileResourceFacts)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.HostProfileResourceFacts: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.HostProfileResourceFacts();
+                if (object.hostname != null)
+                    message.hostname = String(object.hostname);
+                if (object.os != null)
+                    message.os = String(object.os);
+                if (object.kernel != null)
+                    message.kernel = String(object.kernel);
+                if (object.architecture != null)
+                    message.architecture = String(object.architecture);
+                if (object.cpuCount != null)
+                    message.cpuCount = object.cpuCount >>> 0;
+                if (object.memoryTotalBytes != null)
+                    if ($util.Long)
+                        message.memoryTotalBytes = $util.Long.fromValue(object.memoryTotalBytes, true);
+                    else if (typeof object.memoryTotalBytes === "string")
+                        message.memoryTotalBytes = parseInt(object.memoryTotalBytes, 10);
+                    else if (typeof object.memoryTotalBytes === "number")
+                        message.memoryTotalBytes = object.memoryTotalBytes;
+                    else if (typeof object.memoryTotalBytes === "object")
+                        message.memoryTotalBytes = new $util.LongBits(object.memoryTotalBytes.low >>> 0, object.memoryTotalBytes.high >>> 0).toNumber(true);
+                if (object.filesystems) {
+                    if (!Array.isArray(object.filesystems))
+                        throw TypeError(".enoki.v1.HostProfileResourceFacts.filesystems: array expected");
+                    message.filesystems = [];
+                    for (let i = 0; i < object.filesystems.length; ++i) {
+                        if (!$util.isObject(object.filesystems[i]))
+                            throw TypeError(".enoki.v1.HostProfileResourceFacts.filesystems: object expected");
+                        message.filesystems[i] = $root.enoki.v1.FilesystemProfile.fromObject(object.filesystems[i], long + 1);
+                    }
+                }
+                if (object.networkInterfaces) {
+                    if (!Array.isArray(object.networkInterfaces))
+                        throw TypeError(".enoki.v1.HostProfileResourceFacts.networkInterfaces: array expected");
+                    message.networkInterfaces = [];
+                    for (let i = 0; i < object.networkInterfaces.length; ++i) {
+                        if (!$util.isObject(object.networkInterfaces[i]))
+                            throw TypeError(".enoki.v1.HostProfileResourceFacts.networkInterfaces: object expected");
+                        message.networkInterfaces[i] = $root.enoki.v1.NetworkInterfaceProfile.fromObject(object.networkInterfaces[i], long + 1);
+                    }
+                }
+                if (object.cpuModel != null)
+                    message.cpuModel = String(object.cpuModel);
+                if (object.processCount != null)
+                    message.processCount = object.processCount >>> 0;
+                if (object.threadCount != null)
+                    message.threadCount = object.threadCount >>> 0;
+                if (object.cpuCacheL3Bytes != null)
+                    if ($util.Long)
+                        message.cpuCacheL3Bytes = $util.Long.fromValue(object.cpuCacheL3Bytes, true);
+                    else if (typeof object.cpuCacheL3Bytes === "string")
+                        message.cpuCacheL3Bytes = parseInt(object.cpuCacheL3Bytes, 10);
+                    else if (typeof object.cpuCacheL3Bytes === "number")
+                        message.cpuCacheL3Bytes = object.cpuCacheL3Bytes;
+                    else if (typeof object.cpuCacheL3Bytes === "object")
+                        message.cpuCacheL3Bytes = new $util.LongBits(object.cpuCacheL3Bytes.low >>> 0, object.cpuCacheL3Bytes.high >>> 0).toNumber(true);
+                if (object.cpuBaseFrequencyMhz != null)
+                    message.cpuBaseFrequencyMhz = object.cpuBaseFrequencyMhz >>> 0;
+                if (object.cpuSocketCount != null)
+                    message.cpuSocketCount = object.cpuSocketCount >>> 0;
+                if (object.cpuPhysicalCount != null)
+                    message.cpuPhysicalCount = object.cpuPhysicalCount >>> 0;
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a HostProfileResourceFacts message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {enoki.v1.HostProfileResourceFacts} message HostProfileResourceFacts
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            HostProfileResourceFacts.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.arrays || options.defaults) {
+                    object.filesystems = [];
+                    object.networkInterfaces = [];
+                }
+                if (options.defaults) {
+                    object.hostname = "";
+                    object.os = "";
+                    object.kernel = "";
+                    object.architecture = "";
+                    object.cpuCount = 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.memoryTotalBytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.memoryTotalBytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    object.cpuModel = "";
+                    object.processCount = 0;
+                    object.threadCount = 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.cpuCacheL3Bytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.cpuCacheL3Bytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    object.cpuBaseFrequencyMhz = 0;
+                    object.cpuSocketCount = 0;
+                    object.cpuPhysicalCount = 0;
+                }
+                if (message.hostname != null && Object.hasOwnProperty.call(message, "hostname"))
+                    object.hostname = message.hostname;
+                if (message.os != null && Object.hasOwnProperty.call(message, "os"))
+                    object.os = message.os;
+                if (message.kernel != null && Object.hasOwnProperty.call(message, "kernel"))
+                    object.kernel = message.kernel;
+                if (message.architecture != null && Object.hasOwnProperty.call(message, "architecture"))
+                    object.architecture = message.architecture;
+                if (message.cpuCount != null && Object.hasOwnProperty.call(message, "cpuCount"))
+                    object.cpuCount = message.cpuCount;
+                if (message.memoryTotalBytes != null && Object.hasOwnProperty.call(message, "memoryTotalBytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.memoryTotalBytes = typeof message.memoryTotalBytes === "number" ? BigInt(message.memoryTotalBytes) : $util.Long.fromBits(message.memoryTotalBytes.low >>> 0, message.memoryTotalBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.memoryTotalBytes === "number")
+                        object.memoryTotalBytes = options.longs === String ? String(message.memoryTotalBytes) : message.memoryTotalBytes;
+                    else
+                        object.memoryTotalBytes = options.longs === String ? $util.Long.prototype.toString.call(message.memoryTotalBytes) : options.longs === Number ? new $util.LongBits(message.memoryTotalBytes.low >>> 0, message.memoryTotalBytes.high >>> 0).toNumber(true) : message.memoryTotalBytes;
+                if (message.filesystems && message.filesystems.length) {
+                    object.filesystems = [];
+                    for (let j = 0; j < message.filesystems.length; ++j)
+                        object.filesystems[j] = $root.enoki.v1.FilesystemProfile.toObject(message.filesystems[j], options, q + 1);
+                }
+                if (message.networkInterfaces && message.networkInterfaces.length) {
+                    object.networkInterfaces = [];
+                    for (let j = 0; j < message.networkInterfaces.length; ++j)
+                        object.networkInterfaces[j] = $root.enoki.v1.NetworkInterfaceProfile.toObject(message.networkInterfaces[j], options, q + 1);
+                }
+                if (message.cpuModel != null && Object.hasOwnProperty.call(message, "cpuModel"))
+                    object.cpuModel = message.cpuModel;
+                if (message.processCount != null && Object.hasOwnProperty.call(message, "processCount"))
+                    object.processCount = message.processCount;
+                if (message.threadCount != null && Object.hasOwnProperty.call(message, "threadCount"))
+                    object.threadCount = message.threadCount;
+                if (message.cpuCacheL3Bytes != null && Object.hasOwnProperty.call(message, "cpuCacheL3Bytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.cpuCacheL3Bytes = typeof message.cpuCacheL3Bytes === "number" ? BigInt(message.cpuCacheL3Bytes) : $util.Long.fromBits(message.cpuCacheL3Bytes.low >>> 0, message.cpuCacheL3Bytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.cpuCacheL3Bytes === "number")
+                        object.cpuCacheL3Bytes = options.longs === String ? String(message.cpuCacheL3Bytes) : message.cpuCacheL3Bytes;
+                    else
+                        object.cpuCacheL3Bytes = options.longs === String ? $util.Long.prototype.toString.call(message.cpuCacheL3Bytes) : options.longs === Number ? new $util.LongBits(message.cpuCacheL3Bytes.low >>> 0, message.cpuCacheL3Bytes.high >>> 0).toNumber(true) : message.cpuCacheL3Bytes;
+                if (message.cpuBaseFrequencyMhz != null && Object.hasOwnProperty.call(message, "cpuBaseFrequencyMhz"))
+                    object.cpuBaseFrequencyMhz = message.cpuBaseFrequencyMhz;
+                if (message.cpuSocketCount != null && Object.hasOwnProperty.call(message, "cpuSocketCount"))
+                    object.cpuSocketCount = message.cpuSocketCount;
+                if (message.cpuPhysicalCount != null && Object.hasOwnProperty.call(message, "cpuPhysicalCount"))
+                    object.cpuPhysicalCount = message.cpuPhysicalCount;
+                return object;
+            };
+
+            /**
+             * Converts this HostProfileResourceFacts to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            HostProfileResourceFacts.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for HostProfileResourceFacts
+             * @function getTypeUrl
+             * @memberof enoki.v1.HostProfileResourceFacts
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            HostProfileResourceFacts.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.HostProfileResourceFacts";
+            };
+
+            return HostProfileResourceFacts;
         })();
 
         v1.Snapshot = (function() {
@@ -6814,6 +7486,7 @@ export const enoki = $root.enoki = (() => {
              * @property {number|null} [batteryPercent] MetricSample batteryPercent
              * @property {string|null} [batteryState] MetricSample batteryState
              * @property {Array.<enoki.v1.IDiskHealthMetric>|null} [diskHealth] MetricSample diskHealth
+             * @property {Array.<enoki.v1.ICollectorOutcome>|null} [collectorOutcomes] MetricSample collectorOutcomes
              */
 
             /**
@@ -6829,6 +7502,7 @@ export const enoki = $root.enoki = (() => {
                 this.networkInterfaces = [];
                 this.cpuCores = [];
                 this.diskHealth = [];
+                this.collectorOutcomes = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -7027,6 +7701,14 @@ export const enoki = $root.enoki = (() => {
              */
             MetricSample.prototype.diskHealth = $util.emptyArray;
 
+            /**
+             * MetricSample collectorOutcomes.
+             * @member {Array.<enoki.v1.ICollectorOutcome>} collectorOutcomes
+             * @memberof enoki.v1.MetricSample
+             * @instance
+             */
+            MetricSample.prototype.collectorOutcomes = $util.emptyArray;
+
             // OneOf field names bound to virtual getters and setters
             let $oneOfFields;
 
@@ -7218,6 +7900,9 @@ export const enoki = $root.enoki = (() => {
                 if (message.diskHealth != null && message.diskHealth.length)
                     for (let i = 0; i < message.diskHealth.length; ++i)
                         $root.enoki.v1.DiskHealthMetric.encode(message.diskHealth[i], writer.uint32(/* id 24, wireType 2 =*/194).fork(), q + 1).ldelim();
+                if (message.collectorOutcomes != null && message.collectorOutcomes.length)
+                    for (let i = 0; i < message.collectorOutcomes.length; ++i)
+                        $root.enoki.v1.CollectorOutcome.encode(message.collectorOutcomes[i], writer.uint32(/* id 25, wireType 2 =*/202).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -7360,6 +8045,12 @@ export const enoki = $root.enoki = (() => {
                             if (!(message.diskHealth && message.diskHealth.length))
                                 message.diskHealth = [];
                             message.diskHealth.push($root.enoki.v1.DiskHealthMetric.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 25: {
+                            if (!(message.collectorOutcomes && message.collectorOutcomes.length))
+                                message.collectorOutcomes = [];
+                            message.collectorOutcomes.push($root.enoki.v1.CollectorOutcome.decode(reader, reader.uint32(), undefined, long + 1));
                             break;
                         }
                     default:
@@ -7534,6 +8225,15 @@ export const enoki = $root.enoki = (() => {
                             return "diskHealth." + error;
                     }
                 }
+                if (message.collectorOutcomes != null && Object.hasOwnProperty.call(message, "collectorOutcomes")) {
+                    if (!Array.isArray(message.collectorOutcomes))
+                        return "collectorOutcomes: array expected";
+                    for (let i = 0; i < message.collectorOutcomes.length; ++i) {
+                        let error = $root.enoki.v1.CollectorOutcome.verify(message.collectorOutcomes[i], long + 1);
+                        if (error)
+                            return "collectorOutcomes." + error;
+                    }
+                }
                 return null;
             };
 
@@ -7691,6 +8391,16 @@ export const enoki = $root.enoki = (() => {
                         message.diskHealth[i] = $root.enoki.v1.DiskHealthMetric.fromObject(object.diskHealth[i], long + 1);
                     }
                 }
+                if (object.collectorOutcomes) {
+                    if (!Array.isArray(object.collectorOutcomes))
+                        throw TypeError(".enoki.v1.MetricSample.collectorOutcomes: array expected");
+                    message.collectorOutcomes = [];
+                    for (let i = 0; i < object.collectorOutcomes.length; ++i) {
+                        if (!$util.isObject(object.collectorOutcomes[i]))
+                            throw TypeError(".enoki.v1.MetricSample.collectorOutcomes: object expected");
+                        message.collectorOutcomes[i] = $root.enoki.v1.CollectorOutcome.fromObject(object.collectorOutcomes[i], long + 1);
+                    }
+                }
                 return message;
             };
 
@@ -7716,6 +8426,7 @@ export const enoki = $root.enoki = (() => {
                     object.networkInterfaces = [];
                     object.cpuCores = [];
                     object.diskHealth = [];
+                    object.collectorOutcomes = [];
                 }
                 if (options.defaults) {
                     if ($util.Long) {
@@ -7883,6 +8594,11 @@ export const enoki = $root.enoki = (() => {
                     for (let j = 0; j < message.diskHealth.length; ++j)
                         object.diskHealth[j] = $root.enoki.v1.DiskHealthMetric.toObject(message.diskHealth[j], options, q + 1);
                 }
+                if (message.collectorOutcomes && message.collectorOutcomes.length) {
+                    object.collectorOutcomes = [];
+                    for (let j = 0; j < message.collectorOutcomes.length; ++j)
+                        object.collectorOutcomes[j] = $root.enoki.v1.CollectorOutcome.toObject(message.collectorOutcomes[j], options, q + 1);
+                }
                 return object;
             };
 
@@ -7913,6 +8629,719 @@ export const enoki = $root.enoki = (() => {
             };
 
             return MetricSample;
+        })();
+
+        v1.CollectorOutcome = (function() {
+
+            /**
+             * Properties of a CollectorOutcome.
+             * @memberof enoki.v1
+             * @interface ICollectorOutcome
+             * @property {string|null} [collectorId] CollectorOutcome collectorId
+             * @property {enoki.v1.CollectorOutcomeState|null} [state] CollectorOutcome state
+             * @property {enoki.v1.ICollectorFailure|null} [failure] CollectorOutcome failure
+             */
+
+            /**
+             * Constructs a new CollectorOutcome.
+             * @memberof enoki.v1
+             * @classdesc Represents a CollectorOutcome.
+             * @implements ICollectorOutcome
+             * @constructor
+             * @param {enoki.v1.ICollectorOutcome=} [properties] Properties to set
+             */
+            function CollectorOutcome(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * CollectorOutcome collectorId.
+             * @member {string} collectorId
+             * @memberof enoki.v1.CollectorOutcome
+             * @instance
+             */
+            CollectorOutcome.prototype.collectorId = "";
+
+            /**
+             * CollectorOutcome state.
+             * @member {enoki.v1.CollectorOutcomeState} state
+             * @memberof enoki.v1.CollectorOutcome
+             * @instance
+             */
+            CollectorOutcome.prototype.state = 0;
+
+            /**
+             * CollectorOutcome failure.
+             * @member {enoki.v1.ICollectorFailure|null|undefined} failure
+             * @memberof enoki.v1.CollectorOutcome
+             * @instance
+             */
+            CollectorOutcome.prototype.failure = null;
+
+            /**
+             * Creates a new CollectorOutcome instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {enoki.v1.ICollectorOutcome=} [properties] Properties to set
+             * @returns {enoki.v1.CollectorOutcome} CollectorOutcome instance
+             */
+            CollectorOutcome.create = function create(properties) {
+                return new CollectorOutcome(properties);
+            };
+
+            /**
+             * Encodes the specified CollectorOutcome message. Does not implicitly {@link enoki.v1.CollectorOutcome.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {enoki.v1.ICollectorOutcome} message CollectorOutcome message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorOutcome.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.collectorId != null && Object.hasOwnProperty.call(message, "collectorId"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.collectorId);
+                if (message.state != null && Object.hasOwnProperty.call(message, "state"))
+                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.state);
+                if (message.failure != null && Object.hasOwnProperty.call(message, "failure"))
+                    $root.enoki.v1.CollectorFailure.encode(message.failure, writer.uint32(/* id 3, wireType 2 =*/26).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified CollectorOutcome message, length delimited. Does not implicitly {@link enoki.v1.CollectorOutcome.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {enoki.v1.ICollectorOutcome} message CollectorOutcome message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorOutcome.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a CollectorOutcome message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.CollectorOutcome} CollectorOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorOutcome.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.CollectorOutcome();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.collectorId = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.state = reader.int32();
+                            break;
+                        }
+                    case 3: {
+                            message.failure = $root.enoki.v1.CollectorFailure.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a CollectorOutcome message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.CollectorOutcome} CollectorOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorOutcome.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a CollectorOutcome message.
+             * @function verify
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            CollectorOutcome.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.collectorId != null && Object.hasOwnProperty.call(message, "collectorId"))
+                    if (!$util.isString(message.collectorId))
+                        return "collectorId: string expected";
+                if (message.state != null && Object.hasOwnProperty.call(message, "state"))
+                    switch (message.state) {
+                    default:
+                        return "state: enum value expected";
+                    case 0:
+                    case 1:
+                    case 2:
+                    case 3:
+                        break;
+                    }
+                if (message.failure != null && Object.hasOwnProperty.call(message, "failure")) {
+                    let error = $root.enoki.v1.CollectorFailure.verify(message.failure, long + 1);
+                    if (error)
+                        return "failure." + error;
+                }
+                return null;
+            };
+
+            /**
+             * Creates a CollectorOutcome message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.CollectorOutcome} CollectorOutcome
+             */
+            CollectorOutcome.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.CollectorOutcome)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.CollectorOutcome: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.CollectorOutcome();
+                if (object.collectorId != null)
+                    message.collectorId = String(object.collectorId);
+                switch (object.state) {
+                default:
+                    if (typeof object.state === "number") {
+                        message.state = object.state;
+                        break;
+                    }
+                    break;
+                case "COLLECTOR_OUTCOME_STATE_UNSPECIFIED":
+                case 0:
+                    message.state = 0;
+                    break;
+                case "COLLECTOR_OUTCOME_STATE_PRODUCED":
+                case 1:
+                    message.state = 1;
+                    break;
+                case "COLLECTOR_OUTCOME_STATE_NO_DATA":
+                case 2:
+                    message.state = 2;
+                    break;
+                case "COLLECTOR_OUTCOME_STATE_FAILED":
+                case 3:
+                    message.state = 3;
+                    break;
+                }
+                if (object.failure != null) {
+                    if (!$util.isObject(object.failure))
+                        throw TypeError(".enoki.v1.CollectorOutcome.failure: object expected");
+                    message.failure = $root.enoki.v1.CollectorFailure.fromObject(object.failure, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a CollectorOutcome message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {enoki.v1.CollectorOutcome} message CollectorOutcome
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            CollectorOutcome.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.collectorId = "";
+                    object.state = options.enums === String ? "COLLECTOR_OUTCOME_STATE_UNSPECIFIED" : 0;
+                    object.failure = null;
+                }
+                if (message.collectorId != null && Object.hasOwnProperty.call(message, "collectorId"))
+                    object.collectorId = message.collectorId;
+                if (message.state != null && Object.hasOwnProperty.call(message, "state"))
+                    object.state = options.enums === String ? $root.enoki.v1.CollectorOutcomeState[message.state] === undefined ? message.state : $root.enoki.v1.CollectorOutcomeState[message.state] : message.state;
+                if (message.failure != null && Object.hasOwnProperty.call(message, "failure"))
+                    object.failure = $root.enoki.v1.CollectorFailure.toObject(message.failure, options, q + 1);
+                return object;
+            };
+
+            /**
+             * Converts this CollectorOutcome to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.CollectorOutcome
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            CollectorOutcome.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for CollectorOutcome
+             * @function getTypeUrl
+             * @memberof enoki.v1.CollectorOutcome
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            CollectorOutcome.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.CollectorOutcome";
+            };
+
+            return CollectorOutcome;
+        })();
+
+        /**
+         * CollectorOutcomeState enum.
+         * @name enoki.v1.CollectorOutcomeState
+         * @enum {number}
+         * @property {number} COLLECTOR_OUTCOME_STATE_UNSPECIFIED=0 COLLECTOR_OUTCOME_STATE_UNSPECIFIED value
+         * @property {number} COLLECTOR_OUTCOME_STATE_PRODUCED=1 COLLECTOR_OUTCOME_STATE_PRODUCED value
+         * @property {number} COLLECTOR_OUTCOME_STATE_NO_DATA=2 COLLECTOR_OUTCOME_STATE_NO_DATA value
+         * @property {number} COLLECTOR_OUTCOME_STATE_FAILED=3 COLLECTOR_OUTCOME_STATE_FAILED value
+         */
+        v1.CollectorOutcomeState = (function() {
+            const valuesById = {}, values = Object.create(valuesById);
+            values[valuesById[0] = "COLLECTOR_OUTCOME_STATE_UNSPECIFIED"] = 0;
+            values[valuesById[1] = "COLLECTOR_OUTCOME_STATE_PRODUCED"] = 1;
+            values[valuesById[2] = "COLLECTOR_OUTCOME_STATE_NO_DATA"] = 2;
+            values[valuesById[3] = "COLLECTOR_OUTCOME_STATE_FAILED"] = 3;
+            return values;
+        })();
+
+        v1.CollectorFailure = (function() {
+
+            /**
+             * Properties of a CollectorFailure.
+             * @memberof enoki.v1
+             * @interface ICollectorFailure
+             * @property {enoki.v1.CollectorFailurePhase|null} [phase] CollectorFailure phase
+             * @property {enoki.v1.CollectorFailureCode|null} [code] CollectorFailure code
+             */
+
+            /**
+             * Constructs a new CollectorFailure.
+             * @memberof enoki.v1
+             * @classdesc Represents a CollectorFailure.
+             * @implements ICollectorFailure
+             * @constructor
+             * @param {enoki.v1.ICollectorFailure=} [properties] Properties to set
+             */
+            function CollectorFailure(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * CollectorFailure phase.
+             * @member {enoki.v1.CollectorFailurePhase} phase
+             * @memberof enoki.v1.CollectorFailure
+             * @instance
+             */
+            CollectorFailure.prototype.phase = 0;
+
+            /**
+             * CollectorFailure code.
+             * @member {enoki.v1.CollectorFailureCode} code
+             * @memberof enoki.v1.CollectorFailure
+             * @instance
+             */
+            CollectorFailure.prototype.code = 0;
+
+            /**
+             * Creates a new CollectorFailure instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {enoki.v1.ICollectorFailure=} [properties] Properties to set
+             * @returns {enoki.v1.CollectorFailure} CollectorFailure instance
+             */
+            CollectorFailure.create = function create(properties) {
+                return new CollectorFailure(properties);
+            };
+
+            /**
+             * Encodes the specified CollectorFailure message. Does not implicitly {@link enoki.v1.CollectorFailure.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {enoki.v1.ICollectorFailure} message CollectorFailure message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorFailure.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.phase != null && Object.hasOwnProperty.call(message, "phase"))
+                    writer.uint32(/* id 1, wireType 0 =*/8).int32(message.phase);
+                if (message.code != null && Object.hasOwnProperty.call(message, "code"))
+                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.code);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified CollectorFailure message, length delimited. Does not implicitly {@link enoki.v1.CollectorFailure.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {enoki.v1.ICollectorFailure} message CollectorFailure message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CollectorFailure.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a CollectorFailure message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.CollectorFailure} CollectorFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorFailure.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.CollectorFailure();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.phase = reader.int32();
+                            break;
+                        }
+                    case 2: {
+                            message.code = reader.int32();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a CollectorFailure message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.CollectorFailure} CollectorFailure
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CollectorFailure.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a CollectorFailure message.
+             * @function verify
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            CollectorFailure.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.phase != null && Object.hasOwnProperty.call(message, "phase"))
+                    switch (message.phase) {
+                    default:
+                        return "phase: enum value expected";
+                    case 0:
+                    case 1:
+                    case 2:
+                        break;
+                    }
+                if (message.code != null && Object.hasOwnProperty.call(message, "code"))
+                    switch (message.code) {
+                    default:
+                        return "code: enum value expected";
+                    case 0:
+                    case 1:
+                    case 2:
+                    case 3:
+                    case 4:
+                    case 5:
+                    case 6:
+                    case 7:
+                    case 8:
+                    case 9:
+                    case 10:
+                        break;
+                    }
+                return null;
+            };
+
+            /**
+             * Creates a CollectorFailure message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.CollectorFailure} CollectorFailure
+             */
+            CollectorFailure.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.CollectorFailure)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.CollectorFailure: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.CollectorFailure();
+                switch (object.phase) {
+                default:
+                    if (typeof object.phase === "number") {
+                        message.phase = object.phase;
+                        break;
+                    }
+                    break;
+                case "COLLECTOR_FAILURE_PHASE_UNSPECIFIED":
+                case 0:
+                    message.phase = 0;
+                    break;
+                case "COLLECTOR_FAILURE_PHASE_RESOURCE":
+                case 1:
+                    message.phase = 1;
+                    break;
+                case "COLLECTOR_FAILURE_PHASE_CALCULATION":
+                case 2:
+                    message.phase = 2;
+                    break;
+                }
+                switch (object.code) {
+                default:
+                    if (typeof object.code === "number") {
+                        message.code = object.code;
+                        break;
+                    }
+                    break;
+                case "COLLECTOR_FAILURE_CODE_UNSPECIFIED":
+                case 0:
+                    message.code = 0;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE":
+                case 1:
+                    message.code = 1;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED":
+                case 2:
+                    message.code = 2;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED":
+                case 3:
+                    message.code = 3;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED":
+                case 4:
+                    message.code = 4;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED":
+                case 5:
+                    message.code = 5;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED":
+                case 6:
+                    message.code = 6;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED":
+                case 7:
+                    message.code = 7;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED":
+                case 8:
+                    message.code = 8;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE":
+                case 9:
+                    message.code = 9;
+                    break;
+                case "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED":
+                case 10:
+                    message.code = 10;
+                    break;
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a CollectorFailure message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {enoki.v1.CollectorFailure} message CollectorFailure
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            CollectorFailure.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.phase = options.enums === String ? "COLLECTOR_FAILURE_PHASE_UNSPECIFIED" : 0;
+                    object.code = options.enums === String ? "COLLECTOR_FAILURE_CODE_UNSPECIFIED" : 0;
+                }
+                if (message.phase != null && Object.hasOwnProperty.call(message, "phase"))
+                    object.phase = options.enums === String ? $root.enoki.v1.CollectorFailurePhase[message.phase] === undefined ? message.phase : $root.enoki.v1.CollectorFailurePhase[message.phase] : message.phase;
+                if (message.code != null && Object.hasOwnProperty.call(message, "code"))
+                    object.code = options.enums === String ? $root.enoki.v1.CollectorFailureCode[message.code] === undefined ? message.code : $root.enoki.v1.CollectorFailureCode[message.code] : message.code;
+                return object;
+            };
+
+            /**
+             * Converts this CollectorFailure to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.CollectorFailure
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            CollectorFailure.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for CollectorFailure
+             * @function getTypeUrl
+             * @memberof enoki.v1.CollectorFailure
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            CollectorFailure.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.CollectorFailure";
+            };
+
+            return CollectorFailure;
+        })();
+
+        /**
+         * CollectorFailurePhase enum.
+         * @name enoki.v1.CollectorFailurePhase
+         * @enum {number}
+         * @property {number} COLLECTOR_FAILURE_PHASE_UNSPECIFIED=0 COLLECTOR_FAILURE_PHASE_UNSPECIFIED value
+         * @property {number} COLLECTOR_FAILURE_PHASE_RESOURCE=1 COLLECTOR_FAILURE_PHASE_RESOURCE value
+         * @property {number} COLLECTOR_FAILURE_PHASE_CALCULATION=2 COLLECTOR_FAILURE_PHASE_CALCULATION value
+         */
+        v1.CollectorFailurePhase = (function() {
+            const valuesById = {}, values = Object.create(valuesById);
+            values[valuesById[0] = "COLLECTOR_FAILURE_PHASE_UNSPECIFIED"] = 0;
+            values[valuesById[1] = "COLLECTOR_FAILURE_PHASE_RESOURCE"] = 1;
+            values[valuesById[2] = "COLLECTOR_FAILURE_PHASE_CALCULATION"] = 2;
+            return values;
+        })();
+
+        /**
+         * CollectorFailureCode enum.
+         * @name enoki.v1.CollectorFailureCode
+         * @enum {number}
+         * @property {number} COLLECTOR_FAILURE_CODE_UNSPECIFIED=0 COLLECTOR_FAILURE_CODE_UNSPECIFIED value
+         * @property {number} COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE=1 COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE value
+         * @property {number} COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED=2 COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED value
+         * @property {number} COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED=3 COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED value
+         * @property {number} COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED=4 COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED value
+         * @property {number} COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED=5 COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED value
+         * @property {number} COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED=6 COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED value
+         * @property {number} COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED=7 COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED value
+         * @property {number} COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED=8 COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED value
+         * @property {number} COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE=9 COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE value
+         * @property {number} COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED=10 COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED value
+         */
+        v1.CollectorFailureCode = (function() {
+            const valuesById = {}, values = Object.create(valuesById);
+            values[valuesById[0] = "COLLECTOR_FAILURE_CODE_UNSPECIFIED"] = 0;
+            values[valuesById[1] = "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE"] = 1;
+            values[valuesById[2] = "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED"] = 2;
+            values[valuesById[3] = "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED"] = 3;
+            values[valuesById[4] = "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED"] = 4;
+            values[valuesById[5] = "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED"] = 5;
+            values[valuesById[6] = "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED"] = 6;
+            values[valuesById[7] = "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED"] = 7;
+            values[valuesById[8] = "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED"] = 8;
+            values[valuesById[9] = "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE"] = 9;
+            values[valuesById[10] = "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED"] = 10;
+            return values;
         })();
 
         v1.CpuCoreMetric = (function() {

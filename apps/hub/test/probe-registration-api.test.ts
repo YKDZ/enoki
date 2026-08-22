@@ -1586,7 +1586,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("keeps an Enrollment pending when registration fails pure Host Profile validation", async () => {
+  it("accepts identity-only registration and keeps readiness pending for Runtime Host Profile", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1601,7 +1601,7 @@ describe("Probe registration API", () => {
     const identity = createTestProbeIdentity();
     const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
 
-    const rejected = await app.request("/api/probe/register", {
+    const registered = await app.request("/api/probe/register", {
       body: RegistrationRequest.encode(
         RegistrationRequest.create({
           enrollmentToken,
@@ -1614,10 +1614,7 @@ describe("Probe registration API", () => {
       method: "POST",
     });
 
-    expect(rejected.status).toBe(400);
-    await expect(rejected.json()).resolves.toEqual({
-      error: "malformed_probe_registration",
-    });
+    expect(registered.status).toBe(200);
     expect(
       database.sqlite
         .prepare(
@@ -1625,19 +1622,16 @@ describe("Probe registration API", () => {
         )
         .get(),
     ).toEqual({
-      hostId: null,
-      status: "pending",
-      usedAtMs: null,
-      verificationDeadlineAtMs: null,
+      hostId: expect.any(Number),
+      status: "verifying",
+      usedAtMs: expect.any(Number),
+      verificationDeadlineAtMs: expect.any(Number),
     });
     expect(
       database.sqlite
         .prepare("select count(*) as count from managed_hosts")
         .get(),
-    ).toEqual({ count: 0 });
-
-    const retry = await registerProbe(app, enrollmentToken);
-    expect(retry.status).toBe(200);
+    ).toEqual({ count: 1 });
 
     database.close();
   });

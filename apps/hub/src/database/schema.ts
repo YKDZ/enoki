@@ -102,6 +102,7 @@ export const hosts = sqliteTable(
     cpuModel: text(),
     memoryTotalBytes: integer(),
     probeVersion: text(),
+    probeAssetBundleVersion: text(),
     connectAddress: text().notNull(),
     connectAddressEdited: integer({
       mode: "boolean",
@@ -368,6 +369,26 @@ export const metricSamples = sqliteTable(
 
 export type MetricSampleRow = typeof metricSamples.$inferSelect;
 export type NewMetricSampleRow = typeof metricSamples.$inferInsert;
+
+export const metricCollectorOutcomes = sqliteTable(
+  "metric_collector_outcomes",
+  {
+    id: integer().primaryKey({ autoIncrement: true }),
+    metricSampleId: integer("metric_sample_id")
+      .notNull()
+      .references(() => metricSamples.id, { onDelete: "cascade" }),
+    collectorId: text("collector_id").notNull(),
+    state: integer().notNull(),
+    failurePhase: integer("failure_phase"),
+    failureCode: integer("failure_code"),
+  },
+  (table) => [
+    uniqueIndex("metric_collector_outcomes_sample_collector_idx").on(
+      table.metricSampleId,
+      table.collectorId,
+    ),
+  ],
+);
 
 export const officialMetricCpu = sqliteTable(
   "official_metric_cpu",

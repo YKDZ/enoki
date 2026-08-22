@@ -1,8 +1,8 @@
 use std::{os::unix::net::UnixListener, thread};
 
 use enoki_probe::observation_runtime::{
-    CpuCountersProvider, CpuCountersPullRequest, CpuCountersResourceResult,
-    ObservationRuntimeServer, UnixObservationRuntimeClient,
+    ObservationRuntimeServer, SystemStateProvider, SystemStatePullRequest,
+    SystemStateResourceResult, UnixObservationRuntimeClient,
 };
 
 #[test]
@@ -50,6 +50,27 @@ fn probe_side_client_gets_a_bounded_cpu_result_over_the_runtime_socket() {
     );
 }
 
+#[test]
+fn probe_gets_the_runtime_cached_host_profile_snapshot_over_the_same_closed_ipc() {
+    let directory = tempfile::tempdir().expect("temporary socket directory");
+    let socket = directory.path().join("runtime.sock");
+    let listener = UnixListener::bind(&socket).expect("runtime socket binds");
+    let server = thread::spawn(move || {
+        let (connection, _) = listener.accept().expect("Probe connects");
+        let mut sleeper = NoopSleeper;
+        ObservationRuntimeServer::new(FixedCpuProvider)
+            .serve_connection_with_sleeper(connection, &mut sleeper)
+            .expect("Runtime returns its cached Snapshot");
+    });
+
+    let result = UnixObservationRuntimeClient::new(&socket, "dev")
+        .request_finalized_window(std::time::Duration::from_secs(5), 1)
+        .expect("Probe receives the finalized Window");
+    server.join().expect("Runtime exits cleanly");
+    let snapshot = result.host_profile.expect("Runtime-produced Snapshot");
+    assert_eq!(snapshot.hostname, "runtime-host");
+}
+
 struct NoopSleeper;
 
 impl enoki_probe::observation_runtime::ObservationRuntimeSleeper for NoopSleeper {
@@ -58,37 +79,48 @@ impl enoki_probe::observation_runtime::ObservationRuntimeSleeper for NoopSleeper
 
 struct FixedCpuProvider;
 
-impl CpuCountersProvider for FixedCpuProvider {
-    fn pull_cpu_counters(
+impl SystemStateProvider for FixedCpuProvider {
+    fn pull_system_state(
         &mut self,
-        _request: CpuCountersPullRequest,
+        _request: SystemStatePullRequest,
     ) -> Result<
-        CpuCountersResourceResult,
-        enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+        SystemStateResourceResult,
+        enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
     > {
-        CpuCountersResourceResult::from_records(
+        SystemStateResourceResult::from_records(
             enoki_probe::metrics::parse_linux_proc_stat_cpu_counters(
                 "cpu  100 0 0 900 0 0 0 0 0 0\ncpu0 100 0 0 900 0 0 0 0 0 0\n",
             )
             .expect("typed CPU counters"),
         )
         .map(|result| {
-            result.with_system_state(
-                Some(enoki_probe::metrics::LoadMetrics {
-                    one: 1.0,
-                    five: 0.5,
-                    fifteen: 0.25,
-                }),
-                Some(enoki_probe::metrics::MemoryMetrics {
-                    cache_bytes: 512,
-                    swap_total_bytes: 1_024,
-                    swap_used_bytes: 256,
-                    total_bytes: 8_192,
-                    used_bytes: 4_096,
-                }),
-                Some(123),
-            )
+            result
+                .with_system_state(
+                    Some(enoki_probe::metrics::LoadMetrics {
+                        one: 1.0,
+                        five: 0.5,
+                        fifteen: 0.25,
+                    }),
+                    Some(enoki_probe::metrics::MemoryMetrics {
+                        cache_bytes: 512,
+                        swap_total_bytes: 1_024,
+                        swap_used_bytes: 256,
+                        total_bytes: 8_192,
+                        used_bytes: 4_096,
+                    }),
+                    Some(123),
+                )
+                .with_host_profile_facts(
+                    enoki_probe::protocol::enoki::v1::HostProfileResourceFacts {
+                        architecture: "x86_64".to_owned(),
+                        cpu_count: 1,
+                        hostname: "runtime-host".to_owned(),
+                        kernel: "6.8.0".to_owned(),
+                        os: "linux".to_owned(),
+                        ..Default::default()
+                    },
+                )
         })
-        .ok_or(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Malformed)
+        .ok_or(enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure::Malformed)
     }
 }

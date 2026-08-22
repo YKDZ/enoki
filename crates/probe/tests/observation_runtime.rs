@@ -1,6 +1,6 @@
 use enoki_probe::observation_runtime::{
-    CPU_COUNTERS_RESOURCE, CpuCountersProvider, CpuCountersResourceResult, ObservationRuntime,
-    ObservationWindowRequest, ResourceAccess, SYSTEM_STATE_RESOURCE, static_collector_registry,
+    ObservationRuntime, ObservationWindowRequest, ResourceAccess, SYSTEM_STATE_RESOURCE,
+    SystemStateProvider, SystemStateResourceResult, static_collector_registry,
 };
 use std::time::Duration;
 
@@ -35,9 +35,9 @@ fn runtime_owns_cpu_window_cadence_and_returns_one_finalized_batch() {
 #[test]
 fn cpu_observation_window_uses_one_fixed_resource_result_and_keeps_delta_state_in_runtime() {
     let descriptor = static_collector_registry()
-        .resource(CPU_COUNTERS_RESOURCE)
+        .resource(SYSTEM_STATE_RESOURCE)
         .expect("CPU counters Resource is build-fixed");
-    assert_eq!(descriptor.access, ResourceAccess::CpuCounters);
+    assert_eq!(descriptor.access, ResourceAccess::SystemState);
     assert_eq!(descriptor.max_results_per_attempt, 1);
     assert!(!descriptor.request_accepts_caller_input);
 
@@ -69,7 +69,7 @@ fn one_immutable_provider_result_populates_load_memory_and_uptime() {
     assert_eq!(descriptor.max_results_per_attempt, 1);
     assert!(!descriptor.request_accepts_caller_input);
 
-    let mut runtime = ObservationRuntime::new(SystemStateProvider { calls: 0 });
+    let mut runtime = ObservationRuntime::new(FixedSystemStateProvider { calls: 0 });
     let sample = runtime
         .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
         .unwrap();
@@ -83,20 +83,20 @@ fn one_immutable_provider_result_populates_load_memory_and_uptime() {
     assert_eq!(runtime.into_provider().calls, 1);
 }
 
-struct SystemStateProvider {
+struct FixedSystemStateProvider {
     calls: usize,
 }
 
-impl CpuCountersProvider for SystemStateProvider {
-    fn pull_cpu_counters(
+impl SystemStateProvider for FixedSystemStateProvider {
+    fn pull_system_state(
         &mut self,
-        _request: enoki_probe::observation_runtime::CpuCountersPullRequest,
+        _request: enoki_probe::observation_runtime::SystemStatePullRequest,
     ) -> Result<
-        CpuCountersResourceResult,
-        enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+        SystemStateResourceResult,
+        enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
     > {
         self.calls += 1;
-        Ok(CpuCountersResourceResult::from_records(
+        Ok(SystemStateResourceResult::from_records(
             enoki_probe::metrics::parse_linux_proc_stat_cpu_counters("cpu 100 0 0 900 0 0 0 0\n")
                 .unwrap(),
         )
@@ -123,31 +123,36 @@ impl CpuCountersProvider for SystemStateProvider {
 fn every_due_attempt_has_its_own_immutable_success_or_typed_outcome() {
     struct MixedProvider {
         attempts: std::collections::VecDeque<
-            Result<&'static str, enoki_probe::observation_runtime::CpuResourceAcquisitionFailure>,
+            Result<
+                &'static str,
+                enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+            >,
         >,
     }
-    impl CpuCountersProvider for MixedProvider {
-        fn pull_cpu_counters(
+    impl SystemStateProvider for MixedProvider {
+        fn pull_system_state(
             &mut self,
-            _request: enoki_probe::observation_runtime::CpuCountersPullRequest,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
         ) -> Result<
-            CpuCountersResourceResult,
-            enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
         > {
             let counters = self
                 .attempts
                 .pop_front()
                 .expect("one result per due attempt")?;
-            CpuCountersResourceResult::from_records(
+            SystemStateResourceResult::from_records(
                 enoki_probe::metrics::parse_linux_proc_stat_cpu_counters(counters).unwrap(),
             )
-            .ok_or(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Malformed)
+            .ok_or(
+                enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure::Malformed,
+            )
         }
     }
     let mut runtime = ObservationRuntime::new(MixedProvider {
         attempts: [
             Ok("cpu 100 0 0 900 0 0 0 0\n"),
-            Err(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Unavailable),
+            Err(enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure::Unavailable),
             Ok("cpu 130 0 0 970 0 0 0 0\n"),
         ]
         .into_iter()
@@ -171,12 +176,65 @@ fn every_due_attempt_has_its_own_immutable_success_or_typed_outcome() {
         [41, 42, 43]
     );
     assert!(result.attempts[0].sample.is_some());
+    assert!(result.attempts[1].cpu_resource_outcome.is_none());
     assert_eq!(
-        result.attempts[1].cpu_resource_outcome,
-        Some(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Unavailable)
+        result.attempts[1]
+            .sample
+            .as_ref()
+            .unwrap()
+            .collector_outcomes
+            .iter()
+            .map(|outcome| outcome.collector_id.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "official.cpu",
+            "official.load",
+            "official.memory",
+            "official.uptime"
+        ]
     );
     assert!(result.attempts[2].sample.is_some());
     assert_eq!(sleeper.sleeps, vec![Duration::from_secs(1); 3]);
+}
+
+#[test]
+fn malformed_host_profile_facts_are_a_typed_collector_failure_not_a_window_failure() {
+    struct Provider;
+    impl SystemStateProvider for Provider {
+        fn pull_system_state(
+            &mut self,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            Ok(SystemStateResourceResult::from_records(
+                enoki_probe::metrics::parse_linux_proc_stat_cpu_counters(
+                    "cpu 100 0 0 900 0 0 0 0\n",
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_host_profile_facts(Default::default()))
+        }
+    }
+    let result = ObservationRuntime::new(Provider).collect_next_window(
+        ObservationWindowRequest::new(Duration::from_secs(1)).unwrap(),
+        &mut RecordingSleeper::default(),
+    );
+
+    assert!(result.host_profile.is_none());
+    assert_eq!(result.attempts.len(), 3);
+    let outcome = result.attempts[0]
+        .sample
+        .as_ref()
+        .unwrap()
+        .collector_outcomes
+        .iter()
+        .find(|outcome| outcome.collector_id == "official.host-profile")
+        .unwrap();
+    assert_eq!(outcome.state, 3);
+    assert_eq!(outcome.failure.as_ref().unwrap().code, 8);
 }
 
 struct RecordingCpuProvider {
@@ -193,22 +251,22 @@ impl RecordingCpuProvider {
     }
 }
 
-impl CpuCountersProvider for RecordingCpuProvider {
-    fn pull_cpu_counters(
+impl SystemStateProvider for RecordingCpuProvider {
+    fn pull_system_state(
         &mut self,
-        _request: enoki_probe::observation_runtime::CpuCountersPullRequest,
+        _request: enoki_probe::observation_runtime::SystemStatePullRequest,
     ) -> Result<
-        CpuCountersResourceResult,
-        enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+        SystemStateResourceResult,
+        enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
     > {
         self.calls += 1;
-        CpuCountersResourceResult::from_records(
+        SystemStateResourceResult::from_records(
             enoki_probe::metrics::parse_linux_proc_stat_cpu_counters(
                 self.results.pop_front().expect("one result per request"),
             )
             .expect("typed CPU counters"),
         )
-        .ok_or(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Malformed)
+        .ok_or(enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure::Malformed)
     }
 }
 

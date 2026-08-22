@@ -66,6 +66,8 @@ message ProbeReportRequest {
   string enrollment_id = 13;
   ObservationWindowFailure observation_window_failure = 14;
   repeated CpuResourceCollectionOutcome cpu_resource_collection_outcomes = 15;
+  // Present on the observation-free sequence-one Boot Report.
+  string probe_asset_bundle_version = 16;
 }
 
 // CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。

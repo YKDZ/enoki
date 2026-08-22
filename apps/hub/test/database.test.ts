@@ -1167,18 +1167,20 @@ function createHost(
   database: ReturnType<typeof initializeHubDatabase>,
   input: { id: number; probeId: string },
 ) {
-  return database.hosts.create({
-    clockSkewDetected: false,
-    connectAddress: "10.0.0.20",
-    createdAtMs: 1_725_000_000_000,
-    displayName: `Host ${input.id}`,
-    displayNameEdited: false,
-    id: input.id,
-    lastClockSkewMs: null,
-    probeConfigurationVersion: "default-v1",
-    probeId: input.probeId,
-    probeSecretHash: `secret-hash-${input.id}`,
-  });
+  database.sqlite.prepare(`insert into managed_hosts (
+    id, probe_id, probe_secret_hash, display_name, display_name_edited,
+    connect_address, created_at_ms, clock_skew_detected, last_clock_skew_ms,
+    probe_configuration_version
+  ) values (?, ?, ?, ?, 0, ?, ?, 0, null, ?)`)
+    .run(
+      input.id,
+      input.probeId,
+      `secret-hash-${input.id}`,
+      `Host ${input.id}`,
+      "10.0.0.20",
+      1_725_000_000_000,
+      "default-v1",
+    );
 }
 
 function migrationHistoryTables(sqlite: {

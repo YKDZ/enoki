@@ -73,7 +73,11 @@ impl ReceivedRootHandoff {
     ) -> Result<T, ActivationError> {
         self.component()?;
         validate_received_role(&mut self.runtime, &self.bundle, "observation-runtime")?;
-        validate_received_role(&mut self.cpu_provider, &self.bundle, "cpu-provider")?;
+        validate_received_role(
+            &mut self.cpu_provider,
+            &self.bundle,
+            "system-state-provider",
+        )?;
         adapter(&mut self.component, &self.enrollment, &self.bundle)
     }
 
@@ -275,12 +279,16 @@ fn receive_root_handoff(
             .map_err(|_| ActivationError::Verification)?;
         let (_, cpu_provider_len) = metadata
             .bundle()
-            .component_receipt("cpu-provider")
+            .component_receipt("system-state-provider")
             .ok_or(ActivationError::Verification)?;
         Handoff::read_cpu_provider_into(input, &mut cpu_provider, cpu_provider_len)?;
         cpu_provider.sync_all().map_err(|_| ActivationError::Io)?;
-        verify_role_component(&mut cpu_provider, metadata.bundle(), "cpu-provider")
-            .map_err(|_| ActivationError::Verification)?;
+        verify_role_component(
+            &mut cpu_provider,
+            metadata.bundle(),
+            "system-state-provider",
+        )
+        .map_err(|_| ActivationError::Verification)?;
         if let Some(receipt) = activator_receipt {
             let (_, acquirer_len) = metadata
                 .bundle()
@@ -755,12 +763,12 @@ mod tests {
         let daily_id = sha256(&daily_pem);
         let component = b"probe";
         let bundle = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"cpu-observation-v1\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"cpu-provider-v1\",\"resourceContract\":\"cpu-counters-v1\",\"role\":\"cpu-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v1\",\"resourceContract\":\"system-state-v1\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":21,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
             sha256(b"a"),
             sha256(b"b"),
             sha256(component),
             sha256(b"runtime"),
-            sha256(b"cpu-provider"),
+            sha256(b"system-state-provider"),
         )
         .into_bytes();
         let delegation = format!(
@@ -798,8 +806,8 @@ mod tests {
                 component.len() as u64,
                 &mut Cursor::new(b"runtime"),
                 7,
-                &mut Cursor::new(b"cpu-provider"),
-                12,
+                &mut Cursor::new(b"system-state-provider"),
+                21,
                 &mut Cursor::new(b"a"),
                 1,
                 &mut stream,
