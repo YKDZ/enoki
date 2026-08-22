@@ -1,5 +1,6 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, notExists, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
+import { alias } from "drizzle-orm/sqlite-core";
 
 import type { ProbeUpgradeRequest } from "../probe/operation.js";
 import {
@@ -19,6 +20,7 @@ export type ProbeOperationRepository = {
   findActiveForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findById: (id: number) => ProbeUpgradeRequest | null;
   findLatestForHost: (hostId: number) => ProbeUpgradeRequest | null;
+  findLatestForHosts: (hostIds: number[]) => Map<number, ProbeUpgradeRequest>;
   updateProbeUpgradeRequest: (
     operation: ProbeUpgradeRequest,
   ) => ProbeUpgradeRequest;
@@ -77,6 +79,52 @@ export function createProbeOperationRepository(
           .get() ?? null;
 
       return row ? rowToProbeUpgradeRequest(row) : null;
+    },
+    findLatestForHosts(hostIds) {
+      if (hostIds.length === 0) {
+        return new Map();
+      }
+
+      const newerOperation = alias(probeOperations, "newer_probe_operation");
+      const rows = database
+        .select()
+        .from(probeOperations)
+        .where(
+          and(
+            inArray(probeOperations.managedHostId, hostIds),
+            notExists(
+              database
+                .select({ id: newerOperation.id })
+                .from(newerOperation)
+                .where(
+                  and(
+                    eq(
+                      newerOperation.managedHostId,
+                      probeOperations.managedHostId,
+                    ),
+                    or(
+                      gt(
+                        newerOperation.updatedAtMs,
+                        probeOperations.updatedAtMs,
+                      ),
+                      and(
+                        eq(
+                          newerOperation.updatedAtMs,
+                          probeOperations.updatedAtMs,
+                        ),
+                        gt(newerOperation.id, probeOperations.id),
+                      ),
+                    ),
+                  ),
+                ),
+            ),
+          ),
+        )
+        .all();
+
+      return new Map(
+        rows.map((row) => [row.managedHostId, rowToProbeUpgradeRequest(row)]),
+      );
     },
     updateProbeUpgradeRequest(operation) {
       if (operation.id === null) {

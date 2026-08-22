@@ -283,99 +283,120 @@ describe("Host detail page", () => {
     expect(html).not.toContain("探针升级");
   });
 
-  it("offers Installer Recovery when Probe Upgrade lacks privilege", async () => {
-    const detail = {
-      appendLiveSample: vi.fn(),
-      applyLiveSummary: vi.fn(),
-      chartRange: computed(() => ({
-        maxMs: 1_725_000_000_000,
-        minMs: 1_725_000_000_000 - 60 * 60 * 1000,
-      })),
-      createProbeUpgradeRequest: vi.fn(),
-      error: ref(""),
-      host: ref({
-        clockSkew: {
-          detected: false,
-          lastDeltaMs: null,
-        },
-        connectAddress: "10.0.0.10",
-        cpu: "2 cores",
-        cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
-        description: "",
-        displayName: "managed-host-01",
-        hostMetadata: {
+  it.each([
+    ["online", false],
+    ["offline", true],
+  ] as const)(
+    "presents manual Probe reinstall safely when the Host is %s",
+    async (hostStatus, canGenerateCommand) => {
+      const detail = {
+        appendLiveSample: vi.fn(),
+        applyLiveSummary: vi.fn(),
+        chartRange: computed(() => ({
+          maxMs: 1_725_000_000_000,
+          minMs: 1_725_000_000_000 - 60 * 60 * 1000,
+        })),
+        createProbeUpgradeRequest: vi.fn(),
+        error: ref(""),
+        host: ref({
+          clockSkew: {
+            detected: false,
+            lastDeltaMs: null,
+          },
           connectAddress: "10.0.0.10",
+          cpu: "2 cores",
+          cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
           description: "",
           displayName: "managed-host-01",
-          observedIp: "203.0.113.10",
-        },
-        id: 1,
-        hostProfile: {
-          ...hostProfile,
-          probeVersion: "0.1.14",
-        },
-        lastReportAtMs: 1_725_000_000_000,
-        latestMetrics: null,
-        memory: "2 GB",
-        probeConfiguration: {
-          configuration: {
-            enabledCollectorIds: [...defaultEnabledCollectorIds],
-            metricsCollectionIntervalSeconds: 5,
+          hostMetadata: {
+            connectAddress: "10.0.0.10",
+            description: "",
+            displayName: "managed-host-01",
+            observedIp: "203.0.113.10",
+          },
+          id: 1,
+          hostProfile: {
+            ...hostProfile,
+            probeVersion: "0.1.14",
+          },
+          lastReportAtMs: 1_725_000_000_000,
+          latestMetrics: null,
+          memory: "2 GB",
+          probeConfiguration: {
+            configuration: {
+              enabledCollectorIds: [...defaultEnabledCollectorIds],
+              metricsCollectionIntervalSeconds: 5,
+              version: "default-v1",
+            },
+            mode: "inherit",
             version: "default-v1",
           },
-          mode: "inherit",
-          version: "default-v1",
-        },
-        probeUpgradeEligibility: {
-          currentProbeAssetSetVersion: "0.1.16",
-          currentProbeVersion: "0.1.14",
-          isUpgradeable: true,
-          nonUpgradeableReason: null,
-        },
-        probeUpgradeStatus: {
-          createdAtMs: 1_725_000_000_000,
-          failure: {
-            code: "insufficient_privilege",
-            message: "sudo denied",
+          probeUpgradeEligibility: {
+            currentProbeAssetSetVersion: "0.1.16",
+            currentProbeVersion: "0.1.14",
+            isUpgradeable: true,
+            nonUpgradeableReason: null,
           },
-          id: 9,
-          state: "failed",
-          targetProbeVersion: "0.1.15",
-          updatedAtMs: 1_725_000_100_000,
-        },
-        probeVersion: "0.1.14",
-        status: "online",
-        system: "linux",
-        warnings: [],
-      }),
-      isEmpty: computed(() => true),
-      isCreatingProbeUpgradeRequest: ref(false),
-      isLoading: ref(false),
-      load: vi.fn(),
-      samples: ref([]),
-      selectedWindow: ref("1h"),
-      switchWindow: vi.fn(),
-    } as unknown as ReturnType<typeof useHostDetail>;
+          probeUpgradeStatus: {
+            acceptedAtMs: null,
+            completedAtMs: 1_725_000_100_000,
+            createdAtMs: 1_725_000_000_000,
+            failure: {
+              recoveryDisposition: "manual_reinstall_required",
+            },
+            id: 9,
+            runningAtMs: null,
+            state: "failed",
+            targetProbeVersion: "0.1.15",
+            updatedAtMs: 1_725_000_100_000,
+          },
+          probeVersion: "0.1.14",
+          status: hostStatus,
+          system: "linux",
+          warnings: [],
+        }),
+        isEmpty: computed(() => true),
+        isCreatingProbeUpgradeRequest: ref(false),
+        isLoading: ref(false),
+        load: vi.fn(),
+        samples: ref([]),
+        selectedWindow: ref("1h"),
+        switchWindow: vi.fn(),
+      } as unknown as ReturnType<typeof useHostDetail>;
 
-    const html = await renderToString(
-      createSSRApp(HostDetailPage, {
-        activeHostConfigurationId: null,
-        activeHostMetadataId: null,
-        deletingHostId: null,
-        detail,
-        hostConfigurationDraft: null,
-        hostConfigurationError: "",
-        hostMetadataDraft: null,
-        hostMetadataError: "",
-        isSavingHostConfiguration: false,
-        isSavingHostMetadata: false,
-      }),
-    );
+      const html = await renderToString(
+        createSSRApp(HostDetailPage, {
+          activeHostConfigurationId: null,
+          activeHostMetadataId: null,
+          deletingHostId: null,
+          detail,
+          hostConfigurationDraft: null,
+          hostConfigurationError: "",
+          hostMetadataDraft: null,
+          hostMetadataError: "",
+          isSavingHostConfiguration: false,
+          isSavingHostMetadata: false,
+        }),
+      );
 
-    expect(html).toContain("探针升级失败");
-    expect(html).toContain("生成新的一次性安装命令");
-    expect(html).not.toContain("Probe Repair");
-    expect(html).not.toContain("探针可升级到 0.1.16");
-    expect(html).not.toContain("探针可升级到 0.1.15");
-  });
+      expect(html).toContain("探针升级失败");
+      expect(html).toContain("需要手动重新安装探针");
+      if (canGenerateCommand) {
+        expect(html).toContain("生成手动重装命令");
+        expect(html).not.toContain("主机状态变为离线后再继续");
+      } else {
+        expect(html).toContain("主机状态变为离线后再继续");
+        expect(html).not.toContain("生成手动重装命令");
+      }
+      expect(html).not.toContain("Probe Repair");
+      expect(html).not.toContain("探针可升级到 0.1.16");
+      expect(html).not.toContain("探针可升级到 0.1.15");
+      expect(
+        html.indexOf('data-testid="host-system-information"'),
+      ).toBeLessThan(html.indexOf('data-testid="probe-upgrade-status"'));
+      expect(html.indexOf('data-testid="probe-upgrade-status"')).toBeLessThan(
+        html.indexOf('data-testid="host-detail-content"'),
+      );
+    },
+  );
 });

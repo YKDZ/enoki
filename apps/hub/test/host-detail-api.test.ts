@@ -726,6 +726,128 @@ describe("Host detail API", () => {
     database.close();
   });
 
+  it("projects current Probe Upgrade problems for every Host with one bounded repository read", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_005_000,
+    });
+    const ownerSession = await loginOwner(app);
+    for (let index = 0; index < 2; index += 1) {
+      const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+      await registerProbe(app, enrollmentToken, { probeVersion: "0.1.0" });
+    }
+    const hostIds = database.hosts
+      .listSummaries()
+      .map((host) => host.id)
+      .sort((left, right) => left - right);
+    const activeOperation = database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: null,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1_725_000_000_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: hostIds[0]!,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "pending",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_000_000,
+    });
+    database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: 1_725_000_000_100,
+      canceledAtMs: null,
+      completedAtMs: 1_725_000_000_300,
+      createdAtMs: 1_725_000_000_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: "private_failure_code",
+      failureMessage:
+        "curl https://recovery.example/private?enrollment_secret=enk_private",
+      hostId: hostIds[1]!,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: 1_725_000_000_200,
+      state: "failed",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_000_300,
+    });
+
+    const repository = database.probeOperations;
+    let batchReads = 0;
+    let singleLatestReads = 0;
+    let requestedHostIds: number[] = [];
+    database.probeOperations = {
+      ...repository,
+      findLatestForHost(hostId) {
+        singleLatestReads += 1;
+        return repository.findLatestForHost(hostId);
+      },
+      findLatestForHosts(ids) {
+        batchReads += 1;
+        requestedHostIds = ids;
+        return repository.findLatestForHosts(ids);
+      },
+    };
+
+    const overviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    const overviewBody = await overviewResponse.json();
+    expect(overviewBody).toEqual({
+      hosts: expect.arrayContaining([
+        expect.objectContaining({
+          id: hostIds[0],
+          probeUpgradeProblem: { status: "in_progress" },
+        }),
+        expect.objectContaining({
+          id: hostIds[1],
+          probeUpgradeProblem: { status: "failed" },
+        }),
+      ]),
+    });
+    expect(batchReads).toBe(1);
+    expect(singleLatestReads).toBe(0);
+    expect(requestedHostIds.toSorted((left, right) => left - right)).toEqual(
+      hostIds,
+    );
+    expect(JSON.stringify(overviewBody)).not.toContain("private_failure_code");
+    expect(JSON.stringify(overviewBody)).not.toContain("curl");
+    expect(JSON.stringify(overviewBody)).not.toContain("recovery.example");
+    expect(JSON.stringify(overviewBody)).not.toContain("enk_private");
+
+    repository.updateProbeUpgradeRequest({
+      ...activeOperation,
+      completedAtMs: 1_725_000_000_400,
+      state: "superseded",
+      supersededAtMs: 1_725_000_000_400,
+      updatedAtMs: 1_725_000_000_400,
+    });
+    const terminalOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    const terminalOverview = (await terminalOverviewResponse.json()) as {
+      hosts: Array<{ id: number; probeUpgradeProblem: unknown }>;
+    };
+    expect(
+      terminalOverview.hosts.find((host) => host.id === hostIds[0])
+        ?.probeUpgradeProblem,
+    ).toBeNull();
+    expect(batchReads).toBe(2);
+    expect(singleLatestReads).toBe(0);
+
+    database.close();
+  });
+
   it("returns latest-known Disk Health from sparse low-frequency Probe reports", async () => {
     const database = await createTemporaryDatabase();
     let nowMs = 1_725_000_000_000;
@@ -1136,6 +1258,19 @@ describe("Host detail API", () => {
       },
     });
 
+    const activeOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    expect(activeOverviewResponse.status).toBe(200);
+    await expect(activeOverviewResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: { status: "in_progress" },
+        }),
+      ],
+    });
+
     const duplicateResponse = await app.request(
       `/api/web/hosts/${hostId}/probe-upgrade-requests`,
       {
@@ -1182,6 +1317,35 @@ describe("Host detail API", () => {
         },
       }),
     });
+
+    for (const state of ["accepted", "running"] as const) {
+      database.sqlite
+        .prepare(
+          "update probe_operations set state = ?, accepted_at_ms = ?, running_at_ms = ?, updated_at_ms = ? where id = ?",
+        )
+        .run(
+          state,
+          1_725_000_000_100,
+          state === "running" ? 1_725_000_000_200 : null,
+          state === "running" ? 1_725_000_000_200 : 1_725_000_000_100,
+          createdBody.probeUpgradeRequest.id,
+        );
+
+      const currentDetailResponse = await app.request(
+        `/api/web/hosts/${hostId}`,
+        { headers: { cookie: ownerSession } },
+      );
+      expect(currentDetailResponse.status).toBe(200);
+      await expect(currentDetailResponse.json()).resolves.toEqual({
+        host: expect.objectContaining({
+          probeUpgradeStatus: expect.objectContaining({
+            id: createdBody.probeUpgradeRequest.id,
+            state,
+          }),
+        }),
+      });
+    }
+
     database.sqlite
       .prepare(
         "update probe_operations set state = 'failed', failure_code = ?, failure_message = ?, completed_at_ms = ?, updated_at_ms = ? where id = (select id from probe_operations where managed_host_id = ? order by id desc limit 1)",
@@ -1201,24 +1365,149 @@ describe("Host detail API", () => {
     });
 
     expect(failedDetailResponse.status).toBe(200);
-    await expect(failedDetailResponse.json()).resolves.toEqual({
+    const failedDetailBody = await failedDetailResponse.json();
+    expect(failedDetailBody).toEqual({
       host: expect.objectContaining({
         probeUpgradeStatus: {
-          acceptedAtMs: null,
+          acceptedAtMs: 1_725_000_000_100,
           completedAtMs: 1_725_000_001_000,
           createdAtMs: 1_725_000_000_000,
           failure: {
-            code: "unsupported_installation",
-            message: "当前安装方式不支持 Probe 升级。",
+            recoveryDisposition: "manual_reinstall_required",
           },
           id: expect.any(Number),
-          runningAtMs: null,
+          runningAtMs: 1_725_000_000_200,
           state: "failed",
           targetProbeVersion: "0.2.0",
           updatedAtMs: 1_725_000_001_000,
         },
       }),
     });
+    expect(JSON.stringify(failedDetailBody)).not.toContain(
+      "当前安装方式不支持 Probe 升级。",
+    );
+    expect(JSON.stringify(failedDetailBody)).not.toContain(
+      "unsupported_installation",
+    );
+
+    const failedOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    const failedOverviewBody = await failedOverviewResponse.json();
+    expect(failedOverviewBody).toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: { status: "failed" },
+        }),
+      ],
+    });
+    expect(JSON.stringify(failedOverviewBody)).not.toContain(
+      "unsupported_installation",
+    );
+    expect(JSON.stringify(failedOverviewBody)).not.toContain(
+      "当前安装方式不支持 Probe 升级。",
+    );
+
+    for (const [failureCode, recoveryDisposition] of [
+      ["accepted_timeout", "retry_probe_upgrade"],
+      ["post_replacement_restart_failure", "probe_repair"],
+      ["unrecognized_failure", "unclassified"],
+    ] as const) {
+      const failureMessage = `private diagnostic for ${failureCode}`;
+      database.sqlite
+        .prepare(
+          "update probe_operations set failure_code = ?, failure_message = ? where id = (select id from probe_operations where managed_host_id = ? order by id desc limit 1)",
+        )
+        .run(failureCode, failureMessage, hostId);
+
+      const classifiedResponse = await app.request(`/api/web/hosts/${hostId}`, {
+        headers: {
+          cookie: ownerSession,
+        },
+      });
+      const classifiedBody = (await classifiedResponse.json()) as {
+        host: {
+          probeUpgradeStatus: {
+            failure: { recoveryDisposition: string };
+          };
+        };
+      };
+
+      expect(classifiedBody.host.probeUpgradeStatus.failure).toEqual({
+        recoveryDisposition,
+      });
+      expect(
+        Object.keys(classifiedBody.host.probeUpgradeStatus.failure),
+      ).toEqual(["recoveryDisposition"]);
+      expect(JSON.stringify(classifiedBody)).not.toContain(failureCode);
+      expect(JSON.stringify(classifiedBody)).not.toContain(failureMessage);
+    }
+
+    const operationHistoryResponse = await app.request(
+      `/api/web/probe-operations/${createdBody.probeUpgradeRequest.id}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(operationHistoryResponse.status).toBe(200);
+    await expect(operationHistoryResponse.json()).resolves.toEqual({
+      probeOperation: expect.objectContaining({
+        failure: { recoveryDisposition: "unclassified" },
+        id: createdBody.probeUpgradeRequest.id,
+        state: "failed",
+      }),
+    });
+
+    database.snapshotCollectors.write({
+      collectorId: "official.host-profile",
+      hostId,
+      payload: {
+        architecture: "x86_64",
+        cpuCount: 2,
+        cpuModel: "Intel(R) Xeon(R) Gold 6252 CPU @ 2.10GHz",
+        filesystems: [],
+        hostname: "managed-host-01",
+        kernel: "6.8.0",
+        memoryTotalBytes: 8_589_934_592,
+        networkInterfaces: [],
+        os: "linux",
+        probeVersion: "v0.2.0",
+      },
+      snapshotHash: "host-profile-repaired-probe-version",
+      updatedAtMs: 1_725_000_002_000,
+    });
+
+    const repairedDetailResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      {
+        headers: {
+          cookie: ownerSession,
+        },
+      },
+    );
+
+    expect(repairedDetailResponse.status).toBe(200);
+    await expect(repairedDetailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: null,
+      }),
+    });
+    const repairedOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    await expect(repairedOverviewResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: null,
+        }),
+      ],
+    });
+    expect(database.probeOperations.findLatestForHost(hostId)).toEqual(
+      expect.objectContaining({
+        failureCode: "unrecognized_failure",
+        state: "failed",
+      }),
+    );
     expect(database.audit.recent(10)).toContainEqual(
       expect.objectContaining({
         action: "probe_upgrade_request.create",
@@ -1395,17 +1684,7 @@ describe("Host detail API", () => {
     expect(detailResponse.status).toBe(200);
     await expect(detailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
-        probeUpgradeStatus: {
-          acceptedAtMs: null,
-          completedAtMs: 1_725_000_001_000,
-          createdAtMs: 1_725_000_001_000,
-          failure: null,
-          id: created.probeUpgradeRequest.id,
-          runningAtMs: 1_725_000_000_500,
-          state: "succeeded",
-          targetProbeVersion: "0.2.0",
-          updatedAtMs: 1_725_000_001_000,
-        },
+        probeUpgradeStatus: null,
       }),
     });
     expect(
@@ -1417,6 +1696,17 @@ describe("Host detail API", () => {
         state: "succeeded",
       }),
     );
+    const overviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    await expect(overviewResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: null,
+        }),
+      ],
+    });
 
     database.close();
   });
@@ -1570,9 +1860,7 @@ describe("Host detail API", () => {
           completedAtMs: 1_725_000_001_001,
           createdAtMs: 1_725_000_000_000,
           failure: {
-            code: "accepted_timeout",
-            message:
-              "Probe accepted the upgrade request but did not start it in time.",
+            recoveryDisposition: "retry_probe_upgrade",
           },
           id: created.probeUpgradeRequest.id,
           runningAtMs: null,
@@ -1605,6 +1893,19 @@ describe("Host detail API", () => {
     const secondCreated = (await secondCreateResponse.json()) as {
       probeUpgradeRequest: { id: number };
     };
+    const newerProblemResponse = await app.request(`/api/web/hosts/${hostId}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(newerProblemResponse.status).toBe(200);
+    await expect(newerProblemResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: null,
+          id: secondCreated.probeUpgradeRequest.id,
+          state: "pending",
+        }),
+      }),
+    });
     database.sqlite
       .prepare(
         "update probe_operations set state = 'running', running_at_ms = ?, updated_at_ms = ? where id = ?",
@@ -1763,6 +2064,25 @@ describe("Host detail API", () => {
         targetProbeVersion: "0.2.0",
         updatedAtMs: 1_725_000_000_000,
       },
+    });
+    const refreshedDetailResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(refreshedDetailResponse.status).toBe(200);
+    await expect(refreshedDetailResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+    const refreshedOverviewResponse = await app.request("/api/web/hosts", {
+      headers: { cookie: ownerSession },
+    });
+    await expect(refreshedOverviewResponse.json()).resolves.toEqual({
+      hosts: [
+        expect.objectContaining({
+          id: hostId,
+          probeUpgradeProblem: null,
+        }),
+      ],
     });
 
     const secondCreateResponse = await app.request(

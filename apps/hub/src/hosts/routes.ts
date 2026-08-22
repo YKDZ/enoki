@@ -37,7 +37,14 @@ import {
   runningTimedOutProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
-import { hostSummaryResponse } from "./api-response.js";
+import {
+  currentProbeUpgradeProblem,
+  probeUpgradeRecoveryDisposition,
+} from "../probe/upgrade-recovery.js";
+import {
+  hostSummaryResponse,
+  probeUpgradeOverviewProblem,
+} from "./api-response.js";
 
 export type HostRouteServices = {
   audit?: AuditRepository;
@@ -136,9 +143,22 @@ export function createHostRoutes(services: HostRouteServices) {
           userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
         });
 
+    const currentOperation = currentProbeUpgradeProblem({
+      operation:
+        succeededOperation ??
+        timedOutOperation ??
+        services.probeOperations?.findLatestForHost(hostId) ??
+        null,
+      reportedProbeVersion: hostProfile?.probeVersion,
+    });
     const response = {
       host: {
-        ...hostSummaryResponse(hostSummary),
+        ...hostSummaryResponse(hostSummary, {
+          probeUpgradeProblem: probeUpgradeOverviewProblem({
+            operation: currentOperation,
+            reportedProbeVersion: hostProfile?.probeVersion,
+          }),
+        }),
         hostMetadata: {
           connectAddress: host.connectAddress,
           description: host.description,
@@ -159,12 +179,7 @@ export function createHostRoutes(services: HostRouteServices) {
             currentProbeAssetSetVersion.nonUpgradeableReason,
           probeVersion: host.probeVersion,
         }),
-        probeUpgradeStatus: probeUpgradeStatus(
-          succeededOperation ??
-            timedOutOperation ??
-            services.probeOperations?.findLatestForHost(hostId) ??
-            null,
-        ),
+        probeUpgradeStatus: probeUpgradeStatus(currentOperation),
         warnings: warningList(host),
       },
     } satisfies HostDetailResponse;
@@ -774,8 +789,9 @@ function probeUpgradeStatus(
     createdAtMs: operation.createdAtMs,
     failure: operation.failureCode
       ? {
-          code: operation.failureCode,
-          message: operation.failureMessage ?? "",
+          recoveryDisposition: probeUpgradeRecoveryDisposition(
+            operation.failureCode,
+          ),
         }
       : null,
     id: requiredOperationId(operation),

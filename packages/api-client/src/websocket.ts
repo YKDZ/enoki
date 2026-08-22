@@ -1,5 +1,6 @@
 import * as v from "valibot";
 
+import type { ProbeUpgradeOverviewProblem } from "./index.js";
 import type {
   CollectorCapabilities,
   CpuCoreMetric,
@@ -53,6 +54,7 @@ export type HostLiveSummary = {
   id: number;
   lastSeenAtMs: number | null;
   latestMetrics: HostLiveSummaryMetricSample | null;
+  probeUpgradeProblem: ProbeUpgradeOverviewProblem;
   status: HostStatus;
   warningFlags: {
     clockSkew: boolean;
@@ -170,6 +172,11 @@ const hostProfileSchema = v.object({
   processCount: v.optional(nullableNumberSchema),
   threadCount: v.optional(nullableNumberSchema),
 });
+const probeUpgradeOverviewProblemSchema = v.nullable(
+  v.object({
+    status: v.picklist(["in_progress", "failed"]),
+  }),
+);
 
 export const webSocketClientMessageSchema = v.variant("type", [
   v.object({
@@ -214,6 +221,7 @@ export const hostLiveSummarySchema = v.object({
       uptimeSeconds: nullableNumberSchema,
     }),
   ),
+  probeUpgradeProblem: probeUpgradeOverviewProblemSchema,
   status: v.picklist(["online", "stale", "offline"]),
   warningFlags: v.object({
     clockSkew: v.boolean(),

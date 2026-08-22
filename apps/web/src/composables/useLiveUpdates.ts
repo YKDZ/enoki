@@ -41,6 +41,7 @@ export function applyHostLiveSummary(
       latestMetrics: summary.latestMetrics
         ? mergeLatestMetrics(host.latestMetrics, summary.latestMetrics)
         : null,
+      probeUpgradeProblem: summary.probeUpgradeProblem,
       status: summary.status,
     };
   });

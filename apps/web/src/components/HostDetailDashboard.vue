@@ -139,101 +139,110 @@ function statusClass(status: string) {
 
 <template>
   <section class="grid gap-4 pb-24">
-    <div class="flex items-start gap-3 border-b pb-4">
-      <div class="flex h-7 shrink-0 items-center">
-        <Server class="size-5" aria-hidden="true" />
-      </div>
-      <div class="grid min-w-0 flex-1 gap-3">
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div class="min-w-0">
-            <div class="flex flex-wrap items-center gap-2">
-              <h2 class="text-xl leading-7 font-semibold wrap-break-word">
-                {{ host.displayName }}
-              </h2>
-              <Badge :class="statusClass(host.status)" variant="outline">
-                {{ hostStatusText(host.status) }}
-              </Badge>
+    <div data-testid="host-detail-heading" class="grid gap-4 border-b pb-4">
+      <div class="flex items-start gap-3">
+        <div class="flex h-7 shrink-0 items-center">
+          <Server class="size-5" aria-hidden="true" />
+        </div>
+        <div class="grid min-w-0 flex-1 gap-3">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <h2 class="text-xl leading-7 font-semibold wrap-break-word">
+                  {{ host.displayName }}
+                </h2>
+                <Badge :class="statusClass(host.status)" variant="outline">
+                  {{ hostStatusText(host.status) }}
+                </Badge>
+              </div>
+            </div>
+
+            <div class="flex shrink-0 items-center gap-2">
+              <slot name="actions" />
+              <Select
+                :model-value="selectedWindow"
+                @update:model-value="emit('switchMetricsWindow', $event)"
+              >
+                <SelectTrigger class="h-8 w-28">
+                  <SelectValue placeholder="时间范围" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem
+                    v-for="option in windowOptions"
+                    :key="option.value"
+                    :value="option.value"
+                  >
+                    {{ option.label }}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                aria-label="设置"
+                title="配置"
+                @click="emit('openHostSettings', host)"
+              >
+                <Settings class="size-4" aria-hidden="true" />
+                设置
+              </Button>
+              <DeleteHostAlertDialog
+                :deleting-host-id="deletingHostId"
+                :host="host"
+                @delete-host="
+                  (targetHost, mode) => emit('deleteHost', targetHost, mode)
+                "
+              />
             </div>
           </div>
 
-          <div class="flex shrink-0 items-center gap-2">
-            <slot name="actions" />
-            <Select
-              :model-value="selectedWindow"
-              @update:model-value="emit('switchMetricsWindow', $event)"
-            >
-              <SelectTrigger class="h-8 w-28">
-                <SelectValue placeholder="时间范围" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  v-for="option in windowOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <Button
-              variant="outline"
-              size="sm"
-              type="button"
-              aria-label="设置"
-              title="配置"
-              @click="emit('openHostSettings', host)"
-            >
-              <Settings class="size-4" aria-hidden="true" />
-              设置
-            </Button>
-            <DeleteHostAlertDialog
-              :deleting-host-id="deletingHostId"
-              :host="host"
-              @delete-host="
-                (targetHost, mode) => emit('deleteHost', targetHost, mode)
-              "
-            />
-          </div>
-        </div>
-
-        <div
-          v-if="host.description"
-          class="bg-muted/35 text-muted-foreground rounded-md border px-3 py-2 text-sm wrap-break-word whitespace-normal"
-        >
-          {{ host.description }}
-        </div>
-        <div
-          v-if="metadataItems.length"
-          class="text-muted-foreground flex min-w-0 flex-wrap gap-x-6 gap-y-3 text-xs"
-        >
           <div
-            v-for="item in metadataItems"
-            :key="item.label"
-            class="flex min-w-0 items-center gap-2"
+            v-if="host.description"
+            class="bg-muted/35 text-muted-foreground rounded-md border px-3 py-2 text-sm wrap-break-word whitespace-normal"
           >
-            <component
-              :is="item.icon"
-              class="size-3.5 shrink-0"
-              aria-hidden="true"
-            />
-            <span class="shrink-0">{{ item.label }}</span>
-            <span class="text-foreground min-w-0 font-medium wrap-break-word">
-              {{ item.value }}
-            </span>
+            {{ host.description }}
+          </div>
+          <div
+            v-if="metadataItems.length"
+            data-testid="host-system-information"
+            class="text-muted-foreground flex min-w-0 flex-wrap gap-x-6 gap-y-3 text-xs"
+          >
+            <div
+              v-for="item in metadataItems"
+              :key="item.label"
+              class="flex min-w-0 items-center gap-2"
+            >
+              <component
+                :is="item.icon"
+                class="size-3.5 shrink-0"
+                aria-hidden="true"
+              />
+              <span class="shrink-0">{{ item.label }}</span>
+              <span class="text-foreground min-w-0 font-medium wrap-break-word">
+                {{ item.value }}
+              </span>
+            </div>
           </div>
         </div>
       </div>
+
+      <div v-if="$slots['current-problem']" class="w-full empty:hidden">
+        <slot name="current-problem" />
+      </div>
     </div>
 
-    <HostMetricSlotGrid
-      :chart-data="chartData"
-      :chart-start-continuity-gap-ms="chartStartContinuityGapMs"
-      :host="host"
-      :latest-metric="latestMetric"
-      :latest-sample="latestSample"
-      :samples="samples"
-      :x-axis-max-ms="xAxisMaxMs"
-      :x-axis-min-ms="xAxisMinMs"
-    />
+    <div data-testid="host-detail-content">
+      <HostMetricSlotGrid
+        :chart-data="chartData"
+        :chart-start-continuity-gap-ms="chartStartContinuityGapMs"
+        :host="host"
+        :latest-metric="latestMetric"
+        :latest-sample="latestSample"
+        :samples="samples"
+        :x-axis-max-ms="xAxisMaxMs"
+        :x-axis-min-ms="xAxisMinMs"
+      />
+    </div>
   </section>
 </template>

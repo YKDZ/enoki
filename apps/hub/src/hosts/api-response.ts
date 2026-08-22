@@ -1,10 +1,18 @@
-import type { HostSummary as ApiHostSummary } from "@enoki/api-client";
+import type {
+  HostSummary as ApiHostSummary,
+  ProbeUpgradeOverviewProblem,
+} from "@enoki/api-client";
 
 import type { HostSummary as DatabaseHostSummary } from "../database/hosts.js";
+import type { ProbeUpgradeRequest } from "../probe/operation.js";
+import { currentProbeUpgradeProblem } from "../probe/upgrade-recovery.js";
 
 export function hostSummaryResponse(
   host: DatabaseHostSummary,
-  options: { metricsCollectionIntervalSeconds?: number } = {},
+  options: {
+    metricsCollectionIntervalSeconds?: number;
+    probeUpgradeProblem?: ProbeUpgradeOverviewProblem;
+  } = {},
 ): ApiHostSummary {
   return {
     clockSkew: {
@@ -64,9 +72,25 @@ export function hostSummaryResponse(
       mode: host.probeConfiguration.mode,
       version: host.probeConfiguration.version,
     },
+    probeUpgradeProblem: options.probeUpgradeProblem ?? null,
     probeVersion: host.probeVersion,
     status: host.status,
     system: host.system,
+  };
+}
+
+export function probeUpgradeOverviewProblem(input: {
+  operation: ProbeUpgradeRequest | null;
+  reportedProbeVersion?: string | null;
+}): ProbeUpgradeOverviewProblem {
+  const currentProblem = currentProbeUpgradeProblem(input);
+
+  if (!currentProblem) {
+    return null;
+  }
+
+  return {
+    status: currentProblem.state === "failed" ? "failed" : "in_progress",
   };
 }
 

@@ -896,6 +896,29 @@ describe("WebSocket live updates", () => {
     await sendStartupReport(baseUrl, registration, {
       bootId: "boot-live-summary",
     });
+    database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: null,
+      canceledAtMs: null,
+      completedAtMs: null,
+      createdAtMs: 1_725_000_009_000,
+      currentProbeVersion: "0.1.0",
+      failureCode: null,
+      failureMessage: null,
+      hostId: 1,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: null,
+      state: "pending",
+      supersededAtMs: null,
+      targetProbeVersion: "0.2.0",
+      updatedAtMs: 1_725_000_009_000,
+    });
+    const initialOverviewResponse = await fetch(`${baseUrl}/api/web/hosts`, {
+      headers: { cookie: ownerSession },
+    });
+    const initialOverview = (await initialOverviewResponse.json()) as {
+      hosts: Array<{ probeUpgradeProblem: unknown }>;
+    };
     const summaryMessages = collectWebSocketJson(socket);
     await sendReport(baseUrl, registration, {
       bootId: "boot-live-summary",
@@ -903,7 +926,8 @@ describe("WebSocket live updates", () => {
       sequence: 2,
     });
 
-    await expect(summaryMessages).resolves.toEqual(
+    const receivedSummaries = await summaryMessages;
+    expect(receivedSummaries).toEqual(
       expect.arrayContaining([
         {
           host: {
@@ -942,6 +966,7 @@ describe("WebSocket live updates", () => {
               temperatureCelsius: null,
               uptimeSeconds: 86_400,
             },
+            probeUpgradeProblem: { status: "in_progress" },
             status: "online",
             warningFlags: {
               clockSkew: false,
@@ -950,6 +975,73 @@ describe("WebSocket live updates", () => {
           },
           type: "host_summary",
         },
+      ]),
+    );
+    const activeLiveSummary = receivedSummaries.find(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "host" in message &&
+        (message.host as { probeUpgradeProblem?: unknown })
+          .probeUpgradeProblem !== undefined,
+    ) as { host: { probeUpgradeProblem: unknown } } | undefined;
+    expect(activeLiveSummary?.host.probeUpgradeProblem).toEqual(
+      initialOverview.hosts[0]?.probeUpgradeProblem,
+    );
+    expect(JSON.stringify(receivedSummaries)).not.toContain("failureCode");
+    expect(JSON.stringify(receivedSummaries)).not.toContain("failureMessage");
+
+    const currentOperation = database.probeOperations.findLatestForHost(1);
+    expect(currentOperation).not.toBeNull();
+    database.probeOperations.updateProbeUpgradeRequest({
+      ...currentOperation!,
+      completedAtMs: 1_725_000_009_500,
+      failureCode: "private_failure_code",
+      failureMessage:
+        "curl https://recovery.example/private?enrollment_secret=enk_private",
+      state: "failed",
+      updatedAtMs: 1_725_000_009_500,
+    });
+    const failedSummaryMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+      sequence: 3,
+    });
+    const failedSummaries = await failedSummaryMessages;
+    expect(failedSummaries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          host: expect.objectContaining({
+            probeUpgradeProblem: { status: "failed" },
+          }),
+          type: "host_summary",
+        }),
+      ]),
+    );
+    expect(JSON.stringify(failedSummaries)).not.toContain(
+      "private_failure_code",
+    );
+    expect(JSON.stringify(failedSummaries)).not.toContain("curl");
+    expect(JSON.stringify(failedSummaries)).not.toContain("recovery.example");
+    expect(JSON.stringify(failedSummaries)).not.toContain("enk_private");
+
+    const recoveredSummaryMessages = collectWebSocketJson(socket);
+    await sendReport(baseUrl, registration, {
+      bootId: "boot-live-summary",
+      hostProfile: {
+        ...baselineHostProfile(),
+        probeVersion: "v0.2.0",
+      },
+      sequence: 4,
+    });
+    await expect(recoveredSummaryMessages).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          host: expect.objectContaining({
+            probeUpgradeProblem: null,
+          }),
+          type: "host_summary",
+        }),
       ]),
     );
 

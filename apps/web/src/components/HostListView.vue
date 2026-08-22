@@ -28,6 +28,7 @@ import { hostStatusText } from "@/lib/host-display";
 import { sortHostsForOverview } from "@/lib/ready-host-reveal";
 
 import type { HostSummary } from "../types";
+import HostCardProbeUpgradeProblemBadge from "./HostCardProbeUpgradeProblemBadge.vue";
 
 export type HostListSortKey =
   | "cpu"
@@ -202,6 +203,9 @@ function SortIcon(key: HostListSortKey) {
             <Badge :class="statusClass(host.status)" variant="outline">
               {{ hostStatusText(host.status) }}
             </Badge>
+            <HostCardProbeUpgradeProblemBadge
+              :problem="host.probeUpgradeProblem"
+            />
           </div>
           <p
             v-if="host.description"

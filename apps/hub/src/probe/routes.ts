@@ -33,6 +33,7 @@ import {
   maxEnrollmentRejectionMessageLength,
 } from "../enrollment/lifecycle.js";
 import { hashSecret } from "../enrollment/routes.js";
+import { probeUpgradeOverviewProblem } from "../hosts/api-response.js";
 import {
   broadcastHostReadyHint,
   broadcastHostRemovedHint,
@@ -1538,6 +1539,14 @@ function broadcastHostSummary(
       liveSummaryFromHost(hostSummary, {
         metricsCollectionIntervalSeconds:
           effectiveConfiguration.configuration.metricsCollectionIntervalSeconds,
+        probeUpgradeProblem: probeUpgradeOverviewProblem({
+          operation:
+            services.probeOperations
+              ?.findLatestForHosts([hostId])
+              .get(hostId) ?? null,
+          reportedProbeVersion:
+            services.snapshotCollectors?.hostProfile.read(hostId)?.probeVersion,
+        }),
       }),
     );
   }

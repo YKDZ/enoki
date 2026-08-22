@@ -42,6 +42,7 @@ describe("HTTP API contracts", () => {
         mode: "inherit",
         version: "default-v1",
       },
+      probeUpgradeProblem: null,
       probeVersion: "0.1.0",
       status: "online",
       system: "Linux",

@@ -35,6 +35,7 @@ const host: HostSummary = {
     mode: "inherit",
     version: "default-v1",
   },
+  probeUpgradeProblem: null,
   probeVersion: "0.1.0",
   status: "online",
   system: "linux",
@@ -81,5 +82,19 @@ describe("Host overview card", () => {
     expect(html).toContain('data-enoki-host-id="1"');
     expect(html).toContain("ring-primary");
     expect(html).toContain('tabindex="0"');
+  });
+
+  it("shows the compact active Probe Upgrade problem marker", async () => {
+    const html = await renderToString(
+      createSSRApp(HostCard, {
+        host: {
+          ...host,
+          probeUpgradeProblem: { status: "in_progress" },
+        } as HostSummary,
+      }),
+    );
+
+    expect(html).toContain("探针升级中");
+    expect(html).not.toContain("探针升级失败");
   });
 });

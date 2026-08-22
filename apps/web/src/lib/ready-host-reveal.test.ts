@@ -221,6 +221,7 @@ function host(input: {
     },
     memory: "8 GB",
     probeConfiguration: { mode: "inherit", version: "default-v1" },
+    probeUpgradeProblem: null,
     probeVersion: "dev",
     status: "online",
     system: "Linux",

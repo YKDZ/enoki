@@ -63,10 +63,16 @@ export type HostSummary = {
     mode: "inherit" | "override";
     version: string;
   };
+  probeUpgradeProblem: ProbeUpgradeOverviewProblem;
   probeVersion: string;
   status: HostStatus;
   system: string;
 };
+
+export type ProbeUpgradeOverviewProblem =
+  | { status: "in_progress" }
+  | { status: "failed" }
+  | null;
 
 export type HostsResponse = {
   hosts: HostSummary[];
@@ -189,13 +195,18 @@ export type ProbeUpgradeEligibility = {
     | null;
 };
 
+export type ProbeUpgradeRecoveryDisposition =
+  | "retry_probe_upgrade"
+  | "probe_repair"
+  | "manual_reinstall_required"
+  | "unclassified";
+
 export type ProbeUpgradeStatus = {
   acceptedAtMs: number | null;
   completedAtMs: number | null;
   createdAtMs: number;
   failure: {
-    code: string;
-    message: string;
+    recoveryDisposition: ProbeUpgradeRecoveryDisposition;
   } | null;
   id: number;
   runningAtMs: number | null;

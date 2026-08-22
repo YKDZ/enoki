@@ -1831,6 +1831,7 @@ describe("Host detail data", () => {
         receivedAtMs: 1_725_000_020_000,
         uptimeSeconds: 86_400,
       },
+      probeUpgradeProblem: null,
       status: "online",
       warningFlags: {
         clockSkew: true,

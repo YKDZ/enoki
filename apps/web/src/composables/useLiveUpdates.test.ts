@@ -28,6 +28,7 @@ const existingHost: HostSummary = {
     mode: "inherit",
     version: "default-v1",
   },
+  probeUpgradeProblem: null,
   probeVersion: "0.1.0",
   status: "offline",
   system: "linux",
@@ -87,6 +88,7 @@ describe("live Host summaries", () => {
       id: 2,
       lastSeenAtMs: 1_725_000_010_000,
       latestMetrics: null,
+      probeUpgradeProblem: null,
       status: "online",
       warningFlags: {
         clockSkew: false,
@@ -124,6 +126,7 @@ describe("live Host summaries", () => {
       id: 1,
       lastSeenAtMs: 1_725_000_010_000,
       latestMetrics: null,
+      probeUpgradeProblem: null,
       status: "online",
       warningFlags: {
         clockSkew: false,
@@ -138,6 +141,33 @@ describe("live Host summaries", () => {
           status: 6,
         },
       },
+    });
+    expect(result.needsReload).toBe(false);
+  });
+
+  it("replaces the overview Probe Upgrade problem from the authoritative live summary", () => {
+    const result = applyHostLiveSummary(
+      [
+        {
+          ...existingHost,
+          probeUpgradeProblem: { status: "in_progress" },
+        } as HostSummary,
+      ],
+      {
+        id: 1,
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: null,
+        probeUpgradeProblem: { status: "failed" },
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+    );
+
+    expect(result.hosts[0]?.probeUpgradeProblem).toEqual({
+      status: "failed",
     });
     expect(result.needsReload).toBe(false);
   });
@@ -245,6 +275,7 @@ describe("live Host summaries", () => {
           receivedAtMs: 1_725_000_005_500,
           uptimeSeconds: 10_005,
         },
+        probeUpgradeProblem: null,
         status: "online",
         warningFlags: {
           clockSkew: false,
@@ -295,6 +326,7 @@ describe("live Host summaries", () => {
           id: 2,
           lastSeenAtMs: 1_725_000_010_000,
           latestMetrics: null,
+          probeUpgradeProblem: null,
           status: "online",
           warningFlags: {
             clockSkew: false,

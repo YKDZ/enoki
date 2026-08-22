@@ -1,4 +1,7 @@
-import type { HostProfileSnapshot } from "@enoki/api-client";
+import type {
+  HostProfileSnapshot,
+  ProbeUpgradeOverviewProblem,
+} from "@enoki/api-client";
 import {
   type HostDetailSample,
   type HostLiveSummary,
@@ -168,6 +171,7 @@ export function liveSummaryFromHost(
   host: HostSummary,
   options: {
     metricsCollectionIntervalSeconds: number;
+    probeUpgradeProblem: ProbeUpgradeOverviewProblem;
   },
 ): HostLiveSummary {
   return {
@@ -210,6 +214,7 @@ export function liveSummaryFromHost(
           uptimeSeconds: host.latestMetrics.uptimeSeconds,
         }
       : null,
+    probeUpgradeProblem: options.probeUpgradeProblem,
     status: host.status,
     warningFlags: {
       clockSkew: host.clockSkew.detected,

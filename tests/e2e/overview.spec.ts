@@ -5,6 +5,33 @@ import type { HostSummary } from "../../apps/web/src/types";
 const now = Date.UTC(2026, 5, 22, 12, 0, 0);
 
 test.describe("主页主机列表", () => {
+  test("卡片与列表显示相同升级问题且概览不读取逐主机状态", async ({ page }) => {
+    const hosts = createHosts(2);
+    hosts[0]!.probeUpgradeProblem = { status: "in_progress" };
+    hosts[1]!.probeUpgradeProblem = { status: "failed" };
+    const perHostStateRequests: string[] = [];
+    page.on("request", (request) => {
+      const pathname = new URL(request.url()).pathname;
+      if (
+        /^\/api\/web\/hosts\/\d+/.test(pathname) ||
+        /^\/api\/web\/probe-operations\//.test(pathname)
+      ) {
+        perHostStateRequests.push(pathname);
+      }
+    });
+    await mockAuthenticatedOverview(page, hosts);
+    await setOverviewView(page, "cards");
+
+    await page.goto("/");
+
+    await expect(page.getByText("探针升级中", { exact: true })).toBeVisible();
+    await expect(page.getByText("探针升级失败", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "切换到列表" }).click();
+    await expect(page.getByText("探针升级中", { exact: true })).toBeVisible();
+    await expect(page.getByText("探针升级失败", { exact: true })).toBeVisible();
+    expect(perHostStateRequests).toEqual([]);
+  });
+
   test("列表视图可以翻页并保留页码", async ({ page }) => {
     await mockAuthenticatedOverview(page, createHosts(25));
     await setOverviewView(page, "list");
@@ -158,6 +185,7 @@ function createHost(id: number): HostSummary {
       mode: "inherit",
       version: "default",
     },
+    probeUpgradeProblem: null,
     probeVersion: "0.1.39",
     status: "online",
     system: "Debian GNU/Linux 12",

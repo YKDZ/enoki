@@ -1271,6 +1271,7 @@ function routePath() {
         :is-saving-host-metadata="isSavingHostMetadata"
         @back="navigateToOverview"
         @delete-host="deleteHost"
+        @manual-probe-reinstall="createExistingHostEnrollment"
         @open-host-configuration="openHostConfiguration"
         @open-host-metadata="openHostMetadata"
         @probe-upgrade-requested="trackProbeUpgradeRequest"

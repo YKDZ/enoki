@@ -53,6 +53,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   back: [];
   deleteHost: [host: HostDetail, mode: DeleteHostMode];
+  manualProbeReinstall: [hostId: number];
   openHostConfiguration: [hostId: number];
   openHostMetadata: [host: HostDetail];
   probeUpgradeRequested: [
@@ -247,11 +248,6 @@ function openHostSettings(currentHost: HostDetail) {
     </StateHero>
 
     <div v-else-if="host" class="grid gap-4">
-      <ProbeUpgradeStatusAlert
-        v-if="probeUpgradeStatus"
-        :status="probeUpgradeStatus"
-      />
-
       <Alert
         v-for="warning in visibleWarnings"
         :key="`${warning.code}-${warning.occurredAtMs ?? 0}`"
@@ -296,6 +292,16 @@ function openHostSettings(currentHost: HostDetail) {
         @open-host-settings="openHostSettings"
         @switch-metrics-window="switchMetricsWindow"
       >
+        <template #current-problem>
+          <ProbeUpgradeStatusAlert
+            v-if="probeUpgradeStatus"
+            :manual-reinstall-available="host.status === 'offline'"
+            :status="probeUpgradeStatus"
+            @manual-reinstall="emit('manualProbeReinstall', host.id)"
+            @retry-probe-upgrade="isProbeUpgradeDialogOpen = true"
+          />
+        </template>
+
         <template #actions>
           <Button
             v-if="showProbeUpgradeButton"
