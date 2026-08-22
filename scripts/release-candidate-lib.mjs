@@ -384,6 +384,7 @@ export async function packageProbeArchive({
         "--owner=0",
         "--group=0",
         "--numeric-owner",
+        "--blocking-factor=1",
         `--mtime=@${sourceDateEpoch}`,
         "--format=gnu",
         "--file",
