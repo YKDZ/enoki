@@ -367,6 +367,15 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       workflow.indexOf("  prepare-unsigned-probe-assets:"),
     );
     expect(buildProbe).toContain("validate-release-configuration");
+
+    const buildProbeBootstrap = workflow.slice(
+      workflow.indexOf("  build-probe-bootstrap:"),
+      workflow.indexOf("  prepare-unsigned-probe-assets:"),
+    );
+    expect(buildProbeBootstrap).toMatch(
+      /needs:\s*\[\s*validate-candidate-inputs,\s*validate-release-configuration,\s*resolve-release-baseline,?\s*\]/,
+    );
+    expect(buildProbeBootstrap).not.toContain("if: ${{ always() }}");
   });
 
   it("keeps candidate construction private and confines the production key to a trusted signer checkout", async () => {

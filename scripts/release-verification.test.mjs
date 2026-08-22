@@ -272,6 +272,26 @@ describe("verify-only release workflow", () => {
     expect(summary.gates.candidateUiContract.evidenceUrl).toBe(
       "https://github.com/YKDZ/enoki/actions/runs/12345/artifacts/9000",
     );
+
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-schema4-verification-summary-"),
+    );
+    const summaryPath = path.join(workDir, "summary.json");
+    try {
+      await writeFile(summaryPath, `${JSON.stringify(summary)}\n`);
+      await expect(
+        execFileAsync(process.execPath, [
+          "scripts/release-verification.mjs",
+          "assert-verified",
+          "--summary",
+          summaryPath,
+        ]),
+      ).resolves.toMatchObject({
+        stdout: "Release Verification Evidence is complete\n",
+      });
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
   });
 
   it("binds generic verification evidence to the fresh candidate and current run", async () => {
@@ -314,6 +334,42 @@ describe("verify-only release workflow", () => {
       schemaVersion: 3,
       verified: true,
     });
+  });
+
+  it("rejects a schema 4 Candidate Manifest whose Probe Asset Set closure is incomplete", async () => {
+    const matrix = JSON.parse(
+      await readFile("scripts/release-e2e-matrix.json", "utf8"),
+    );
+    const candidateManifest = releaseCandidateManifest();
+    const summary = createReleaseVerificationSummary({
+      candidateManifest: {
+        ...candidateManifest,
+        probeAssetSet: { ...candidateManifest.probeAssetSet, files: [] },
+      },
+      gateResults: {
+        candidateBuild: "success",
+        matrixExpansion: "success",
+        matrixJob: "success",
+        uiJob: "success",
+      },
+      hostGates: expectedHostGateResults(matrix, candidateManifest),
+      matrix,
+      requested: candidateManifest.candidate,
+      run: {
+        attempt: 1,
+        id: "12345",
+        url: "https://github.com/YKDZ/enoki/actions/runs/12345",
+      },
+      standardCi: standardCiEvidence(candidateManifest.candidate),
+      uiGate: {
+        artifactName: "release-ui-contract-12345-1",
+        candidate: candidateManifest.candidate,
+        outcome: "succeeded",
+      },
+    });
+
+    expect(summary.verified).toBe(false);
+    expect(summary.missingIdentities).toContain("candidate-manifest");
   });
 
   it("emits a schema-valid failed attempt when an early component prevents candidate assembly", async () => {
@@ -1206,6 +1262,7 @@ function releaseCandidateManifest() {
         {
           file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
           sha256: "c".repeat(64),
+          size: 123,
         },
       ],
       signingIdentity: {
@@ -1226,7 +1283,7 @@ function releaseCandidateManifest() {
       probeAssetSet: { version: "1.2.2" },
       tag: "v1.2.2",
     },
-    schemaVersion: 2,
+    schemaVersion: 4,
   };
 }
 

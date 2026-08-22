@@ -233,7 +233,12 @@ jobs:
 
   build-probe-bootstrap:
     name: Build constrained Probe Bootstrap inputs
-    needs: [validate-candidate-inputs, validate-release-configuration]
+    needs:
+      [
+        validate-candidate-inputs,
+        validate-release-configuration,
+        resolve-release-baseline,
+      ]
     uses: ./.github/workflows/reusable-build-probe-bootstrap.yml
     with:
       commit: ${{ inputs.commit }}

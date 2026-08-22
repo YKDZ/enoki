@@ -1395,13 +1395,116 @@ function assertAttemptSummaryInputs({
 }
 
 function isCandidateManifest(candidateManifest) {
+  // 候选目录已由 validateReleaseCandidate 完成内容闭包验证；此处重验其
+  // schema 4 描述符，避免汇总器把残缺的已解析值当作可验证的候选。
   return (
+    isPlainObject(candidateManifest) &&
     candidateManifest?.kind === "enoki-release-candidate" &&
-    candidateManifest?.schemaVersion === 2 &&
-    Boolean(candidateManifest.candidate) &&
-    Boolean(candidateManifest.hub) &&
-    Boolean(candidateManifest.probeAssetSet) &&
-    Boolean(candidateManifest.releaseBaseline)
+    candidateManifest?.schemaVersion === 4 &&
+    sameKeySet(candidateManifest, {
+      candidate: null,
+      hub: null,
+      kind: null,
+      probeAssetSet: null,
+      releaseBaseline: null,
+      schemaVersion: null,
+    }) &&
+    isCandidateIdentity(candidateManifest.candidate) &&
+    isCandidateHub(candidateManifest.hub, candidateManifest.candidate) &&
+    isCandidateProbeAssetSet(
+      candidateManifest.probeAssetSet,
+      candidateManifest.candidate,
+    ) &&
+    isReleaseBaselineDescriptor(candidateManifest.releaseBaseline)
+  );
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCandidateIdentity(candidate) {
+  return (
+    isPlainObject(candidate) &&
+    sameKeySet(candidate, { commit: null, version: null }) &&
+    /^[0-9a-f]{40}$/.test(candidate.commit ?? "") &&
+    /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(
+      candidate.version ?? "",
+    )
+  );
+}
+
+function isCandidateHub(hub, candidate) {
+  return (
+    isPlainObject(hub) &&
+    sameKeySet(hub, {
+      archive: null,
+      archiveSha256: null,
+      digest: null,
+      embeddedProbeVersion: null,
+      size: null,
+    }) &&
+    hub.archive === `hub/enoki-hub-${candidate.version}.oci.tar` &&
+    /^[0-9a-f]{64}$/.test(hub.archiveSha256 ?? "") &&
+    /^sha256:[0-9a-f]{64}$/.test(hub.digest ?? "") &&
+    hub.embeddedProbeVersion === candidate.version.slice(1) &&
+    Number.isSafeInteger(hub.size) &&
+    hub.size > 0
+  );
+}
+
+function isCandidateProbeAssetSet(probeAssetSet, candidate) {
+  return (
+    isPlainObject(probeAssetSet) &&
+    sameKeySet(probeAssetSet, {
+      directory: null,
+      files: null,
+      signingIdentity: null,
+      version: null,
+    }) &&
+    probeAssetSet.directory === "probe-assets" &&
+    probeAssetSet.version === candidate.version.slice(1) &&
+    Array.isArray(probeAssetSet.files) &&
+    probeAssetSet.files.length > 0 &&
+    probeAssetSet.files.every(
+      (file) =>
+        isPlainObject(file) &&
+        typeof file.file === "string" &&
+        file.file.length > 0 &&
+        /^[0-9a-f]{64}$/.test(file.sha256 ?? "") &&
+        Number.isSafeInteger(file.size) &&
+        file.size > 0,
+    ) &&
+    isPlainObject(probeAssetSet.signingIdentity) &&
+    sameKeySet(probeAssetSet.signingIdentity, {
+      algorithm: null,
+      publicKeyFile: null,
+      publicKeySha256: null,
+    }) &&
+    probeAssetSet.signingIdentity.algorithm === "rsa-sha256" &&
+    probeAssetSet.signingIdentity.publicKeyFile === "signing-key.pem" &&
+    /^[0-9a-f]{64}$/.test(probeAssetSet.signingIdentity.publicKeySha256 ?? "")
+  );
+}
+
+function isReleaseBaselineDescriptor(releaseBaseline) {
+  const githubRelease = releaseBaseline?.githubRelease;
+  return (
+    isPlainObject(releaseBaseline) &&
+    ["enoki-release-baseline", "enoki-trust-epoch-migration-baseline"].includes(
+      releaseBaseline.kind,
+    ) &&
+    typeof releaseBaseline.tag === "string" &&
+    /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(
+      releaseBaseline.tag,
+    ) &&
+    isPlainObject(githubRelease) &&
+    Number.isSafeInteger(githubRelease.id) &&
+    githubRelease.id > 0 &&
+    /^[0-9a-f]{40}$/.test(githubRelease.peeledCommitSha ?? "") &&
+    /^[0-9a-f]{40}$/.test(githubRelease.tagRefSha ?? "") &&
+    isPlainObject(releaseBaseline.hub) &&
+    /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub.imageDigest ?? "")
   );
 }
 
