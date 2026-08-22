@@ -65,6 +65,19 @@ message ProbeReportRequest {
   repeated Snapshot snapshots = 12;
   string enrollment_id = 13;
   ObservationWindowFailure observation_window_failure = 14;
+  CpuResourceCollectionOutcome cpu_resource_collection_outcome = 15;
+}
+
+// CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。
+message CpuResourceCollectionOutcome {
+  CpuResourceCollectionOutcomeReason reason = 1;
+}
+
+enum CpuResourceCollectionOutcomeReason {
+  CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED = 0;
+  CPU_RESOURCE_UNAVAILABLE = 1;
+  CPU_RESOURCE_MALFORMED = 2;
+  CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED = 3;
 }
 
 // 闭合的 Runtime 报告级失败，不携带 Provider、Resource、路径或本机诊断。

@@ -14,11 +14,20 @@ fn runtime_owns_cpu_window_cadence_and_returns_one_finalized_batch() {
     let mut runtime = ObservationRuntime::new(provider);
     let mut sleeper = RecordingSleeper::default();
 
-    let batch = runtime
-        .collect_next_window(&mut sleeper)
-        .expect("Runtime finalizes its own CPU window");
+    let batch = runtime.collect_next_window(
+        ObservationWindowRequest::new(Duration::from_secs(5)).unwrap(),
+        &mut sleeper,
+    );
 
-    assert_eq!(batch.len(), 3);
+    assert_eq!(batch.samples.len(), 3);
+    assert_eq!(
+        batch
+            .samples
+            .iter()
+            .map(|sample| sample.collected_at_ms)
+            .collect::<Vec<_>>(),
+        [5_000, 10_000, 15_000]
+    );
     assert_eq!(sleeper.sleeps, vec![Duration::from_secs(5); 3]);
     assert_eq!(runtime.into_provider().calls, 3);
 }
@@ -39,10 +48,10 @@ fn cpu_observation_window_uses_one_fixed_resource_result_and_keeps_delta_state_i
     let mut runtime = ObservationRuntime::new(provider);
 
     let first = runtime
-        .observe(ObservationWindowRequest::next())
+        .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
         .expect("first bounded CPU observation succeeds");
     let second = runtime
-        .observe(ObservationWindowRequest::next())
+        .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
         .expect("second bounded CPU observation succeeds");
 
     let provider = runtime.into_provider();
@@ -66,12 +75,13 @@ impl RecordingCpuProvider {
 }
 
 impl CpuCountersProvider for RecordingCpuProvider {
-    type Error = ();
-
     fn pull_cpu_counters(
         &mut self,
         _request: enoki_probe::observation_runtime::CpuCountersPullRequest,
-    ) -> Result<CpuCountersResourceResult, Self::Error> {
+    ) -> Result<
+        CpuCountersResourceResult,
+        enoki_probe::observation_runtime::CpuResourceAcquisitionFailure,
+    > {
         self.calls += 1;
         CpuCountersResourceResult::from_records(
             enoki_probe::metrics::parse_linux_proc_stat_cpu_counters(
@@ -79,17 +89,23 @@ impl CpuCountersProvider for RecordingCpuProvider {
             )
             .expect("typed CPU counters"),
         )
-        .ok_or(())
+        .ok_or(enoki_probe::observation_runtime::CpuResourceAcquisitionFailure::Malformed)
     }
 }
 
 #[derive(Default)]
 struct RecordingSleeper {
     sleeps: Vec<Duration>,
+    now_ms: i64,
 }
 
 impl enoki_probe::observation_runtime::ObservationRuntimeSleeper for RecordingSleeper {
     fn sleep(&mut self, duration: Duration) {
         self.sleeps.push(duration);
+        self.now_ms += i64::try_from(duration.as_millis()).unwrap();
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.now_ms
     }
 }

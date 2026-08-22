@@ -210,7 +210,7 @@ describe("Metrics Archive file writer", () => {
     try {
       expect(archive.prepare("select * from archive_metadata").get()).toEqual(
         expect.objectContaining({
-          archive_schema_version: 1,
+          archive_schema_version: 2,
           created_at_ms: Date.UTC(2024, 8, 1),
           host_snapshot_captured_at_ms: Date.UTC(2024, 8, 1, 0, 0, 5),
           period: "monthly",

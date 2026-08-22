@@ -34,6 +34,7 @@ const COMMAND_STEP_BUDGET: Duration = Duration::from_secs(15);
 const SERVICE_NAME: &str = "enoki-probe";
 const SERVICE_USER: &str = "enoki-probe";
 const SERVICE_GROUP: &str = "enoki-probe";
+const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 const BINARY: &str = "/usr/local/bin/enoki-probe";
 const OBSERVATION_RUNTIME_BINARY: &str = "/usr/local/bin/enoki-observation-runtime";
 const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
@@ -86,6 +87,7 @@ pub enum RollbackStep {
     RemoveServiceIdentity,
     RemoveServiceUser,
     RemoveServiceGroup,
+    RemoveObservationIpcGroup,
     RemoveTemporary,
     RemovePartiallyInstalledPath,
 }
@@ -185,6 +187,7 @@ impl RollbackStep {
             Self::RemoveServiceIdentity => "remove_service_identity",
             Self::RemoveServiceUser => "remove_service_user",
             Self::RemoveServiceGroup => "remove_service_group",
+            Self::RemoveObservationIpcGroup => "remove_observation_ipc_group",
             Self::RemoveTemporary => "remove_temporary",
             Self::RemovePartiallyInstalledPath => "remove_partial_path",
         }
@@ -226,6 +229,12 @@ pub trait AccountPort {
             Some(identity) => self.owns_static_service_identity(identity),
             None => Ok(false),
         }
+    }
+    fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
+        Ok(())
+    }
+    fn remove_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
+        Ok(())
     }
 }
 
@@ -671,6 +680,18 @@ fn activate_current_probe_with_observation_files(
             ports.files,
         ));
     }
+    if install_observation
+        && let Err(error) = ports
+            .accounts
+            .create_observation_ipc_group(journal.transaction_id())
+    {
+        return Err(abort_prepared_install(
+            error,
+            &journal,
+            ports.accounts,
+            ports.files,
+        ));
+    }
     let staged = match stage_complete_layout(
         component,
         enrollment,
@@ -852,6 +873,11 @@ fn abort_prepared_install(
     cleanup_owned_paths(files, journal, &mut failures);
     record_rollback(
         &mut failures,
+        RollbackStep::RemoveObservationIpcGroup,
+        accounts.remove_observation_ipc_group(journal.transaction_id()),
+    );
+    record_rollback(
+        &mut failures,
         RollbackStep::RemoveServiceIdentity,
         accounts.remove_transaction_identity(
             journal.transaction_id(),
@@ -925,6 +951,11 @@ fn cleanup_failed_install(
     );
     record_rollback(
         failures,
+        RollbackStep::RemoveObservationIpcGroup,
+        accounts.remove_observation_ipc_group(journal.transaction_id()),
+    );
+    record_rollback(
+        failures,
         RollbackStep::RemoveServiceIdentity,
         accounts.remove_transaction_identity(
             journal.transaction_id(),
@@ -994,6 +1025,13 @@ fn recover_interrupted_install(
         &mut failures,
         RollbackStep::ReloadSystemd,
         ports.systemd.daemon_reload(),
+    );
+    record_rollback(
+        &mut failures,
+        RollbackStep::RemoveObservationIpcGroup,
+        ports
+            .accounts
+            .remove_observation_ipc_group(journal.transaction_id()),
     );
     {
         let identity = journal
@@ -1136,12 +1174,13 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\n",
+        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
         OBSERVATION_RUNTIME_BINARY,
         CPU_PROVIDER_BINARY,
+        OBSERVATION_IPC_GROUP,
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
         trust.root_fingerprint,
@@ -1168,15 +1207,25 @@ fn observation_runtime_socket_unit() -> &'static str {
 }
 
 fn observation_runtime_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\n"
+    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\n"
 }
 
 fn cpu_provider_socket_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-runtime\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nMaxConnections=8\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=12\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
 fn cpu_provider_unit() -> &'static str {
     "[Unit]\nDescription=Enoki one-shot CPU Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProcSubset=pid\nProtectProc=invisible\nReadOnlyPaths=/proc/stat\n"
+}
+
+/// Upgrader 与首次安装共享的固定 systemd integration assets。
+pub fn fixed_observation_unit_contents() -> [&'static [u8]; 4] {
+    [
+        observation_runtime_unit().as_bytes(),
+        observation_runtime_socket_unit().as_bytes(),
+        cpu_provider_unit().as_bytes(),
+        cpu_provider_socket_unit().as_bytes(),
+    ]
 }
 
 fn command_presence(

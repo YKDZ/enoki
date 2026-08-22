@@ -8,7 +8,6 @@ import type { MetricsArchiveRun } from "../database/metrics-archives.js";
 import {
   cleanupArchivedMetrics,
   cleanupMetricsRetentionDirectly,
-  cleanupObservationOnlyReportObservations,
 } from "./cleanup.js";
 import {
   type FinalizedMetricsArchive,
@@ -106,12 +105,6 @@ export function runMetricsArchiveMaintenance(
     };
   }
 
-  cleanupObservationOnlyReportObservations({
-    database: input.database.sqlite,
-    nowMs,
-    receivedGraceMs,
-    retentionDays: input.metrics.retentionDays,
-  });
   const attemptedRuns = retryFinalizedArchiveCleanups({
     database: input.database,
     nowMs,
@@ -247,9 +240,19 @@ function listArchiveCandidateSamples(
   return database.sqlite
     .prepare(
       `
-      select probe_id, boot_id, sequence, collected_at_ms, received_at_ms
-      from metric_samples
-      order by collected_at_ms, probe_id, boot_id, sequence
+      select
+        ro.probe_id,
+        ro.boot_id,
+        ro.sequence,
+        coalesce(ms.collected_at_ms, ro.received_at_ms) as collected_at_ms,
+        ro.received_at_ms,
+        case when ms.id is null then 0 else 1 end as has_metric_sample
+      from report_observations ro
+      left join metric_samples ms
+        on ms.probe_id = ro.probe_id
+       and ms.boot_id = ro.boot_id
+       and ms.sequence = ro.sequence
+      order by collected_at_ms, ro.probe_id, ro.boot_id, ro.sequence
       `,
     )
     .all()
@@ -260,10 +263,12 @@ function listArchiveCandidateSamples(
         probe_id: string;
         received_at_ms: number;
         sequence: number;
+        has_metric_sample: number;
       };
       return {
         bootId: sample.boot_id,
         collectedAtMs: sample.collected_at_ms,
+        hasMetricSample: sample.has_metric_sample === 1,
         probeId: sample.probe_id,
         receivedAtMs: sample.received_at_ms,
         sequence: sample.sequence,

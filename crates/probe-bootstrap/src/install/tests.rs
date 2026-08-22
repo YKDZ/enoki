@@ -11,6 +11,7 @@ mod tests {
     #[derive(Default)]
     struct Accounts {
         calls: Vec<&'static str>,
+        ipc_calls: Vec<&'static str>,
         reject: bool,
     }
     impl AccountPort for Accounts {
@@ -37,6 +38,20 @@ mod tests {
         ) -> Result<bool, InstallError> {
             self.calls.push("owns");
             Ok(true)
+        }
+        fn create_observation_ipc_group(
+            &mut self,
+            _transaction_id: &str,
+        ) -> Result<(), InstallError> {
+            self.ipc_calls.push("create");
+            Ok(())
+        }
+        fn remove_observation_ipc_group(
+            &mut self,
+            _transaction_id: &str,
+        ) -> Result<(), InstallError> {
+            self.ipc_calls.push("remove");
+            Ok(())
         }
     }
     #[derive(Default)]
@@ -523,12 +538,61 @@ mod tests {
         assert!(runtime_socket.contains("SocketGroup=enoki-probe"));
         assert!(runtime.contains("User=enoki-observation-runtime"));
         assert!(runtime.contains("PrivateNetwork=true"));
-        assert!(provider_socket.contains("SocketGroup=enoki-observation-runtime"));
+        assert!(runtime.contains("SupplementaryGroups=enoki-observation-ipc"));
+        assert!(provider_socket.contains("SocketGroup=enoki-observation-ipc"));
+        assert!(provider_socket.contains("MaxConnections=8"));
+        assert!(provider_socket.contains("TriggerLimitBurst=12"));
         assert!(provider.contains("ExecStart=/usr/local/bin/enoki-cpu-resource-provider\n"));
         assert!(provider.contains("RuntimeMaxSec=3s"));
         assert!(provider.contains("KillMode=control-group"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat"));
         assert!(!provider.contains('%'));
+    }
+
+    #[test]
+    fn complete_observation_install_owns_and_rolls_back_the_static_ipc_group() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let mut probe = component();
+        let mut runtime = component();
+        let mut provider = component();
+        let mut acquirer = component();
+        let mut activator = component();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            fail_start: true,
+            ..Systemd::default()
+        };
+
+        let result = activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(accounts.ipc_calls, ["create", "remove"]);
+        assert!(!temporary
+            .path()
+            .join("usr/local/bin/enoki-observation-runtime")
+            .exists());
     }
 
     #[test]

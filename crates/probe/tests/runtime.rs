@@ -5,6 +5,9 @@ use std::os::unix::fs::PermissionsExt;
 
 use enoki_probe::{
     metrics::CollectorId,
+    observation_runtime::{
+        ObservationClientError, ObservationWindowClient, ObservationWindowResult,
+    },
     protocol::enoki::v1::{
         CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
         HostProfileSnapshot, OfficialCollectorCapabilities, ProbeConfigurationRequest,
@@ -17,11 +20,64 @@ use enoki_probe::{
         HostProfileProvider, PERMANENT_REPORT_EXIT_STATUS, ProbeRequestAuth, ProbeRunError,
         ProbeRunInput, ProbeRuntimeSleeper, ProbeTransport, ReportError, ReportTransport,
         RunLoopControl, probe_run_exit_status, run_loop_control_from_environment, run_probe,
-        run_probe_with_loop_control, run_probe_with_loop_control_and_host_profile_provider,
+        run_probe_with_loop_control_and_host_profile_provider_and_observation_client,
+        run_probe_with_loop_control_and_observation_client,
     },
     transport::HttpAttemptError,
 };
 use prost::Message;
+
+struct FixedObservationRuntime;
+
+impl ObservationWindowClient for FixedObservationRuntime {
+    fn request_finalized_window(
+        &self,
+        cadence: Duration,
+    ) -> Result<ObservationWindowResult, ObservationClientError> {
+        Ok(ObservationWindowResult {
+            cpu_resource_outcome: None,
+            samples: (1..=3)
+                .map(|tick| enoki_probe::protocol::enoki::v1::MetricSample {
+                    collected_at_ms: (cadence.as_millis() as i64) * i64::from(tick),
+                    cpu_percent: Some(10.0),
+                    ..Default::default()
+                })
+                .collect(),
+        })
+    }
+}
+
+fn run_probe_with_loop_control(
+    input: ProbeRunInput,
+    transport: &mut impl ProbeTransport,
+    sleeper: &mut impl ProbeRuntimeSleeper,
+    control: RunLoopControl,
+) -> Result<(), ProbeRunError> {
+    run_probe_with_loop_control_and_observation_client(
+        input,
+        transport,
+        sleeper,
+        control,
+        &FixedObservationRuntime,
+    )
+}
+
+fn run_probe_with_loop_control_and_host_profile_provider(
+    input: ProbeRunInput,
+    transport: &mut impl ProbeTransport,
+    sleeper: &mut impl ProbeRuntimeSleeper,
+    control: RunLoopControl,
+    host_profile_provider: &mut impl HostProfileProvider,
+) -> Result<(), ProbeRunError> {
+    run_probe_with_loop_control_and_host_profile_provider_and_observation_client(
+        input,
+        transport,
+        sleeper,
+        control,
+        host_profile_provider,
+        &FixedObservationRuntime,
+    )
+}
 
 #[test]
 fn probe_run_fails_when_bootstrap_config_is_missing() {

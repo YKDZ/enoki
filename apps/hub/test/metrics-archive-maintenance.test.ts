@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -59,12 +60,13 @@ describe("Metrics Archive maintenance service", () => {
     expect(existsSync(path.join(root, "enoki.db"))).toBe(true);
   });
 
-  it("retention-cleans observation-only reports while Metrics Archive is enabled", async () => {
+  it("archives observation-only collection outcomes while Metrics Archive is enabled", async () => {
     const { archiveDirectory, database } = await createMaintenanceDatabase(
       "enabled-observation-only",
     );
     recordObservation(database, {
       bootId: "boot-observation-only-old",
+      cpuResourceCollectionOutcomeReason: 1,
       receivedAtMs: Date.UTC(2024, 7, 1),
       sequence: 1,
     });
@@ -88,17 +90,38 @@ describe("Metrics Archive maintenance service", () => {
       receivedGraceMs: 60_000,
     });
 
-    expect(result).toEqual({
-      attemptedRuns: [],
-      mode: "archive",
-      skipped: false,
-    });
+    expect(result).toEqual(
+      expect.objectContaining({
+        attemptedRuns: [
+          expect.objectContaining({
+            rowCounts: expect.objectContaining({
+              metric_samples: 0,
+              report_observations: 1,
+            }),
+            status: "succeeded",
+          }),
+        ],
+        mode: "archive",
+        skipped: false,
+      }),
+    );
     expect(observationIdentities(database)).toEqual([
       "boot-observation-only-grace:2",
     ]);
     expect(sampleIdentities(database)).toEqual([]);
-    expect(countRows(database, "metrics_archive_runs")).toBe(0);
-    expect(existsSync(archiveDirectory)).toBe(false);
+    expect(countRows(database, "metrics_archive_runs")).toBe(1);
+    const archive = new DatabaseSync(
+      path.join(archiveDirectory, "metrics-archive-2024-08.sqlite"),
+      { readOnly: true },
+    );
+    expect(
+      archive
+        .prepare(
+          "select cpu_resource_collection_outcome_reason from report_observations",
+        )
+        .get(),
+    ).toEqual({ cpu_resource_collection_outcome_reason: 1 });
+    archive.close();
 
     database.close();
   });
@@ -586,12 +609,15 @@ function recordObservation(
   database: HubDatabase,
   input: {
     bootId: string;
+    cpuResourceCollectionOutcomeReason?: number;
     receivedAtMs: number;
     sequence: number;
   },
 ) {
   database.metrics.recordObservation({
     bootId: input.bootId,
+    cpuResourceCollectionOutcomeReason:
+      input.cpuResourceCollectionOutcomeReason,
     hostId: 90,
     probeId: "probe-maintenance",
     receivedAtMs: input.receivedAtMs,

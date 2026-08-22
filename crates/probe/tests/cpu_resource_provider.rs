@@ -6,7 +6,7 @@ use std::{
 const CPU_PULL: &[u8] = b"enoki.cpu-counters.v1\n";
 
 #[test]
-fn cpu_provider_serves_only_the_fixed_pull_once_and_exits() {
+fn cpu_provider_rejects_the_fixed_pull_when_stdin_is_a_direct_pipe() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_enoki-cpu-resource-provider"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -20,14 +20,8 @@ fn cpu_provider_serves_only_the_fixed_pull_once_and_exits() {
         .expect("fixed request writes");
     let output = child.wait_with_output().expect("Provider exits");
 
-    assert!(output.status.success());
-    let result_len = u32::from_be_bytes(output.stdout[..4].try_into().expect("length prefix"));
-    assert_eq!(result_len as usize, output.stdout.len() - 4);
-    let typed = &output.stdout[4..];
-    let count = u16::from_be_bytes(typed[..2].try_into().expect("record count"));
-    assert!(count > 0);
-    let name_len = typed[2] as usize;
-    assert_eq!(&typed[3..3 + name_len], b"cpu");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
 }
 
 #[test]

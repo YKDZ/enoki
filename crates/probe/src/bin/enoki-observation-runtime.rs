@@ -4,6 +4,7 @@ use std::{os::fd::FromRawFd, os::unix::net::UnixListener, process::ExitCode};
 
 use enoki_probe::observation_runtime::{
     CPU_PROVIDER_SOCKET, ObservationRuntimeServer, UnixCpuCountersProvider,
+    validate_systemd_listener_fd,
 };
 
 fn main() -> ExitCode {
@@ -17,11 +18,20 @@ fn main() -> ExitCode {
 }
 
 fn inherited_listener() -> std::io::Result<UnixListener> {
-    if std::env::var_os("LISTEN_FDS").as_deref() != Some(std::ffi::OsStr::new("1")) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "one systemd listener is required",
-        ));
+    let listen_pid = std::env::var("LISTEN_PID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    let listen_fds = std::env::var("LISTEN_FDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    validate_systemd_listener_fd(3, listen_pid, listen_fds)?;
+    // SAFETY: 进程尚未启动线程；清除 activation 环境避免子进程继承并误认 FD。
+    unsafe {
+        std::env::remove_var("LISTEN_PID");
+        std::env::remove_var("LISTEN_FDS");
+        std::env::remove_var("LISTEN_FDNAMES");
     }
     // SAFETY: systemd 在 exec 时把固定 Unix listener 的 FD 3 独占转交给进程。
     Ok(unsafe { UnixListener::from_raw_fd(3) })

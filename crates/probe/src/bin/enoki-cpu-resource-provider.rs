@@ -16,8 +16,8 @@ const MAX_REQUEST_BYTES: usize = 128;
 
 fn main() -> ExitCode {
     let input = io::stdin();
-    if stdin_is_socket(input.as_raw_fd())
-        && require_peer_uid(input.as_raw_fd(), c"enoki-observation-runtime").is_err()
+    if !stdin_is_socket(input.as_raw_fd())
+        || require_peer_uid(input.as_raw_fd(), c"enoki-observation-runtime").is_err()
     {
         return ExitCode::from(2);
     }

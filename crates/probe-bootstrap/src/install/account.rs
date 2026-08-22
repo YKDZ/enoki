@@ -14,7 +14,13 @@ impl AccountPort for SystemAccounts {
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
         let group = command_presence("/usr/bin/getent", &["group", SERVICE_GROUP], 2, deadline)?;
         let user = command_presence("/usr/bin/id", &["-u", SERVICE_USER], 1, deadline)?;
-        if group || user {
+        let ipc_group = command_presence(
+            "/usr/bin/getent",
+            &["group", OBSERVATION_IPC_GROUP],
+            2,
+            deadline,
+        )?;
+        if group || user || ipc_group {
             Err(InstallError::ExistingResidue)
         } else {
             Ok(())
@@ -78,6 +84,47 @@ impl AccountPort for SystemAccounts {
         identity: Option<ServiceIdentity>,
     ) -> Result<(), InstallError> {
         remove_transaction_identity(transaction_id, identity, self.command_deadline)
+    }
+    fn create_observation_ipc_group(&mut self, transaction_id: &str) -> Result<(), InstallError> {
+        let deadline = self
+            .command_deadline
+            .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+        let marker = group_account_marker(transaction_id);
+        require_success(
+            "/usr/sbin/groupadd",
+            &["--system", "--password", &marker, OBSERVATION_IPC_GROUP],
+            InstallError::Account,
+            deadline,
+        )
+    }
+    fn remove_observation_ipc_group(&mut self, transaction_id: &str) -> Result<(), InstallError> {
+        let deadline = self
+            .command_deadline
+            .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+        let output = run_bounded(
+            "/usr/bin/getent",
+            &["gshadow", OBSERVATION_IPC_GROUP],
+            InstallError::Account,
+            deadline,
+            COMMAND_STEP_BUDGET,
+        )?;
+        if output.status.code() == Some(2) {
+            return Ok(());
+        }
+        let record = String::from_utf8(output.stdout).map_err(|_| InstallError::Account)?;
+        let fields = record.trim_end().split(':').collect::<Vec<_>>();
+        if fields.len() != 4
+            || fields[0] != OBSERVATION_IPC_GROUP
+            || fields[1] != group_account_marker(transaction_id)
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        require_success(
+            "/usr/sbin/groupdel",
+            &[OBSERVATION_IPC_GROUP],
+            InstallError::Account,
+            deadline,
+        )
     }
 }
 

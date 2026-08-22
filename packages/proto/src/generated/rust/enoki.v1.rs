@@ -466,6 +466,16 @@ pub struct ProbeReportRequest {
     pub enrollment_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "14")]
     pub observation_window_failure: ::core::option::Option<ObservationWindowFailure>,
+    #[prost(message, optional, tag = "15")]
+    pub cpu_resource_collection_outcome: ::core::option::Option<
+        CpuResourceCollectionOutcome,
+    >,
+}
+/// CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CpuResourceCollectionOutcome {
+    #[prost(enumeration = "CpuResourceCollectionOutcomeReason", tag = "1")]
+    pub reason: i32,
 }
 /// 闭合的 Runtime 报告级失败，不携带 Provider、Resource、路径或本机诊断。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -513,6 +523,44 @@ impl ProbeEnrollmentTargetKind {
             "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "NEW_HOST" => Some(Self::NewHost),
             "EXISTING_HOST" => Some(Self::ExistingHost),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CpuResourceCollectionOutcomeReason {
+    Unspecified = 0,
+    CpuResourceUnavailable = 1,
+    CpuResourceMalformed = 2,
+    CpuProviderActivationBudgetExhausted = 3,
+}
+impl CpuResourceCollectionOutcomeReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED",
+            Self::CpuResourceUnavailable => "CPU_RESOURCE_UNAVAILABLE",
+            Self::CpuResourceMalformed => "CPU_RESOURCE_MALFORMED",
+            Self::CpuProviderActivationBudgetExhausted => {
+                "CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "CPU_RESOURCE_UNAVAILABLE" => Some(Self::CpuResourceUnavailable),
+            "CPU_RESOURCE_MALFORMED" => Some(Self::CpuResourceMalformed),
+            "CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED" => {
+                Some(Self::CpuProviderActivationBudgetExhausted)
+            }
             _ => None,
         }
     }

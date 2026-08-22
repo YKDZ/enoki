@@ -73,6 +73,27 @@ pub struct VerifiedBundle {
     pub(crate) bootstrap_assets: Vec<BundleComponent>,
 }
 impl VerifiedBundle {
+    pub fn delegation_generation(&self) -> u64 {
+        self.delegation_generation
+    }
+    #[cfg(test)]
+    pub(crate) fn with_test_observation_receipts(mut self, size: u64) -> Self {
+        for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
+            if matches!(role, "observation-runtime" | "cpu-provider") {
+                self.bootstrap_assets.push(BundleComponent {
+                    path: path.to_string(),
+                    permission_profile: permission_profile.to_string(),
+                    resource_contract: Some(resource_contract.to_string()),
+                    role: role.to_string(),
+                    sha256: "a".repeat(64),
+                    size,
+                    version: self.version.clone(),
+                });
+            }
+        }
+        self
+    }
+
     pub(crate) fn component_receipt(&self, role: &str) -> Option<(&str, u64)> {
         self.bootstrap_assets
             .iter()
@@ -222,6 +243,27 @@ pub fn verify_archive_and_extract(
         sink,
         &mut std::io::sink(),
         &mut std::io::sink(),
+        &mut std::io::sink(),
+    )
+}
+
+/// 可信升级路径使用与首次安装相同的三组件 archive verifier；调用者不能提供角色表。
+#[cfg(feature = "acquirer")]
+pub fn verify_archive_and_extract_upgrade_roles(
+    archive: &mut File,
+    handoff: &Handoff,
+    metadata: &VerifiedMetadata,
+    probe_sink: &mut impl Write,
+    runtime_sink: &mut impl Write,
+    cpu_provider_sink: &mut impl Write,
+) -> Result<VerifiedBundle, VerificationError> {
+    verify_archive_and_extract_roles(
+        archive,
+        handoff,
+        metadata,
+        probe_sink,
+        runtime_sink,
+        cpu_provider_sink,
         &mut std::io::sink(),
     )
 }

@@ -7,6 +7,7 @@ import type { MetricsArchivePeriodPlan } from "./planner.js";
 export type MetricsArchivePlannedSample = {
   bootId: string;
   collectedAtMs: number;
+  hasMetricSample?: boolean;
   probeId: string;
   receivedAtMs: number;
   sequence: number;
@@ -27,7 +28,7 @@ export type WriteMetricsArchiveFileResult = {
   rowCounts: MetricsArchiveFileRowCounts;
 };
 
-const archiveSchemaVersion = 1;
+const archiveSchemaVersion = 2;
 
 const archiveTables = [
   "archive_metadata",
@@ -284,7 +285,9 @@ function createArchiveSchema(database: DatabaseSync) {
       probe_id text not null,
       boot_id text not null,
       sequence integer not null,
-      received_at_ms integer not null
+      received_at_ms integer not null,
+      observation_window_failure_reason integer,
+      cpu_resource_collection_outcome_reason integer
     );
 
     create index archive_host_snapshots_host_lookup_idx
@@ -327,14 +330,17 @@ function copyMetricsClosure(
     return;
   }
 
-  const plannedSampleFilter = sampleIdentityFilter(plan.samples);
+  const metricSamplePlans = plan.samples.filter(
+    (sample) => sample.hasMetricSample !== false,
+  );
+  const plannedSampleFilter = sampleIdentityFilter(metricSamplePlans);
   const samples = hot
     .prepare(
       `
         select *
         from metric_samples
         where collected_at_ms >= ? and collected_at_ms < ?
-          and (${plannedSampleFilter.sql})
+          and (${plannedSampleFilter.sql || "0"})
         order by collected_at_ms, id
       `,
     )
@@ -345,10 +351,6 @@ function copyMetricsClosure(
     ) as SqlRow[];
 
   insertRows(archive, "metric_samples", samples);
-  if (samples.length === 0) {
-    return;
-  }
-
   const sampleIds = samples.map((sample) => Number(sample.id));
   const hostIds = [
     ...new Set(samples.map((sample) => Number(sample.managed_host_id))),
@@ -387,13 +389,16 @@ function copyMetricsClosure(
     );
   }
 
-  const archivedSampleFilter = sampleRowsIdentityFilter("ro", samples);
+  const archivedSampleFilter = sampleIdentityFilter(plan.samples);
   const observations = hot
     .prepare(
       `
         select ro.*
         from report_observations ro
-        where ${archivedSampleFilter.sql}
+        where ${archivedSampleFilter.sql
+          .replaceAll("probe_id", "ro.probe_id")
+          .replaceAll("boot_id", "ro.boot_id")
+          .replaceAll("sequence", "ro.sequence")}
         order by ro.received_at_ms, ro.id
       `,
     )

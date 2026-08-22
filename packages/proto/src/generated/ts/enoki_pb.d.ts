@@ -596,6 +596,9 @@ export namespace enoki {
 
             /** ProbeReportRequest observationWindowFailure */
             observationWindowFailure?: (enoki.v1.IObservationWindowFailure|null);
+
+            /** ProbeReportRequest cpuResourceCollectionOutcome */
+            cpuResourceCollectionOutcome?: (enoki.v1.ICpuResourceCollectionOutcome|null);
         }
 
         /** Represents a ProbeReportRequest. */
@@ -642,6 +645,9 @@ export namespace enoki {
 
             /** ProbeReportRequest observationWindowFailure. */
             public observationWindowFailure?: (enoki.v1.IObservationWindowFailure|null);
+
+            /** ProbeReportRequest cpuResourceCollectionOutcome. */
+            public cpuResourceCollectionOutcome?: (enoki.v1.ICpuResourceCollectionOutcome|null);
 
             /**
              * Creates a new ProbeReportRequest instance using the specified properties.
@@ -719,6 +725,111 @@ export namespace enoki {
              * @returns The default type url
              */
             public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a CpuResourceCollectionOutcome. */
+        interface ICpuResourceCollectionOutcome {
+
+            /** CpuResourceCollectionOutcome reason */
+            reason?: (enoki.v1.CpuResourceCollectionOutcomeReason|null);
+        }
+
+        /** Represents a CpuResourceCollectionOutcome. */
+        class CpuResourceCollectionOutcome implements ICpuResourceCollectionOutcome {
+
+            /**
+             * Constructs a new CpuResourceCollectionOutcome.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ICpuResourceCollectionOutcome);
+
+            /** CpuResourceCollectionOutcome reason. */
+            public reason: enoki.v1.CpuResourceCollectionOutcomeReason;
+
+            /**
+             * Creates a new CpuResourceCollectionOutcome instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns CpuResourceCollectionOutcome instance
+             */
+            public static create(properties?: enoki.v1.ICpuResourceCollectionOutcome): enoki.v1.CpuResourceCollectionOutcome;
+
+            /**
+             * Encodes the specified CpuResourceCollectionOutcome message. Does not implicitly {@link enoki.v1.CpuResourceCollectionOutcome.verify|verify} messages.
+             * @param message CpuResourceCollectionOutcome message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ICpuResourceCollectionOutcome, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified CpuResourceCollectionOutcome message, length delimited. Does not implicitly {@link enoki.v1.CpuResourceCollectionOutcome.verify|verify} messages.
+             * @param message CpuResourceCollectionOutcome message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ICpuResourceCollectionOutcome, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a CpuResourceCollectionOutcome message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns CpuResourceCollectionOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CpuResourceCollectionOutcome;
+
+            /**
+             * Decodes a CpuResourceCollectionOutcome message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns CpuResourceCollectionOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CpuResourceCollectionOutcome;
+
+            /**
+             * Verifies a CpuResourceCollectionOutcome message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a CpuResourceCollectionOutcome message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns CpuResourceCollectionOutcome
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.CpuResourceCollectionOutcome;
+
+            /**
+             * Creates a plain object from a CpuResourceCollectionOutcome message. Also converts values to other types if specified.
+             * @param message CpuResourceCollectionOutcome
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.CpuResourceCollectionOutcome, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this CpuResourceCollectionOutcome to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for CpuResourceCollectionOutcome
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** CpuResourceCollectionOutcomeReason enum. */
+        enum CpuResourceCollectionOutcomeReason {
+            CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED = 0,
+            CPU_RESOURCE_UNAVAILABLE = 1,
+            CPU_RESOURCE_MALFORMED = 2,
+            CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED = 3
         }
 
         /** Properties of an ObservationWindowFailure. */

@@ -306,6 +306,9 @@ export const reportObservations = sqliteTable(
     observationWindowFailureReason: integer(
       "observation_window_failure_reason",
     ),
+    cpuResourceCollectionOutcomeReason: integer(
+      "cpu_resource_collection_outcome_reason",
+    ),
   },
   (table) => [
     uniqueIndex("report_observations_probe_boot_sequence_idx").on(

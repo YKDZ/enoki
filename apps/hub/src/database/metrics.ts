@@ -98,6 +98,7 @@ export type RawMetricSampleInput = {
 
 export type ReportObservationInput = {
   bootId: string;
+  cpuResourceCollectionOutcomeReason?: number | null;
   hostId: number;
   observationWindowFailureReason?: number | null;
   probeId: string;
@@ -146,6 +147,7 @@ export type MetricsRepository = {
   findObservation: (
     input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
   ) => {
+    cpuResourceCollectionOutcomeReason: number | null;
     observationWindowFailureReason: number | null;
   } | null;
   hasObservation: (
@@ -180,6 +182,8 @@ export function createMetricsRepository(
       return (
         database
           .select({
+            cpuResourceCollectionOutcomeReason:
+              reportObservations.cpuResourceCollectionOutcomeReason,
             observationWindowFailureReason:
               reportObservations.observationWindowFailureReason,
           })
@@ -428,6 +432,8 @@ function insertReportObservation(
     .insert(reportObservations)
     .values({
       bootId: input.bootId,
+      cpuResourceCollectionOutcomeReason:
+        input.cpuResourceCollectionOutcomeReason ?? null,
       hostId: input.hostId,
       observationWindowFailureReason:
         input.observationWindowFailureReason ?? null,

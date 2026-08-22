@@ -311,7 +311,10 @@ describe("Probe report API", () => {
         probeId: registration.probeId,
         sequence: 2,
       }),
-    ).toEqual({ observationWindowFailureReason: 1 });
+    ).toEqual({
+      cpuResourceCollectionOutcomeReason: null,
+      observationWindowFailureReason: 1,
+    });
     expect(
       database.sqlite
         .prepare(
@@ -359,6 +362,57 @@ describe("Probe report API", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({
       error: "malformed_probe_report",
+    });
+    database.close();
+  });
+
+  it("persists one idempotent CPU resource acquisition outcome without Metrics", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-cpu-acquisition-outcome",
+        cpuResourceCollectionOutcome: {
+          reason:
+            root.enoki.v1.CpuResourceCollectionOutcomeReason
+              .CPU_RESOURCE_UNAVAILABLE,
+        },
+        probeId: registration.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+      }),
+    ).finish();
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    expect(
+      database.metrics.findObservation({
+        bootId: "boot-cpu-acquisition-outcome",
+        probeId: registration.probeId,
+        sequence: 2,
+      }),
+    ).toEqual({
+      cpuResourceCollectionOutcomeReason: 1,
+      observationWindowFailureReason: null,
     });
     database.close();
   });

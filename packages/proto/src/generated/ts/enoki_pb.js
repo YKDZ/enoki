@@ -1494,6 +1494,7 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeReportRequest snapshots
              * @property {string|null} [enrollmentId] ProbeReportRequest enrollmentId
              * @property {enoki.v1.IObservationWindowFailure|null} [observationWindowFailure] ProbeReportRequest observationWindowFailure
+             * @property {enoki.v1.ICpuResourceCollectionOutcome|null} [cpuResourceCollectionOutcome] ProbeReportRequest cpuResourceCollectionOutcome
              */
 
             /**
@@ -1612,6 +1613,14 @@ export const enoki = $root.enoki = (() => {
             ProbeReportRequest.prototype.observationWindowFailure = null;
 
             /**
+             * ProbeReportRequest cpuResourceCollectionOutcome.
+             * @member {enoki.v1.ICpuResourceCollectionOutcome|null|undefined} cpuResourceCollectionOutcome
+             * @memberof enoki.v1.ProbeReportRequest
+             * @instance
+             */
+            ProbeReportRequest.prototype.cpuResourceCollectionOutcome = null;
+
+            /**
              * Creates a new ProbeReportRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeReportRequest
@@ -1667,6 +1676,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 13, wireType 2 =*/106).string(message.enrollmentId);
                 if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure"))
                     $root.enoki.v1.ObservationWindowFailure.encode(message.observationWindowFailure, writer.uint32(/* id 14, wireType 2 =*/114).fork(), q + 1).ldelim();
+                if (message.cpuResourceCollectionOutcome != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcome"))
+                    $root.enoki.v1.CpuResourceCollectionOutcome.encode(message.cpuResourceCollectionOutcome, writer.uint32(/* id 15, wireType 2 =*/122).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -1761,6 +1772,10 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 14: {
                             message.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 15: {
+                            message.cpuResourceCollectionOutcome = $root.enoki.v1.CpuResourceCollectionOutcome.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
                     default:
@@ -1866,6 +1881,11 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "observationWindowFailure." + error;
                 }
+                if (message.cpuResourceCollectionOutcome != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcome")) {
+                    let error = $root.enoki.v1.CpuResourceCollectionOutcome.verify(message.cpuResourceCollectionOutcome, long + 1);
+                    if (error)
+                        return "cpuResourceCollectionOutcome." + error;
+                }
                 return null;
             };
 
@@ -1963,6 +1983,11 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeReportRequest.observationWindowFailure: object expected");
                     message.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.fromObject(object.observationWindowFailure, long + 1);
                 }
+                if (object.cpuResourceCollectionOutcome != null) {
+                    if (!$util.isObject(object.cpuResourceCollectionOutcome))
+                        throw TypeError(".enoki.v1.ProbeReportRequest.cpuResourceCollectionOutcome: object expected");
+                    message.cpuResourceCollectionOutcome = $root.enoki.v1.CpuResourceCollectionOutcome.fromObject(object.cpuResourceCollectionOutcome, long + 1);
+                }
                 return message;
             };
 
@@ -2006,6 +2031,7 @@ export const enoki = $root.enoki = (() => {
                     object.probeConfigurationError = null;
                     object.enrollmentId = "";
                     object.observationWindowFailure = null;
+                    object.cpuResourceCollectionOutcome = null;
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -2053,6 +2079,8 @@ export const enoki = $root.enoki = (() => {
                     object.enrollmentId = message.enrollmentId;
                 if (message.observationWindowFailure != null && Object.hasOwnProperty.call(message, "observationWindowFailure"))
                     object.observationWindowFailure = $root.enoki.v1.ObservationWindowFailure.toObject(message.observationWindowFailure, options, q + 1);
+                if (message.cpuResourceCollectionOutcome != null && Object.hasOwnProperty.call(message, "cpuResourceCollectionOutcome"))
+                    object.cpuResourceCollectionOutcome = $root.enoki.v1.CpuResourceCollectionOutcome.toObject(message.cpuResourceCollectionOutcome, options, q + 1);
                 return object;
             };
 
@@ -2083,6 +2111,280 @@ export const enoki = $root.enoki = (() => {
             };
 
             return ProbeReportRequest;
+        })();
+
+        v1.CpuResourceCollectionOutcome = (function() {
+
+            /**
+             * Properties of a CpuResourceCollectionOutcome.
+             * @memberof enoki.v1
+             * @interface ICpuResourceCollectionOutcome
+             * @property {enoki.v1.CpuResourceCollectionOutcomeReason|null} [reason] CpuResourceCollectionOutcome reason
+             */
+
+            /**
+             * Constructs a new CpuResourceCollectionOutcome.
+             * @memberof enoki.v1
+             * @classdesc Represents a CpuResourceCollectionOutcome.
+             * @implements ICpuResourceCollectionOutcome
+             * @constructor
+             * @param {enoki.v1.ICpuResourceCollectionOutcome=} [properties] Properties to set
+             */
+            function CpuResourceCollectionOutcome(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * CpuResourceCollectionOutcome reason.
+             * @member {enoki.v1.CpuResourceCollectionOutcomeReason} reason
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @instance
+             */
+            CpuResourceCollectionOutcome.prototype.reason = 0;
+
+            /**
+             * Creates a new CpuResourceCollectionOutcome instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {enoki.v1.ICpuResourceCollectionOutcome=} [properties] Properties to set
+             * @returns {enoki.v1.CpuResourceCollectionOutcome} CpuResourceCollectionOutcome instance
+             */
+            CpuResourceCollectionOutcome.create = function create(properties) {
+                return new CpuResourceCollectionOutcome(properties);
+            };
+
+            /**
+             * Encodes the specified CpuResourceCollectionOutcome message. Does not implicitly {@link enoki.v1.CpuResourceCollectionOutcome.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {enoki.v1.ICpuResourceCollectionOutcome} message CpuResourceCollectionOutcome message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CpuResourceCollectionOutcome.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
+                    writer.uint32(/* id 1, wireType 0 =*/8).int32(message.reason);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified CpuResourceCollectionOutcome message, length delimited. Does not implicitly {@link enoki.v1.CpuResourceCollectionOutcome.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {enoki.v1.ICpuResourceCollectionOutcome} message CpuResourceCollectionOutcome message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CpuResourceCollectionOutcome.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a CpuResourceCollectionOutcome message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.CpuResourceCollectionOutcome} CpuResourceCollectionOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CpuResourceCollectionOutcome.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.CpuResourceCollectionOutcome();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.reason = reader.int32();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a CpuResourceCollectionOutcome message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.CpuResourceCollectionOutcome} CpuResourceCollectionOutcome
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CpuResourceCollectionOutcome.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a CpuResourceCollectionOutcome message.
+             * @function verify
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            CpuResourceCollectionOutcome.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
+                    switch (message.reason) {
+                    default:
+                        return "reason: enum value expected";
+                    case 0:
+                    case 1:
+                    case 2:
+                    case 3:
+                        break;
+                    }
+                return null;
+            };
+
+            /**
+             * Creates a CpuResourceCollectionOutcome message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.CpuResourceCollectionOutcome} CpuResourceCollectionOutcome
+             */
+            CpuResourceCollectionOutcome.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.CpuResourceCollectionOutcome)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.CpuResourceCollectionOutcome: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.CpuResourceCollectionOutcome();
+                switch (object.reason) {
+                default:
+                    if (typeof object.reason === "number") {
+                        message.reason = object.reason;
+                        break;
+                    }
+                    break;
+                case "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED":
+                case 0:
+                    message.reason = 0;
+                    break;
+                case "CPU_RESOURCE_UNAVAILABLE":
+                case 1:
+                    message.reason = 1;
+                    break;
+                case "CPU_RESOURCE_MALFORMED":
+                case 2:
+                    message.reason = 2;
+                    break;
+                case "CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED":
+                case 3:
+                    message.reason = 3;
+                    break;
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a CpuResourceCollectionOutcome message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {enoki.v1.CpuResourceCollectionOutcome} message CpuResourceCollectionOutcome
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            CpuResourceCollectionOutcome.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults)
+                    object.reason = options.enums === String ? "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED" : 0;
+                if (message.reason != null && Object.hasOwnProperty.call(message, "reason"))
+                    object.reason = options.enums === String ? $root.enoki.v1.CpuResourceCollectionOutcomeReason[message.reason] === undefined ? message.reason : $root.enoki.v1.CpuResourceCollectionOutcomeReason[message.reason] : message.reason;
+                return object;
+            };
+
+            /**
+             * Converts this CpuResourceCollectionOutcome to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            CpuResourceCollectionOutcome.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for CpuResourceCollectionOutcome
+             * @function getTypeUrl
+             * @memberof enoki.v1.CpuResourceCollectionOutcome
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            CpuResourceCollectionOutcome.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.CpuResourceCollectionOutcome";
+            };
+
+            return CpuResourceCollectionOutcome;
+        })();
+
+        /**
+         * CpuResourceCollectionOutcomeReason enum.
+         * @name enoki.v1.CpuResourceCollectionOutcomeReason
+         * @enum {number}
+         * @property {number} CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED=0 CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED value
+         * @property {number} CPU_RESOURCE_UNAVAILABLE=1 CPU_RESOURCE_UNAVAILABLE value
+         * @property {number} CPU_RESOURCE_MALFORMED=2 CPU_RESOURCE_MALFORMED value
+         * @property {number} CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED=3 CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED value
+         */
+        v1.CpuResourceCollectionOutcomeReason = (function() {
+            const valuesById = {}, values = Object.create(valuesById);
+            values[valuesById[0] = "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED"] = 0;
+            values[valuesById[1] = "CPU_RESOURCE_UNAVAILABLE"] = 1;
+            values[valuesById[2] = "CPU_RESOURCE_MALFORMED"] = 2;
+            values[valuesById[3] = "CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED"] = 3;
+            return values;
         })();
 
         v1.ObservationWindowFailure = (function() {

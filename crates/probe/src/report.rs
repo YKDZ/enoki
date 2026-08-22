@@ -4,8 +4,9 @@ use crate::{
     collectors::HOST_PROFILE_COLLECTOR_ID,
     host_profile::host_profile_hash,
     protocol::enoki::v1::{
-        HostProfileSnapshot, MetricSample, ObservationWindowFailure, ProbeOperationAcknowledgement,
-        ProbeOperationStatus, ProbeReportRequest, Snapshot, snapshot,
+        CpuResourceCollectionOutcome, HostProfileSnapshot, MetricSample, ObservationWindowFailure,
+        ProbeOperationAcknowledgement, ProbeOperationStatus, ProbeReportRequest, Snapshot,
+        snapshot,
     },
 };
 
@@ -68,6 +69,7 @@ pub struct ObservationBatchInput<'a> {
     pub boot_id: &'a str,
     pub host_profile: &'a HostProfileSnapshot,
     pub metrics: Vec<MetricSample>,
+    pub cpu_resource_collection_outcome: Option<CpuResourceCollectionOutcome>,
     pub observation_window_failure: Option<ObservationWindowFailure>,
     pub operation_progress: OperationReportProgress,
     pub probe_configuration_error: Option<crate::protocol::enoki::v1::ProbeConfigurationError>,
@@ -84,6 +86,7 @@ pub fn startup_report(input: StartupReportInput<'_>) -> ProbeReportRequest {
         boot_id: input.boot_id.to_string(),
         enrollment_id: input.enrollment_id.to_string(),
         metrics: Vec::new(),
+        cpu_resource_collection_outcome: None,
         observation_window_failure: None,
         operation_acknowledgements,
         operation_statuses,
@@ -101,6 +104,7 @@ pub fn snapshot_replay_report(input: SnapshotReplayInput<'_>) -> ProbeReportRequ
         boot_id: input.boot_id.to_string(),
         enrollment_id: String::new(),
         metrics: Vec::new(),
+        cpu_resource_collection_outcome: None,
         observation_window_failure: None,
         operation_acknowledgements: Vec::new(),
         operation_statuses: Vec::new(),
@@ -120,6 +124,7 @@ pub fn observation_batch_report(input: ObservationBatchInput<'_>) -> ProbeReport
         boot_id: input.boot_id.to_string(),
         enrollment_id: String::new(),
         metrics: input.metrics,
+        cpu_resource_collection_outcome: input.cpu_resource_collection_outcome,
         observation_window_failure: input.observation_window_failure,
         operation_acknowledgements,
         operation_statuses,

@@ -568,6 +568,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       );
       const observationWindowFailureReason =
         validatedReport.observationWindowFailureReason;
+      const cpuResourceCollectionOutcomeReason =
+        validatedReport.cpuResourceCollectionOutcomeReason;
       const detailSamples: HostDetailSample[] = [];
 
       for (
@@ -581,6 +583,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           const inserted = services.metrics.recordObservationSample({
             observation: {
               bootId: request.bootId,
+              cpuResourceCollectionOutcomeReason,
               hostId: host.id,
               observationWindowFailureReason,
               probeId: host.probeId,
@@ -706,6 +709,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           services.metrics.recordObservationSample({
             observation: {
               bootId: request.bootId,
+              cpuResourceCollectionOutcomeReason,
               hostId: host.id,
               observationWindowFailureReason,
               probeId: host.probeId,
@@ -2005,6 +2009,8 @@ function validateReportEnvelope(request: ProtoMessage) {
   const observationWindowFailureReason = observationWindowFailureReasonFor(
     request.observationWindowFailure,
   );
+  const cpuResourceCollectionOutcomeReason =
+    cpuResourceCollectionOutcomeReasonFor(request.cpuResourceCollectionOutcome);
   const sequenceCount = sequenceEnd - sequenceStart + 1;
 
   if (
@@ -2013,11 +2019,20 @@ function validateReportEnvelope(request: ProtoMessage) {
   ) {
     return null;
   }
-
+  if (
+    request.cpuResourceCollectionOutcome != null &&
+    cpuResourceCollectionOutcomeReason === null
+  ) {
+    return null;
+  }
   if (
     observationWindowFailureReason !== null &&
-    (samples.length !== 0 || sequenceCount !== 1)
+    cpuResourceCollectionOutcomeReason !== null
   ) {
+    return null;
+  }
+
+  if (observationWindowFailureReason !== null && samples.length !== 0) {
     return null;
   }
 
@@ -2062,7 +2077,22 @@ function validateReportEnvelope(request: ProtoMessage) {
     }
   }
 
-  return { observationWindowFailureReason, sequenceEnd, sequenceStart };
+  return {
+    cpuResourceCollectionOutcomeReason,
+    observationWindowFailureReason,
+    sequenceEnd,
+    sequenceStart,
+  };
+}
+
+function cpuResourceCollectionOutcomeReasonFor(
+  outcome: unknown,
+): number | null {
+  if (!outcome || typeof outcome !== "object") {
+    return null;
+  }
+  const reason = unsignedNumber((outcome as ProtoMessage).reason);
+  return reason >= 1 && reason <= 3 ? reason : null;
 }
 
 function observationWindowFailureReasonFor(failure: unknown): number | null {
