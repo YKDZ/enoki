@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   acceptedTimedOutProbeUpgradeRequest,
+  acknowledgeProbeUpgradeRequest,
   cancelProbeUpgradeRequest,
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
+  failReportedProbeUpgradeRequest,
   runningTimedOutProbeUpgradeRequest,
+  startProbeUpgradeRequest,
   succeedReportedProbeOperation,
   succeedProbeUpgradeRequestFromHostProfile,
 } from "../src/probe/operation";
@@ -17,8 +20,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_000_000,
-      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.2.0" },
     });
 
     expect(result.operation).toEqual({
@@ -116,7 +118,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_000_000,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.2.0" },
     }).operation;
 
     const second = createProbeUpgradeRequest({
@@ -124,7 +126,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_001_000,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.2.0" },
     });
 
     expect(second.operation).toEqual({ ...first, id: 42 });
@@ -137,8 +139,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_000_000,
-      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.2.0" },
     }).operation;
 
     const second = createProbeUpgradeRequest({
@@ -146,8 +147,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_001_000,
-      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"b".repeat(64)}`, version: "0.2.0" },
     });
 
     expect(second.events.map((event) => event.action)).toEqual([
@@ -168,7 +168,10 @@ describe("Probe Upgrade Request lifecycle", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       id: 42,
     };
@@ -178,7 +181,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_001_000,
-      targetProbeVersion: "0.3.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.3.0" },
     });
 
     expect(result.operation).toEqual(
@@ -212,7 +215,10 @@ describe("Probe Upgrade Request lifecycle", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       id: 42,
       runningAtMs: 1_725_000_100_000,
@@ -225,7 +231,10 @@ describe("Probe Upgrade Request lifecycle", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_200_000,
-        targetProbeVersion: "0.3.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.3.0",
+        },
       }),
     ).toEqual({
       error: "probe_upgrade_request_active",
@@ -240,7 +249,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_000_000,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.2.0" },
     }).operation;
 
     expect(
@@ -280,7 +289,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_000_000,
-      targetProbeVersion: "0.2.0",
+      target: { assetSetDigest: `sha256:${"a".repeat(64)}`, version: "0.2.0" },
     }).operation;
 
     const accepted = {
@@ -333,7 +342,10 @@ describe("Probe Upgrade Request lifecycle", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       acceptedAtMs: 1_725_000_010_000,
       runningAtMs: 1_725_000_020_000,
@@ -374,7 +386,10 @@ describe("Probe Upgrade Request lifecycle", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       acceptedAtMs: 1_725_000_010_000,
       runningAtMs: 1_725_000_020_000,
@@ -397,5 +412,74 @@ describe("Probe Upgrade Request lifecycle", () => {
       state: "succeeded",
       updatedAtMs: 1_725_000_030_000,
     });
+  });
+
+  it("does not advance a legacy Probe Upgrade Request without an Asset Set target", () => {
+    const operation = {
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
+      }).operation,
+      targetAssetSetDigest: null,
+    };
+
+    expect(
+      acknowledgeProbeUpgradeRequest({
+        nowMs: 1_725_000_010_000,
+        operation,
+      }),
+    ).toEqual({
+      acknowledged: operation,
+      error: "probe_operation_not_acknowledgeable",
+    });
+    expect(
+      startProbeUpgradeRequest({
+        nowMs: 1_725_000_010_000,
+        operation: {
+          ...operation,
+          acceptedAtMs: 1_725_000_005_000,
+          state: "accepted",
+        },
+      }),
+    ).toEqual({
+      error: "probe_operation_status_invalid",
+      operation: {
+        ...operation,
+        acceptedAtMs: 1_725_000_005_000,
+        state: "accepted",
+      },
+    });
+    expect(
+      failReportedProbeUpgradeRequest({
+        code: "upgrade_failed",
+        message: "Upgrade did not complete.",
+        nowMs: 1_725_000_010_000,
+        operation: {
+          ...operation,
+          acceptedAtMs: 1_725_000_005_000,
+          state: "accepted",
+        },
+      }),
+    ).toEqual({
+      error: "probe_operation_status_invalid",
+      operation: {
+        ...operation,
+        acceptedAtMs: 1_725_000_005_000,
+        state: "accepted",
+      },
+    });
+    expect(
+      succeedProbeUpgradeRequestFromHostProfile({
+        hostProfile: { probeVersion: "0.2.0" },
+        nowMs: 1_725_000_010_000,
+        operation,
+      }),
+    ).toBeNull();
   });
 });

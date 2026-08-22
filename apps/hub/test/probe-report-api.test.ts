@@ -1677,7 +1677,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_010_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       acceptedAtMs: 1_725_000_015_000,
       runningAtMs: 1_725_000_020_000,
@@ -1938,8 +1941,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -1982,6 +1987,95 @@ describe("Probe report API", () => {
         "",
       );
     }
+  });
+
+  it("keeps legacy Probe Upgrade Requests without an Asset Set target closed to report progress", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => 1_725_000_010_000,
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest({
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
+      }).operation,
+      targetAssetSetDigest: null,
+    });
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const ReportResponse = root.enoki.v1.ProbeReportResponse;
+    const report = (payload: object) =>
+      app.request(
+        "/api/probe/report",
+        signedProbeRequest(
+          registration,
+          "/api/probe/report",
+          ReportRequest.encode(
+            ReportRequest.create({
+              bootId: "boot-legacy-upgrade-target",
+              probeConfigurationVersion: "default-v1",
+              probeId: registration.probeId,
+              sequenceEnd: 1,
+              sequenceStart: 1,
+              ...payload,
+            }),
+          ).finish(),
+        ),
+      );
+
+    const acknowledgement = await report({
+      operationAcknowledgements: [{ operationId: String(operation.id) }],
+    });
+    expect(acknowledgement.status).toBe(400);
+    await expect(acknowledgement.json()).resolves.toEqual({
+      error: "malformed_probe_operation_acknowledgement",
+    });
+
+    const status = await report({
+      operationStatuses: [{ operationId: String(operation.id), running: {} }],
+    });
+    expect(status.status).toBe(400);
+    await expect(status.json()).resolves.toEqual({
+      error: "malformed_probe_operation_status",
+    });
+
+    const hostProfile = sampleHostProfileSnapshot({ probeVersion: "0.2.0" });
+    const observation = await report({
+      snapshots: [
+        {
+          collectorId: "official.host-profile",
+          hostProfile,
+          snapshotHash: hashStableHostProfile(hostProfile),
+        },
+      ],
+    });
+    expect(observation.status).toBe(200);
+    expect(
+      ReportResponse.decode(new Uint8Array(await observation.arrayBuffer()))
+        .pendingOperation,
+    ).toBeNull();
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "pending" }),
+    );
+
+    database.close();
   });
 
   it("authenticates signed Probe report requests and rejects nonce replay", async () => {
@@ -2245,8 +2339,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -2417,7 +2513,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -2547,7 +2646,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: nowMs - 1_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -2628,7 +2730,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -2822,6 +2927,7 @@ describe("Probe report API", () => {
       runningAtMs: 1_725_000_001_220,
       state: "failed",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.1.0",
       updatedAtMs: 1_725_000_001_250,
     });
@@ -2966,7 +3072,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
@@ -3025,7 +3134,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       acceptedAtMs: 1_725_000_009_500,
       state: "accepted",
@@ -3092,7 +3204,10 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       state: "superseded",
       supersededAtMs: 1_725_000_009_500,

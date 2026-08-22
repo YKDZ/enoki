@@ -140,8 +140,10 @@ export function createHostRoutes(services: HostRouteServices) {
         currentProbeVersion: eligibility.currentProbeVersion,
         hostId: host.id,
         nowMs: now(),
-        targetAssetSetDigest: assetSet.targetAssetSetDigest,
-        targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+        target: {
+          assetSetDigest: assetSet.targetAssetSetDigest,
+          version: eligibility.currentProbeAssetSetVersion,
+        },
       });
 
       let created: ProbeUpgradeRequest;
@@ -336,8 +338,10 @@ export function createHostRoutes(services: HostRouteServices) {
       currentProbeVersion: eligibility.currentProbeVersion,
       hostId,
       nowMs: now(),
-      targetAssetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
-      targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+      target: {
+        assetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
+        version: eligibility.currentProbeAssetSetVersion,
+      },
     });
     if (result.error) {
       return context.json(

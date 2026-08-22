@@ -92,7 +92,7 @@ describe("Hub database", () => {
     database.close();
   });
 
-  it("migrates legacy Enrollment Tokens to terminal expired records without changing Hub data", async () => {
+  it("migrates legacy data and closes Probe Upgrade Requests without Asset Set targets", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);
     const preFeatureMigrations = path.join(dataRoot, "pre-feature-migrations");
@@ -123,6 +123,8 @@ describe("Hub database", () => {
       },
     );
     createHost(legacy, { id: 41, probeId: "probe-preserved" });
+    createHost(legacy, { id: 42, probeId: "probe-accepted" });
+    createHost(legacy, { id: 43, probeId: "probe-running" });
     legacy.audit.record({
       action: "host.metadata.update",
       actor: "owner",
@@ -131,22 +133,70 @@ describe("Hub database", () => {
       subjectId: "41",
       subjectType: "host",
     });
-    legacy.sqlite
-      .prepare(
-        `insert into probe_operations (
+    const insertLegacyOperation = legacy.sqlite.prepare(
+      `insert into probe_operations (
           managed_host_id, kind, state, current_probe_version,
-          target_probe_version, created_at_ms, updated_at_ms
-        ) values (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        41,
-        "probe_upgrade",
-        "pending",
-        "0.1.0",
-        "0.2.0",
-        1_725_000_002_000,
-        1_725_000_002_000,
-      );
+          target_probe_version, failure_code, failure_message,
+          created_at_ms, updated_at_ms, accepted_at_ms, running_at_ms,
+          completed_at_ms
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insertLegacyOperation.run(
+      41,
+      "probe_upgrade",
+      "pending",
+      "0.1.0",
+      "0.2.0",
+      null,
+      null,
+      1_725_000_002_000,
+      1_725_000_002_000,
+      null,
+      null,
+      null,
+    );
+    insertLegacyOperation.run(
+      42,
+      "probe_upgrade",
+      "accepted",
+      "0.1.0",
+      "0.2.0",
+      null,
+      null,
+      1_725_000_002_000,
+      1_725_000_003_000,
+      1_725_000_003_000,
+      null,
+      null,
+    );
+    insertLegacyOperation.run(
+      43,
+      "probe_upgrade",
+      "running",
+      "0.1.0",
+      "0.2.0",
+      null,
+      null,
+      1_725_000_002_000,
+      1_725_000_004_000,
+      1_725_000_003_000,
+      1_725_000_004_000,
+      null,
+    );
+    insertLegacyOperation.run(
+      41,
+      "probe_upgrade",
+      "failed",
+      "0.1.0",
+      "0.1.5",
+      "accepted_timeout",
+      "Historical failure.",
+      1_724_000_000_000,
+      1_724_000_010_000,
+      1_724_000_001_000,
+      null,
+      1_724_000_010_000,
+    );
     legacy.metrics.recordSample({
       bootId: "boot-preserved",
       collectedAtMs: 1_725_000_003_000,
@@ -252,19 +302,55 @@ describe("Hub database", () => {
         .get(),
     ).toEqual({
       auditEvents: 1,
-      hosts: 1,
+      hosts: 3,
       metrics: 1,
       officialMetricCpu: 1,
-      operations: 1,
+      operations: 4,
       profiles: 1,
     });
     expect(migrated.sqlite.prepare("pragma foreign_key_check").all()).toEqual(
       [],
     );
-    const legacyOperation = migrated.probeOperations.findLatestForHost(41);
-    expect(legacyOperation).toEqual(
-      expect.objectContaining({ targetAssetSetDigest: null }),
+    const migratedOperations = migrated.sqlite
+      .prepare(
+        `select managed_host_id as hostId, state, failure_code as failureCode,
+          failure_message as failureMessage, completed_at_ms as completedAtMs,
+          updated_at_ms as updatedAtMs,
+          target_asset_set_digest as targetAssetSetDigest
+        from probe_operations order by id`,
+      )
+      .all();
+    expect(migratedOperations.slice(0, 3)).toEqual(
+      [41, 42, 43].map((hostId) => ({
+        completedAtMs: expect.any(Number),
+        failureCode: "probe_upgrade_target_unavailable",
+        failureMessage:
+          "Probe Upgrade Request predates its required Probe Asset Set target.",
+        hostId,
+        state: "failed",
+        targetAssetSetDigest: null,
+        updatedAtMs: expect.any(Number),
+      })),
     );
+    for (const operation of migratedOperations.slice(0, 3) as Array<{
+      completedAtMs: number;
+      updatedAtMs: number;
+    }>) {
+      expect(operation.completedAtMs).toBe(operation.updatedAtMs);
+    }
+    expect(migratedOperations[3]).toEqual({
+      completedAtMs: 1_724_000_010_000,
+      failureCode: "accepted_timeout",
+      failureMessage: "Historical failure.",
+      hostId: 41,
+      state: "failed",
+      targetAssetSetDigest: null,
+      updatedAtMs: 1_724_000_010_000,
+    });
+    for (const hostId of [41, 42, 43]) {
+      expect(migrated.probeOperations.findActiveForHost(hostId)).toBeNull();
+    }
+    const legacyOperation = migrated.probeOperations.findLatestForHost(41);
     expect(() =>
       issueProbeOperationToken({
         expiresAtMs: 1_725_000_020_000,
@@ -934,6 +1020,7 @@ describe("Hub database", () => {
       runningAtMs: null,
       state: "pending",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_000_000,
     });
@@ -953,6 +1040,7 @@ describe("Hub database", () => {
         runningAtMs: null,
         state: "pending",
         supersededAtMs: null,
+        targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
         targetProbeVersion: "0.3.0",
         updatedAtMs: 1_725_000_001_000,
       }),
@@ -972,6 +1060,7 @@ describe("Hub database", () => {
       runningAtMs: null,
       state: "failed",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
       targetProbeVersion: "0.3.0",
       updatedAtMs: 1_725_000_002_000,
     });

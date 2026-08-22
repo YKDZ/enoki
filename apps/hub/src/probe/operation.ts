@@ -28,6 +28,11 @@ export type ProbeUpgradeRequest = {
   updatedAtMs: number;
 };
 
+export type ProbeUpgradeTarget = {
+  assetSetDigest: string;
+  version: string;
+};
+
 export type ProbeUpgradeRequestLifecycleEvent = {
   action: "created" | "superseded";
   operation: ProbeUpgradeRequest;
@@ -62,28 +67,26 @@ export function createProbeUpgradeRequest(input: {
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
-  targetAssetSetDigest?: string;
-  targetProbeVersion: string;
+  target: ProbeUpgradeTarget;
 }): Extract<CreateProbeUpgradeRequestResult, { error: null }>;
 export function createProbeUpgradeRequest(input: {
   activeOperation: ProbeUpgradeRequest | null;
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
-  targetAssetSetDigest?: string;
-  targetProbeVersion: string;
+  target: ProbeUpgradeTarget;
 }): CreateProbeUpgradeRequestResult;
 export function createProbeUpgradeRequest(input: {
   activeOperation: ProbeUpgradeRequest | null;
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
-  targetAssetSetDigest?: string;
-  targetProbeVersion: string;
+  target: ProbeUpgradeTarget;
 }): CreateProbeUpgradeRequestResult {
   if (
-    input.activeOperation?.targetProbeVersion === input.targetProbeVersion &&
-    input.activeOperation.targetAssetSetDigest === input.targetAssetSetDigest &&
+    input.activeOperation?.targetProbeVersion === input.target.version &&
+    input.activeOperation.targetAssetSetDigest ===
+      input.target.assetSetDigest &&
     isActiveProbeOperation(input.activeOperation)
   ) {
     return {
@@ -246,6 +249,13 @@ export function acknowledgeProbeUpgradeRequest(input: {
   acknowledged: ProbeUpgradeRequest;
   error: "probe_operation_not_acknowledgeable" | null;
 } {
+  if (hasUnavailableProbeUpgradeTarget(input.operation)) {
+    return {
+      acknowledged: input.operation,
+      error: "probe_operation_not_acknowledgeable",
+    };
+  }
+
   if (input.operation.state === "pending") {
     return {
       acknowledged: {
@@ -281,6 +291,13 @@ export function startProbeUpgradeRequest(input: {
   error: "probe_operation_status_invalid" | null;
   operation: ProbeUpgradeRequest;
 } {
+  if (hasUnavailableProbeUpgradeTarget(input.operation)) {
+    return {
+      error: "probe_operation_status_invalid",
+      operation: input.operation,
+    };
+  }
+
   if (input.operation.state === "accepted") {
     return {
       error: null,
@@ -315,6 +332,13 @@ export function failReportedProbeUpgradeRequest(input: {
   error: "probe_operation_status_invalid" | null;
   operation: ProbeUpgradeRequest;
 } {
+  if (hasUnavailableProbeUpgradeTarget(input.operation)) {
+    return {
+      error: "probe_operation_status_invalid",
+      operation: input.operation,
+    };
+  }
+
   if (
     input.operation.state === "accepted" ||
     input.operation.state === "running"
@@ -393,6 +417,7 @@ export function succeedProbeUpgradeRequestFromHostProfile(input: {
 }): ProbeUpgradeRequest | null {
   if (
     input.operation.kind !== "probe_upgrade" ||
+    hasUnavailableProbeUpgradeTarget(input.operation) ||
     !isActiveProbeOperation(input.operation) ||
     normalizeProbeVersion(input.hostProfile?.probeVersion) !==
       normalizeProbeVersion(input.operation.targetProbeVersion)
@@ -463,6 +488,12 @@ function isSafeToSupersedeProbeOperation(operation: ProbeUpgradeRequest) {
   return operation.state === "pending" || operation.state === "accepted";
 }
 
+export function hasUnavailableProbeUpgradeTarget(
+  operation: ProbeUpgradeRequest,
+) {
+  return operation.kind === "probe_upgrade" && !operation.targetAssetSetDigest;
+}
+
 function normalizeProbeVersion(value: string | null | undefined) {
   return typeof value === "string" ? value.trim().replace(/^v/, "") : "";
 }
@@ -471,8 +502,7 @@ function newPendingProbeUpgradeRequest(input: {
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
-  targetAssetSetDigest?: string;
-  targetProbeVersion: string;
+  target: ProbeUpgradeTarget;
 }): ProbeUpgradeRequest {
   return {
     acceptedAtMs: null,
@@ -488,10 +518,8 @@ function newPendingProbeUpgradeRequest(input: {
     runningAtMs: null,
     state: "pending",
     supersededAtMs: null,
-    ...(input.targetAssetSetDigest
-      ? { targetAssetSetDigest: input.targetAssetSetDigest }
-      : {}),
-    targetProbeVersion: input.targetProbeVersion,
+    targetAssetSetDigest: input.target.assetSetDigest,
+    targetProbeVersion: input.target.version,
     updatedAtMs: input.nowMs,
   };
 }

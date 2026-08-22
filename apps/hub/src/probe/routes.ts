@@ -51,6 +51,7 @@ import {
 import {
   acknowledgeProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
+  hasUnavailableProbeUpgradeTarget,
   succeedReportedProbeOperation,
   startProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromHostProfile,
@@ -1435,18 +1436,19 @@ function findReportableProbeOperation(
   }
 
   const stagedOperation = stagedOperations?.get(id);
-  if (stagedOperation) {
+  if (stagedOperation && !hasUnavailableProbeUpgradeTarget(stagedOperation)) {
     return stagedOperation;
   }
 
   const active = services.probeOperations?.findActiveForHost(hostId);
-  if (active?.id === id) {
+  if (active?.id === id && !hasUnavailableProbeUpgradeTarget(active)) {
     return active;
   }
 
   const operation = services.probeOperations?.findById(id);
   if (
     operation?.hostId === hostId &&
+    !hasUnavailableProbeUpgradeTarget(operation) &&
     ["failed", "superseded", "canceled", "succeeded"].includes(operation.state)
   ) {
     return operation;

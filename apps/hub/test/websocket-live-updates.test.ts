@@ -1086,6 +1086,7 @@ describe("WebSocket live updates", () => {
       runningAtMs: null,
       state: "accepted",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: nowMs - 5 * 60 * 1_000 - 1,
     });

@@ -14,8 +14,10 @@ describe("Probe Operation Token", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       id: 42,
     };
@@ -82,8 +84,10 @@ describe("Probe Operation Token", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       id: 42,
     };
@@ -114,8 +118,10 @@ describe("Probe Operation Token", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "0.2.0",
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
       }).operation,
       id: 42,
     };

@@ -761,6 +761,7 @@ describe("Host detail API", () => {
       runningAtMs: null,
       state: "pending",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_000_000,
     });
@@ -779,6 +780,7 @@ describe("Host detail API", () => {
       runningAtMs: 1_725_000_000_200,
       state: "failed",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_000_300,
     });
@@ -1670,6 +1672,7 @@ describe("Host detail API", () => {
       runningAtMs: 1_725_000_000_200,
       state: "failed",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_001_500,
     });
