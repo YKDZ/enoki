@@ -341,6 +341,61 @@ describe("live Host summaries", () => {
     expect(hosts.value.map((host) => host.id)).toEqual([1, 2]);
   });
 
+  it("reloads an open Host detail once when its failed Probe Upgrade problem recovers", async () => {
+    const hosts = ref<HostSummary[]>([
+      {
+        ...existingHost,
+        probeUpgradeProblem: { status: "failed" },
+      },
+    ]);
+    let detailReloadCount = 0;
+    const liveUpdates = useLiveUpdates({
+      hosts,
+      isAuthenticated: ref(true),
+      async loadHosts() {},
+      async recoverDetail() {
+        detailReloadCount += 1;
+      },
+    });
+    liveUpdates.subscribeHostDetail(existingHost.id);
+    const recoveredSummary = JSON.stringify({
+      host: {
+        id: existingHost.id,
+        lastSeenAtMs: 1_725_000_010_000,
+        latestMetrics: null,
+        probeUpgradeProblem: null,
+        status: "online",
+        warningFlags: {
+          clockSkew: false,
+          probeConfigurationError: false,
+        },
+      },
+      type: "host_summary",
+    });
+
+    await liveUpdates.handleLiveUpdate(recoveredSummary);
+    await liveUpdates.handleLiveUpdate(recoveredSummary);
+    await liveUpdates.handleLiveUpdate(
+      JSON.stringify({
+        host: {
+          id: 2,
+          lastSeenAtMs: 1_725_000_010_000,
+          latestMetrics: null,
+          probeUpgradeProblem: null,
+          status: "online",
+          warningFlags: {
+            clockSkew: false,
+            probeConfigurationError: false,
+          },
+        },
+        type: "host_summary",
+      }),
+    );
+
+    expect(detailReloadCount).toBe(1);
+    expect(hosts.value[0]?.probeUpgradeProblem).toBeNull();
+  });
+
   it("passes subscribed detail samples to the detail handler", async () => {
     const hosts = ref<HostSummary[]>([existingHost]);
     const detailSamples: unknown[] = [];

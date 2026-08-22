@@ -482,17 +482,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         services.snapshotCollectors
           ?.get(hostProfileCollectorId)
           ?.hasSnapshot(host.id, reportedSnapshotHash) ?? false;
-      if (
-        !reportedHostProfile &&
-        knownHostProfileSnapshot &&
-        reportedSnapshotHash
-      ) {
-        services.snapshotCollectors?.hostProfile.observe({
-          hostId: host.id,
-          observedAtMs: reportReceivedAtMs,
-          snapshotHash: reportedSnapshotHash,
-        });
-      }
       const snapshotReplayRequest =
         !reportedHostProfile &&
         !knownHostProfileSnapshot &&
@@ -561,20 +550,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           : null,
         probeVersion: reportedHostProfile?.probeVersion || undefined,
       });
-      let hostProfileUpdate: HostProfileSnapshot | null = null;
-      if (reportedHostProfile && reportedHostProfileHash) {
-        const result = services.snapshotCollectors?.write({
-          collectorId: hostProfileCollectorId,
-          hostId: host.id,
-          observedIp,
-          payload: reportedHostProfile,
-          snapshotHash: reportedHostProfileHash,
-          updatedAtMs: reportReceivedAtMs,
-        });
-        if (result?.changed) {
-          hostProfileUpdate = result.view;
-        }
-      }
       if (
         snapshotReplayToFulfill &&
         !services.snapshotCollectors?.fulfillSnapshotReplay({
@@ -584,22 +559,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       ) {
         throw new ReportBusinessRejection("malformed_probe_report", 400);
       }
-      const storedReportedHostProfile =
-        !reportedHostProfile &&
-        hostProfileSnapshot &&
-        services.snapshotCollectors?.hostProfile.hasSnapshot(
-          host.id,
-          reportedSnapshotHash,
-        )
-          ? services.snapshotCollectors.hostProfile.read(host.id)
-          : null;
-      markProbeUpgradeSucceededFromHostProfile({
-        hostId: host.id,
-        hostProfile: reportedHostProfile ?? storedReportedHostProfile,
-        nowMs: reportReceivedAtMs,
-        services,
-      });
-
       const samplesBySequence = new Map<number, ProtoMessage>(
         ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
           unsignedNumber(sample.sequence),
@@ -751,6 +710,55 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           });
         }
       }
+
+      const hostProfileObservedAtMs = services.metrics.observationReceivedAtMs({
+        bootId: request.bootId,
+        probeId: host.probeId,
+        sequence: validatedReport.sequenceEnd,
+      });
+      let hostProfileUpdate: HostProfileSnapshot | null = null;
+      if (
+        hostProfileObservedAtMs !== null &&
+        reportedHostProfile &&
+        reportedHostProfileHash
+      ) {
+        const result = services.snapshotCollectors?.write({
+          collectorId: hostProfileCollectorId,
+          hostId: host.id,
+          observedIp,
+          payload: reportedHostProfile,
+          snapshotHash: reportedHostProfileHash,
+          updatedAtMs: hostProfileObservedAtMs,
+        });
+        if (result?.changed) {
+          hostProfileUpdate = result.view;
+        }
+      } else if (
+        hostProfileObservedAtMs !== null &&
+        knownHostProfileSnapshot &&
+        reportedSnapshotHash
+      ) {
+        services.snapshotCollectors?.hostProfile.observe({
+          hostId: host.id,
+          observedAtMs: hostProfileObservedAtMs,
+          snapshotHash: reportedSnapshotHash,
+        });
+      }
+      const storedReportedHostProfile =
+        !reportedHostProfile &&
+        hostProfileSnapshot &&
+        services.snapshotCollectors?.hostProfile.hasSnapshot(
+          host.id,
+          reportedSnapshotHash,
+        )
+          ? services.snapshotCollectors.hostProfile.read(host.id)
+          : null;
+      markProbeUpgradeSucceededFromHostProfile({
+        hostId: host.id,
+        hostProfile: reportedHostProfile ?? storedReportedHostProfile,
+        nowMs: reportReceivedAtMs,
+        services,
+      });
 
       const readyEnrollment =
         startupEnrollment?.status === "ready"

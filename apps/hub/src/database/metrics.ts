@@ -145,6 +145,9 @@ export type MetricsRepository = {
   hasObservation: (
     input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
   ) => boolean;
+  observationReceivedAtMs: (
+    input: Pick<ReportObservationInput, "bootId" | "probeId" | "sequence">,
+  ) => number | null;
   findLatestSample: (hostId: number) =>
     | (MetricSampleRow & {
         diskHealth: MetricHistorySample["diskHealth"];
@@ -181,6 +184,22 @@ export function createMetricsRepository(
           )
           .limit(1)
           .get(),
+      );
+    },
+    observationReceivedAtMs(input) {
+      return (
+        database
+          .select({ receivedAtMs: reportObservations.receivedAtMs })
+          .from(reportObservations)
+          .where(
+            and(
+              eq(reportObservations.bootId, input.bootId),
+              eq(reportObservations.probeId, input.probeId),
+              eq(reportObservations.sequence, input.sequence),
+            ),
+          )
+          .limit(1)
+          .get()?.receivedAtMs ?? null
       );
     },
     findLatestSample(hostId) {

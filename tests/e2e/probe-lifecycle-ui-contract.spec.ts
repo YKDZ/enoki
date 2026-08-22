@@ -1,4 +1,10 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Page,
+  type Route,
+  type WebSocketRoute,
+} from "@playwright/test";
 
 import type { HostDetail } from "../../apps/web/src/types";
 import { releaseUiLifecycleVersions } from "./release-ui-contract-fixture";
@@ -287,16 +293,32 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
     });
   }
 
-  test("较新的权威 Host Profile 恢复证据会在刷新后清除当前失败", async ({
+  test("live summary 恢复信号会重取并清除已打开详情的当前失败", async ({
     page,
   }) => {
     let recovered = false;
+    let detailRequestCount = 0;
+    let liveSocket: WebSocketRoute | null = null;
+    const detailSubscribed = deferred<void>();
+    await page.routeWebSocket("**/api/web/ws", (socket) => {
+      liveSocket = socket;
+      socket.onMessage((message) => {
+        if (
+          typeof message === "string" &&
+          message.includes('"type":"subscribe_host_detail"') &&
+          message.includes(`"hostId":${hostId}`)
+        ) {
+          detailSubscribed.resolve();
+        }
+      });
+    });
     const failed = probeUpgrade("failed", {
       recoveryDisposition: "probe_repair",
     });
     await openHostDetail(page, failed, {
       async onHostRequest(route) {
         if (route.request().method() !== "GET") return false;
+        detailRequestCount += 1;
         await route.fulfill({
           contentType: "application/json",
           json: { host: hostDetail(recovered ? null : failed) },
@@ -305,11 +327,28 @@ test.describe("候选 Hub 探针生命周期 UI Contract", () => {
       },
     });
     await expect(page.getByTestId("probe-upgrade-status")).toBeVisible();
+    await detailSubscribed.promise;
 
     recovered = true;
-    await page.reload();
+    liveSocket?.send(
+      JSON.stringify({
+        host: {
+          id: hostId,
+          lastSeenAtMs: 1_725_000_001_600,
+          latestMetrics: null,
+          probeUpgradeProblem: null,
+          status: "online",
+          warningFlags: {
+            clockSkew: false,
+            probeConfigurationError: false,
+          },
+        },
+        type: "host_summary",
+      }),
+    );
 
     await expect(page.getByTestId("probe-upgrade-status")).toHaveCount(0);
+    expect(detailRequestCount).toBe(2);
   });
 
   test("管理员确认后发送一次带会话认证的卸载探针并删除主机请求", async ({
@@ -554,6 +593,15 @@ function hostDetail(
       },
       mode: "inherit",
     },
+    probeUpgradeProblem:
+      probeUpgradeStatus?.state === "failed"
+        ? { status: "failed" }
+        : probeUpgradeStatus &&
+            ["pending", "accepted", "running"].includes(
+              probeUpgradeStatus.state,
+            )
+          ? { status: "in_progress" }
+          : null,
     probeUpgradeEligibility: {
       currentProbeAssetSetVersion: candidateVersion,
       currentProbeVersion,

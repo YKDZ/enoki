@@ -2802,7 +2802,47 @@ describe("Probe report API", () => {
         ?.observedAtMs,
     ).toBe(nowMs);
 
+    const failed = database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: 1_725_000_001_210,
+      canceledAtMs: null,
+      completedAtMs: 1_725_000_001_250,
+      createdAtMs: 1_725_000_001_200,
+      currentProbeVersion: "0.0.9",
+      failureCode: "post_replacement_restart_failure",
+      failureMessage: "local restart failed",
+      hostId: host.id,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: 1_725_000_001_220,
+      state: "failed",
+      supersededAtMs: null,
+      targetProbeVersion: "0.1.0",
+      updatedAtMs: 1_725_000_001_250,
+    });
+
     nowMs = 1_725_000_001_300;
+    const duplicateCompact = await send(2, {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    });
+    expect(duplicateCompact.status).toBe(200);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id)
+        ?.observedAtMs,
+    ).toBe(1_725_000_001_200);
+    const duplicateDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(duplicateDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
+      }),
+    });
+
+    nowMs = 1_725_000_001_350;
     const wrongHash = await send(3, {
       collectorId: "official.host-profile",
       snapshotHash: "unknown-host-profile-hash",
@@ -2816,6 +2856,22 @@ describe("Probe report API", () => {
       database.snapshotCollectors.hostProfile.readObservation(host.id)
         ?.observedAtMs,
     ).toBe(1_725_000_001_200);
+
+    nowMs = 1_725_000_001_400;
+    const newCompact = await send(4, {
+      collectorId: "official.host-profile",
+      snapshotHash,
+    });
+    expect(newCompact.status).toBe(200);
+    const recoveredDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(recoveredDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({ probeUpgradeStatus: null }),
+    });
+    expect(database.probeOperations.findById(failed.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "failed" }),
+    );
 
     database.close();
   });
