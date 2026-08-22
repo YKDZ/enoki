@@ -97,6 +97,7 @@ it("submits ordinary requests for every currently eligible active Host and skips
       hostId: eligible.id,
       kind: "probe_upgrade",
       state: "pending",
+      targetAssetSetDigest: fixture.targetAssetSetDigest,
       targetProbeVersion: "0.2.0",
     }),
   );
@@ -308,6 +309,7 @@ async function createFixture(
     database,
     liveUpdates,
     ownerSession: login.headers.get("set-cookie") ?? "",
+    targetAssetSetDigest: release.targetAssetSetDigest,
   };
 }
 

@@ -15,6 +15,7 @@ message ProbeUpgradeOperation {
   string current_probe_version = 1;
   string target_probe_version = 2;
   string operation_token = 3;
+  string target_asset_set_digest = 4;
 }
 
 message ProbeUninstallOperation {

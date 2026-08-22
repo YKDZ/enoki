@@ -9103,6 +9103,7 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [currentProbeVersion] ProbeUpgradeOperation currentProbeVersion
              * @property {string|null} [targetProbeVersion] ProbeUpgradeOperation targetProbeVersion
              * @property {string|null} [operationToken] ProbeUpgradeOperation operationToken
+             * @property {string|null} [targetAssetSetDigest] ProbeUpgradeOperation targetAssetSetDigest
              */
 
             /**
@@ -9145,6 +9146,14 @@ export const enoki = $root.enoki = (() => {
             ProbeUpgradeOperation.prototype.operationToken = "";
 
             /**
+             * ProbeUpgradeOperation targetAssetSetDigest.
+             * @member {string} targetAssetSetDigest
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             */
+            ProbeUpgradeOperation.prototype.targetAssetSetDigest = "";
+
+            /**
              * Creates a new ProbeUpgradeOperation instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeUpgradeOperation
@@ -9178,6 +9187,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 2, wireType 2 =*/18).string(message.targetProbeVersion);
                 if (message.operationToken != null && Object.hasOwnProperty.call(message, "operationToken"))
                     writer.uint32(/* id 3, wireType 2 =*/26).string(message.operationToken);
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.targetAssetSetDigest);
                 return writer;
             };
 
@@ -9230,6 +9241,10 @@ export const enoki = $root.enoki = (() => {
                             message.operationToken = reader.string();
                             break;
                         }
+                    case 4: {
+                            message.targetAssetSetDigest = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -9278,6 +9293,9 @@ export const enoki = $root.enoki = (() => {
                 if (message.operationToken != null && Object.hasOwnProperty.call(message, "operationToken"))
                     if (!$util.isString(message.operationToken))
                         return "operationToken: string expected";
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    if (!$util.isString(message.targetAssetSetDigest))
+                        return "targetAssetSetDigest: string expected";
                 return null;
             };
 
@@ -9305,6 +9323,8 @@ export const enoki = $root.enoki = (() => {
                     message.targetProbeVersion = String(object.targetProbeVersion);
                 if (object.operationToken != null)
                     message.operationToken = String(object.operationToken);
+                if (object.targetAssetSetDigest != null)
+                    message.targetAssetSetDigest = String(object.targetAssetSetDigest);
                 return message;
             };
 
@@ -9329,6 +9349,7 @@ export const enoki = $root.enoki = (() => {
                     object.currentProbeVersion = "";
                     object.targetProbeVersion = "";
                     object.operationToken = "";
+                    object.targetAssetSetDigest = "";
                 }
                 if (message.currentProbeVersion != null && Object.hasOwnProperty.call(message, "currentProbeVersion"))
                     object.currentProbeVersion = message.currentProbeVersion;
@@ -9336,6 +9357,8 @@ export const enoki = $root.enoki = (() => {
                     object.targetProbeVersion = message.targetProbeVersion;
                 if (message.operationToken != null && Object.hasOwnProperty.call(message, "operationToken"))
                     object.operationToken = message.operationToken;
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    object.targetAssetSetDigest = message.targetAssetSetDigest;
                 return object;
             };
 

@@ -1411,7 +1411,8 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     let hub_url = &install_metadata.hub_url;
     let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
     let body = format!(
-        "{{\"targetProbeVersion\":\"{}\",\"token\":\"{}\"}}",
+        "{{\"targetAssetSetDigest\":\"{}\",\"targetProbeVersion\":\"{}\",\"token\":\"{}\"}}",
+        json_string_fragment(&operation.target_asset_set_digest),
         json_string_fragment(&operation.target_probe_version),
         json_string_fragment(&operation.token),
     );
@@ -1433,7 +1434,15 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
         let failed = failed_probe_upgrader_result(&operation, &error);
         let _ = write_failed_local_operation_status(&operation, install_metadata, &failed);
         if let Ok(status_url) = operation_status_url(hub_url, &operation.operation_id) {
-            let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
+            let body = render_operation_status_body(
+                &operation.token,
+                "failed",
+                Some(&failed),
+                Some((
+                    &operation.target_asset_set_digest,
+                    &operation.target_probe_version,
+                )),
+            );
             let _ = transport.post_operation_status(&status_url, &request_auth, &body);
         }
         return Ok(failed);
@@ -1535,12 +1544,12 @@ fn run_probe_uninstaller_with_systemd_runner_and_install_metadata(
 
     if let Err(error) = execute_probe_uninstall(&input, install_metadata, systemd) {
         let failed = failed_probe_uninstaller_result(&operation, &error);
-        let body = render_operation_status_body(&operation.token, "failed", Some(&failed));
+        let body = render_operation_status_body(&operation.token, "failed", Some(&failed), None);
         let _ = transport.post_operation_status(&status_url, &request_auth, &body);
         return Ok(failed);
     }
 
-    let body = render_operation_status_body(&operation.token, "succeeded", None);
+    let body = render_operation_status_body(&operation.token, "succeeded", None, None);
     transport.post_operation_status(&status_url, &request_auth, &body)?;
 
     Ok(ProbeUpgraderResult {
@@ -2064,10 +2073,18 @@ fn render_operation_status_body(
     token: &str,
     status: &str,
     failure: Option<&ProbeUpgraderResult>,
+    upgrade_target: Option<(&str, &str)>,
 ) -> String {
+    let target_fields = upgrade_target.map_or_else(String::new, |(digest, version)| {
+        format!(
+            "\"targetAssetSetDigest\":\"{}\",\"targetProbeVersion\":\"{}\",",
+            json_string_fragment(digest),
+            json_string_fragment(version),
+        )
+    });
     if let Some(failure) = failure {
         return format!(
-            "{{\"errorCode\":\"{}\",\"message\":\"{}\",\"status\":\"{}\",\"token\":\"{}\"}}",
+            "{{\"errorCode\":\"{}\",\"message\":\"{}\",\"status\":\"{}\",{}\"token\":\"{}\"}}",
             json_string_fragment(
                 failure
                     .error_code
@@ -2076,19 +2093,22 @@ fn render_operation_status_body(
             ),
             json_string_fragment(failure.message.as_deref().unwrap_or("")),
             json_string_fragment(status),
+            target_fields,
             json_string_fragment(token),
         );
     }
 
     format!(
-        "{{\"status\":\"{}\",\"token\":\"{}\"}}",
+        "{{\"status\":\"{}\",{}\"token\":\"{}\"}}",
         json_string_fragment(status),
+        target_fields,
         json_string_fragment(token),
     )
 }
 
 struct ProbeUpgraderOperationMetadata {
     operation_id: String,
+    target_asset_set_digest: String,
     target_probe_version: String,
     token: String,
 }
@@ -2109,11 +2129,13 @@ fn read_operation_metadata(
         .parse::<toml::Value>()
         .map_err(|_| ProbeUpgraderRunError::InvalidMetadata("invalid TOML"))?;
     let operation_id = required_metadata_string(&value, "operation_id")?;
+    let target_asset_set_digest = required_metadata_string(&value, "target_asset_set_digest")?;
     let target_probe_version = required_metadata_string(&value, "target_probe_version")?;
     let token = required_metadata_string(&value, "token")?;
 
     Ok(ProbeUpgraderOperationMetadata {
         operation_id,
+        target_asset_set_digest,
         target_probe_version,
         token,
     })
@@ -2824,6 +2846,9 @@ fn execute_probe_upgrade_with_current_version(
     let signature_bytes = download_hub_asset(transport, hub_url, "manifest.json.sig")?;
     let public_key_bytes = download_hub_asset(transport, hub_url, "signing-key.pem")?;
 
+    if operation.target_asset_set_digest != format!("sha256:{}", hex_sha256(&manifest_bytes)) {
+        return Err(ProbeUpgraderRunError::TargetMismatch);
+    }
     verify_public_key_trust(
         &public_key_bytes,
         &install_metadata.probe_asset_public_key_sha256,
@@ -3652,6 +3677,7 @@ pub struct ProbeUpgraderLaunch {
     pub bootstrap_config_path: PathBuf,
     pub install_path: PathBuf,
     pub operation_id: String,
+    pub target_asset_set_digest: String,
     pub target_probe_version: String,
     pub token: String,
 }
@@ -3787,6 +3813,10 @@ pub fn launch_systemd_probe_uninstaller(
 pub fn render_probe_upgrader_stdin(input: &ProbeUpgraderLaunch) -> String {
     [
         format!("operation_id = {}", toml_string(&input.operation_id)),
+        format!(
+            "target_asset_set_digest = {}",
+            toml_string(&input.target_asset_set_digest),
+        ),
         format!(
             "target_probe_version = {}",
             toml_string(&input.target_probe_version),
@@ -4128,6 +4158,7 @@ mod tests {
                 bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
                 install_path: PathBuf::from("/usr/local/bin/enoki-probe"),
                 operation_id: "42".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                 target_probe_version: "0.2.0".to_string(),
                 token: "probe-operation-token".to_string(),
             },
@@ -4156,6 +4187,7 @@ mod tests {
             runner.stdin,
             [
                 "operation_id = \"42\"",
+                &format!("target_asset_set_digest = \"sha256:{}\"", "a".repeat(64)),
                 "target_probe_version = \"0.2.0\"",
                 "token = \"probe-operation-token\"",
                 "",
@@ -6331,6 +6363,7 @@ mod tests {
             },
             &[
                 "operation_id = \"42\"",
+                "target_asset_set_digest = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
                 "target_probe_version = \"0.2.0\"",
                 "token = \"probe-operation-token\"",
                 "",
@@ -6349,7 +6382,7 @@ mod tests {
         assert_eq!(transport.probe_id, "probe_01");
         assert_eq!(
             transport.body,
-            "{\"targetProbeVersion\":\"0.2.0\",\"token\":\"probe-operation-token\"}",
+            "{\"targetAssetSetDigest\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"targetProbeVersion\":\"0.2.0\",\"token\":\"probe-operation-token\"}",
         );
         assert_eq!(
             result,
@@ -6566,13 +6599,7 @@ mod tests {
             ProbeUpgraderRunInput {
                 bootstrap_config_path: bootstrap_config_path.clone(),
             },
-            &[
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
+            &operation_stdin_for_assets(&assets),
             &mut transport,
             &mut systemd,
             &install_metadata,
@@ -6679,6 +6706,7 @@ echo replacement probe
             read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
         let operation = ProbeUpgraderOperationMetadata {
             operation_id: "42".to_string(),
+            target_asset_set_digest: format!("sha256:{}", hex_sha256(&assets.manifest)),
             target_probe_version: "0.2.0".to_string(),
             token: "probe-operation-token".to_string(),
         };
@@ -6776,6 +6804,7 @@ echo replacement probe
             read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
         let operation = ProbeUpgraderOperationMetadata {
             operation_id: "42".to_string(),
+            target_asset_set_digest: format!("sha256:{}", hex_sha256(&assets.manifest)),
             target_probe_version: "0.2.0".to_string(),
             token: "probe-operation-token".to_string(),
         };
@@ -6863,13 +6892,7 @@ echo replacement probe
             ProbeUpgraderRunInput {
                 bootstrap_config_path,
             },
-            &[
-                "operation_id = \"42\"",
-                "target_probe_version = \"0.2.0\"",
-                "token = \"probe-operation-token\"",
-                "",
-            ]
-            .join("\n"),
+            &operation_stdin_for_assets(&assets),
             &mut transport,
             &mut systemd,
             &install_metadata,
@@ -6947,6 +6970,7 @@ echo replacement probe
             public_key_sha256,
             "0.2.0",
             "0.1.9",
+            None,
         );
 
         assert!(matches!(
@@ -6969,6 +6993,7 @@ echo replacement probe
             public_key_sha256,
             "0.2.0",
             "0.2.0",
+            None,
         );
 
         assert!(matches!(
@@ -6991,6 +7016,7 @@ echo replacement probe
             public_key_sha256,
             "0.1.9",
             "0.2.0",
+            None,
         );
 
         assert!(result.is_ok());
@@ -7000,6 +7026,26 @@ echo replacement probe
                 .contains("new probe")
         );
         assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
+    }
+
+    #[test]
+    fn internal_probe_upgrader_rejects_a_different_asset_set_at_the_same_version() {
+        let assets = signed_assets("0.2.0", &replacement_probe_binary("new probe"), None);
+        let public_key_sha256 = assets.public_key_sha256.clone();
+        let (result, install_path, systemd) = run_upgrade_with_assets_and_current_version(
+            assets,
+            public_key_sha256,
+            "0.1.9",
+            "0.2.0",
+            Some(&format!("sha256:{}", "b".repeat(64))),
+        );
+
+        assert!(matches!(result, Err(ProbeUpgraderRunError::TargetMismatch)));
+        assert_eq!(
+            fs::read_to_string(install_path).expect("binary"),
+            "old probe"
+        );
+        assert!(systemd.restarted.is_empty());
     }
 
     #[test]
@@ -7104,7 +7150,7 @@ echo replacement probe
             ProbeUpgraderRunInput {
                 bootstrap_config_path,
             },
-            &operation_stdin(),
+            &operation_stdin_for_assets(&assets),
             &mut transport,
             &mut systemd,
             &install_metadata,
@@ -7243,7 +7289,7 @@ echo replacement probe
             ProbeUpgraderRunInput {
                 bootstrap_config_path,
             },
-            &operation_stdin(),
+            &operation_stdin_for_assets(&assets),
             &mut transport,
             &mut systemd,
             &install_metadata,
@@ -7797,7 +7843,7 @@ printf '%s\n' '{}'
             ProbeUpgraderRunInput {
                 bootstrap_config_path,
             },
-            &operation_stdin(),
+            &operation_stdin_for_assets(&assets),
             &mut transport,
             &mut systemd,
             &install_metadata,
@@ -7813,6 +7859,7 @@ printf '%s\n' '{}'
         public_key_sha256: String,
         current_probe_version: &str,
         target_probe_version: &str,
+        target_asset_set_digest: Option<&str>,
     ) -> (
         Result<(), ProbeUpgraderRunError>,
         PathBuf,
@@ -7832,6 +7879,10 @@ printf '%s\n' '{}'
             read_upgrader_bootstrap_config(&bootstrap_config_path).expect("bootstrap config");
         let operation = ProbeUpgraderOperationMetadata {
             operation_id: "42".to_string(),
+            target_asset_set_digest: target_asset_set_digest.map_or_else(
+                || format!("sha256:{}", hex_sha256(&assets.manifest)),
+                str::to_string,
+            ),
             target_probe_version: target_probe_version.to_string(),
             token: "probe-operation-token".to_string(),
         };
@@ -7899,11 +7950,23 @@ printf '%s\n' '{}'
     }
 
     fn operation_stdin() -> String {
+        operation_stdin_with_digest(&format!("sha256:{}", "a".repeat(64)))
+    }
+
+    fn operation_stdin_for_assets(assets: &SignedAssets) -> String {
+        operation_stdin_with_digest(&format!("sha256:{}", hex_sha256(&assets.manifest)))
+    }
+
+    fn operation_stdin_with_digest(target_asset_set_digest: &str) -> String {
         [
-            "operation_id = \"42\"",
-            "target_probe_version = \"0.2.0\"",
-            "token = \"probe-operation-token\"",
-            "",
+            "operation_id = \"42\"".to_string(),
+            format!(
+                "target_asset_set_digest = {}",
+                toml_string(target_asset_set_digest)
+            ),
+            "target_probe_version = \"0.2.0\"".to_string(),
+            "token = \"probe-operation-token\"".to_string(),
+            String::new(),
         ]
         .join("\n")
     }

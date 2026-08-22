@@ -15,6 +15,7 @@ type ProbeOperationTokenPayload = {
   kind: string;
   operationId: number;
   probeId: string;
+  targetAssetSetDigest?: string;
   targetProbeVersion?: string;
 };
 
@@ -38,12 +39,24 @@ export function issueProbeOperationToken(input: {
       "Cannot issue Probe Operation Token for unsaved operation.",
     );
   }
+  if (
+    input.operation.kind === "probe_upgrade" &&
+    !input.operation.targetAssetSetDigest
+  ) {
+    throw new Error(
+      "Cannot issue Probe Operation Token without a Probe Asset Set digest.",
+    );
+  }
 
   const payload: ProbeOperationTokenPayload = {
     expiresAtMs: input.expiresAtMs,
     kind: input.operation.kind,
     operationId: input.operation.id,
     probeId: input.probeId,
+    targetAssetSetDigest:
+      input.operation.kind === "probe_upgrade"
+        ? (input.operation.targetAssetSetDigest ?? undefined)
+        : undefined,
     targetProbeVersion:
       input.operation.kind === "probe_upgrade"
         ? input.operation.targetProbeVersion
@@ -60,6 +73,7 @@ export function validateProbeOperationToken(input: {
   operation: ProbeUpgradeRequest;
   probeId: string;
   secret: string;
+  targetAssetSetDigest: string;
   targetProbeVersion: string;
   token: string;
 }): { error: ProbeOperationTokenValidationError | null } {
@@ -83,7 +97,9 @@ export function validateProbeOperationToken(input: {
 
   if (
     input.operation.kind === "probe_upgrade" &&
-    (payload.targetProbeVersion !== input.targetProbeVersion ||
+    (payload.targetAssetSetDigest !== input.targetAssetSetDigest ||
+      input.operation.targetAssetSetDigest !== input.targetAssetSetDigest ||
+      payload.targetProbeVersion !== input.targetProbeVersion ||
       input.operation.targetProbeVersion !== input.targetProbeVersion)
   ) {
     return { error: "probe_operation_token_target_mismatch" };
@@ -135,6 +151,10 @@ function isProbeOperationTokenPayload(
     typeof (payload as ProbeOperationTokenPayload).kind === "string" &&
     typeof (payload as ProbeOperationTokenPayload).operationId === "number" &&
     typeof (payload as ProbeOperationTokenPayload).probeId === "string" &&
+    (typeof (payload as ProbeOperationTokenPayload).targetAssetSetDigest ===
+      "string" ||
+      typeof (payload as ProbeOperationTokenPayload).targetAssetSetDigest ===
+        "undefined") &&
     (typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===
       "string" ||
       typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===

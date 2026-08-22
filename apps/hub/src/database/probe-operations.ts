@@ -164,6 +164,7 @@ function probeUpgradeRequestToRow(
     runningAtMs: operation.runningAtMs,
     state: operation.state,
     supersededAtMs: operation.supersededAtMs,
+    targetAssetSetDigest: operation.targetAssetSetDigest,
     targetProbeVersion: operation.targetProbeVersion,
     updatedAtMs: operation.updatedAtMs,
   };
@@ -184,6 +185,7 @@ function rowToProbeUpgradeRequest(row: ProbeOperationRow): ProbeUpgradeRequest {
     runningAtMs: row.runningAtMs,
     state: row.state as ProbeUpgradeRequest["state"],
     supersededAtMs: row.supersededAtMs,
+    targetAssetSetDigest: row.targetAssetSetDigest,
     targetProbeVersion: row.targetProbeVersion,
     updatedAtMs: row.updatedAtMs,
   };

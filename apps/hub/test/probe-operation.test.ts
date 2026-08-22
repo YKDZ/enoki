@@ -11,12 +11,13 @@ import {
 } from "../src/probe/operation";
 
 describe("Probe Upgrade Request lifecycle", () => {
-  it("creates a pending Probe Upgrade Request with Unix millisecond timestamps", () => {
+  it("creates a pending request bound to one Probe Asset Set", () => {
     const result = createProbeUpgradeRequest({
       activeOperation: null,
       currentProbeVersion: "0.1.0",
       hostId: 7,
       nowMs: 1_725_000_000_000,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
     });
 
@@ -34,6 +35,7 @@ describe("Probe Upgrade Request lifecycle", () => {
       runningAtMs: null,
       state: "pending",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_000_000,
     });
@@ -127,6 +129,36 @@ describe("Probe Upgrade Request lifecycle", () => {
 
     expect(second.operation).toEqual({ ...first, id: 42 });
     expect(second.events).toEqual([]);
+  });
+
+  it("does not reuse a request for a different Asset Set at the same version", () => {
+    const first = createProbeUpgradeRequest({
+      activeOperation: null,
+      currentProbeVersion: "0.1.0",
+      hostId: 7,
+      nowMs: 1_725_000_000_000,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      targetProbeVersion: "0.2.0",
+    }).operation;
+
+    const second = createProbeUpgradeRequest({
+      activeOperation: { ...first, id: 42 },
+      currentProbeVersion: "0.1.0",
+      hostId: 7,
+      nowMs: 1_725_000_001_000,
+      targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+      targetProbeVersion: "0.2.0",
+    });
+
+    expect(second.events.map((event) => event.action)).toEqual([
+      "superseded",
+      "created",
+    ]);
+    expect(second.operation).toEqual(
+      expect.objectContaining({
+        targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+      }),
+    );
   });
 
   it("supersedes a safe active request when a different target is requested", () => {

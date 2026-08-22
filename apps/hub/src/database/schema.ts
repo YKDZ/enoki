@@ -226,6 +226,7 @@ export const probeOperations = sqliteTable(
     kind: text().notNull(),
     state: text().notNull(),
     currentProbeVersion: text(),
+    targetAssetSetDigest: text("target_asset_set_digest"),
     targetProbeVersion: text().notNull(),
     failureCode: text(),
     failureMessage: text(),

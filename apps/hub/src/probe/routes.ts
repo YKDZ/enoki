@@ -890,6 +890,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest ?? "",
       targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
@@ -961,6 +962,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest ?? "",
       targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
@@ -1136,6 +1138,9 @@ function pendingProbeOperationForHost(
   if (!operation || operation.state !== "pending") {
     return null;
   }
+  if (operation.kind === "probe_upgrade" && !operation.targetAssetSetDigest) {
+    return null;
+  }
 
   return probeUpgradeOperationMessage(operation, {
     expiresAtMs: nowMs + defaultProbeOperationTokenTtlMs,
@@ -1176,6 +1181,7 @@ function probeUpgradeOperationMessage(
         probeId: tokenInput.probeId,
         secret: tokenInput.secret,
       }),
+      targetAssetSetDigest: operation.targetAssetSetDigest ?? "",
       targetProbeVersion: operation.targetProbeVersion,
     },
   };
@@ -1188,6 +1194,7 @@ function probeOperationTokenSecret(services: ProbeRouteServices) {
 function readTokenValidationBody(requestBody: Uint8Array) {
   try {
     const body = JSON.parse(new TextDecoder().decode(requestBody)) as {
+      targetAssetSetDigest?: unknown;
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -1195,6 +1202,8 @@ function readTokenValidationBody(requestBody: Uint8Array) {
     if (
       typeof body.token !== "string" ||
       body.token.length === 0 ||
+      (Object.hasOwn(body, "targetAssetSetDigest") &&
+        typeof body.targetAssetSetDigest !== "string") ||
       (Object.hasOwn(body, "targetProbeVersion") &&
         typeof body.targetProbeVersion !== "string")
     ) {
@@ -1202,6 +1211,10 @@ function readTokenValidationBody(requestBody: Uint8Array) {
     }
 
     return {
+      targetAssetSetDigest:
+        typeof body.targetAssetSetDigest === "string"
+          ? body.targetAssetSetDigest
+          : undefined,
       targetProbeVersion:
         typeof body.targetProbeVersion === "string"
           ? body.targetProbeVersion
@@ -1219,6 +1232,7 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       errorCode?: unknown;
       message?: unknown;
       status?: unknown;
+      targetAssetSetDigest?: unknown;
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -1227,6 +1241,8 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       typeof body.token !== "string" ||
       body.token.length === 0 ||
       (body.status !== "succeeded" && body.status !== "failed") ||
+      (Object.hasOwn(body, "targetAssetSetDigest") &&
+        typeof body.targetAssetSetDigest !== "string") ||
       (Object.hasOwn(body, "targetProbeVersion") &&
         typeof body.targetProbeVersion !== "string") ||
       (Object.hasOwn(body, "errorCode") &&
@@ -1240,6 +1256,10 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       errorCode: typeof body.errorCode === "string" ? body.errorCode : null,
       message: typeof body.message === "string" ? body.message : null,
       status: body.status,
+      targetAssetSetDigest:
+        typeof body.targetAssetSetDigest === "string"
+          ? body.targetAssetSetDigest
+          : undefined,
       targetProbeVersion:
         typeof body.targetProbeVersion === "string"
           ? body.targetProbeVersion

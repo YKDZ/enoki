@@ -25,10 +25,7 @@ import {
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "../probe-configuration/model.js";
-import {
-  evaluateProbeUpgradeEligibility,
-  readProbeAssetSetVersionFromDirectory,
-} from "../probe/asset-set.js";
+import { evaluateProbeUpgradeEligibility } from "../probe/asset-set.js";
 import {
   cancelProbeUpgradeRequest,
   createProbeUninstallRequest,
@@ -37,7 +34,10 @@ import {
   type ProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
-import { readVerifiedReleaseTransitionFromDirectory } from "../probe/release-transition.js";
+import {
+  readProbeReleaseContextFromDirectory,
+  unavailableProbeReleaseContext,
+} from "../probe/release-context.js";
 import {
   currentProbeUpgradeProblem,
   probeUpgradeRecoveryDisposition,
@@ -95,7 +95,7 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("probe_operations_unavailable", 503);
     }
 
-    const [assetSet, releaseTransition] =
+    const { assetSet, releaseTransition } =
       await readProbeUpgradeReleaseContext(services);
     const activeHosts = services.hosts.listActive();
     const latestOperations = services.probeOperations.findLatestForHosts(
@@ -127,6 +127,7 @@ export function createHostRoutes(services: HostRouteServices) {
       if (
         !eligibility.isUpgradeable ||
         !eligibility.currentProbeAssetSetVersion ||
+        !assetSet.targetAssetSetDigest ||
         (latestOperation && isActiveProbeOperation(latestOperation)) ||
         currentProblem
       ) {
@@ -139,6 +140,7 @@ export function createHostRoutes(services: HostRouteServices) {
         currentProbeVersion: eligibility.currentProbeVersion,
         hostId: host.id,
         nowMs: now(),
+        targetAssetSetDigest: assetSet.targetAssetSetDigest,
         targetProbeVersion: eligibility.currentProbeAssetSetVersion,
       });
 
@@ -212,7 +214,7 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    const [currentProbeAssetSetVersion, releaseTransition] =
+    const { assetSet: currentProbeAssetSetVersion, releaseTransition } =
       await readProbeUpgradeReleaseContext(services);
 
     const hostProfileObservation =
@@ -297,7 +299,7 @@ export function createHostRoutes(services: HostRouteServices) {
       return hostMetadataError("host_not_found", 404);
     }
 
-    const [currentProbeAssetSetVersion, releaseTransition] =
+    const { assetSet: currentProbeAssetSetVersion, releaseTransition } =
       await readProbeUpgradeReleaseContext(services);
     const eligibility = evaluateProbeUpgradeEligibility({
       probeAssetSetVersion: currentProbeAssetSetVersion.version,
@@ -309,7 +311,8 @@ export function createHostRoutes(services: HostRouteServices) {
 
     if (
       !eligibility.isUpgradeable ||
-      !eligibility.currentProbeAssetSetVersion
+      !eligibility.currentProbeAssetSetVersion ||
+      !currentProbeAssetSetVersion.targetAssetSetDigest
     ) {
       return context.json(
         {
@@ -333,6 +336,7 @@ export function createHostRoutes(services: HostRouteServices) {
       currentProbeVersion: eligibility.currentProbeVersion,
       hostId,
       nowMs: now(),
+      targetAssetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
       targetProbeVersion: eligibility.currentProbeAssetSetVersion,
     });
     if (result.error) {
@@ -834,20 +838,12 @@ function failTimedOutActiveProbeUpgradeRequest(input: {
 }
 
 function readProbeUpgradeReleaseContext(services: HostRouteServices) {
-  return Promise.all([
-    services.probeAssetDir
-      ? readProbeAssetSetVersionFromDirectory(services.probeAssetDir)
-      : Promise.resolve({
-          nonUpgradeableReason: "probe_asset_set_version_missing" as const,
-          version: null,
-        }),
-    services.probeAssetDir && services.probeDistributionRootPublicKeyPem
-      ? readVerifiedReleaseTransitionFromDirectory({
-          assetDir: services.probeAssetDir,
-          trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
-        })
-      : Promise.resolve(null),
-  ]);
+  return services.probeAssetDir
+    ? readProbeReleaseContextFromDirectory({
+        assetDir: services.probeAssetDir,
+        trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+      })
+    : Promise.resolve(unavailableProbeReleaseContext());
 }
 
 function succeedActiveProbeUpgradeRequestFromHostProfile(input: {

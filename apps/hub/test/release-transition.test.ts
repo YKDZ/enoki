@@ -1,35 +1,41 @@
-import { createHash, generateKeyPairSync, sign } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-// @ts-expect-error JavaScript release tool has no declaration file.
-import { createProbeTrustDelegation } from "../../../scripts/release-candidate-lib.mjs";
-// @ts-expect-error JavaScript release transition issuer has no declaration file.
-import { createReleaseTransitionContract } from "../../../scripts/release-transition-contract.mjs";
 import { readVerifiedReleaseTransitionFromDirectory } from "../src/probe/release-transition.js";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture.js";
 
 describe("verified Probe release transition", () => {
   it("returns no transition when the release does not declare one", async () => {
     const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
-    const root = testKeyPair();
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    await rm(path.join(assetDir, "release-transition-contract.json"));
 
     await expect(
       readVerifiedReleaseTransitionFromDirectory({
         assetDir,
-        trustedRootPublicKeyPem: root.publicKey,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
       }),
     ).resolves.toBeNull();
   });
 
   it("reads a root-authorized compatible source-to-target transition", async () => {
-    const fixture = await writeTransitionFixture({ transition: "compatible" });
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
 
     await expect(
       readVerifiedReleaseTransitionFromDirectory({
-        assetDir: fixture.assetDir,
+        assetDir,
         trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
       }),
     ).resolves.toEqual({
@@ -41,13 +47,16 @@ describe("verified Probe release transition", () => {
   });
 
   it("preserves an explicit replacement-required classification", async () => {
-    const fixture = await writeTransitionFixture({
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
       transition: "replacement-required",
     });
 
     await expect(
       readVerifiedReleaseTransitionFromDirectory({
-        assetDir: fixture.assetDir,
+        assetDir,
         trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
       }),
     ).resolves.toMatchObject({
@@ -56,87 +65,85 @@ describe("verified Probe release transition", () => {
       targetProbeVersion: "1.4.0",
     });
   });
+
+  it("rejects a linked manifest instead of following it", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const linkedManifest = path.join(assetDir, "linked-manifest.json");
+    await rename(path.join(assetDir, "manifest.json"), linkedManifest);
+    await symlink(linkedManifest, path.join(assetDir, "manifest.json"));
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("keeps individual files and the complete metadata set bounded", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        maxMetadataBytes: 32,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        maxTotalMetadataBytes: 256,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("maps malformed release metadata to an unavailable transition", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    await writeFile(path.join(assetDir, "root-key.pem"), "not a public key");
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("propagates operational I/O errors", async () => {
+    const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
+    const fixture = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+
+    await expect(
+      readVerifiedReleaseTransitionFromDirectory({
+        assetDir,
+        openFile: async () => {
+          throw Object.assign(new Error("file table exhausted"), {
+            code: "EMFILE",
+          });
+        },
+        trustedRootPublicKeyPem: fixture.rootPublicKeyPem,
+      }),
+    ).rejects.toMatchObject({ code: "EMFILE" });
+  });
 });
-
-async function writeTransitionFixture(input: {
-  transition: "compatible" | "replacement-required";
-}) {
-  const assetDir = await mkdtemp(path.join(tmpdir(), "enoki-transition-"));
-  const root = testKeyPair();
-  const release = testKeyPair();
-  const delegation = createProbeTrustDelegation({
-    distribution: "enoki",
-    generation: 3,
-    releasePublicKeyPem: release.publicKey,
-    rootPrivateKeyPem: root.privateKey,
-  });
-  const manifest = Buffer.from(
-    `${JSON.stringify({
-      assets: [
-        "aarch64-unknown-linux-gnu",
-        "aarch64-unknown-linux-musl",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-      ].map((target, index) => ({
-        bundleManifestSha256: String(index + 1).repeat(64),
-        file: `enoki-probe-${target}.tar.gz`,
-        sha256: String(index + 5).repeat(64),
-        size: 123 + index,
-        target,
-      })),
-      kind: "enoki-probe-assets",
-      signature: {
-        algorithm: "rsa-sha256",
-        delegationGeneration: 3,
-        delegationKeyId: delegation.delegation.signingIdentity.keyId,
-        file: "manifest.json.sig",
-        publicKey: "signing-key.pem",
-      },
-      version: "1.4.0",
-    })}\n`,
-  );
-  const contract = createReleaseTransitionContract({
-    distribution: "enoki",
-    rootPrivateKeyPem: root.privateKey,
-    sourceVersion: "1.3.0",
-    targetManifestBytes: manifest,
-    transition: input.transition,
-  });
-
-  await Promise.all([
-    writeFile(path.join(assetDir, "manifest.json"), manifest),
-    writeFile(
-      path.join(assetDir, "manifest.json.sig"),
-      sign("RSA-SHA256", manifest, release.privateKey),
-    ),
-    writeFile(path.join(assetDir, "signing-key.pem"), release.publicKey),
-    writeFile(path.join(assetDir, "root-key.pem"), root.publicKey),
-    writeFile(path.join(assetDir, "trust-delegation.json"), delegation.bytes),
-    writeFile(
-      path.join(assetDir, "trust-delegation.json.sig"),
-      delegation.signature,
-    ),
-    writeFile(
-      path.join(assetDir, "release-transition-contract.json"),
-      contract.bytes,
-    ),
-    writeFile(
-      path.join(assetDir, "release-transition-contract.json.sig"),
-      contract.signature,
-    ),
-  ]);
-
-  return {
-    assetDir,
-    rootPublicKeyPem: root.publicKey,
-    targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
-  };
-}
-
-function testKeyPair() {
-  const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  return {
-    privateKey: pair.privateKey.export({ format: "pem", type: "pkcs8" }),
-    publicKey: pair.publicKey.export({ format: "pem", type: "spki" }),
-  };
-}

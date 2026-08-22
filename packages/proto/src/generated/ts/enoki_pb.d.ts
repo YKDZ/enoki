@@ -2927,6 +2927,9 @@ export namespace enoki {
 
             /** ProbeUpgradeOperation operationToken */
             operationToken?: (string|null);
+
+            /** ProbeUpgradeOperation targetAssetSetDigest */
+            targetAssetSetDigest?: (string|null);
         }
 
         /** Represents a ProbeUpgradeOperation. */
@@ -2946,6 +2949,9 @@ export namespace enoki {
 
             /** ProbeUpgradeOperation operationToken. */
             public operationToken: string;
+
+            /** ProbeUpgradeOperation targetAssetSetDigest. */
+            public targetAssetSetDigest: string;
 
             /**
              * Creates a new ProbeUpgradeOperation instance using the specified properties.

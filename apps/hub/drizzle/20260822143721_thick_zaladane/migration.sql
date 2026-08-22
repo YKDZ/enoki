@@ -1,0 +1,1 @@
+ALTER TABLE `probe_operations` ADD `target_asset_set_digest` text;

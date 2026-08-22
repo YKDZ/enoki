@@ -20,6 +20,72 @@ const defaultMaxConcurrentPackageStreams = 4;
 const defaultMaxPackageBytes = 512 * 1024 * 1024;
 const defaultMaxPackageStreamDurationMs = 5 * 60 * 1000;
 const defaultMaxMetadataBytes = 256 * 1024;
+export const defaultMaxProbeMetadataBytes = defaultMaxMetadataBytes;
+export const defaultMaxProbeMetadataSetBytes = 1024 * 1024;
+
+type OpenFile = typeof open;
+
+export async function readBoundedMetadataFilesFromDirectory(input: {
+  assetDir: string;
+  fileNames: readonly string[];
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
+  openFile?: OpenFile;
+}): Promise<Record<string, Buffer> | null> {
+  const snapshot = await readBoundedMetadataSnapshotFromDirectory({
+    ...input,
+    requiredFileNames: input.fileNames,
+  });
+  if (!snapshot) return null;
+  return Object.fromEntries(
+    Object.entries(snapshot).map(([fileName, file]) => [fileName, file!]),
+  );
+}
+
+export async function readBoundedMetadataSnapshotFromDirectory(input: {
+  assetDir: string;
+  optionalFileNames?: readonly string[];
+  requiredFileNames: readonly string[];
+  maxFileBytes?: number;
+  maxTotalBytes?: number;
+  openFile?: OpenFile;
+}): Promise<Record<string, Buffer | null> | null> {
+  const assetDir = path.resolve(input.assetDir);
+  const maxFileBytes = positiveSafeInteger(
+    input.maxFileBytes ?? defaultMaxProbeMetadataBytes,
+    "maxFileBytes",
+  );
+  const maxTotalBytes = positiveSafeInteger(
+    input.maxTotalBytes ?? defaultMaxProbeMetadataSetBytes,
+    "maxTotalBytes",
+  );
+  const files: Record<string, Buffer | null> = {};
+  let totalBytes = 0;
+
+  for (const [fileName, required] of [
+    ...input.requiredFileNames.map((fileName) => [fileName, true] as const),
+    ...(input.optionalFileNames ?? []).map(
+      (fileName) => [fileName, false] as const,
+    ),
+  ]) {
+    if (!assetFileNamePattern.test(fileName)) return null;
+    const file = await readExistingSmallFile(
+      path.join(assetDir, fileName),
+      Math.min(maxFileBytes, maxTotalBytes - totalBytes),
+      input.openFile,
+    );
+    if (!file) {
+      if (required) return null;
+      files[fileName] = null;
+      continue;
+    }
+    totalBytes += file.byteLength;
+    if (totalBytes > maxTotalBytes) return null;
+    files[fileName] = file;
+  }
+
+  return files;
+}
 
 export function createProbeAssetRoutes(options: ProbeAssetRouteOptions = {}) {
   const app = new Hono();
@@ -119,8 +185,13 @@ function isPathInsideDirectory(filePath: string, directoryPath: string) {
   );
 }
 
-async function readExistingSmallFile(filePath: string, maxBytes: number) {
-  const opened = await openRegularFile(filePath, maxBytes);
+async function readExistingSmallFile(
+  filePath: string,
+  maxBytes: number,
+  openFile: OpenFile = open,
+) {
+  if (maxBytes < 1) return null;
+  const opened = await openRegularFile(filePath, maxBytes, openFile);
   if (!opened) return null;
 
   try {
@@ -133,10 +204,14 @@ async function readExistingSmallFile(filePath: string, maxBytes: number) {
   }
 }
 
-async function openRegularFile(filePath: string, maxBytes: number) {
+async function openRegularFile(
+  filePath: string,
+  maxBytes: number,
+  openFile: OpenFile = open,
+) {
   let file: FileHandle;
   try {
-    file = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    file = await openFile(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   } catch (error) {
     if (isUnavailable(error)) return null;
     throw error;

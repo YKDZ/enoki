@@ -60,7 +60,7 @@ COPY --from=builder --chown=node:node /app/apps/hub/drizzle drizzle
 COPY --from=builder --chown=node:node /app/apps/hub/drizzle-official-metrics drizzle-official-metrics
 COPY --from=builder --chown=node:node /app/apps/web/dist web-dist
 COPY --from=builder --chown=node:node /app/probe-assets probe-assets
-COPY --from=builder --chown=node:node /app/probe-distribution-root probe-distribution-root
+COPY --from=builder /app/probe-distribution-root probe-distribution-root
 COPY apps/hub/docker-entrypoint.sh /usr/local/bin/enoki-hub-entrypoint
 
 ADD --checksum=sha256:4003163f58cd4a75df79973171d25e4912df4284d8bac9850ac267b58b969be5 \
@@ -70,6 +70,8 @@ ADD --checksum=sha256:4003163f58cd4a75df79973171d25e4912df4284d8bac9850ac267b58b
 RUN apk add --allow-untrusted --no-network /tmp/su-exec.apk && \
   rm /tmp/su-exec.apk && \
   rm -f /var/log/apk.log && \
+  chmod 0555 /app/probe-distribution-root && \
+  chmod 0444 /app/probe-distribution-root/root-key.pem && \
   chmod +x /app/dist/src/hub-state-snapshot/cli.js && \
   ln -s /app/dist/src/hub-state-snapshot/cli.js /usr/local/bin/enoki-hub-state && \
   chmod +x /usr/local/bin/enoki-hub-entrypoint && \

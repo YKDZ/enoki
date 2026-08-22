@@ -1262,6 +1262,13 @@ describe("Host detail API", () => {
         updatedAtMs: 1_725_000_000_000,
       },
     });
+    expect(
+      database.probeOperations.findById(createdBody.probeUpgradeRequest.id),
+    ).toEqual(
+      expect.objectContaining({
+        targetAssetSetDigest: release.targetAssetSetDigest,
+      }),
+    );
 
     const activeOverviewResponse = await app.request("/api/web/hosts", {
       headers: { cookie: ownerSession },

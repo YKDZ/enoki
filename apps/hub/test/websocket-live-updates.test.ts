@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import { initializeHubDatabase } from "../src/database/index";
 import { createLiveUpdateBroadcaster } from "../src/live-updates";
 import { createHubNodeServer } from "../src/node-server";
 import { hashStableHostProfile } from "./host-profile-hash";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import {
   createTestProbeIdentity,
   signedJsonProbeHeaders,
@@ -47,6 +48,7 @@ async function startHubServer(options: {
   database: Awaited<ReturnType<typeof createTemporaryDatabase>>;
   now?: () => number;
   probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: string | Buffer;
 }) {
   const server = await createHubNodeServer({
     auth: {
@@ -62,7 +64,10 @@ async function startHubServer(options: {
     }),
     port: 0,
     probeAssets: options.probeAssetDir
-      ? { assetDir: options.probeAssetDir }
+      ? {
+          assetDir: options.probeAssetDir,
+          trustedRootPublicKeyPem: options.probeDistributionRootPublicKeyPem,
+        }
       : undefined,
   });
   openServers.push(server);
@@ -914,6 +919,7 @@ describe("WebSocket live updates", () => {
       runningAtMs: null,
       state: "pending",
       supersededAtMs: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
       targetProbeVersion: "0.2.0",
       updatedAtMs: 1_725_000_009_000,
     });
@@ -1121,28 +1127,16 @@ describe("WebSocket live updates", () => {
     tempRoots.push(assetRoot);
     const assetDir = path.join(assetRoot, "assets");
     await mkdir(assetDir, { recursive: true });
-    await writeFile(
-      path.join(assetDir, "manifest.json"),
-      JSON.stringify({
-        assets: [
-          {
-            file: "enoki-probe-x86_64-unknown-linux-gnu.tar.gz",
-            sha256: "a".repeat(64),
-            target: "x86_64-unknown-linux-gnu",
-          },
-        ],
-        kind: "enoki-probe-assets",
-        signature: {
-          algorithm: "rsa-sha256",
-          file: "manifest.json.sig",
-        },
-        version: "0.2.0",
-      }),
-    );
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "compatible",
+    });
     const { baseUrl, webSocketUrl } = await startHubServer({
       database,
       now: () => 1_725_000_010_000,
       probeAssetDir: assetDir,
+      probeDistributionRootPublicKeyPem: release.rootPublicKeyPem,
     });
     const ownerSession = await loginOwner(baseUrl);
     const enrollmentToken = await createEnrollmentToken(baseUrl, ownerSession);

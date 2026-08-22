@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -85,6 +85,7 @@ export async function writeSignedProbeAssetSet(
   return {
     authority,
     rootPublicKeyPem: authority.publicKey,
+    targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
   };
 }
 

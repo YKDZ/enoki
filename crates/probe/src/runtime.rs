@@ -635,6 +635,7 @@ struct ProbeUpgradeRunnerInput<'a> {
 struct ProbeUpgradeRunnerOperationMetadata<'a> {
     current_probe_version: &'a str,
     operation_id: &'a str,
+    target_asset_set_digest: &'a str,
     target_probe_version: &'a str,
 }
 
@@ -701,6 +702,7 @@ impl ProbeOperationRunner for InstalledProbeOperationRunner {
                 bootstrap_config_path: self.bootstrap_config_path.clone(),
                 install_path,
                 operation_id: input.operation.operation_id.to_string(),
+                target_asset_set_digest: input.operation.target_asset_set_digest.to_string(),
                 target_probe_version: input.operation.target_probe_version.to_string(),
                 token: input.stdin.to_string(),
             },
@@ -796,6 +798,7 @@ impl ProbeOperationReportQueue {
                     operation: ProbeUpgradeRunnerOperationMetadata {
                         current_probe_version: &probe_upgrade.current_probe_version,
                         operation_id: &operation.id,
+                        target_asset_set_digest: &probe_upgrade.target_asset_set_digest,
                         target_probe_version: &probe_upgrade.target_probe_version,
                     },
                 })
@@ -866,6 +869,7 @@ mod operation_report_tests {
                         crate::protocol::enoki::v1::ProbeUpgradeOperation {
                             current_probe_version: "0.1.0".to_string(),
                             operation_token: "operation-token".to_string(),
+                            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                             target_probe_version: "0.2.0".to_string(),
                         },
                     )),
@@ -961,6 +965,7 @@ mod operation_report_tests {
                         crate::protocol::enoki::v1::ProbeUpgradeOperation {
                             current_probe_version: "0.1.0".to_string(),
                             operation_token: "operation-token".to_string(),
+                            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                             target_probe_version: "0.2.0".to_string(),
                         },
                     )),
@@ -1661,6 +1666,7 @@ mod tests {
         observed_current_probe_version: Option<String>,
         observed_operation_id: Option<String>,
         observed_stdin: Option<String>,
+        observed_target_asset_set_digest: Option<String>,
         observed_target_probe_version: Option<String>,
         outcome: Option<ProbeUpgradeRunnerOutcome>,
     }
@@ -1674,6 +1680,8 @@ mod tests {
                 Some(input.operation.current_probe_version.to_string());
             self.observed_operation_id = Some(input.operation.operation_id.to_string());
             self.observed_stdin = Some(input.stdin.to_string());
+            self.observed_target_asset_set_digest =
+                Some(input.operation.target_asset_set_digest.to_string());
             self.observed_target_probe_version =
                 Some(input.operation.target_probe_version.to_string());
 
@@ -2010,6 +2018,7 @@ mod tests {
                 operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                     current_probe_version: "0.1.0".to_string(),
                     operation_token: "operation-token-01".to_string(),
+                    target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                     target_probe_version: "0.2.0".to_string(),
                 })),
             }),
@@ -2020,6 +2029,10 @@ mod tests {
         queue.observe_response(&response, &mut runner);
 
         assert_eq!(runner.observed_stdin.as_deref(), Some("operation-token-01"));
+        assert_eq!(
+            runner.observed_target_asset_set_digest.as_deref(),
+            Some(&*format!("sha256:{}", "a".repeat(64)))
+        );
         assert_eq!(
             runner.observed_operation_id.as_deref(),
             Some("operation-01")
@@ -2052,6 +2065,7 @@ mod tests {
                 operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                     current_probe_version: "0.1.0".to_string(),
                     operation_token: "operation-token-01".to_string(),
+                    target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                     target_probe_version: "0.2.0".to_string(),
                 })),
             }),
@@ -2118,6 +2132,7 @@ mod tests {
                         operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                             current_probe_version: "0.1.0".to_string(),
                             operation_token: "operation-token-01".to_string(),
+                            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                             target_probe_version: "0.2.0".to_string(),
                         })),
                     }),

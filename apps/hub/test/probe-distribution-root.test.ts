@@ -41,7 +41,14 @@ describe("Probe Distribution Trust Root image material", () => {
       "cp /app/probe-assets/root-key.pem /app/probe-distribution-root/root-key.pem",
     );
     expect(dockerfile).toContain(
-      "COPY --from=builder --chown=node:node /app/probe-distribution-root probe-distribution-root",
+      "COPY --from=builder /app/probe-distribution-root probe-distribution-root",
+    );
+    expect(dockerfile).toContain("chmod 0555 /app/probe-distribution-root");
+    expect(dockerfile).toContain(
+      "chmod 0444 /app/probe-distribution-root/root-key.pem",
+    );
+    expect(dockerfile).not.toContain(
+      "--chown=node:node /app/probe-distribution-root",
     );
   });
 });

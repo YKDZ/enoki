@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { issueProbeOperationToken } from "../src/probe/operation-token";
 
 const tempRoots: string[] = [];
 
@@ -130,23 +131,22 @@ describe("Hub database", () => {
       subjectId: "41",
       subjectType: "host",
     });
-    legacy.probeOperations.createProbeUpgradeRequest({
-      acceptedAtMs: null,
-      canceledAtMs: null,
-      completedAtMs: null,
-      createdAtMs: 1_725_000_002_000,
-      currentProbeVersion: "0.1.0",
-      failureCode: null,
-      failureMessage: null,
-      hostId: 41,
-      id: null,
-      kind: "probe_upgrade",
-      runningAtMs: null,
-      state: "pending",
-      supersededAtMs: null,
-      targetProbeVersion: "0.2.0",
-      updatedAtMs: 1_725_000_002_000,
-    });
+    legacy.sqlite
+      .prepare(
+        `insert into probe_operations (
+          managed_host_id, kind, state, current_probe_version,
+          target_probe_version, created_at_ms, updated_at_ms
+        ) values (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        41,
+        "probe_upgrade",
+        "pending",
+        "0.1.0",
+        "0.2.0",
+        1_725_000_002_000,
+        1_725_000_002_000,
+      );
     legacy.metrics.recordSample({
       bootId: "boot-preserved",
       collectedAtMs: 1_725_000_003_000,
@@ -260,6 +260,20 @@ describe("Hub database", () => {
     });
     expect(migrated.sqlite.prepare("pragma foreign_key_check").all()).toEqual(
       [],
+    );
+    const legacyOperation = migrated.probeOperations.findLatestForHost(41);
+    expect(legacyOperation).toEqual(
+      expect.objectContaining({ targetAssetSetDigest: null }),
+    );
+    expect(() =>
+      issueProbeOperationToken({
+        expiresAtMs: 1_725_000_020_000,
+        operation: legacyOperation!,
+        probeId: "probe-preserved",
+        secret: "test-secret",
+      }),
+    ).toThrow(
+      "Cannot issue Probe Operation Token without a Probe Asset Set digest.",
     );
 
     const app = createHubApp({

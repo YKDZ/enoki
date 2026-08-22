@@ -14,6 +14,7 @@ describe("Probe Operation Token", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
       }).operation,
       id: 42,
@@ -31,6 +32,7 @@ describe("Probe Operation Token", () => {
         operation,
         probeId: "probe_01",
         secret: "test-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
         token,
       }),
@@ -42,6 +44,7 @@ describe("Probe Operation Token", () => {
         operation,
         probeId: "probe_02",
         secret: "test-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
         token,
       }),
@@ -53,6 +56,7 @@ describe("Probe Operation Token", () => {
         operation,
         probeId: "probe_01",
         secret: "test-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.3.0",
         token,
       }),
@@ -64,10 +68,43 @@ describe("Probe Operation Token", () => {
         operation,
         probeId: "probe_01",
         secret: "test-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
         token,
       }),
     ).toEqual({ error: "probe_operation_token_expired" });
+  });
+
+  it("rejects the same version from a different Probe Asset Set", () => {
+    const operation = {
+      ...createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+        targetProbeVersion: "0.2.0",
+      }).operation,
+      id: 42,
+    };
+    const token = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_060_000,
+      operation,
+      probeId: "probe_01",
+      secret: "test-signing-secret",
+    });
+
+    expect(
+      validateProbeOperationToken({
+        nowMs: 1_725_000_010_000,
+        operation,
+        probeId: "probe_01",
+        secret: "test-signing-secret",
+        targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+        targetProbeVersion: "0.2.0",
+        token,
+      }),
+    ).toEqual({ error: "probe_operation_token_target_mismatch" });
   });
 
   it("rejects wrong operation and closed Probe Upgrade Requests", () => {
@@ -77,6 +114,7 @@ describe("Probe Operation Token", () => {
         currentProbeVersion: "0.1.0",
         hostId: 7,
         nowMs: 1_725_000_000_000,
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
       }).operation,
       id: 42,
@@ -94,6 +132,7 @@ describe("Probe Operation Token", () => {
         operation: { ...operation, id: 43 },
         probeId: "probe_01",
         secret: "test-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
         token,
       }),
@@ -106,6 +145,7 @@ describe("Probe Operation Token", () => {
           operation: { ...operation, state },
           probeId: "probe_01",
           secret: "test-signing-secret",
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),

@@ -23,6 +23,7 @@ export type ProbeUpgradeRequest = {
   runningAtMs: number | null;
   state: ProbeOperationState;
   supersededAtMs: number | null;
+  targetAssetSetDigest?: string | null;
   targetProbeVersion: string;
   updatedAtMs: number;
 };
@@ -61,6 +62,7 @@ export function createProbeUpgradeRequest(input: {
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
+  targetAssetSetDigest?: string;
   targetProbeVersion: string;
 }): Extract<CreateProbeUpgradeRequestResult, { error: null }>;
 export function createProbeUpgradeRequest(input: {
@@ -68,6 +70,7 @@ export function createProbeUpgradeRequest(input: {
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
+  targetAssetSetDigest?: string;
   targetProbeVersion: string;
 }): CreateProbeUpgradeRequestResult;
 export function createProbeUpgradeRequest(input: {
@@ -75,10 +78,12 @@ export function createProbeUpgradeRequest(input: {
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
+  targetAssetSetDigest?: string;
   targetProbeVersion: string;
 }): CreateProbeUpgradeRequestResult {
   if (
     input.activeOperation?.targetProbeVersion === input.targetProbeVersion &&
+    input.activeOperation.targetAssetSetDigest === input.targetAssetSetDigest &&
     isActiveProbeOperation(input.activeOperation)
   ) {
     return {
@@ -466,6 +471,7 @@ function newPendingProbeUpgradeRequest(input: {
   currentProbeVersion: string | null;
   hostId: number;
   nowMs: number;
+  targetAssetSetDigest?: string;
   targetProbeVersion: string;
 }): ProbeUpgradeRequest {
   return {
@@ -482,6 +488,9 @@ function newPendingProbeUpgradeRequest(input: {
     runningAtMs: null,
     state: "pending",
     supersededAtMs: null,
+    ...(input.targetAssetSetDigest
+      ? { targetAssetSetDigest: input.targetAssetSetDigest }
+      : {}),
     targetProbeVersion: input.targetProbeVersion,
     updatedAtMs: input.nowMs,
   };

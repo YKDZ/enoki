@@ -1938,6 +1938,7 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
       }).operation,
     );
@@ -2244,6 +2245,7 @@ describe("Probe report API", () => {
         currentProbeVersion: "0.1.0",
         hostId: host.id,
         nowMs: 1_725_000_009_000,
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
       }).operation,
     );
@@ -2277,6 +2279,7 @@ describe("Probe report API", () => {
         operation,
         probeId: registration.probeId,
         secret: "configured-token-signing-secret",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "0.2.0",
         token: token ?? "",
       }),
@@ -2288,6 +2291,7 @@ describe("Probe report API", () => {
         registration,
         `/api/probe/operations/${operation.id}/token/validate`,
         JSON.stringify({
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),
@@ -2339,6 +2343,7 @@ describe("Probe report API", () => {
         otherRegistration,
         `/api/probe/operations/${operation.id}/token/validate`,
         JSON.stringify({
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),
@@ -2377,6 +2382,7 @@ describe("Probe report API", () => {
         registration,
         `/api/probe/operations/${operation.id}/token/validate`,
         JSON.stringify({
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
           token,
         }),
