@@ -34,6 +34,7 @@ import {
   probeBootstrapTargets,
   withVerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-artifact.mjs";
+import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -868,7 +869,7 @@ export async function assembleReleaseCandidate({
       trustedRootPublicKeyPem,
     },
   );
-  assertReleaseTransitionMatchesCandidate({
+  assertMigrationCandidateJoin({
     identity,
     releaseBaseline,
     releaseTransition: probeAssetSet.releaseTransition ?? null,
@@ -1024,7 +1025,7 @@ export async function validateReleaseCandidate(
     path.join(candidateDir, "probe-assets"),
     { expectedVersion: probe.version, trustedRootPublicKeyPem },
   );
-  assertReleaseTransitionMatchesCandidate({
+  assertMigrationCandidateJoin({
     identity,
     releaseBaseline,
     releaseTransition: inspectedProbe.releaseTransition ?? null,
@@ -1086,30 +1087,6 @@ export async function validateReleaseCandidate(
   }
 
   return manifest;
-}
-
-function assertReleaseTransitionMatchesCandidate({
-  identity,
-  releaseBaseline,
-  releaseTransition,
-}) {
-  const migration =
-    releaseBaseline.kind === "enoki-trust-epoch-migration-baseline";
-  if (!migration && releaseTransition !== null) {
-    throw new Error("Ordinary Release Candidate transition does not match");
-  }
-  if (!migration) return;
-  if (
-    releaseTransition === null ||
-    releaseTransition.transition !== "replacement-required" ||
-    releaseTransition.candidateCommit !== identity.commit ||
-    releaseTransition.source.tag !== releaseBaseline.tag ||
-    releaseTransition.source.commit !==
-      releaseBaseline.githubRelease?.peeledCommitSha ||
-    `v${releaseTransition.target.version}` !== identity.version
-  ) {
-    throw new Error("Trust Epoch Migration candidate does not match");
-  }
 }
 
 export async function inspectProbeAssetSet(

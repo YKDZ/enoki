@@ -2,9 +2,11 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
+import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
 import {
   createReleaseTransitionContract,
+  preflightReleaseMigrationConfiguration,
   verifyReleaseTransitionContract,
 } from "./release-transition-contract.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
@@ -53,6 +55,119 @@ describe("Trust Epoch release transition", () => {
         rootPublicKeyPem: fixture.root.publicKey,
       }),
     ).toThrow("does not match");
+  });
+
+  it.each([
+    [
+      "authorization",
+      (baseline) => (baseline.authorization.sha256 = "f".repeat(64)),
+    ],
+    [
+      "release id",
+      (_baseline, transition) => (transition.source.releaseId += 1),
+    ],
+    [
+      "asset closure",
+      (_baseline, transition) => (transition.source.assets[0].size += 1),
+    ],
+    [
+      "Hub digest",
+      (_baseline, transition) =>
+        (transition.source.hubDigest = `sha256:${"f".repeat(64)}`),
+    ],
+  ])("rejects an ordinary A/B mismatch in %s", (_name, mutate) => {
+    const fixture = transitionFixture();
+    const signed = createReleaseTransitionContract(fixture.createInput);
+    const baseline = {
+      authorization: {
+        legacyReleaseSha256: sha256(
+          Buffer.from(JSON.stringify(fixture.createInput.legacyRelease)),
+        ),
+        sha256: sha256(fixture.createInput.authorizationBytes),
+      },
+      githubRelease: {
+        peeledCommitSha:
+          fixture.createInput.legacyRelease.githubRelease.peeledCommitSha,
+      },
+      kind: "enoki-trust-epoch-migration-baseline",
+      tag: "v0.1.74",
+    };
+    const transition = structuredClone(signed.contract);
+    mutate(baseline, transition);
+    expect(() =>
+      assertMigrationCandidateJoin({
+        identity: {
+          commit: fixture.expected.candidateCommit,
+          version: "v1.2.3",
+        },
+        releaseBaseline: baseline,
+        releaseTransition: transition,
+      }),
+    ).toThrow("candidate does not match");
+  });
+
+  it("preflights the four public values before candidate signing", () => {
+    const fixture = transitionFixture();
+    const signed = createReleaseTransitionContract(fixture.createInput);
+    expect(
+      preflightReleaseMigrationConfiguration({
+        authorization: fixture.createInput.authorizationBytes.toString(),
+        authorizationSignatureBase64:
+          fixture.createInput.authorizationSignature.toString("base64"),
+        candidateCommit: fixture.expected.candidateCommit,
+        candidateVersion: "v1.2.3",
+        contract: signed.bytes.toString(),
+        contractSignatureBase64: signed.signature.toString("base64"),
+        rootPublicKeyPem: fixture.root.publicKey,
+      }),
+    ).toEqual(signed.contract);
+  });
+
+  it("requires the four public values to be configured together", () => {
+    const fixture = transitionFixture();
+    expect(() =>
+      preflightReleaseMigrationConfiguration({
+        authorization: fixture.createInput.authorizationBytes.toString(),
+        authorizationSignatureBase64: "",
+        candidateCommit: fixture.expected.candidateCommit,
+        candidateVersion: "v1.2.3",
+        contract: "",
+        contractSignatureBase64: "",
+        rootPublicKeyPem: fixture.root.publicKey,
+      }),
+    ).toThrow("one complete closure");
+  });
+
+  it("rejects bounded transition metadata before parsing", () => {
+    const fixture = transitionFixture();
+    expect(() =>
+      verifyReleaseTransitionContract({
+        authorizationBytes: fixture.createInput.authorizationBytes,
+        authorizationSignature: fixture.createInput.authorizationSignature,
+        contractBytes: Buffer.alloc(64 * 1024 + 1, 32),
+        contractSignature: Buffer.alloc(256),
+        rootPublicKeyPem: fixture.root.publicKey,
+      }),
+    ).toThrow("contract is invalid");
+  });
+
+  it("rejects an authorization asset cardinality above the fixed bound", () => {
+    const fixture = transitionFixture();
+    expect(() =>
+      createTrustEpochMigrationAuthorization({
+        candidateVersion: "v1.2.3",
+        distribution: "enoki",
+        legacyRelease: {
+          ...fixture.createInput.legacyRelease,
+          assets: Array.from({ length: 65 }, (_, index) => ({
+            name: `asset-${index}`,
+            sha256: "1".repeat(64),
+            size: 1,
+          })),
+        },
+        rootPrivateKeyPem: fixture.root.privateKey,
+      }),
+    ).toThrow("assets are invalid");
   });
 });
 

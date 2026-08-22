@@ -101,6 +101,18 @@ jobs:
         with:
           node-version-file: trusted-tool/package.json
 
+      - name: Validate public release migration configuration
+        env:
+          PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
+          RELEASE_MIGRATION_AUTHORIZATION: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON }}
+          RELEASE_MIGRATION_AUTHORIZATION_SIGNATURE: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_SIGNATURE_BASE64 }}
+          RELEASE_MIGRATION_CONTRACT: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_JSON }}
+          RELEASE_MIGRATION_CONTRACT_SIGNATURE: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_SIGNATURE_BASE64 }}
+        run: >-
+          node trusted-tool/scripts/release-transition-preflight.mjs
+          --candidate-commit "${{ inputs.commit }}"
+          --candidate-version "${{ inputs.version }}"
+
       - name: Validate the production Probe signing identity
         env:
           PRODUCTION_PROBE_PRIVATE_KEY: ${{ secrets.probe_asset_signing_key_pem }}

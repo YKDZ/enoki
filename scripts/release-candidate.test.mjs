@@ -340,6 +340,20 @@ describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
       workflow.indexOf("  validate-release-configuration:"),
       workflow.indexOf("  resolve-release-baseline:"),
     );
+    expect(preflight).toContain(
+      "Validate public release migration configuration",
+    );
+    expect(preflight.indexOf("release-transition-preflight.mjs")).toBeLessThan(
+      preflight.indexOf("${{ secrets.probe_asset_signing_key_pem }}"),
+    );
+    for (const variable of [
+      "ENOKI_RELEASE_TRANSITION_CONTRACT_JSON",
+      "ENOKI_RELEASE_TRANSITION_CONTRACT_SIGNATURE_BASE64",
+      "ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON",
+      "ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_SIGNATURE_BASE64",
+    ]) {
+      expect(preflight).toContain(variable);
+    }
     expect(preflight).toContain("validate-signing-identity");
     expect(preflight).toContain("${{ secrets.probe_asset_signing_key_pem }}");
     expect(preflight).toContain(

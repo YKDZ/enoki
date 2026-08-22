@@ -13,6 +13,11 @@ const signingDomain = Buffer.from(
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const tagPattern = /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
 const gitObjectPattern = /^[0-9a-f]{40}$/;
+const MAX_AUTHORIZATION_BYTES = 64 * 1024;
+const MAX_SIGNATURE_BYTES = 1024;
+const MAX_LEGACY_ASSETS = 64;
+const MAX_LEGACY_ASSET_BYTES = 1024 * 1024 * 1024;
+const MAX_LEGACY_ASSET_CLOSURE_BYTES = 4 * 1024 * 1024 * 1024;
 
 export function createTrustEpochMigrationAuthorization({
   candidateVersion,
@@ -34,6 +39,7 @@ export function createTrustEpochMigrationAuthorization({
     targetRootKeyId: sha256(rootPublicKey),
   });
   const bytes = canonicalBytes(authorization);
+  assertBoundedBytes(bytes, MAX_AUTHORIZATION_BYTES, "authorization");
   return {
     authorization,
     bytes,
@@ -53,6 +59,8 @@ export function verifyTrustEpochMigrationAuthorization({
   rootPublicKeyPem,
   signature,
 }) {
+  assertBoundedBytes(bytes, MAX_AUTHORIZATION_BYTES, "authorization");
+  assertBoundedBytes(signature, MAX_SIGNATURE_BYTES, "signature");
   const rootPublicKey = canonicalPublicKey(rootPublicKeyPem);
   let parsed;
   try {
@@ -108,6 +116,12 @@ export function verifyTrustEpochMigrationAuthorization({
 
 export function trustEpochMigrationAuthorizationSigningInput(bytes) {
   return Buffer.concat([signingDomain, Buffer.from(bytes)]);
+}
+
+export function trustEpochLegacyReleaseSha256(legacyRelease) {
+  return sha256(
+    Buffer.from(JSON.stringify(validateLegacyRelease(legacyRelease))),
+  );
 }
 
 function validateAuthorization(value) {
@@ -188,7 +202,9 @@ function validateLegacyRelease(value) {
     !gitObjectPattern.test(githubRelease.tagRefSha ?? "") ||
     !gitObjectPattern.test(githubRelease.peeledCommitSha ?? "") ||
     typeof githubRelease.targetCommitish !== "string" ||
-    githubRelease.targetCommitish.length === 0
+    githubRelease.targetCommitish.length === 0 ||
+    githubRelease.targetCommitish.length > 256 ||
+    githubRelease.repository.length > 128
   ) {
     throw new Error(
       "Trust Epoch Migration Authorization GitHub Release is invalid",
@@ -202,10 +218,15 @@ function validateLegacyRelease(value) {
   ) {
     throw new Error("Trust Epoch Migration Authorization Hub is invalid");
   }
-  if (!Array.isArray(value.assets) || value.assets.length === 0) {
+  if (
+    !Array.isArray(value.assets) ||
+    value.assets.length === 0 ||
+    value.assets.length > MAX_LEGACY_ASSETS
+  ) {
     throw new Error("Trust Epoch Migration Authorization assets are invalid");
   }
   const names = new Set();
+  let closureBytes = 0;
   const assets = value.assets
     .map((asset) => {
       assertPlainObject(asset, "Trust Epoch Migration Authorization asset");
@@ -216,9 +237,16 @@ function validateLegacyRelease(value) {
         !sha256Pattern.test(asset.sha256 ?? "") ||
         !Number.isSafeInteger(asset.size) ||
         asset.size < 0 ||
+        asset.size > MAX_LEGACY_ASSET_BYTES ||
         names.has(asset.name)
       ) {
         throw new Error("Trust Epoch Migration Authorization asset is invalid");
+      }
+      closureBytes += asset.size;
+      if (closureBytes > MAX_LEGACY_ASSET_CLOSURE_BYTES) {
+        throw new Error(
+          "Trust Epoch Migration Authorization asset closure is invalid",
+        );
       }
       names.add(asset.name);
       return { name: asset.name, sha256: asset.sha256, size: asset.size };
@@ -237,6 +265,19 @@ function validateLegacyRelease(value) {
     hub: { digest: value.hub.digest, image: value.hub.image },
     legacySigningKeySha256: value.legacySigningKeySha256,
   };
+}
+
+function assertBoundedBytes(value, maximum, description) {
+  const length = Buffer.isBuffer(value)
+    ? value.byteLength
+    : value instanceof Uint8Array
+      ? value.byteLength
+      : -1;
+  if (length < 1 || length > maximum) {
+    throw new Error(
+      `Trust Epoch Migration Authorization ${description} is invalid`,
+    );
+  }
 }
 
 function sameLegacyRelease(left, right) {

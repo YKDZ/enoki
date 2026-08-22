@@ -21,8 +21,17 @@ const probeTargets = Object.freeze([
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
 ]);
+const MAX_CONTRACT_BYTES = 64 * 1024;
+const MAX_SIGNATURE_BYTES = 1024;
+const MAX_TARGET_BUNDLE_BYTES = 1024 * 1024 * 1024;
+const MAX_TARGET_CLOSURE_BYTES = 4 * 1024 * 1024 * 1024;
 
 export function createReleaseTransitionContract(input) {
+  assertBoundedBytes(
+    input.targetManifestBytes,
+    MAX_CONTRACT_BYTES,
+    "target manifest",
+  );
   const authorization = verifyTrustEpochMigrationAuthorization({
     bytes: input.authorizationBytes,
     expectedCandidateVersion: `v${input.targetVersion}`,
@@ -83,6 +92,7 @@ export function createReleaseTransitionContract(input) {
     transition: "replacement-required",
   });
   const bytes = canonicalBytes(contract);
+  assertBoundedBytes(bytes, MAX_CONTRACT_BYTES, "contract");
   return {
     bytes,
     contract,
@@ -102,6 +112,8 @@ export function verifyReleaseTransitionContract({
   expected,
   rootPublicKeyPem,
 }) {
+  assertBoundedBytes(contractBytes, MAX_CONTRACT_BYTES, "contract");
+  assertBoundedBytes(contractSignature, MAX_SIGNATURE_BYTES, "signature");
   let parsed;
   try {
     parsed = JSON.parse(Buffer.from(contractBytes).toString("utf8"));
@@ -155,23 +167,97 @@ export function verifyReleaseTransitionContract({
       "Release Transition Contract root signature does not match",
     );
   }
-  if (
-    expected &&
-    (contract.candidateCommit !== expected.candidateCommit ||
-      contract.target.delegationGeneration !== expected.delegationGeneration ||
-      contract.source.commit !== expected.sourceCommit ||
-      contract.source.tag !== expected.sourceTag ||
-      contract.target.assetSetManifestSha256 !==
-        expected.targetAssetSetManifestSha256 ||
-      contract.target.version !== expected.targetVersion)
-  ) {
+  if (expected && !matchesExpectedContract(contract, expected)) {
     throw new Error("Release Transition Contract candidate does not match");
   }
   return contract;
 }
 
+function matchesExpectedContract(contract, expected) {
+  const comparisons = [
+    ["candidateCommit", contract.candidateCommit],
+    ["delegationGeneration", contract.target.delegationGeneration],
+    ["sourceCommit", contract.source.commit],
+    ["sourceTag", contract.source.tag],
+    ["targetAssetSetManifestSha256", contract.target.assetSetManifestSha256],
+    ["targetVersion", contract.target.version],
+  ];
+  return comparisons.every(
+    ([name, actual]) =>
+      expected[name] === undefined || expected[name] === actual,
+  );
+}
+
 export function releaseTransitionContractSigningInput(bytes) {
   return Buffer.concat([signingDomain, Buffer.from(bytes)]);
+}
+
+export function preflightReleaseMigrationConfiguration({
+  authorization,
+  authorizationSignatureBase64,
+  candidateCommit,
+  candidateVersion,
+  contract,
+  contractSignatureBase64,
+  rootPublicKeyPem,
+}) {
+  const values = [
+    authorization,
+    authorizationSignatureBase64,
+    contract,
+    contractSignatureBase64,
+  ];
+  const configured = values.filter(
+    (value) => typeof value === "string" && value.length > 0,
+  ).length;
+  if (configured === 0) return null;
+  if (configured !== values.length) {
+    throw new Error(
+      "Release migration public configuration must be provided as one complete closure",
+    );
+  }
+  if (
+    Buffer.byteLength(authorization) > MAX_CONTRACT_BYTES ||
+    Buffer.byteLength(contract) > MAX_CONTRACT_BYTES
+  ) {
+    throw new Error("Release migration public configuration is invalid");
+  }
+  return verifyReleaseTransitionContract({
+    authorizationBytes: Buffer.from(authorization),
+    authorizationSignature: decodeBoundedBase64(
+      authorizationSignatureBase64,
+      "authorization signature",
+    ),
+    contractBytes: Buffer.from(contract),
+    contractSignature: decodeBoundedBase64(
+      contractSignatureBase64,
+      "contract signature",
+    ),
+    expected: {
+      candidateCommit,
+      sourceTag: "v0.1.74",
+      targetVersion: candidateVersion.replace(/^v/, ""),
+    },
+    rootPublicKeyPem,
+  });
+}
+
+function decodeBoundedBase64(value, description) {
+  if (
+    typeof value !== "string" ||
+    value.length < 4 ||
+    value.length > 2048 ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
+  ) {
+    throw new Error(`Release migration ${description} is invalid`);
+  }
+  const bytes = Buffer.from(value, "base64");
+  assertBoundedBytes(bytes, MAX_SIGNATURE_BYTES, description);
+  if (bytes.toString("base64") !== value) {
+    throw new Error(`Release migration ${description} is invalid`);
+  }
+  return bytes;
 }
 
 function validateContract(value) {
@@ -269,6 +355,7 @@ function validateAssetClosure(value) {
   if (!Array.isArray(value) || value.length !== probeTargets.length) {
     throw new Error("Release Transition Contract Bundle closure is invalid");
   }
+  let closureBytes = 0;
   return value.map((asset, index) => {
     assertPlainObject(asset, "Release Transition Contract Bundle");
     assertExactKeys(asset, [
@@ -285,8 +372,13 @@ function validateAssetClosure(value) {
       !digestPattern.test(asset.sha256 ?? "") ||
       !Number.isSafeInteger(asset.size) ||
       asset.size < 0 ||
+      asset.size > MAX_TARGET_BUNDLE_BYTES ||
       asset.target !== target
     ) {
+      throw new Error("Release Transition Contract Bundle closure is invalid");
+    }
+    closureBytes += asset.size;
+    if (closureBytes > MAX_TARGET_CLOSURE_BYTES) {
       throw new Error("Release Transition Contract Bundle closure is invalid");
     }
     return {
@@ -297,6 +389,17 @@ function validateAssetClosure(value) {
       target: asset.target,
     };
   });
+}
+
+function assertBoundedBytes(value, maximum, description) {
+  const length = Buffer.isBuffer(value)
+    ? value.byteLength
+    : value instanceof Uint8Array
+      ? value.byteLength
+      : -1;
+  if (length < 1 || length > maximum) {
+    throw new Error(`Release Transition Contract ${description} is invalid`);
+  }
 }
 
 function canonicalBytes(value) {

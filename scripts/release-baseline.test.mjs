@@ -36,6 +36,7 @@ import {
   prepareProbeAssetSet,
   probeTargets,
 } from "./release-candidate-lib.mjs";
+import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -173,6 +174,32 @@ describe("Release Baseline resolution", () => {
     }
   });
 
+  it("keeps the first rooted release publication closure as an ordinary v0.1.76 baseline", async () => {
+    const fixture = await createResolverFixture({
+      candidateVersion: "v0.1.76",
+      historicalTransition: true,
+      version: "v0.1.75",
+    });
+    try {
+      const descriptor = await resolveReleaseBaseline(fixture.arguments_);
+      expect(descriptor).toMatchObject({
+        kind: "enoki-release-baseline",
+        tag: "v0.1.75",
+      });
+      expect(descriptor.probeAssetSet).not.toHaveProperty("releaseTransition");
+      expect(descriptor.probeAssetSet.files.map(({ file }) => file)).toEqual(
+        expect.arrayContaining([
+          "release-transition-contract.json",
+          "release-transition-contract.json.sig",
+          "trust-epoch-migration-authorization.json",
+          "trust-epoch-migration-authorization.json.sig",
+        ]),
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it("keeps the ordinary rooted failure when migration material is unavailable", async () => {
     const fixture = await createResolverFixture({ legacyTrustEpoch: true });
     try {
@@ -180,9 +207,30 @@ describe("Release Baseline resolution", () => {
       fixture.releaseIdentity.tagName = "v0.1.74";
       fixture.releaseIdentity.assets = fixture.release.assets;
       fixture.arguments_.candidateVersion = "v0.1.75";
-      await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
-        "must contain exactly",
+      const error = await resolveReleaseBaseline(fixture.arguments_).catch(
+        (caught) => caught,
       );
+      expect(error).toMatchObject({
+        classification: "rooted-baseline-metadata-closure-missing",
+        code: "RELEASE_BASELINE_ROOT_METADATA_CLOSURE_MISSING",
+      });
+      expect(error.message).toContain("must contain exactly");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("rejects an extra migration baseline Hub directory member", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await resolveReleaseBaseline(fixture.arguments_);
+      await writeFile(path.join(fixture.outputDir, "hub", "extra"), "extra");
+      await expect(
+        validateResolvedReleaseBaseline(fixture.outputDir, {
+          candidateVersion: "v0.1.75",
+          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
+        }),
+      ).rejects.toThrow("Hub directory must contain exactly");
     } finally {
       await fixture.cleanup();
     }
@@ -502,9 +550,77 @@ function release(tagName, overrides = {}) {
 
 async function createResolverFixture(options = {}) {
   const workDir = await mkdtemp(path.join(tmpdir(), "enoki-baseline-"));
-  const probe = await createProbeAssetSetFixture(workDir, "v1.7.2", {
+  const version = options.version ?? "v1.7.2";
+  const probe = await createProbeAssetSetFixture(workDir, version, {
     legacyProbe: options.legacyProbe,
   });
+  if (options.historicalTransition) {
+    const legacyRelease = {
+      assets: [
+        { name: "manifest.json", sha256: "1".repeat(64), size: 100 },
+        { name: "manifest.json.sig", sha256: "2".repeat(64), size: 256 },
+        { name: "signing-key.pem", sha256: "3".repeat(64), size: 451 },
+      ],
+      githubRelease: {
+        id: 368250351,
+        peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
+        repository: "YKDZ/enoki",
+        tag: "v0.1.74",
+        tagRefSha: "4".repeat(40),
+        targetCommitish: "main",
+      },
+      hub: {
+        digest: `sha256:${"5".repeat(64)}`,
+        image: "ghcr.io/ykdz/enoki-hub",
+      },
+      legacySigningKeySha256: "3".repeat(64),
+    };
+    const authorization = createTrustEpochMigrationAuthorization({
+      candidateVersion: version,
+      distribution: "enoki",
+      legacyRelease,
+      rootPrivateKeyPem: probe.root.privateKey,
+    });
+    const transition = createReleaseTransitionContract({
+      authorizationBytes: authorization.bytes,
+      authorizationSignature: authorization.signature,
+      candidateCommit: commitSha,
+      delegationBytes: await readFile(
+        path.join(probe.outputDir, "trust-delegation.json"),
+      ),
+      delegationSignature: await readFile(
+        path.join(probe.outputDir, "trust-delegation.json.sig"),
+      ),
+      legacyRelease,
+      rootPrivateKeyPem: probe.root.privateKey,
+      rootPublicKeyPem: probe.root.publicKey,
+      targetManifestBytes: await readFile(
+        path.join(probe.outputDir, "manifest.json"),
+      ),
+      targetVersion: version.slice(1),
+    });
+    await Promise.all([
+      writeFile(
+        path.join(probe.outputDir, "release-transition-contract.json"),
+        transition.bytes,
+      ),
+      writeFile(
+        path.join(probe.outputDir, "release-transition-contract.json.sig"),
+        transition.signature,
+      ),
+      writeFile(
+        path.join(probe.outputDir, "trust-epoch-migration-authorization.json"),
+        authorization.bytes,
+      ),
+      writeFile(
+        path.join(
+          probe.outputDir,
+          "trust-epoch-migration-authorization.json.sig",
+        ),
+        authorization.signature,
+      ),
+    ]);
+  }
   if (options.legacyTrustEpoch) {
     await Promise.all(
       [
@@ -527,7 +643,7 @@ async function createResolverFixture(options = {}) {
       name,
       size: bytes.byteLength,
     }));
-  const release_ = release("v1.7.2", { assets });
+  const release_ = release(version, { assets });
   const releases = [release_];
   const releaseIdentity = {
     assets,
@@ -543,7 +659,7 @@ async function createResolverFixture(options = {}) {
       assetDownloader: {
         downloadAsset: async ({ asset }) => contents.get(asset.name),
       },
-      candidateVersion: "v2.0.0",
+      candidateVersion: options.candidateVersion ?? "v2.0.0",
       githubRepository: "YKDZ/enoki",
       hubImage: "ghcr.io/ykdz/enoki-hub",
       outputDir,
