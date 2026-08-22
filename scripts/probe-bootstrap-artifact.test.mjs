@@ -11,6 +11,7 @@ import {
   inspectProbeBootstrapArtifact,
   inspectProbeBootstrapBinary,
   packageProbeBootstrapArtifact,
+  withVerifiedProbeBootstrapArchive,
   withVerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-artifact.mjs";
 
@@ -24,6 +25,24 @@ const identity = {
 };
 
 describe("Probe Bootstrap build artifact", () => {
+  it("requires exact release bytes at the public archive snapshot seam", async () => {
+    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
+      const artifact = await packageProbeBootstrapArtifact({
+        binaries: { acquirerPath, activatorPath },
+        outputDir: path.join(root, "out"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+
+      await expect(
+        withVerifiedProbeBootstrapArchive(
+          { archivePath: artifact.archivePath },
+          async () => undefined,
+        ),
+      ).rejects.toThrow(/expected release bytes/);
+    });
+  });
+
   it("accepts one exact length-prefixed identity in the expected ELF target", async () => {
     await withFixture(async ({ acquirerPath }) => {
       await writeFile(

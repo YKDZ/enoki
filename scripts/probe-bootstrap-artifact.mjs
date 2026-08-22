@@ -145,6 +145,11 @@ export async function withVerifiedProbeBootstrapArchive(input, callback) {
   if (typeof input?.archivePath !== "string") {
     throw new Error("Probe Bootstrap archive path is invalid");
   }
+  if (input.expectedArchive === undefined) {
+    throw new Error(
+      "Probe Bootstrap archive snapshot requires expected release bytes",
+    );
+  }
   const archive = await readBoundedArchive(input.archivePath);
   assertExpectedArchive(archive, input.expectedArchive);
   return withPrivateProbeBootstrapArchive(archive, callback);
