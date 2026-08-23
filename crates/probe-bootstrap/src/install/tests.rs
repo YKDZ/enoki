@@ -14,12 +14,13 @@ mod tests {
             assert!(unit.contains("InaccessiblePaths=/proc/stat"));
             assert!(unit.contains("/proc/cpuinfo"));
             assert!(unit.contains("/etc/os-release"));
+            assert!(unit.contains("/sys/class/block"));
         }
         let provider = cpu_provider_unit();
         assert!(provider.contains("RestrictAddressFamilies=AF_NETLINK"));
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("ProtectHome=read-only"));
-        assert!(provider.contains("BindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply"));
+        assert!(provider.contains("BindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts"));
         assert!(provider.contains("/proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats"));
         assert!(provider.contains("IPAddressDeny=any"));

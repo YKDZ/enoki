@@ -7,6 +7,7 @@ const SYSTEM_STATE_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-cpu-resource-provider.rs");
 const DISK_HEALTH_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-disk-health-resource-provider.rs");
+const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
 
@@ -75,6 +76,12 @@ fn observation_roles_have_one_way_dependency_boundaries() {
         assert!(
             !runtime.contains(forbidden),
             "Observation Runtime 不得反向依赖 Probe 身份、Hub 传输或生命周期：{forbidden}",
+        );
+    }
+    for forbidden in ["fs::canonicalize", "fs::read_dir"] {
+        assert!(
+            !DISK_HEALTH_CALCULATION.contains(forbidden),
+            "Runtime 可达的磁盘健康计算不得打开主机资源：{forbidden}",
         );
     }
 }

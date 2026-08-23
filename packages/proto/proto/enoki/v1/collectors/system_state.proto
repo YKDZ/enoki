@@ -32,6 +32,12 @@ message BatterySupplyResourceFact {
   string status = 3;
 }
 
+// Provider 从固定 mount table 与 block sysfs 派生的设备拓扑事实。
+message BlockDeviceTopologyResourceFact {
+  string source = 1;
+  string physical_device = 2;
+}
+
 // 一次固定 pull 的完整 typed Resource Result。
 // procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
 message SystemStateResourceResult {
@@ -53,4 +59,5 @@ message SystemStateResourceResult {
   string disk_failure_code = 16;
   string temperature_failure_code = 17;
   string battery_failure_code = 18;
+  repeated BlockDeviceTopologyResourceFact block_device_topology = 19;
 }

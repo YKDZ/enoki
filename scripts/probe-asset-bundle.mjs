@@ -17,8 +17,8 @@ export const probeBundleComponentProfiles = Object.freeze({
   }),
   "system-state-provider": Object.freeze({
     path: "enoki-cpu-resource-provider",
-    permissionProfile: "system-state-provider-v2",
-    resourceContract: "system-state-v2",
+    permissionProfile: "system-state-provider-v3",
+    resourceContract: "system-state-v3",
   }),
   "disk-health-provider": Object.freeze({
     path: "enoki-disk-health-resource-provider",

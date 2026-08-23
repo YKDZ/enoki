@@ -3154,6 +3154,109 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
+        /** Properties of a BlockDeviceTopologyResourceFact. */
+        interface IBlockDeviceTopologyResourceFact {
+
+            /** BlockDeviceTopologyResourceFact source */
+            source?: (string|null);
+
+            /** BlockDeviceTopologyResourceFact physicalDevice */
+            physicalDevice?: (string|null);
+        }
+
+        /** Represents a BlockDeviceTopologyResourceFact. */
+        class BlockDeviceTopologyResourceFact implements IBlockDeviceTopologyResourceFact {
+
+            /**
+             * Constructs a new BlockDeviceTopologyResourceFact.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IBlockDeviceTopologyResourceFact);
+
+            /** BlockDeviceTopologyResourceFact source. */
+            public source: string;
+
+            /** BlockDeviceTopologyResourceFact physicalDevice. */
+            public physicalDevice: string;
+
+            /**
+             * Creates a new BlockDeviceTopologyResourceFact instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns BlockDeviceTopologyResourceFact instance
+             */
+            public static create(properties?: enoki.v1.IBlockDeviceTopologyResourceFact): enoki.v1.BlockDeviceTopologyResourceFact;
+
+            /**
+             * Encodes the specified BlockDeviceTopologyResourceFact message. Does not implicitly {@link enoki.v1.BlockDeviceTopologyResourceFact.verify|verify} messages.
+             * @param message BlockDeviceTopologyResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IBlockDeviceTopologyResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified BlockDeviceTopologyResourceFact message, length delimited. Does not implicitly {@link enoki.v1.BlockDeviceTopologyResourceFact.verify|verify} messages.
+             * @param message BlockDeviceTopologyResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IBlockDeviceTopologyResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a BlockDeviceTopologyResourceFact message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns BlockDeviceTopologyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.BlockDeviceTopologyResourceFact;
+
+            /**
+             * Decodes a BlockDeviceTopologyResourceFact message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns BlockDeviceTopologyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.BlockDeviceTopologyResourceFact;
+
+            /**
+             * Verifies a BlockDeviceTopologyResourceFact message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a BlockDeviceTopologyResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns BlockDeviceTopologyResourceFact
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.BlockDeviceTopologyResourceFact;
+
+            /**
+             * Creates a plain object from a BlockDeviceTopologyResourceFact message. Also converts values to other types if specified.
+             * @param message BlockDeviceTopologyResourceFact
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.BlockDeviceTopologyResourceFact, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this BlockDeviceTopologyResourceFact to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for BlockDeviceTopologyResourceFact
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
         /** Properties of a SystemStateResourceResult. */
         interface ISystemStateResourceResult {
 
@@ -3210,6 +3313,9 @@ export namespace enoki {
 
             /** SystemStateResourceResult batteryFailureCode */
             batteryFailureCode?: (string|null);
+
+            /** SystemStateResourceResult blockDeviceTopology */
+            blockDeviceTopology?: (enoki.v1.IBlockDeviceTopologyResourceFact[]|null);
         }
 
         /** Represents a SystemStateResourceResult. */
@@ -3274,6 +3380,9 @@ export namespace enoki {
 
             /** SystemStateResourceResult batteryFailureCode. */
             public batteryFailureCode: string;
+
+            /** SystemStateResourceResult blockDeviceTopology. */
+            public blockDeviceTopology: enoki.v1.IBlockDeviceTopologyResourceFact[];
 
             /**
              * Creates a new SystemStateResourceResult instance using the specified properties.

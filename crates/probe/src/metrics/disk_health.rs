@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::protocol::enoki::v1::DiskHealthMetric;
 
@@ -40,7 +36,6 @@ pub fn collect_disk_health_metrics_from_smartctl_json(
         used_bytes: None,
     }))
 }
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct DiskPhysicalUsage {
     mount_point: String,
@@ -54,9 +49,10 @@ pub(crate) fn enrich_disk_health_metrics_with_resource_facts(
     mounts: &str,
     capacities: &BTreeMap<String, crate::metrics::FilesystemCapacity>,
     unraid_disks_ini: &str,
+    block_device_topology: &BTreeMap<String, String>,
 ) {
     let usage_by_device = if unraid_disks_ini.is_empty() {
-        disk_usage_by_device_from_mounts_and_capacities(mounts, capacities)
+        disk_usage_by_device_from_mounts_and_capacities(mounts, capacities, block_device_topology)
     } else {
         disk_usage_by_device_from_unraid_disks_ini_contents(unraid_disks_ini)
     };
@@ -70,6 +66,7 @@ pub(crate) fn enrich_disk_health_metrics_with_resource_facts(
 fn disk_usage_by_device_from_mounts_and_capacities(
     contents: &str,
     capacities: &BTreeMap<String, crate::metrics::FilesystemCapacity>,
+    block_device_topology: &BTreeMap<String, String>,
 ) -> BTreeMap<String, DiskPhysicalUsage> {
     let mut usage_by_device = BTreeMap::new();
     let mut seen_sources = BTreeSet::new();
@@ -81,7 +78,7 @@ fn disk_usage_by_device_from_mounts_and_capacities(
         {
             continue;
         }
-        let Some(device_name) = physical_device_name(&mount.source) else {
+        let Some(device_name) = physical_device_name(&mount.source, block_device_topology) else {
             continue;
         };
         let Some(capacity) = capacities.get(&mount.mount_point) else {
@@ -109,18 +106,6 @@ fn apply_disk_physical_usage(metric: &mut DiskHealthMetric, usage: &DiskPhysical
     metric.total_bytes = metric.total_bytes.or(Some(usage.total_bytes));
     metric.usage_mount_point = usage.mount_point.clone();
     metric.used_bytes = Some(usage.used_bytes);
-}
-
-#[cfg(any())]
-fn disk_usage_by_device() -> BTreeMap<String, DiskPhysicalUsage> {
-    let unraid = disk_usage_by_device_from_unraid_disks_ini("/var/local/emhttp/disks.ini");
-    if !unraid.is_empty() {
-        return unraid;
-    }
-
-    fs::read_to_string("/proc/mounts")
-        .map(|mounts| disk_usage_by_device_from_mounts(&mounts))
-        .unwrap_or_default()
 }
 
 fn disk_usage_by_device_from_unraid_disks_ini_contents(
@@ -225,24 +210,14 @@ fn parse_mount(line: &str) -> Option<MountEntry> {
     })
 }
 
-fn physical_device_name(source: &str) -> Option<String> {
-    physical_device_name_with_sysfs(source, Path::new("/sys/class/block"))
-}
-
-fn physical_device_name_with_sysfs(source: &str, sysfs_block_root: &Path) -> Option<String> {
-    let name = source.strip_prefix("/dev/")?;
-    if let Some(name) = physical_device_name_from_direct_block_name(name) {
-        return Some(name);
-    }
-
-    let basename = block_device_basename(source).or_else(|| Some(name.to_string()))?;
-    let physical_names = physical_device_names_from_sysfs(&basename, sysfs_block_root);
-
-    if physical_names.len() == 1 {
-        return physical_names.into_iter().next();
-    }
-
-    None
+fn physical_device_name(
+    source: &str,
+    block_device_topology: &BTreeMap<String, String>,
+) -> Option<String> {
+    block_device_topology
+        .get(source)
+        .cloned()
+        .or_else(|| physical_device_name_from_direct_block_name(source.strip_prefix("/dev/")?))
 }
 
 fn physical_device_name_from_direct_block_name(name: &str) -> Option<String> {
@@ -251,49 +226,6 @@ fn physical_device_name_from_direct_block_name(name: &str) -> Option<String> {
     }
 
     Some(format!("/dev/{}", physical_device_basename(name)?))
-}
-
-fn block_device_basename(source: &str) -> Option<String> {
-    let canonical = fs::canonicalize(source).ok()?;
-    canonical.file_name()?.to_str().map(ToOwned::to_owned)
-}
-
-fn physical_device_names_from_sysfs(block_name: &str, sysfs_block_root: &Path) -> BTreeSet<String> {
-    let mut visited = BTreeSet::new();
-    physical_device_names_from_sysfs_inner(block_name, sysfs_block_root, &mut visited)
-}
-
-fn physical_device_names_from_sysfs_inner(
-    block_name: &str,
-    sysfs_block_root: &Path,
-    visited: &mut BTreeSet<String>,
-) -> BTreeSet<String> {
-    let mut physical_names = BTreeSet::new();
-    if !visited.insert(block_name.to_string()) {
-        return physical_names;
-    }
-
-    if let Some(name) = physical_device_name_from_direct_block_name(block_name) {
-        physical_names.insert(name);
-        return physical_names;
-    }
-
-    let Ok(slaves) = fs::read_dir(sysfs_block_root.join(block_name).join("slaves")) else {
-        return physical_names;
-    };
-
-    for slave in slaves.flatten() {
-        let Some(slave_name) = slave.file_name().to_str().map(ToOwned::to_owned) else {
-            continue;
-        };
-        physical_names.extend(physical_device_names_from_sysfs_inner(
-            &slave_name,
-            sysfs_block_root,
-            visited,
-        ));
-    }
-
-    physical_names
 }
 
 fn physical_device_basename(name: &str) -> Option<String> {
@@ -435,15 +367,18 @@ fsUsed="90"
     #[test]
     fn physical_device_names_match_smartctl_device_names() {
         assert_eq!(
-            physical_device_name("/dev/sda1").as_deref(),
+            physical_device_name("/dev/sda1", &BTreeMap::new()).as_deref(),
             Some("/dev/sda")
         );
         assert_eq!(
-            physical_device_name("/dev/nvme0n1p1").as_deref(),
+            physical_device_name("/dev/nvme0n1p1", &BTreeMap::new()).as_deref(),
             Some("/dev/nvme0"),
         );
-        assert_eq!(physical_device_name("/dev/md1p1"), None);
-        assert_eq!(physical_device_name("/dev/mapper/vg-root"), None);
+        assert_eq!(physical_device_name("/dev/md1p1", &BTreeMap::new()), None);
+        assert_eq!(
+            physical_device_name("/dev/mapper/vg-root", &BTreeMap::new()),
+            None,
+        );
     }
 
     #[test]
@@ -497,14 +432,11 @@ fsUsed="90"
     }
 
     #[test]
-    fn lvm_dm_device_maps_to_single_physical_nvme_controller() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let slaves = temp.path().join("dm-0/slaves");
-        fs::create_dir_all(&slaves).expect("slaves dir");
-        fs::write(slaves.join("nvme0n1p3"), "").expect("slave marker");
+    fn provider_topology_maps_lvm_to_single_physical_nvme_controller() {
+        let topology = BTreeMap::from([("/dev/dm-0".to_owned(), "/dev/nvme0".to_owned())]);
 
         assert_eq!(
-            physical_device_name_with_sysfs("/dev/dm-0", temp.path()).as_deref(),
+            physical_device_name("/dev/dm-0", &topology).as_deref(),
             Some("/dev/nvme0"),
         );
     }

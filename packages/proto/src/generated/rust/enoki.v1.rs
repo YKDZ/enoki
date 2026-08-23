@@ -306,6 +306,14 @@ pub struct BatterySupplyResourceFact {
     #[prost(string, tag = "3")]
     pub status: ::prost::alloc::string::String,
 }
+/// Provider 从固定 mount table 与 block sysfs 派生的设备拓扑事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BlockDeviceTopologyResourceFact {
+    #[prost(string, tag = "1")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub physical_device: ::prost::alloc::string::String,
+}
 /// 一次固定 pull 的完整 typed Resource Result。
 /// procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -346,6 +354,8 @@ pub struct SystemStateResourceResult {
     pub temperature_failure_code: ::prost::alloc::string::String,
     #[prost(string, tag = "18")]
     pub battery_failure_code: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "19")]
+    pub block_device_topology: ::prost::alloc::vec::Vec<BlockDeviceTopologyResourceFact>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuCoreMetric {

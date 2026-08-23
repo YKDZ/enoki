@@ -5,9 +5,10 @@ use enoki_probe::observation_runtime::{
     static_collector_registry,
 };
 use enoki_probe::protocol::enoki::v1::{
-    BatterySupplyResourceFact, CpuCounterResourceFact, DiskHealthCollectorCapabilityStatus,
-    DiskHealthDeviceResourceFact, DiskHealthResourceResult as WireDiskHealthResourceResult,
-    FilesystemCapacityResourceFact, SystemStateResourceResult as WireSystemStateResourceResult,
+    BatterySupplyResourceFact, BlockDeviceTopologyResourceFact, CpuCounterResourceFact,
+    DiskHealthCollectorCapabilityStatus, DiskHealthDeviceResourceFact,
+    DiskHealthResourceResult as WireDiskHealthResourceResult, FilesystemCapacityResourceFact,
+    SystemStateResourceResult as WireSystemStateResourceResult,
 };
 use prost::Message;
 use std::time::Duration;
@@ -198,6 +199,50 @@ fn malformed_typed_envelope_is_rejected() {
 }
 
 #[test]
+fn malformed_or_duplicate_topology_is_an_inert_disk_resource_failure() {
+    for topology in [
+        vec![BlockDeviceTopologyResourceFact {
+            source: "../../dev/dm-0".into(),
+            physical_device: "/dev/nvme0".into(),
+        }],
+        vec![
+            BlockDeviceTopologyResourceFact {
+                source: "/dev/dm-0".into(),
+                physical_device: "/dev/nvme0".into(),
+            },
+            BlockDeviceTopologyResourceFact {
+                source: "/dev/dm-0".into(),
+                physical_device: "/dev/sda".into(),
+            },
+        ],
+    ] {
+        let wire = WireSystemStateResourceResult {
+            cpu_counters: vec![CpuCounterResourceFact {
+                name: "cpu".into(),
+                user: 100,
+                idle: 900,
+                ..Default::default()
+            }],
+            block_device_topology: topology,
+            ..Default::default()
+        };
+        let decoded = decode_system_state_resource_result(&wire.encode_to_vec()).unwrap();
+        let mut runtime = ObservationRuntime::new(OneResultProvider(Some(decoded)));
+        let sample = runtime
+            .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
+            .unwrap();
+
+        assert_eq!(sample.cpu_percent, Some(0.0));
+        assert!(sample.collector_outcomes.iter().any(|outcome| {
+            outcome.collector_id == "official.disk"
+                && outcome.failure.as_ref().is_some_and(|failure| {
+                    failure.code == "official.disk.resource-result-malformed"
+                })
+        }));
+    }
+}
+
+#[test]
 fn one_device_fact_failure_does_not_discard_other_collector_results() {
     let wire = WireSystemStateResourceResult {
         cpu_counters: vec![CpuCounterResourceFact {
@@ -259,9 +304,41 @@ fn disk_health_uses_a_distinct_fixed_resource_and_runtime_owned_cadence() {
             Ok(self.result.clone())
         }
     }
+    struct FixedTopologyProvider(SystemStateResourceResult);
+    impl SystemStateProvider for FixedTopologyProvider {
+        fn pull_system_state(
+            &mut self,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            Ok(self.0.clone())
+        }
+    }
+    let system_state_wire = WireSystemStateResourceResult {
+        cpu_counters: vec![CpuCounterResourceFact {
+            name: "cpu".into(),
+            user: 100,
+            idle: 900,
+            ..Default::default()
+        }],
+        proc_mounts: "/dev/dm-0 / ext4 rw 0 0\n".into(),
+        filesystem_capacities: vec![FilesystemCapacityResourceFact {
+            mount_point: "/".into(),
+            total_bytes: 1_000,
+            free_bytes: 400,
+            available_bytes: 300,
+        }],
+        block_device_topology: vec![BlockDeviceTopologyResourceFact {
+            source: "/dev/dm-0".into(),
+            physical_device: "/dev/nvme0".into(),
+        }],
+        ..Default::default()
+    };
     let wire = WireDiskHealthResourceResult {
         devices: vec![DiskHealthDeviceResourceFact {
-            device_name: "/dev/sda".into(),
+            device_name: "/dev/nvme0".into(),
             smartctl_json: br#"{"smart_status":{"passed":true},"model_name":"Example","user_capacity":{"bytes":1000}}"#.to_vec(),
             exit_code: 0,
         }],
@@ -269,11 +346,13 @@ fn disk_health_uses_a_distinct_fixed_resource_and_runtime_owned_cadence() {
         ..Default::default()
     };
     let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-    let mut runtime = ObservationRuntime::new(FixedSystemStateProvider { calls: 0 })
-        .with_disk_health_provider(FixedDiskHealthProvider {
-            calls: calls.clone(),
-            result: decode_disk_health_resource_result(&wire.encode_to_vec()).unwrap(),
-        });
+    let mut runtime = ObservationRuntime::new(FixedTopologyProvider(
+        decode_system_state_resource_result(&system_state_wire.encode_to_vec()).unwrap(),
+    ))
+    .with_disk_health_provider(FixedDiskHealthProvider {
+        calls: calls.clone(),
+        result: decode_disk_health_resource_result(&wire.encode_to_vec()).unwrap(),
+    });
     let request = ObservationWindowRequest::new(Duration::from_secs(5)).unwrap();
     let before_due = runtime
         .observe(request.with_sequence_start(11).unwrap())
@@ -285,7 +364,9 @@ fn disk_health_uses_a_distinct_fixed_resource_and_runtime_owned_cadence() {
     assert!(before_due.disk_health.is_empty());
     assert_eq!(calls.get(), 1);
     assert_eq!(due.disk_health.len(), 1);
-    assert_eq!(due.disk_health[0].device_name, "/dev/sda");
+    assert_eq!(due.disk_health[0].device_name, "/dev/nvme0");
+    assert_eq!(due.disk_health[0].usage_mount_point, "/");
+    assert_eq!(due.disk_health[0].used_bytes, Some(600));
     assert!(due.collector_outcomes.iter().any(|outcome| {
         outcome.collector_id == "official.disk-health"
             && outcome.state

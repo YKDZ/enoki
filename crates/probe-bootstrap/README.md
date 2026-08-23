@@ -1,6 +1,6 @@
 # Probe Bootstrap
 
-`enoki-probe-bootstrap` 是 Probe 首次安装的最小信任入口。它不单独分发：每个目标平台只有一个签名的 Probe Asset Bundle，包内固定包含 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`bootstrap-acquirer` 与 `bootstrap-activator` 六个同版本角色；每个运行角色同时绑定固定权限配置与资源合同。为兼容既有 schema 3 安装路径，`system-state-provider` 角色仍使用 `enoki-cpu-resource-provider` 二进制与对应 unit/socket 文件名；签名清单中的角色和资源合同以 `system-state-provider/system-state-v2` 为准。磁盘健康由独立的 `disk-health-provider/disk-health-v1` 权限边界提供，常驻 Probe 不执行 `smartctl`。
+`enoki-probe-bootstrap` 是 Probe 首次安装的最小信任入口。它不单独分发：每个目标平台只有一个签名的 Probe Asset Bundle，包内固定包含 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`bootstrap-acquirer` 与 `bootstrap-activator` 六个同版本角色；每个运行角色同时绑定固定权限配置与资源合同。为兼容既有 schema 3 安装路径，`system-state-provider` 角色仍使用 `enoki-cpu-resource-provider` 二进制与对应 unit/socket 文件名；签名清单中的角色和资源合同以 `system-state-provider/system-state-v3` 为准。磁盘健康由独立的 `disk-health-provider/disk-health-v1` 权限边界提供，常驻 Probe 不执行 `smartctl`。
 
 管理员先从 GitHub Release 取得静态 recipe 与公开 recipe record，核对 recipe 版本、字节数、SHA-256、Probe Distribution Trust Root 指纹、目标平台及 Probe Asset Bundle Version。非 root recipe 从 Hub 下载一个目标平台安装包，验证离线根、委派、签名清单、归档 receipt 和完整角色 closure；验证后的 acquirer 字节直接进入 sealed memfd，并由绑定该 FD 的 `/proc/self/fd` 路径执行，不会落入用户可写 pathname 后再重读。
 

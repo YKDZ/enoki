@@ -9266,6 +9266,257 @@ export const enoki = $root.enoki = (() => {
             return BatterySupplyResourceFact;
         })();
 
+        v1.BlockDeviceTopologyResourceFact = (function() {
+
+            /**
+             * Properties of a BlockDeviceTopologyResourceFact.
+             * @memberof enoki.v1
+             * @interface IBlockDeviceTopologyResourceFact
+             * @property {string|null} [source] BlockDeviceTopologyResourceFact source
+             * @property {string|null} [physicalDevice] BlockDeviceTopologyResourceFact physicalDevice
+             */
+
+            /**
+             * Constructs a new BlockDeviceTopologyResourceFact.
+             * @memberof enoki.v1
+             * @classdesc Represents a BlockDeviceTopologyResourceFact.
+             * @implements IBlockDeviceTopologyResourceFact
+             * @constructor
+             * @param {enoki.v1.IBlockDeviceTopologyResourceFact=} [properties] Properties to set
+             */
+            function BlockDeviceTopologyResourceFact(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * BlockDeviceTopologyResourceFact source.
+             * @member {string} source
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @instance
+             */
+            BlockDeviceTopologyResourceFact.prototype.source = "";
+
+            /**
+             * BlockDeviceTopologyResourceFact physicalDevice.
+             * @member {string} physicalDevice
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @instance
+             */
+            BlockDeviceTopologyResourceFact.prototype.physicalDevice = "";
+
+            /**
+             * Creates a new BlockDeviceTopologyResourceFact instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {enoki.v1.IBlockDeviceTopologyResourceFact=} [properties] Properties to set
+             * @returns {enoki.v1.BlockDeviceTopologyResourceFact} BlockDeviceTopologyResourceFact instance
+             */
+            BlockDeviceTopologyResourceFact.create = function create(properties) {
+                return new BlockDeviceTopologyResourceFact(properties);
+            };
+
+            /**
+             * Encodes the specified BlockDeviceTopologyResourceFact message. Does not implicitly {@link enoki.v1.BlockDeviceTopologyResourceFact.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {enoki.v1.IBlockDeviceTopologyResourceFact} message BlockDeviceTopologyResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            BlockDeviceTopologyResourceFact.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.source != null && Object.hasOwnProperty.call(message, "source"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.source);
+                if (message.physicalDevice != null && Object.hasOwnProperty.call(message, "physicalDevice"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.physicalDevice);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified BlockDeviceTopologyResourceFact message, length delimited. Does not implicitly {@link enoki.v1.BlockDeviceTopologyResourceFact.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {enoki.v1.IBlockDeviceTopologyResourceFact} message BlockDeviceTopologyResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            BlockDeviceTopologyResourceFact.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a BlockDeviceTopologyResourceFact message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.BlockDeviceTopologyResourceFact} BlockDeviceTopologyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            BlockDeviceTopologyResourceFact.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.BlockDeviceTopologyResourceFact();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.source = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.physicalDevice = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a BlockDeviceTopologyResourceFact message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.BlockDeviceTopologyResourceFact} BlockDeviceTopologyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            BlockDeviceTopologyResourceFact.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a BlockDeviceTopologyResourceFact message.
+             * @function verify
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            BlockDeviceTopologyResourceFact.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.source != null && Object.hasOwnProperty.call(message, "source"))
+                    if (!$util.isString(message.source))
+                        return "source: string expected";
+                if (message.physicalDevice != null && Object.hasOwnProperty.call(message, "physicalDevice"))
+                    if (!$util.isString(message.physicalDevice))
+                        return "physicalDevice: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a BlockDeviceTopologyResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.BlockDeviceTopologyResourceFact} BlockDeviceTopologyResourceFact
+             */
+            BlockDeviceTopologyResourceFact.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.BlockDeviceTopologyResourceFact)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.BlockDeviceTopologyResourceFact: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.BlockDeviceTopologyResourceFact();
+                if (object.source != null)
+                    message.source = String(object.source);
+                if (object.physicalDevice != null)
+                    message.physicalDevice = String(object.physicalDevice);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a BlockDeviceTopologyResourceFact message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {enoki.v1.BlockDeviceTopologyResourceFact} message BlockDeviceTopologyResourceFact
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            BlockDeviceTopologyResourceFact.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.source = "";
+                    object.physicalDevice = "";
+                }
+                if (message.source != null && Object.hasOwnProperty.call(message, "source"))
+                    object.source = message.source;
+                if (message.physicalDevice != null && Object.hasOwnProperty.call(message, "physicalDevice"))
+                    object.physicalDevice = message.physicalDevice;
+                return object;
+            };
+
+            /**
+             * Converts this BlockDeviceTopologyResourceFact to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            BlockDeviceTopologyResourceFact.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for BlockDeviceTopologyResourceFact
+             * @function getTypeUrl
+             * @memberof enoki.v1.BlockDeviceTopologyResourceFact
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            BlockDeviceTopologyResourceFact.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.BlockDeviceTopologyResourceFact";
+            };
+
+            return BlockDeviceTopologyResourceFact;
+        })();
+
         v1.SystemStateResourceResult = (function() {
 
             /**
@@ -9290,6 +9541,7 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [diskFailureCode] SystemStateResourceResult diskFailureCode
              * @property {string|null} [temperatureFailureCode] SystemStateResourceResult temperatureFailureCode
              * @property {string|null} [batteryFailureCode] SystemStateResourceResult batteryFailureCode
+             * @property {Array.<enoki.v1.IBlockDeviceTopologyResourceFact>|null} [blockDeviceTopology] SystemStateResourceResult blockDeviceTopology
              */
 
             /**
@@ -9305,6 +9557,7 @@ export const enoki = $root.enoki = (() => {
                 this.filesystemCapacities = [];
                 this.temperatureInputs = [];
                 this.batterySupplies = [];
+                this.blockDeviceTopology = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -9456,6 +9709,14 @@ export const enoki = $root.enoki = (() => {
             SystemStateResourceResult.prototype.batteryFailureCode = "";
 
             /**
+             * SystemStateResourceResult blockDeviceTopology.
+             * @member {Array.<enoki.v1.IBlockDeviceTopologyResourceFact>} blockDeviceTopology
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.blockDeviceTopology = $util.emptyArray;
+
+            /**
              * Creates a new SystemStateResourceResult instance using the specified properties.
              * @function create
              * @memberof enoki.v1.SystemStateResourceResult
@@ -9523,6 +9784,9 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 17, wireType 2 =*/138).string(message.temperatureFailureCode);
                 if (message.batteryFailureCode != null && Object.hasOwnProperty.call(message, "batteryFailureCode"))
                     writer.uint32(/* id 18, wireType 2 =*/146).string(message.batteryFailureCode);
+                if (message.blockDeviceTopology != null && message.blockDeviceTopology.length)
+                    for (let i = 0; i < message.blockDeviceTopology.length; ++i)
+                        $root.enoki.v1.BlockDeviceTopologyResourceFact.encode(message.blockDeviceTopology[i], writer.uint32(/* id 19, wireType 2 =*/154).fork(), q + 1).ldelim();
                 return writer;
             };
 
@@ -9643,6 +9907,12 @@ export const enoki = $root.enoki = (() => {
                             message.batteryFailureCode = reader.string();
                             break;
                         }
+                    case 19: {
+                            if (!(message.blockDeviceTopology && message.blockDeviceTopology.length))
+                                message.blockDeviceTopology = [];
+                            message.blockDeviceTopology.push($root.enoki.v1.BlockDeviceTopologyResourceFact.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -9760,6 +10030,15 @@ export const enoki = $root.enoki = (() => {
                 if (message.batteryFailureCode != null && Object.hasOwnProperty.call(message, "batteryFailureCode"))
                     if (!$util.isString(message.batteryFailureCode))
                         return "batteryFailureCode: string expected";
+                if (message.blockDeviceTopology != null && Object.hasOwnProperty.call(message, "blockDeviceTopology")) {
+                    if (!Array.isArray(message.blockDeviceTopology))
+                        return "blockDeviceTopology: array expected";
+                    for (let i = 0; i < message.blockDeviceTopology.length; ++i) {
+                        let error = $root.enoki.v1.BlockDeviceTopologyResourceFact.verify(message.blockDeviceTopology[i], long + 1);
+                        if (error)
+                            return "blockDeviceTopology." + error;
+                    }
+                }
                 return null;
             };
 
@@ -9856,6 +10135,16 @@ export const enoki = $root.enoki = (() => {
                     message.temperatureFailureCode = String(object.temperatureFailureCode);
                 if (object.batteryFailureCode != null)
                     message.batteryFailureCode = String(object.batteryFailureCode);
+                if (object.blockDeviceTopology) {
+                    if (!Array.isArray(object.blockDeviceTopology))
+                        throw TypeError(".enoki.v1.SystemStateResourceResult.blockDeviceTopology: array expected");
+                    message.blockDeviceTopology = [];
+                    for (let i = 0; i < object.blockDeviceTopology.length; ++i) {
+                        if (!$util.isObject(object.blockDeviceTopology[i]))
+                            throw TypeError(".enoki.v1.SystemStateResourceResult.blockDeviceTopology: object expected");
+                        message.blockDeviceTopology[i] = $root.enoki.v1.BlockDeviceTopologyResourceFact.fromObject(object.blockDeviceTopology[i], long + 1);
+                    }
+                }
                 return message;
             };
 
@@ -9881,6 +10170,7 @@ export const enoki = $root.enoki = (() => {
                     object.filesystemCapacities = [];
                     object.temperatureInputs = [];
                     object.batterySupplies = [];
+                    object.blockDeviceTopology = [];
                 }
                 if (options.defaults) {
                     object.procLoadavg = "";
@@ -9955,6 +10245,11 @@ export const enoki = $root.enoki = (() => {
                     object.temperatureFailureCode = message.temperatureFailureCode;
                 if (message.batteryFailureCode != null && Object.hasOwnProperty.call(message, "batteryFailureCode"))
                     object.batteryFailureCode = message.batteryFailureCode;
+                if (message.blockDeviceTopology && message.blockDeviceTopology.length) {
+                    object.blockDeviceTopology = [];
+                    for (let j = 0; j < message.blockDeviceTopology.length; ++j)
+                        object.blockDeviceTopology[j] = $root.enoki.v1.BlockDeviceTopologyResourceFact.toObject(message.blockDeviceTopology[j], options, q + 1);
+                }
                 return object;
             };
 

@@ -1,7 +1,7 @@
 //! 构建期固定、单次有界的 System State 观测 Runtime。
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::CStr,
     io::{self, Read, Write},
     os::fd::{AsRawFd, RawFd},
@@ -141,6 +141,7 @@ pub struct SystemStateResourceResult {
     disk_failure_code: Option<String>,
     temperature_failure_code: Option<String>,
     battery_failure_code: Option<String>,
+    block_device_topology: BTreeMap<String, String>,
 }
 
 impl SystemStateResourceResult {
@@ -164,6 +165,7 @@ impl SystemStateResourceResult {
             disk_failure_code: None,
             temperature_failure_code: None,
             battery_failure_code: None,
+            block_device_topology: BTreeMap::new(),
         })
     }
 
@@ -517,6 +519,7 @@ where
             self.collect_disk_health(
                 &resource.proc_mounts,
                 &resource.filesystem_capacities,
+                &resource.block_device_topology,
                 &mut sample,
             );
         }
@@ -527,6 +530,7 @@ where
         &mut self,
         proc_mounts: &str,
         filesystem_capacities: &BTreeMap<String, FilesystemCapacity>,
+        block_device_topology: &BTreeMap<String, String>,
         sample: &mut MetricSample,
     ) {
         let resource = match self
@@ -610,6 +614,7 @@ where
             proc_mounts,
             filesystem_capacities,
             &resource.unraid_disks_ini,
+            block_device_topology,
         );
         sample.disk_health = metrics;
         self.set_disk_health_capability(DiskHealthCollectorCapabilityStatus::Available, "");
@@ -679,7 +684,12 @@ where
                     let mut sample = resource_failure_sample(sleeper.now_ms(), outcome);
                     let sequence = request.sequence_start + offset as u64;
                     if sequence.is_multiple_of(12) {
-                        self.collect_disk_health("", &BTreeMap::new(), &mut sample);
+                        self.collect_disk_health(
+                            "",
+                            &BTreeMap::new(),
+                            &BTreeMap::new(),
+                            &mut sample,
+                        );
                     }
                     if offset == 0 {
                         sample
@@ -913,7 +923,15 @@ pub fn decode_system_state_resource_result(bytes: &[u8]) -> Option<SystemStateRe
     let load = crate::metrics::collect_load_metrics_from_proc_loadavg(&wire.proc_loadavg);
     let memory = crate::metrics::collect_memory_metrics_from_proc_meminfo(&wire.proc_meminfo);
     let uptime_seconds = crate::metrics::collect_uptime_seconds_from_proc_uptime(&wire.proc_uptime);
+    let mut topology_sources = BTreeSet::new();
+    let topology_contract_malformed = wire.block_device_topology.len() > 512
+        || wire.block_device_topology.iter().any(|fact| {
+            !canonical_device_path(&fact.source)
+                || !canonical_device_path(&fact.physical_device)
+                || !topology_sources.insert(fact.source.as_str())
+        });
     let disk_contract_malformed = wire.filesystem_capacities.len() > 4096
+        || topology_contract_malformed
         || wire.filesystem_capacities.iter().any(|fact| {
             fact.mount_point.is_empty()
                 || fact.mount_point.len() > 4096
@@ -998,7 +1016,27 @@ pub fn decode_system_state_resource_result(bytes: &[u8]) -> Option<SystemStateRe
             battery_contract_malformed,
             "official.battery.resource-result-malformed",
         ),
+        block_device_topology: if topology_contract_malformed {
+            BTreeMap::new()
+        } else {
+            wire.block_device_topology
+                .into_iter()
+                .map(|fact| (fact.source, fact.physical_device))
+                .collect()
+        },
     })
+}
+
+fn canonical_device_path(value: &str) -> bool {
+    let Some(relative) = value.strip_prefix("/dev/") else {
+        return false;
+    };
+    !relative.is_empty()
+        && value.len() <= 4096
+        && !value.chars().any(char::is_control)
+        && relative
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn produced(id: &str) -> CollectorOutcome {

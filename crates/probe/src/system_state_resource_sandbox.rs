@@ -29,7 +29,11 @@ const FIXED_READ_FILES: &[&str] = &[
     "/proc/sys/kernel/hostname",
     "/proc/sys/kernel/osrelease",
 ];
-const FIXED_DEVICE_CLASSES: &[&str] = &["/sys/class/hwmon", "/sys/class/power_supply"];
+const FIXED_DEVICE_CLASSES: &[&str] = &[
+    "/sys/class/hwmon",
+    "/sys/class/power_supply",
+    "/sys/class/block",
+];
 
 #[derive(Debug)]
 pub struct SystemStateResourceSandboxError;
@@ -198,7 +202,11 @@ mod tests {
         assert!(FIXED_READ_FILES.contains(&"/proc/diskstats"));
         assert_eq!(
             FIXED_DEVICE_CLASSES,
-            &["/sys/class/hwmon", "/sys/class/power_supply"]
+            &[
+                "/sys/class/hwmon",
+                "/sys/class/power_supply",
+                "/sys/class/block",
+            ]
         );
     }
 }
