@@ -680,7 +680,7 @@ mod tests {
         let disk_provider_socket = disk_health_provider_socket_unit();
         let disk_provider = disk_health_provider_unit();
 
-        assert!(probe.contains("Requires=enoki-observation-runtime.socket\n"));
+        assert!(probe.contains("Wants=network-online.target enoki-observation-runtime.socket\n"));
         assert!(!probe.contains("Requires=enoki-cpu-resource-provider.socket"));
         assert!(probe.contains("DynamicUser=true"));
         assert!(probe.contains("SupplementaryGroups=enoki-probe-ipc"));
@@ -727,7 +727,7 @@ mod tests {
         assert_eq!(
             role_units.each_ref().map(|(profile, _)| *profile),
             [
-                "probe-v3",
+                "probe-v4",
                 "observation-runtime-v4",
                 "system-state-provider-v5",
                 "disk-health-provider-v3",
@@ -794,6 +794,19 @@ mod tests {
     }
 
     #[test]
+    fn probe_startup_does_not_propagate_runtime_crash_budget_exhaustion() {
+        let probe = service_unit();
+
+        assert!(probe.contains(
+            "After=network-online.target enoki-observation-runtime.socket\n"
+        ));
+        assert!(probe.contains(
+            "Wants=network-online.target enoki-observation-runtime.socket\n"
+        ));
+        assert!(!probe.contains("Requires=enoki-observation-runtime.socket\n"));
+    }
+
+    #[test]
     fn fixed_provider_role_closure_bounds_each_activation_and_the_global_total() {
         let sockets = [
             (
@@ -843,7 +856,7 @@ mod tests {
     #[test]
     fn canonical_roles_expose_only_their_declared_transport_and_resource_surfaces() {
         let probe = service_unit();
-        assert!(probe.contains("Requires=enoki-observation-runtime.socket\n"));
+        assert!(probe.contains("Wants=network-online.target enoki-observation-runtime.socket\n"));
         assert!(!probe.contains("Requires=enoki-cpu-resource-provider.socket"));
         assert!(probe.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
         assert!(probe.contains("ReadWritePaths=/var/lib/enoki-probe"));

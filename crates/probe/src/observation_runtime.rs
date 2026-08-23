@@ -46,6 +46,8 @@ const PROVIDER_DEADLINE: Duration = Duration::from_secs(2);
 const DISK_HEALTH_PROVIDER_DEADLINE: Duration = Duration::from_secs(9);
 const RUNTIME_REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 const RUNTIME_WINDOW_HEADROOM: Duration = Duration::from_secs(5);
+const RUNTIME_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
+const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CPU_SAMPLES_PER_WINDOW: usize = 3;
 const MIN_COLLECTION_CADENCE_SECONDS: u16 = 1;
 const MAX_COLLECTION_CADENCE_SECONDS: u16 = 200;
@@ -79,7 +81,7 @@ impl ObservationRuntimeSleeper for ThreadObservationRuntimeSleeper {
     ) -> io::Result<()> {
         let mut remaining = duration;
         while !remaining.is_zero() {
-            let step = remaining.min(Duration::from_secs(10));
+            let step = remaining.min(RUNTIME_PROGRESS_INTERVAL);
             std::thread::sleep(step);
             remaining = remaining.saturating_sub(step);
             progress.notify_progress()?;
@@ -1255,11 +1257,82 @@ fn resource_failure_code(
     format!("{collector_id}.{suffix}")
 }
 
-pub struct ObservationRuntimeServer<P> {
-    runtime: ObservationRuntime<P>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowAdmissionDecision {
+    Admit,
+    Reject,
+}
+
+#[derive(Default)]
+struct ObservationWindowAdmission {
+    active: bool,
     last_request_sequence_start: Option<u64>,
     last_delivered_sequence_end: Option<u64>,
     next_eligible_at: Option<Instant>,
+}
+
+impl ObservationWindowAdmission {
+    fn arrive(
+        &mut self,
+        request: ObservationWindowRequest,
+        now: Instant,
+    ) -> WindowAdmissionDecision {
+        if self.active
+            || self
+                .last_request_sequence_start
+                .is_some_and(|last| request.sequence_start <= last)
+            || self
+                .last_delivered_sequence_end
+                .is_some_and(|last| request.sequence_start <= last)
+            || self.next_eligible_at.is_some_and(|eligible| now < eligible)
+        {
+            return WindowAdmissionDecision::Reject;
+        }
+        let Some(window_span) = request.cadence().checked_mul(CPU_SAMPLES_PER_WINDOW as u32) else {
+            return WindowAdmissionDecision::Reject;
+        };
+        let Some(next_eligible_at) = now.checked_add(window_span) else {
+            return WindowAdmissionDecision::Reject;
+        };
+        self.active = true;
+        self.last_request_sequence_start = Some(request.sequence_start);
+        self.next_eligible_at = Some(next_eligible_at);
+        WindowAdmissionDecision::Admit
+    }
+
+    fn complete(&mut self, delivered_sequence_end: Option<u64>) {
+        self.last_delivered_sequence_end =
+            delivered_sequence_end.or(self.last_delivered_sequence_end);
+        self.active = false;
+    }
+}
+
+pub struct ObservationRuntimeServer<P> {
+    runtime: ObservationRuntime<P>,
+    admission: ObservationWindowAdmission,
+}
+
+struct AdmittedWindow {
+    request: ObservationWindowRequest,
+    stream: UnixStream,
+}
+
+enum AdmittedWindowError {
+    Connection(io::Error),
+    Progress(io::Error),
+}
+
+impl AdmittedWindowError {
+    fn into_io_error(self) -> io::Error {
+        match self {
+            Self::Connection(error) | Self::Progress(error) => error,
+        }
+    }
+}
+
+enum AdmissionMessage {
+    Window(AdmittedWindow),
+    ListenerFailed(io::Error),
 }
 
 impl<P> ObservationRuntimeServer<P>
@@ -1269,9 +1342,7 @@ where
     pub fn new(provider: P) -> Self {
         Self {
             runtime: ObservationRuntime::new(provider),
-            last_request_sequence_start: None,
-            last_delivered_sequence_end: None,
-            next_eligible_at: None,
+            admission: ObservationWindowAdmission::default(),
         }
     }
 
@@ -1282,9 +1353,7 @@ where
         Self {
             runtime: ObservationRuntime::new(provider)
                 .with_disk_health_provider(disk_health_provider),
-            last_request_sequence_start: None,
-            last_delivered_sequence_end: None,
-            next_eligible_at: None,
+            admission: ObservationWindowAdmission::default(),
         }
     }
 
@@ -1316,43 +1385,47 @@ where
             return write_window_failure(&mut stream);
         };
         let RuntimeRequest::Window(request) = request;
-        if !self.claim_window(request, Instant::now()) {
+        if self.admission.arrive(request, Instant::now()) == WindowAdmissionDecision::Reject {
             return write_window_failure(&mut stream);
         }
-        configure_deadline(
-            &stream,
-            runtime_window_deadline(request.cadence()).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "bounded Runtime deadline")
-            })?,
-        )?;
-        let result = self
-            .runtime
-            .collect_next_window_with_progress(request, sleeper, progress)?;
-        write_window_success(&mut stream, crate::version::probe_version(), &result)?;
-        self.last_delivered_sequence_end = result.attempts.last().map(|attempt| attempt.sequence);
-        Ok(())
+        let delivered = self.serve_admitted_window(stream, request, sleeper, progress);
+        self.admission.complete(delivered.as_ref().ok().copied());
+        delivered
+            .map(|_| ())
+            .map_err(AdmittedWindowError::into_io_error)
     }
 
-    fn claim_window(&mut self, request: ObservationWindowRequest, now: Instant) -> bool {
-        if self
-            .last_request_sequence_start
-            .is_some_and(|last| request.sequence_start <= last)
-            || self
-                .last_delivered_sequence_end
-                .is_some_and(|last| request.sequence_start <= last)
-            || self.next_eligible_at.is_some_and(|eligible| now < eligible)
-        {
-            return false;
-        }
-        let Some(window_span) = request.cadence().checked_mul(CPU_SAMPLES_PER_WINDOW as u32) else {
-            return false;
-        };
-        let Some(next_eligible_at) = now.checked_add(window_span) else {
-            return false;
-        };
-        self.last_request_sequence_start = Some(request.sequence_start);
-        self.next_eligible_at = Some(next_eligible_at);
-        true
+    fn serve_admitted_window(
+        &mut self,
+        mut stream: UnixStream,
+        request: ObservationWindowRequest,
+        sleeper: &mut impl ObservationRuntimeSleeper,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
+    ) -> Result<u64, AdmittedWindowError> {
+        let deadline = runtime_window_deadline(request.cadence()).ok_or_else(|| {
+            AdmittedWindowError::Connection(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bounded Runtime deadline",
+            ))
+        })?;
+        configure_deadline(&stream, deadline).map_err(AdmittedWindowError::Connection)?;
+        let result = self
+            .runtime
+            .collect_next_window_with_progress(request, sleeper, progress)
+            .map_err(AdmittedWindowError::Progress)?;
+        let delivered_sequence_end = result
+            .attempts
+            .last()
+            .map(|attempt| attempt.sequence)
+            .ok_or_else(|| {
+                AdmittedWindowError::Connection(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "empty Runtime window",
+                ))
+            })?;
+        write_window_success(&mut stream, crate::version::probe_version(), &result)
+            .map_err(AdmittedWindowError::Connection)?;
+        Ok(delivered_sequence_end)
     }
 
     pub fn serve_listener(&mut self, listener: &UnixListener) -> io::Result<()> {
@@ -1397,48 +1470,134 @@ where
         listener: &UnixListener,
         progress: &mut dyn ObservationRuntimeProgressNotifier,
     ) -> io::Result<()> {
+        let listener = listener.try_clone()?;
+        listener.set_nonblocking(true)?;
+        let (admission_sender, admission_receiver) = std::sync::mpsc::sync_channel(1);
+        let (completion_sender, completion_receiver) = std::sync::mpsc::sync_channel(1);
+        let mut admission = std::mem::take(&mut self.admission);
+        // admission 线程只接收、校验与拒绝连接；它绝不发送 watchdog 进度，
+        // 因而不能掩盖主线程中的 Collector 或 Provider 停滞。
+        let admission_thread = std::thread::Builder::new()
+            .name("enoki-runtime-admission".to_owned())
+            .spawn(move || {
+                serve_runtime_admission(
+                    &listener,
+                    &mut admission,
+                    &admission_sender,
+                    &completion_receiver,
+                )
+            })?;
+        let serve_result =
+            self.serve_admitted_windows(&admission_receiver, &completion_sender, progress);
+        drop(completion_sender);
+        let _ = admission_thread.join();
+        serve_result
+    }
+
+    fn serve_admitted_windows(
+        &mut self,
+        admission_receiver: &std::sync::mpsc::Receiver<AdmissionMessage>,
+        completion_sender: &std::sync::mpsc::SyncSender<Option<u64>>,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
+    ) -> io::Result<()> {
         progress.notify_ready()?;
         loop {
-            if !listener_has_connection(listener, Duration::from_secs(10))? {
-                progress.notify_progress()?;
-                continue;
-            }
-            let connection = match listener.accept() {
-                Ok((connection, _)) => connection,
-                Err(error) if recoverable_accept_error(&error) => continue,
-                Err(error) => return Err(error),
+            let admitted = match admission_receiver.recv_timeout(RUNTIME_PROGRESS_INTERVAL) {
+                Ok(AdmissionMessage::Window(admitted)) => admitted,
+                Ok(AdmissionMessage::ListenerFailed(error)) => return Err(error),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    progress.notify_progress()?;
+                    continue;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "Runtime admission stopped",
+                    ));
+                }
             };
-            if require_peer_uid(connection.as_raw_fd(), c"enoki-probe").is_err() {
-                continue;
-            }
             let mut sleeper = ThreadObservationRuntimeSleeper;
-            let _ =
-                self.serve_connection_with_sleeper_and_progress(connection, &mut sleeper, progress);
+            let delivered = self.serve_admitted_window(
+                admitted.stream,
+                admitted.request,
+                &mut sleeper,
+                progress,
+            );
+            let delivered_sequence_end = delivered.as_ref().ok().copied();
+            if completion_sender.send(delivered_sequence_end).is_err() {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Runtime admission completion failed",
+                ));
+            }
+            if let Err(AdmittedWindowError::Progress(error)) = delivered {
+                return Err(error);
+            }
         }
     }
 }
 
-fn listener_has_connection(listener: &UnixListener, timeout: Duration) -> io::Result<bool> {
-    let timeout_ms = i32::try_from(timeout.as_millis())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "listener wait exceeds i32"))?;
-    let mut descriptor = libc::pollfd {
-        fd: listener.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: poll 只在调用期间借用一个有效的固定 listener 描述符。
-    let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
-    match result {
-        -1 => {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                Ok(false)
-            } else {
-                Err(error)
+fn serve_runtime_admission(
+    listener: &UnixListener,
+    admission: &mut ObservationWindowAdmission,
+    sender: &std::sync::mpsc::SyncSender<AdmissionMessage>,
+    completion_receiver: &std::sync::mpsc::Receiver<Option<u64>>,
+) {
+    loop {
+        let mut accepted_connection = false;
+        loop {
+            let mut connection = match listener.accept() {
+                Ok((connection, _)) => connection,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) if recoverable_accept_error(&error) => continue,
+                Err(error) => {
+                    let _ = sender.send(AdmissionMessage::ListenerFailed(error));
+                    return;
+                }
+            };
+            accepted_connection = true;
+            if require_peer_uid(connection.as_raw_fd(), c"enoki-probe").is_err() {
+                continue;
+            }
+            if admission.active {
+                let _ = configure_deadline(&connection, RUNTIME_REQUEST_DEADLINE)
+                    .and_then(|()| write_window_failure(&mut connection));
+                continue;
+            }
+            if configure_deadline(&connection, RUNTIME_REQUEST_DEADLINE).is_err() {
+                continue;
+            }
+            let request = match read_runtime_request(&mut connection) {
+                Ok(Some(RuntimeRequest::Window(request))) => request,
+                Ok(None) => {
+                    let _ = write_window_failure(&mut connection);
+                    continue;
+                }
+                Err(_) => continue,
+            };
+            if admission.arrive(request, Instant::now()) == WindowAdmissionDecision::Reject {
+                let _ = write_window_failure(&mut connection);
+                continue;
+            }
+            if sender
+                .send(AdmissionMessage::Window(AdmittedWindow {
+                    request,
+                    stream: connection,
+                }))
+                .is_err()
+            {
+                return;
             }
         }
-        0 => Ok(false),
-        _ => Ok(true),
+
+        match completion_receiver.try_recv() {
+            Ok(delivered_sequence_end) => admission.complete(delivered_sequence_end),
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+        }
+        if !accepted_connection {
+            std::thread::sleep(ADMISSION_POLL_INTERVAL);
+        }
     }
 }
 
@@ -1872,6 +2031,50 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn normal_multi_connection_schedule_admits_only_after_the_current_window_completes() {
+        let cadence = Duration::from_secs(1);
+        let first = ObservationWindowRequest::new(cadence).unwrap();
+        let next = first.with_sequence_start(4).unwrap();
+        let started_at = Instant::now();
+        let next_window_at = started_at + cadence * CPU_SAMPLES_PER_WINDOW as u32;
+        let mut admission = ObservationWindowAdmission::default();
+
+        assert_eq!(
+            admission.arrive(first, started_at),
+            WindowAdmissionDecision::Admit
+        );
+        assert_eq!(
+            admission.arrive(next, next_window_at),
+            WindowAdmissionDecision::Reject
+        );
+        admission.complete(Some(3));
+        assert_eq!(
+            admission.arrive(next, next_window_at),
+            WindowAdmissionDecision::Admit
+        );
+    }
+
+    #[test]
+    fn uncompleted_delivery_releases_only_the_accepted_sequence() {
+        let cadence = Duration::from_secs(1);
+        let first = ObservationWindowRequest::new(cadence).unwrap();
+        let recovery = first.with_sequence_start(2).unwrap();
+        let started_at = Instant::now();
+        let recovery_at = started_at + cadence * CPU_SAMPLES_PER_WINDOW as u32;
+        let mut admission = ObservationWindowAdmission::default();
+
+        assert_eq!(
+            admission.arrive(first, started_at),
+            WindowAdmissionDecision::Admit
+        );
+        admission.complete(None);
+        assert_eq!(
+            admission.arrive(recovery, recovery_at),
+            WindowAdmissionDecision::Admit
+        );
+    }
 
     struct UnusedProvider;
 

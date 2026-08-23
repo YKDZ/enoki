@@ -1,6 +1,6 @@
 //! 构建期固定的探针安装包角色合同。
 
-pub(crate) const PROBE_PERMISSION_PROFILE: &str = "probe-v3";
+pub(crate) const PROBE_PERMISSION_PROFILE: &str = "probe-v4";
 pub(crate) const OBSERVATION_RUNTIME_PERMISSION_PROFILE: &str = "observation-runtime-v4";
 pub(crate) const SYSTEM_STATE_PERMISSION_PROFILE: &str = "system-state-provider-v5";
 pub(crate) const DISK_HEALTH_PERMISSION_PROFILE: &str = "disk-health-provider-v3";
