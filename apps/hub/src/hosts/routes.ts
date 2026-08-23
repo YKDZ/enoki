@@ -26,6 +26,7 @@ import {
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import { evaluateProbeUpgradeEligibility } from "../probe/asset-set.js";
+import { manualProbeReinstallPolicy } from "../probe/manual-reinstall-policy.js";
 import {
   cancelProbeUpgradeRequest,
   createProbeUninstallRequest,
@@ -247,6 +248,23 @@ export function createHostRoutes(services: HostRouteServices) {
       reportedProbeVersion: hostProfile?.probeVersion,
       reportedProbeVersionObservedAtMs: hostProfileObservation?.observedAtMs,
     });
+    const probeUpgradeEligibility = evaluateProbeUpgradeEligibility({
+      probeAssetSetVersion: currentProbeAssetSetVersion.version,
+      probeAssetSetVersionNonUpgradeableReason:
+        currentProbeAssetSetVersion.nonUpgradeableReason,
+      probeVersion: host.probeVersion,
+      releaseTransition,
+    });
+    const manualReinstall = manualProbeReinstallPolicy({
+      eligibility: probeUpgradeEligibility,
+      hostLastReportAtMs: host.lastReportAtMs,
+      hostProbeVersion: host.probeVersion,
+      latestOperation: currentOperation,
+      nowMs: now(),
+      offlineAfterMs: services.hostStatus?.offlineAfterMs ?? 90_000,
+      targetAssetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
+      targetProbeVersion: currentProbeAssetSetVersion.version,
+    });
     const response = {
       host: {
         ...hostSummaryResponse(hostSummary, {
@@ -271,13 +289,10 @@ export function createHostRoutes(services: HostRouteServices) {
           mode: "inherit",
         },
         reportedProbeConfigurationVersion: host.probeConfigurationVersion,
-        probeUpgradeEligibility: evaluateProbeUpgradeEligibility({
-          probeAssetSetVersion: currentProbeAssetSetVersion.version,
-          probeAssetSetVersionNonUpgradeableReason:
-            currentProbeAssetSetVersion.nonUpgradeableReason,
-          probeVersion: host.probeVersion,
-          releaseTransition,
-        }),
+        probeUpgradeEligibility: {
+          ...probeUpgradeEligibility,
+          ...(manualReinstall ? { manualReinstall } : {}),
+        },
         probeUpgradeStatus: probeUpgradeStatus(currentOperation),
         warnings: warningList(host),
       },

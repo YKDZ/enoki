@@ -45,31 +45,16 @@ describe("Probe Upgrade current problem", () => {
     expect(wrapper.find("button").exists()).toBe(false);
   });
 
-  it("keeps an online manual-reinstall problem visible without an unavailable action", () => {
+  it("keeps a manual-reinstall problem visible while leaving its single action to the Hub policy", () => {
     const wrapper = mount(ProbeUpgradeStatusAlert, {
       props: {
-        manualReinstallAvailable: false,
         status: failedProbeUpgradeStatus("manual_reinstall_required"),
       },
     });
 
     expect(wrapper.text()).toContain("手动重新安装探针");
-    expect(wrapper.text()).toContain("主机状态变为离线后再继续");
+    expect(wrapper.text()).toContain("Hub 验证迁移目标后");
     expect(wrapper.find("button").exists()).toBe(false);
-    expect(wrapper.emitted("manualReinstall")).toBeUndefined();
-  });
-
-  it("offers the existing manual reinstall flow only for an offline Host", async () => {
-    const wrapper = mount(ProbeUpgradeStatusAlert, {
-      props: {
-        manualReinstallAvailable: true,
-        status: failedProbeUpgradeStatus("manual_reinstall_required"),
-      },
-    });
-
-    expect(wrapper.text()).toContain("手动重新安装探针");
-    await wrapper.get("button").trigger("click");
-    expect(wrapper.emitted("manualReinstall")).toHaveLength(1);
   });
 
   it("renders unknown failures generically without a privileged action", () => {

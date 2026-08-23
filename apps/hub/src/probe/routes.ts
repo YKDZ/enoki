@@ -165,7 +165,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
                 ? enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST
                 : enrollment.targetKind === "existing_host"
                   ? enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST
-                  : 3,
+                  : enoki.v1.ProbeEnrollmentTargetKind.MANUAL_REINSTALL,
             expectedHubOrigin:
               enrollment.targetKind === "manual_reinstall"
                 ? enrollment.expectedHubOrigin

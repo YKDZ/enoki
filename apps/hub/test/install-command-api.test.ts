@@ -308,6 +308,82 @@ describe("Owner add-host install command", () => {
     database.close();
   });
 
+  it("issues the same bounded command for an offline closed recovery disposition", async () => {
+    const database = await createTemporaryDatabase();
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-recovery-reinstall-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.2.2",
+      targetVersion: "1.2.3",
+      transition: "compatible",
+    });
+    database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "203.0.113.10",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "恢复中的主机",
+      displayNameEdited: false,
+      id: 8,
+      lastClockSkewMs: null,
+      lastReportAtMs: 1_725_000_000_000,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-recovery-identity",
+      probeSecretHash: "secret-hash-recovery-identity",
+      probeVersion: "1.2.2",
+    });
+    database.probeOperations.createProbeUpgradeRequest({
+      acceptedAtMs: 1_725_000_001_000,
+      canceledAtMs: null,
+      completedAtMs: 1_725_000_003_000,
+      createdAtMs: 1_725_000_000_500,
+      currentProbeVersion: "1.2.2",
+      failureCode: "manual_probe_reinstall_required",
+      failureMessage: null,
+      hostId: 8,
+      id: null,
+      kind: "probe_upgrade",
+      runningAtMs: 1_725_000_002_000,
+      state: "failed",
+      supersededAtMs: null,
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetProbeVersion: "1.2.3",
+      updatedAtMs: 1_725_000_003_000,
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      installation: {
+        bootstrapRecipe,
+        probeApiOrigin: "https://hub.example",
+      },
+      now: () => 1_725_000_100_000,
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+    });
+    const ownerSession = await loginOwner(app);
+
+    const response = await app.request(
+      "/api/web/enrollments/manual-reinstall/8",
+      { headers: { cookie: ownerSession }, method: "POST" },
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual(
+      expect.objectContaining({
+        target: { hostId: 8, kind: "manual_reinstall" },
+      }),
+    );
+    database.close();
+  });
+
   it("persists an overdue pending Enrollment as expired when the Owner reads its status", async () => {
     const database = await createTemporaryDatabase();
     let nowMs = 1_725_000_000_000;

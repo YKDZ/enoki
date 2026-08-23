@@ -10,6 +10,9 @@ import type {
 } from "../database/enrollments.js";
 import type { HostStatusThresholds } from "../database/hosts.js";
 import type { HostRepository } from "../database/hosts.js";
+import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import { evaluateProbeUpgradeEligibility } from "../probe/asset-set.js";
+import { manualProbeReinstallPolicy } from "../probe/manual-reinstall-policy.js";
 import {
   readProbeReleaseContextFromDirectory,
   unavailableProbeReleaseContext,
@@ -32,6 +35,7 @@ export type EnrollmentRouteServices = {
   now?: () => number;
   probeAssetDir?: string;
   probeDistributionRootPublicKeyPem?: Buffer | string;
+  probeOperations?: ProbeOperationRepository;
 };
 
 export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
@@ -77,16 +81,24 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
           trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
         })
       : unavailableProbeReleaseContext();
-    const transition = releaseContext.releaseTransition;
-    if (
-      !transition ||
-      transition.classification !== "replacement-required" ||
-      transition.sourceProbeVersion !== host.probeVersion ||
-      transition.targetProbeVersion !== releaseContext.assetSet.version ||
-      transition.targetAssetSetDigest !==
-        releaseContext.assetSet.targetAssetSetDigest ||
-      !releaseContext.assetSet.targetAssetSetDigest
-    ) {
+    const policy = manualProbeReinstallPolicy({
+      eligibility: evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: releaseContext.assetSet.version,
+        probeAssetSetVersionNonUpgradeableReason:
+          releaseContext.assetSet.nonUpgradeableReason,
+        probeVersion: host.probeVersion,
+        releaseTransition: releaseContext.releaseTransition,
+      }),
+      hostLastReportAtMs: host.lastReportAtMs,
+      hostProbeVersion: host.probeVersion,
+      latestOperation:
+        services.probeOperations?.findLatestForHost(hostId) ?? null,
+      nowMs: now(),
+      offlineAfterMs: services.hostStatus?.offlineAfterMs ?? 90_000,
+      targetAssetSetDigest: releaseContext.assetSet.targetAssetSetDigest,
+      targetProbeVersion: releaseContext.assetSet.version,
+    });
+    if (!policy) {
       return context.json({ error: "manual_reinstall_not_required" }, 409);
     }
     const expectedHubOrigin = installation.probeApiOrigin;
@@ -96,11 +108,11 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
     return createOwnerEnrollment(context, services, installation, now, {
       expectedHubOrigin,
       expectedProbeId: host.probeId,
-      expectedProbeVersion: transition.sourceProbeVersion,
+      expectedProbeVersion: policy.sourceProbeVersion,
       hostId,
       kind: "manual_reinstall",
-      targetAssetSetDigest: transition.targetAssetSetDigest,
-      targetProbeVersion: transition.targetProbeVersion,
+      targetAssetSetDigest: policy.targetAssetSetDigest,
+      targetProbeVersion: policy.targetProbeVersion,
     });
   });
 

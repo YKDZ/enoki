@@ -229,6 +229,7 @@ export function createHubApp(options: HubAppOptions = {}) {
           probeAssetDir: options.probeAssets?.assetDir,
           probeDistributionRootPublicKeyPem:
             options.probeAssets?.trustedRootPublicKeyPem,
+          probeOperations: options.database.probeOperations,
         }),
       );
       app.route("/api/web/hosts", createHostRoutes(hostRouteServices));

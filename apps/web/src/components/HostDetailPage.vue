@@ -53,7 +53,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   back: [];
   deleteHost: [host: HostDetail, mode: DeleteHostMode];
-  manualProbeReinstall: [hostId: number];
   replacementMigrationRequested: [hostId: number];
   openHostConfiguration: [hostId: number];
   openHostMetadata: [host: HostDetail];
@@ -324,9 +323,7 @@ function openHostSettings(currentHost: HostDetail) {
           </Alert>
           <ProbeUpgradeStatusAlert
             v-if="probeUpgradeStatus"
-            :manual-reinstall-available="host.status === 'offline'"
             :status="probeUpgradeStatus"
-            @manual-reinstall="emit('manualProbeReinstall', host.id)"
             @retry-probe-upgrade="isProbeUpgradeDialogOpen = true"
           />
         </template>

@@ -6,16 +6,11 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import type { HostDetail } from "@/types";
 
-const props = withDefaults(
-  defineProps<{
-    manualReinstallAvailable?: boolean;
-    status: NonNullable<HostDetail["probeUpgradeStatus"]>;
-  }>(),
-  { manualReinstallAvailable: false },
-);
+const props = defineProps<{
+  status: NonNullable<HostDetail["probeUpgradeStatus"]>;
+}>();
 
 const emit = defineEmits<{
-  manualReinstall: [];
   retryProbeUpgrade: [];
 }>();
 
@@ -92,12 +87,9 @@ function failedPresentation(disposition: RecoveryDisposition) {
     case "manual_reinstall_required":
       return {
         ...base,
-        action: props.manualReinstallAvailable
-          ? ("manual-reinstall" as const)
-          : null,
-        description: props.manualReinstallAvailable
-          ? "当前安装无法安全原地恢复。请生成绑定此主机的一次性命令，手动重新安装探针。"
-          : "当前安装无法安全原地恢复。现有恢复流程只支持离线主机，请待主机状态变为离线后再继续。",
+        action: null,
+        description:
+          "当前安装无法安全原地恢复。主机离线且 Hub 验证迁移目标后，会提供一次手动重装操作。",
         title: "探针升级失败：需要手动重新安装探针",
       };
     default:
@@ -132,27 +124,14 @@ function failedPresentation(disposition: RecoveryDisposition) {
         运行
         <code>sudo enoki-probe repair</code>，然后返回此页确认探针恢复上报。
       </p>
-      <div
-        v-if="
-          presentation.action === 'retry' ||
-          presentation.action === 'manual-reinstall'
-        "
-      >
+      <div v-if="presentation.action === 'retry'">
         <Button
           type="button"
           variant="outline"
           size="sm"
-          @click="
-            presentation.action === 'retry'
-              ? emit('retryProbeUpgrade')
-              : emit('manualReinstall')
-          "
+          @click="emit('retryProbeUpgrade')"
         >
-          {{
-            presentation.action === "retry"
-              ? "再次确认升级"
-              : "生成手动重装命令"
-          }}
+          再次确认升级
         </Button>
       </div>
     </AlertDescription>

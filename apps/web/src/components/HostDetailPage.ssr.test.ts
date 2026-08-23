@@ -354,8 +354,17 @@ describe("Host detail page", () => {
           probeUpgradeEligibility: {
             currentProbeAssetSetVersion: "0.1.16",
             currentProbeVersion: "0.1.14",
-            isUpgradeable: true,
-            nonUpgradeableReason: null,
+            isUpgradeable: false,
+            ...(canGenerateCommand
+              ? {
+                  manualReinstall: {
+                    sourceProbeVersion: "0.1.14",
+                    targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+                    targetProbeVersion: "0.1.15",
+                  },
+                }
+              : {}),
+            nonUpgradeableReason: "probe_release_transition_missing",
           },
           probeUpgradeStatus: {
             acceptedAtMs: null,
@@ -403,9 +412,8 @@ describe("Host detail page", () => {
       expect(html).toContain("需要手动重新安装探针");
       if (canGenerateCommand) {
         expect(html).toContain("生成手动重装命令");
-        expect(html).not.toContain("主机状态变为离线后再继续");
       } else {
-        expect(html).toContain("主机状态变为离线后再继续");
+        expect(html).toContain("主机离线且 Hub 验证迁移目标后");
         expect(html).not.toContain("生成手动重装命令");
       }
       expect(html).not.toContain("Probe Repair");
