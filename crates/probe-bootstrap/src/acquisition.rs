@@ -306,6 +306,7 @@ pub(crate) struct VerifiedAcquisition {
     runtime: File,
     cpu_provider: File,
     disk_health_provider: File,
+    lifecycle_companion: File,
     activator: File,
 }
 
@@ -337,6 +338,10 @@ impl VerifiedAcquisition {
             .bundle
             .component_receipt("disk-health-provider")
             .ok_or(AcquisitionFailure::Permanent)?;
+        let (_, lifecycle_companion_len) = self
+            .bundle
+            .component_receipt("lifecycle-companion")
+            .ok_or(AcquisitionFailure::Permanent)?;
         let (acquirer_sha256, acquirer_len) = self
             .bundle
             .acquirer_receipt()
@@ -356,6 +361,9 @@ impl VerifiedAcquisition {
         self.disk_health_provider
             .rewind()
             .map_err(|_| AcquisitionFailure::Local)?;
+        self.lifecycle_companion
+            .rewind()
+            .map_err(|_| AcquisitionFailure::Local)?;
         handoff
             .write_from(
                 enrollment,
@@ -367,6 +375,8 @@ impl VerifiedAcquisition {
                 cpu_provider_len,
                 &mut self.disk_health_provider,
                 disk_health_provider_len,
+                &mut self.lifecycle_companion,
+                lifecycle_companion_len,
                 &mut acquirer,
                 acquirer_len,
                 output,
@@ -479,6 +489,7 @@ fn acquire_local(
     let mut runtime = create_exclusive_staging_file(asset_dir)?;
     let mut cpu_provider = create_exclusive_staging_file(asset_dir)?;
     let mut disk_health_provider = create_exclusive_staging_file(asset_dir)?;
+    let mut lifecycle_companion = create_exclusive_staging_file(asset_dir)?;
     let mut activator = create_exclusive_staging_file(asset_dir)?;
     let bundle = verify_archive_and_extract_roles(
         &mut archive,
@@ -488,6 +499,7 @@ fn acquire_local(
         &mut runtime,
         &mut cpu_provider,
         &mut disk_health_provider,
+        &mut lifecycle_companion,
         &mut std::io::sink(),
         &mut activator,
     )
@@ -502,6 +514,9 @@ fn acquire_local(
     disk_health_provider
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
+    lifecycle_companion
+        .sync_all()
+        .map_err(|_| AcquisitionFailure::Local)?;
     activator
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
@@ -512,6 +527,7 @@ fn acquire_local(
         runtime,
         cpu_provider,
         disk_health_provider,
+        lifecycle_companion,
         activator,
     })
 }
@@ -695,6 +711,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
     let mut runtime = create_exclusive_staging_file(&request.staging_dir)?;
     let mut cpu_provider = create_exclusive_staging_file(&request.staging_dir)?;
     let mut disk_health_provider = create_exclusive_staging_file(&request.staging_dir)?;
+    let mut lifecycle_companion = create_exclusive_staging_file(&request.staging_dir)?;
     let mut activator = create_exclusive_staging_file(&request.staging_dir)?;
     let bundle = verify_archive_and_extract_roles(
         &mut archive,
@@ -704,6 +721,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut runtime,
         &mut cpu_provider,
         &mut disk_health_provider,
+        &mut lifecycle_companion,
         &mut std::io::sink(),
         &mut activator,
     )
@@ -713,6 +731,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut runtime,
         &mut cpu_provider,
         &mut disk_health_provider,
+        &mut lifecycle_companion,
         &mut activator,
     ] {
         role.sync_all().map_err(|_| AcquisitionFailure::Local)?;
@@ -724,6 +743,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         runtime,
         cpu_provider,
         disk_health_provider,
+        lifecycle_companion,
         activator,
     })
 }

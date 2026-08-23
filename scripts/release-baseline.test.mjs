@@ -946,6 +946,7 @@ async function writeProbeArchive(
     "enoki-observation-runtime",
     "enoki-cpu-resource-provider",
     "enoki-disk-health-resource-provider",
+    "enoki-probe-lifecycle-companion",
   ]) {
     await writeFile(path.join(binaryDir, rolePath), binary, { mode: 0o755 });
   }
@@ -1002,6 +1003,15 @@ async function writeProbeArchive(
           size: binary.byteLength,
           version: version.slice(1),
         },
+        {
+          path: "enoki-probe-lifecycle-companion",
+          permissionProfile: "lifecycle-companion-v1",
+          resourceContract: "local-lifecycle-v1",
+          role: "lifecycle-companion",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
       ],
       kind: "enoki-probe-bundle",
       target,
@@ -1026,6 +1036,7 @@ async function writeProbeArchive(
     "enoki-observation-runtime",
     "enoki-cpu-resource-provider",
     "enoki-disk-health-resource-provider",
+    "enoki-probe-lifecycle-companion",
     ...bootstrapAssets.map(({ member }) => member),
   ]);
   await rm(binaryDir, { force: true, recursive: true });

@@ -12,8 +12,9 @@ mod transaction;
 
 use crate::{
     bundle_role::{
-        DISK_HEALTH_PERMISSION_PROFILE, OBSERVATION_RUNTIME_PERMISSION_PROFILE,
-        PROBE_PERMISSION_PROFILE, SYSTEM_STATE_PERMISSION_PROFILE,
+        DISK_HEALTH_PERMISSION_PROFILE, LIFECYCLE_COMPANION_PERMISSION_PROFILE,
+        OBSERVATION_RUNTIME_PERMISSION_PROFILE, PROBE_PERMISSION_PROFILE,
+        SYSTEM_STATE_PERMISSION_PROFILE,
     },
     handoff::Enrollment,
     trust::{BootstrapRole, BuildTrust},
@@ -44,6 +45,7 @@ const BINARY: &str = "/usr/local/bin/enoki-probe";
 const OBSERVATION_RUNTIME_BINARY: &str = "/usr/local/bin/enoki-observation-runtime";
 const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
+const LIFECYCLE_COMPANION_BINARY: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 const STATE: &str = "/var/lib/enoki-probe";
 const IDENTITY_DIR: &str = "/var/lib/enoki-probe/identity";
 const IDENTITY: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
@@ -58,6 +60,10 @@ const DISK_HEALTH_PROVIDER_UNIT: &str =
     "/etc/systemd/system/enoki-disk-health-resource-provider@.service";
 const DISK_HEALTH_PROVIDER_SOCKET_UNIT: &str =
     "/etc/systemd/system/enoki-disk-health-resource-provider.socket";
+const LIFECYCLE_COMPANION_UNIT: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-companion@.service";
+const LIFECYCLE_COMPANION_SOCKET_UNIT: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-companion.socket";
 const BOOTSTRAP_ACQUIRER: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const BOOTSTRAP_ACTIVATOR: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const BOOTSTRAP_STATE: &str = "/var/lib/enoki-probe-bootstrap";
@@ -380,6 +386,9 @@ impl FixedInstallPaths {
     fn disk_health_provider_binary(&self) -> PathBuf {
         self.map(DISK_HEALTH_PROVIDER_BINARY)
     }
+    fn lifecycle_companion_binary(&self) -> PathBuf {
+        self.map(LIFECYCLE_COMPANION_BINARY)
+    }
     fn state(&self) -> PathBuf {
         self.map(STATE)
     }
@@ -415,6 +424,12 @@ impl FixedInstallPaths {
     }
     fn disk_health_provider_socket_unit(&self) -> PathBuf {
         self.map(DISK_HEALTH_PROVIDER_SOCKET_UNIT)
+    }
+    fn lifecycle_companion_unit(&self) -> PathBuf {
+        self.map(LIFECYCLE_COMPANION_UNIT)
+    }
+    fn lifecycle_companion_socket_unit(&self) -> PathBuf {
+        self.map(LIFECYCLE_COMPANION_SOCKET_UNIT)
     }
     fn bootstrap_acquirer(&self) -> PathBuf {
         self.map(BOOTSTRAP_ACQUIRER)
@@ -476,6 +491,7 @@ pub struct VerifiedCompleteFreshComponents<'a> {
     pub observation_runtime: &'a mut File,
     pub cpu_provider: &'a mut File,
     pub disk_health_provider: &'a mut File,
+    pub lifecycle_companion: &'a mut File,
     pub bootstrap_acquirer: &'a mut File,
     pub bootstrap_activator: &'a mut File,
 }
@@ -524,6 +540,7 @@ pub fn activate_complete_fresh_current_probe(
             components.observation_runtime,
             components.cpu_provider,
             components.disk_health_provider,
+            components.lifecycle_companion,
         )),
         Some((
             components.bootstrap_acquirer,
@@ -603,7 +620,7 @@ fn activate_current_probe_with_files(
 #[allow(clippy::too_many_arguments)]
 fn activate_current_probe_with_observation_files(
     component: &mut File,
-    mut observation_components: Option<(&mut File, &mut File, &mut File)>,
+    mut observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
     bootstrap_components: Option<(&mut File, &mut File)>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -615,6 +632,7 @@ fn activate_current_probe_with_observation_files(
     let runtime_receipt = bundle.component_receipt("observation-runtime");
     let cpu_provider_receipt = bundle.component_receipt("system-state-provider");
     let disk_health_provider_receipt = bundle.component_receipt("disk-health-provider");
+    let lifecycle_companion_receipt = bundle.component_receipt("lifecycle-companion");
     if !trust.is_for(BootstrapRole::Activator)
         || bundle.target != trust.target
         || bundle.version != trust_version
@@ -622,18 +640,25 @@ fn activate_current_probe_with_observation_files(
         || (observation_components.is_some()
             && (runtime_receipt.is_none()
                 || cpu_provider_receipt.is_none()
-                || disk_health_provider_receipt.is_none()))
+                || disk_health_provider_receipt.is_none()
+                || lifecycle_companion_receipt.is_none()))
     {
         return Err(InstallError::InvalidVerifiedComponent);
     }
     validate_component(component, bundle.component_len)?;
     let install_observation = observation_components.is_some();
-    if let Some((runtime, cpu_provider, disk_health_provider)) = observation_components.as_mut() {
+    if let Some((runtime, cpu_provider, disk_health_provider, lifecycle_companion)) =
+        observation_components.as_mut()
+    {
         validate_component(runtime, runtime_receipt.expect("checked").1)?;
         validate_component(cpu_provider, cpu_provider_receipt.expect("checked").1)?;
         validate_component(
             disk_health_provider,
             disk_health_provider_receipt.expect("checked").1,
+        )?;
+        validate_component(
+            lifecycle_companion,
+            lifecycle_companion_receipt.expect("checked").1,
         )?;
     }
     let _activation_lock = ActivationLock::acquire(
@@ -752,7 +777,9 @@ fn activate_current_probe_with_observation_files(
             &mut journal,
             RollbackStep::RemoveBinary,
         )?;
-        if let Some((runtime, cpu_provider, disk_health_provider)) = observation_components {
+        if let Some((runtime, cpu_provider, disk_health_provider, lifecycle_companion)) =
+            observation_components
+        {
             ports.files.install_binary(
                 runtime,
                 &paths.observation_runtime_binary(),
@@ -768,6 +795,12 @@ fn activate_current_probe_with_observation_files(
             ports.files.install_binary(
                 cpu_provider,
                 &paths.cpu_provider_binary(),
+                &mut journal,
+                RollbackStep::RemoveBinary,
+            )?;
+            ports.files.install_binary(
+                lifecycle_companion,
+                &paths.lifecycle_companion_binary(),
                 &mut journal,
                 RollbackStep::RemoveBinary,
             )?;
@@ -815,6 +848,11 @@ fn activate_current_probe_with_observation_files(
                 (
                     paths.disk_health_provider_socket_unit(),
                     disk_health_provider_socket_unit().to_owned(),
+                ),
+                (paths.lifecycle_companion_unit(), lifecycle_companion_unit()),
+                (
+                    paths.lifecycle_companion_socket_unit(),
+                    lifecycle_companion_socket_unit().to_owned(),
                 ),
             ])
             .into_iter()
@@ -1207,13 +1245,14 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 4\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
         OBSERVATION_RUNTIME_BINARY,
         CPU_PROVIDER_BINARY,
         DISK_HEALTH_PROVIDER_BINARY,
+        LIFECYCLE_COMPANION_BINARY,
         OBSERVATION_IPC_GROUP,
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
@@ -1231,6 +1270,8 @@ fn install_metadata(
         CPU_PROVIDER_SOCKET_UNIT,
         DISK_HEALTH_PROVIDER_UNIT,
         DISK_HEALTH_PROVIDER_SOCKET_UNIT,
+        LIFECYCLE_COMPANION_UNIT,
+        LIFECYCLE_COMPANION_SOCKET_UNIT,
         COLLECTOR_SUDOERS,
     )
 }
@@ -1240,7 +1281,17 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nWants=network-online.target enoki-observation-runtime.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0700\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0700\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+fn lifecycle_companion_socket_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki Probe Lifecycle Companion Socket\n\n[Socket]\nListenStream=/run/enoki-probe-lifecycle-companion.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe-ipc\nAccept=yes\nMaxConnections=1\nMaxConnectionsPerSource=1\n\n[Install]\nWantedBy=sockets.target\n"
+}
+
+fn lifecycle_companion_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nPrivateNetwork=true\nRestrictAddressFamilies=AF_UNIX\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap\n"
     )
 }
 
@@ -1275,7 +1326,7 @@ fn disk_health_provider_unit() -> String {
 }
 
 /// 签名 permission profile 到 canonical execution unit 的构建期固定映射。
-pub fn fixed_execution_role_units() -> [(&'static str, Vec<u8>); 4] {
+pub fn fixed_execution_role_units() -> [(&'static str, Vec<u8>); 5] {
     [
         (PROBE_PERMISSION_PROFILE, service_unit().into_bytes()),
         (
@@ -1290,11 +1341,15 @@ pub fn fixed_execution_role_units() -> [(&'static str, Vec<u8>); 4] {
             DISK_HEALTH_PERMISSION_PROFILE,
             disk_health_provider_unit().into_bytes(),
         ),
+        (
+            LIFECYCLE_COMPANION_PERMISSION_PROFILE,
+            lifecycle_companion_unit().into_bytes(),
+        ),
     ]
 }
 
 /// Upgrader 与首次安装共享的固定 systemd integration assets。
-pub fn fixed_observation_unit_contents() -> [Vec<u8>; 6] {
+pub fn fixed_observation_unit_contents() -> [Vec<u8>; 8] {
     [
         observation_runtime_unit().into_bytes(),
         observation_runtime_socket_unit().as_bytes().to_vec(),
@@ -1302,12 +1357,15 @@ pub fn fixed_observation_unit_contents() -> [Vec<u8>; 6] {
         cpu_provider_socket_unit().as_bytes().to_vec(),
         disk_health_provider_unit().into_bytes(),
         disk_health_provider_socket_unit().as_bytes().to_vec(),
+        lifecycle_companion_unit().into_bytes(),
+        lifecycle_companion_socket_unit().as_bytes().to_vec(),
     ]
 }
 
-/// 目标 Activator 的无输入固定协议；旧 Upgrader 只能取得该已验证目标版本编译的集成资产。
+/// 目标 Activator 的无输入固定协议；函数名保留 v1 是为了旧 CLI 调用点的窄兼容。
+/// 返回内容以自描述 v2 magic 封闭新增的 Lifecycle Companion 资产。
 pub fn render_observation_integration_v1() -> Vec<u8> {
-    let mut output = b"enoki.observation-integration.v1\n".to_vec();
+    let mut output = b"enoki.observation-integration.v2\n".to_vec();
     for unit in fixed_observation_unit_contents() {
         output.extend_from_slice(unit.len().to_string().as_bytes());
         output.push(b'\n');

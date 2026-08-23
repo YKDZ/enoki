@@ -588,6 +588,11 @@ with open(os.devnull, "rb") as input_stream:
         binary,
         { mode: 0o755 },
       );
+      await writeFile(
+        path.join(workDir, "enoki-probe-lifecycle-companion"),
+        binary,
+        { mode: 0o755 },
+      );
       const firstOutput = path.join(workDir, "first");
       const secondOutput = path.join(workDir, "second");
       const commonArguments = [
@@ -883,6 +888,7 @@ with open(os.devnull, "rb") as input_stream:
         "enoki-observation-runtime",
         "enoki-cpu-resource-provider",
         "enoki-disk-health-resource-provider",
+        "enoki-probe-lifecycle-companion",
         "bootstrap/enoki-probe-bootstrap-acquire",
         "bootstrap/enoki-probe-bootstrap-activate",
       ]);
@@ -1422,6 +1428,11 @@ with open(os.devnull, "rb") as input_stream:
         );
         await writeFile(
           path.join(workDir, "enoki-disk-health-resource-provider"),
+          createProbeElf({ interpreter, target, version: "v1.2.3" }),
+          { mode: 0o755 },
+        );
+        await writeFile(
+          path.join(workDir, "enoki-probe-lifecycle-companion"),
           createProbeElf({ interpreter, target, version: "v1.2.3" }),
           { mode: 0o755 },
         );
@@ -2109,6 +2120,7 @@ async function writeProbeArchive(
     "enoki-observation-runtime",
     "enoki-cpu-resource-provider",
     "enoki-disk-health-resource-provider",
+    "enoki-probe-lifecycle-companion",
   ]) {
     await writeFile(path.join(binaryDir, rolePath), binary);
     await chmod(path.join(binaryDir, rolePath), mode);
@@ -2165,6 +2177,15 @@ async function writeProbeArchive(
         size: binary.byteLength,
         version: version.slice(1),
       },
+      {
+        path: "enoki-probe-lifecycle-companion",
+        permissionProfile: "lifecycle-companion-v1",
+        resourceContract: "local-lifecycle-v1",
+        role: "lifecycle-companion",
+        sha256: sha256(binary),
+        size: binary.byteLength,
+        version: version.slice(1),
+      },
     ],
     kind: "enoki-probe-bundle",
     target,
@@ -2202,6 +2223,7 @@ async function writeProbeArchive(
           "enoki-observation-runtime",
           "enoki-cpu-resource-provider",
           "enoki-disk-health-resource-provider",
+          "enoki-probe-lifecycle-companion",
           ...bundledBootstrap.map(({ archiveMember }) => archiveMember),
         ]),
   ]);

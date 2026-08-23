@@ -4,10 +4,12 @@ const ROLLBACK_STOP_UNITS: &[&str] = &[
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
+    "enoki-probe-lifecycle-companion.socket",
     "enoki-probe.service",
     "enoki-observation-runtime.service",
     "enoki-cpu-resource-provider@*.service",
     "enoki-disk-health-resource-provider@*.service",
+    "enoki-probe-lifecycle-companion@*.service",
 ];
 const ROLLBACK_VERIFY_UNITS: &[&str] = &[
     "enoki-probe.service",
@@ -17,15 +19,19 @@ const ROLLBACK_VERIFY_UNITS: &[&str] = &[
     "enoki-cpu-resource-provider@*.service",
     "enoki-disk-health-resource-provider.socket",
     "enoki-disk-health-resource-provider@*.service",
+    "enoki-probe-lifecycle-companion.socket",
+    "enoki-probe-lifecycle-companion@*.service",
 ];
 const ROLLBACK_RESET_UNITS: &[&str] = &[
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
+    "enoki-probe-lifecycle-companion.socket",
     "enoki-probe.service",
     "enoki-observation-runtime.service",
     "enoki-cpu-resource-provider@*.service",
     "enoki-disk-health-resource-provider@*.service",
+    "enoki-probe-lifecycle-companion@*.service",
 ];
 
 fn attempt_all_fixed_units(

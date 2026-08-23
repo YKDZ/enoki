@@ -40,7 +40,7 @@ const BUNDLED_BOOTSTRAP_ASSETS: [(&str, &str, &str); 2] = [
 const MAX_TAR_OVERHEAD_BYTES: u64 = 16 * 1024;
 #[cfg(feature = "acquirer")]
 const MAX_UNCOMPRESSED_ARCHIVE_BYTES: u64 =
-    MAX_COMPONENT_BYTES * 5 + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
+    MAX_COMPONENT_BYTES * 6 + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VerificationPolicy<'a> {
@@ -67,7 +67,10 @@ impl VerifiedBundle {
         for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
             if matches!(
                 role,
-                "observation-runtime" | "system-state-provider" | "disk-health-provider"
+                "observation-runtime"
+                    | "system-state-provider"
+                    | "disk-health-provider"
+                    | "lifecycle-companion"
             ) {
                 self.bootstrap_assets.push(BundleComponent {
                     path: path.to_string(),
@@ -235,6 +238,7 @@ pub fn verify_archive_and_extract(
         &mut std::io::sink(),
         &mut std::io::sink(),
         &mut std::io::sink(),
+        &mut std::io::sink(),
     )
 }
 
@@ -248,6 +252,7 @@ pub fn verify_archive_and_extract_upgrade_roles(
     runtime_sink: &mut impl Write,
     cpu_provider_sink: &mut impl Write,
     disk_health_provider_sink: &mut impl Write,
+    lifecycle_companion_sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
     verify_archive_and_extract_lifecycle_roles(
         archive,
@@ -257,6 +262,7 @@ pub fn verify_archive_and_extract_upgrade_roles(
         runtime_sink,
         cpu_provider_sink,
         disk_health_provider_sink,
+        lifecycle_companion_sink,
         &mut std::io::sink(),
         &mut std::io::sink(),
     )
@@ -273,6 +279,7 @@ pub fn verify_archive_and_extract_lifecycle_roles(
     runtime_sink: &mut impl Write,
     cpu_provider_sink: &mut impl Write,
     disk_health_provider_sink: &mut impl Write,
+    lifecycle_companion_sink: &mut impl Write,
     bootstrap_acquirer_sink: &mut impl Write,
     bootstrap_activator_sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
@@ -284,6 +291,7 @@ pub fn verify_archive_and_extract_lifecycle_roles(
         runtime_sink,
         cpu_provider_sink,
         disk_health_provider_sink,
+        lifecycle_companion_sink,
         bootstrap_acquirer_sink,
         bootstrap_activator_sink,
     )
@@ -299,6 +307,7 @@ pub(crate) fn verify_archive_and_extract_roles(
     runtime_sink: &mut impl Write,
     cpu_provider_sink: &mut impl Write,
     disk_health_provider_sink: &mut impl Write,
+    lifecycle_companion_sink: &mut impl Write,
     acquirer_sink: &mut impl Write,
     activator_sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
@@ -315,7 +324,11 @@ pub(crate) fn verify_archive_and_extract_roles(
         .filter(|component| {
             matches!(
                 component.role.as_str(),
-                "probe" | "observation-runtime" | "system-state-provider" | "disk-health-provider"
+                "probe"
+                    | "observation-runtime"
+                    | "system-state-provider"
+                    | "disk-health-provider"
+                    | "lifecycle-companion"
             )
         })
         .collect::<Vec<_>>();
@@ -379,6 +392,12 @@ pub(crate) fn verify_archive_and_extract_roles(
                 "disk-health-provider" => stream_component(
                     &mut entry,
                     disk_health_provider_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "lifecycle-companion" => stream_component(
+                    &mut entry,
+                    lifecycle_companion_sink,
                     component.size,
                     component.sha256.clone(),
                 )?,
@@ -1085,9 +1104,10 @@ mod tests {
         let runtime = b"runtime".to_vec();
         let cpu_provider = b"system-state-provider".to_vec();
         let disk_health_provider = b"disk-health-provider".to_vec();
+        let lifecycle_companion = b"lifecycle-companion".to_vec();
         let acquirer = b"acquirer".to_vec();
         let activator = b"activator".to_vec();
-        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v4\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len(),sha256_hex(&disk_health_provider),disk_health_provider.len()).into_bytes();
+        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v4\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v1\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len(),sha256_hex(&disk_health_provider),disk_health_provider.len(),sha256_hex(&lifecycle_companion),lifecycle_companion.len()).into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gzip);
         for (name, data, kind) in [
@@ -1100,6 +1120,7 @@ mod tests {
                 disk_health_provider,
                 b'0',
             ),
+            ("enoki-probe-lifecycle-companion", lifecycle_companion, b'0'),
             ("bootstrap/enoki-probe-bootstrap-acquire", acquirer, b'0'),
             ("bootstrap/enoki-probe-bootstrap-activate", activator, b'0'),
         ] {
@@ -1222,13 +1243,14 @@ mod tests {
             target: TARGET.to_owned(),
         };
         let manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v4\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v4\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v1\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":19,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
             "1".repeat(64),
             "2".repeat(64),
             "3".repeat(64),
             "4".repeat(64),
             "5".repeat(64),
             "6".repeat(64),
+            "7".repeat(64),
         );
 
         assert!(verify_bundle_manifest(manifest.as_bytes(), "1.2.3", &asset, 1).is_ok());
@@ -1262,6 +1284,11 @@ mod tests {
         .unwrap();
         std::fs::write(
             temporary.path().join("enoki-disk-health-resource-provider"),
+            &binary,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("enoki-probe-lifecycle-companion"),
             &binary,
         )
         .unwrap();

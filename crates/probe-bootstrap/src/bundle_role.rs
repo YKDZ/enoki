@@ -4,8 +4,9 @@ pub(crate) const PROBE_PERMISSION_PROFILE: &str = "probe-v4";
 pub(crate) const OBSERVATION_RUNTIME_PERMISSION_PROFILE: &str = "observation-runtime-v4";
 pub(crate) const SYSTEM_STATE_PERMISSION_PROFILE: &str = "system-state-provider-v5";
 pub(crate) const DISK_HEALTH_PERMISSION_PROFILE: &str = "disk-health-provider-v3";
+pub(crate) const LIFECYCLE_COMPANION_PERMISSION_PROFILE: &str = "lifecycle-companion-v1";
 
-pub(crate) const BUNDLE_COMPONENTS: [(&str, &str, &str, &str); 4] = [
+pub(crate) const BUNDLE_COMPONENTS: [(&str, &str, &str, &str); 5] = [
     (
         "enoki-probe",
         PROBE_PERMISSION_PROFILE,
@@ -30,4 +31,26 @@ pub(crate) const BUNDLE_COMPONENTS: [(&str, &str, &str, &str); 4] = [
         "disk-health-v1",
         "disk-health-provider",
     ),
+    (
+        "enoki-probe-lifecycle-companion",
+        LIFECYCLE_COMPANION_PERMISSION_PROFILE,
+        "local-lifecycle-v1",
+        "lifecycle-companion",
+    ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_bundle_closes_over_the_independent_lifecycle_companion() {
+        assert_eq!(BUNDLE_COMPONENTS.len(), 5);
+        assert!(BUNDLE_COMPONENTS.contains(&(
+            "enoki-probe-lifecycle-companion",
+            "lifecycle-companion-v1",
+            "local-lifecycle-v1",
+            "lifecycle-companion",
+        )));
+    }
+}

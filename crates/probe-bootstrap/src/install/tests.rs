@@ -731,6 +731,7 @@ mod tests {
                 "observation-runtime-v4",
                 "system-state-provider-v5",
                 "disk-health-provider-v3",
+                "lifecycle-companion-v1",
             ],
         );
         for (role, unit) in &role_units {
@@ -930,6 +931,7 @@ mod tests {
         let mut runtime = component();
         let mut provider = component();
         let mut disk_health_provider = component();
+        let mut lifecycle_companion = component();
         let mut acquirer = component();
         let mut activator = component();
         let mut accounts = Accounts::default();
@@ -944,6 +946,7 @@ mod tests {
                 observation_runtime: &mut runtime,
                 cpu_provider: &mut provider,
                 disk_health_provider: &mut disk_health_provider,
+                lifecycle_companion: &mut lifecycle_companion,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
             },
@@ -973,6 +976,7 @@ mod tests {
         let mut runtime = component();
         let mut provider = component();
         let mut disk_health_provider = component();
+        let mut lifecycle_companion = component();
         let mut acquirer = component();
         let mut activator = component();
         let mut accounts = Accounts::default();
@@ -983,6 +987,7 @@ mod tests {
                 observation_runtime: &mut runtime,
                 cpu_provider: &mut provider,
                 disk_health_provider: &mut disk_health_provider,
+                lifecycle_companion: &mut lifecycle_companion,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
             },
@@ -1020,6 +1025,8 @@ mod tests {
             "enoki-cpu-resource-provider.socket",
             "enoki-disk-health-resource-provider@.service",
             "enoki-disk-health-resource-provider.socket",
+            "enoki-probe-lifecycle-companion@.service",
+            "enoki-probe-lifecycle-companion.socket",
         ]
         .into_iter()
         .zip(fixed_observation_unit_contents())

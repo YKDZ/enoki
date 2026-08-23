@@ -3295,6 +3295,7 @@ fn execute_schema_three_probe_upgrade(
     let mut runtime = Vec::new();
     let mut provider = Vec::new();
     let mut disk_health_provider = Vec::new();
+    let mut lifecycle_companion = Vec::new();
     let mut bootstrap_acquirer = Vec::new();
     let mut bootstrap_activator = Vec::new();
     let verified_bundle = verify_archive_and_extract_lifecycle_roles(
@@ -3305,6 +3306,7 @@ fn execute_schema_three_probe_upgrade(
         &mut runtime,
         &mut provider,
         &mut disk_health_provider,
+        &mut lifecycle_companion,
         &mut bootstrap_acquirer,
         &mut bootstrap_activator,
     )

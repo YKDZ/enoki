@@ -25,6 +25,11 @@ export const probeBundleComponentProfiles = Object.freeze({
     permissionProfile: "disk-health-provider-v3",
     resourceContract: "disk-health-v1",
   }),
+  "lifecycle-companion": Object.freeze({
+    path: "enoki-probe-lifecycle-companion",
+    permissionProfile: "lifecycle-companion-v1",
+    resourceContract: "local-lifecycle-v1",
+  }),
 });
 
 export const probeBundledBootstrapAssets = Object.freeze([
