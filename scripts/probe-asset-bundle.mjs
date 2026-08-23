@@ -27,7 +27,7 @@ export const probeBundleComponentProfiles = Object.freeze({
   }),
   "lifecycle-companion": Object.freeze({
     path: "enoki-probe-lifecycle-companion",
-    permissionProfile: "lifecycle-companion-v1",
+    permissionProfile: "lifecycle-companion-v2",
     resourceContract: "local-lifecycle-v1",
   }),
 });

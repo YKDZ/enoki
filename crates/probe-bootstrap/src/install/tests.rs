@@ -732,7 +732,7 @@ mod tests {
                 "observation-runtime-v4",
                 "system-state-provider-v5",
                 "disk-health-provider-v3",
-                "lifecycle-companion-v1",
+                "lifecycle-companion-v2",
             ],
         );
         for (role, unit) in &role_units {

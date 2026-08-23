@@ -2179,7 +2179,7 @@ async function writeProbeArchive(
       },
       {
         path: "enoki-probe-lifecycle-companion",
-        permissionProfile: "lifecycle-companion-v1",
+        permissionProfile: "lifecycle-companion-v2",
         resourceContract: "local-lifecycle-v1",
         role: "lifecycle-companion",
         sha256: sha256(binary),
