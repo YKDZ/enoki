@@ -360,7 +360,7 @@ pub fn mark_probe_repair_unresolved(
     let state = journal_string(&current, "state")?;
     if state == "consumed" {
         transition_repair_state(paths, consumed, &["consumed"], "unresolved")?;
-    } else if !matches!(state, "unresolved" | "completion-pending") {
+    } else if state != "unresolved" {
         return Err(InstallError::ExistingResidue);
     }
     write_operation_status(
@@ -387,6 +387,9 @@ pub fn persist_probe_repair_execution_failure(
     if persisted.state == RepairIntentState::CompletionPending {
         return Ok(());
     }
+    if repair_upgrade_is_exactly_activated(paths, &persisted)? {
+        return Ok(());
+    }
     mark_probe_repair_unresolved(paths, &persisted)
 }
 
@@ -396,9 +399,13 @@ pub fn execute_authorized_probe_repair(
     systemd: &mut impl SystemdPort,
     mut cleanup_verified_stage: impl FnMut(&str, u32) -> Result<(), InstallError>,
 ) -> Result<(), InstallError> {
-    if consumed.state != RepairIntentState::CompletionPending {
-        let recovered = recover_incomplete_probe_upgrade(paths, systemd)?;
-        if let Some(receipt) = recovered {
+    let persisted = resume_probe_repair_intent(paths)?.ok_or(InstallError::ExistingResidue)?;
+    if persisted != *consumed || persisted.state != RepairIntentState::Consumed {
+        return Err(InstallError::ExistingResidue);
+    }
+    let recovered = recover_incomplete_probe_upgrade_for_repair(paths, systemd)?;
+    match recovered {
+        Some(receipt) => {
             if receipt.operation_id != consumed.failed_operation_id
                 || receipt.probe_id != consumed.probe_id
                 || receipt.target_bundle_version != consumed.target_bundle_version
@@ -407,28 +414,65 @@ pub fn execute_authorized_probe_repair(
                 return Err(InstallError::ExistingResidue);
             }
             cleanup_verified_stage(&receipt.operation_id, receipt.stage_owner_uid)?;
-            finalize_probe_upgrade_stage_cleanup(paths, &receipt)?;
+            finalize_probe_repair_stage_cleanup(paths, &receipt)?;
         }
-        transition_repair_state(
-            paths,
-            consumed,
-            &["consumed", "unresolved"],
-            "completion-pending",
-        )?;
+        None if !repair_upgrade_is_exactly_activated(paths, consumed)? => {
+            return Err(InstallError::ExistingResidue);
+        }
+        None => {}
+    }
+    transition_repair_state(paths, consumed, &["consumed"], "completion-pending")?;
+    let pending = ConsumedRepairAuthority {
+        state: RepairIntentState::CompletionPending,
+        ..consumed.clone()
+    };
+    complete_authorized_probe_repair(paths, &pending)
+}
+
+pub fn complete_authorized_probe_repair(
+    paths: &FixedInstallPaths,
+    pending: &ConsumedRepairAuthority,
+) -> Result<(), InstallError> {
+    let persisted = resume_probe_repair_intent(paths)?.ok_or(InstallError::ExistingResidue)?;
+    if persisted != *pending || persisted.state != RepairIntentState::CompletionPending {
+        return Err(InstallError::ExistingResidue);
     }
     let repair_attempt = UpgradeAttempt {
-        operation_id: consumed.repair_operation_id.clone(),
+        operation_id: pending.repair_operation_id.clone(),
         stage_owner_uid: 0,
         authority_sha256: None,
     };
     write_operation_status(
         paths,
         &repair_attempt,
-        &consumed.target_bundle_version,
+        &pending.target_bundle_version,
         "running",
         None,
     )?;
-    transition_repair_state(paths, consumed, &["completion-pending"], "completed")
+    transition_repair_state(paths, pending, &["completion-pending"], "completed")
+}
+
+fn repair_upgrade_is_exactly_activated(
+    paths: &FixedInstallPaths,
+    repair: &ConsumedRepairAuthority,
+) -> Result<bool, InstallError> {
+    let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    if !journal_path.exists() {
+        return Ok(false);
+    }
+    let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
+    if journal_string(&contents, "operation_id")? != repair.failed_operation_id
+        || journal_string(&contents, "source_probe_id")? != repair.probe_id
+        || journal_string(&contents, "target_bundle_version")? != repair.target_bundle_version
+        || journal_string(&contents, "phase")? != "activated"
+    {
+        return Ok(false);
+    }
+    let target_count = upgrade_destinations(paths).len();
+    Ok(
+        journal_usize(&contents, "activated_targets")? == target_count
+            && journal_usize(&contents, "finalized_targets")? == target_count,
+    )
 }
 
 fn transition_repair_state(
@@ -444,6 +488,12 @@ fn transition_repair_state(
     }
     let state = journal_string(&current, "state")?;
     if !expected.contains(&state) {
+        return Err(InstallError::ExistingResidue);
+    }
+    if !matches!(
+        (state, next),
+        ("consumed", "unresolved" | "completion-pending") | ("completion-pending", "completed")
+    ) {
         return Err(InstallError::ExistingResidue);
     }
     let mut replacement_count = 0;
@@ -1553,6 +1603,21 @@ pub fn recover_incomplete_probe_upgrade(
     paths: &FixedInstallPaths,
     systemd: &mut impl SystemdPort,
 ) -> Result<Option<UpgradeRecoveryReceipt>, InstallError> {
+    recover_incomplete_probe_upgrade_with_status(paths, systemd, true)
+}
+
+fn recover_incomplete_probe_upgrade_for_repair(
+    paths: &FixedInstallPaths,
+    systemd: &mut impl SystemdPort,
+) -> Result<Option<UpgradeRecoveryReceipt>, InstallError> {
+    recover_incomplete_probe_upgrade_with_status(paths, systemd, false)
+}
+
+fn recover_incomplete_probe_upgrade_with_status(
+    paths: &FixedInstallPaths,
+    systemd: &mut impl SystemdPort,
+    publish_upgrade_status: bool,
+) -> Result<Option<UpgradeRecoveryReceipt>, InstallError> {
     let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
     if !journal_path.exists() {
         return Ok(None);
@@ -1597,13 +1662,15 @@ pub fn recover_incomplete_probe_upgrade(
             "consumed" | "admitted" | "prepared" => {
                 cleanup_pre_activation_residue(paths)?;
                 mark_upgrade_attempt_phase(paths, "aborted")?;
-                write_operation_status(
-                    paths,
-                    &attempt,
-                    &target_bundle_version,
-                    "failed",
-                    Some("lifecycle.upgrade_repair_required"),
-                )?;
+                if publish_upgrade_status {
+                    write_operation_status(
+                        paths,
+                        &attempt,
+                        &target_bundle_version,
+                        "failed",
+                        Some("lifecycle.upgrade_repair_required"),
+                    )?;
+                }
             }
             "aborted" => {}
             "activation-started" | "repair-required" | "finalizing" => {
@@ -1665,13 +1732,15 @@ pub fn recover_incomplete_probe_upgrade(
                     destinations.len(),
                     destinations.len(),
                 )?;
-                write_operation_status(
-                    paths,
-                    &attempt,
-                    &target_bundle_version,
-                    "failed",
-                    Some("lifecycle.upgrade_repair_required"),
-                )?;
+                if publish_upgrade_status {
+                    write_operation_status(
+                        paths,
+                        &attempt,
+                        &target_bundle_version,
+                        "failed",
+                        Some("lifecycle.upgrade_repair_required"),
+                    )?;
+                }
             }
             "stage-cleanup-required" => {}
             "activated" => return Ok(None),
@@ -1681,13 +1750,15 @@ pub fn recover_incomplete_probe_upgrade(
     })();
     if recovered.is_err() && !matches!(phase, "consumed" | "admitted" | "prepared" | "aborted") {
         let _ = mark_upgrade_attempt_phase(paths, "repair-required");
-        let _ = write_operation_status(
-            paths,
-            &attempt,
-            &target_bundle_version,
-            "failed",
-            Some("lifecycle.upgrade_repair_required"),
-        );
+        if publish_upgrade_status {
+            let _ = write_operation_status(
+                paths,
+                &attempt,
+                &target_bundle_version,
+                "failed",
+                Some("lifecycle.upgrade_repair_required"),
+            );
+        }
     }
     recovered
 }
@@ -1695,6 +1766,21 @@ pub fn recover_incomplete_probe_upgrade(
 pub fn finalize_probe_upgrade_stage_cleanup(
     paths: &FixedInstallPaths,
     receipt: &UpgradeRecoveryReceipt,
+) -> Result<(), InstallError> {
+    finalize_probe_upgrade_stage_cleanup_with_status(paths, receipt, true)
+}
+
+fn finalize_probe_repair_stage_cleanup(
+    paths: &FixedInstallPaths,
+    receipt: &UpgradeRecoveryReceipt,
+) -> Result<(), InstallError> {
+    finalize_probe_upgrade_stage_cleanup_with_status(paths, receipt, false)
+}
+
+fn finalize_probe_upgrade_stage_cleanup_with_status(
+    paths: &FixedInstallPaths,
+    receipt: &UpgradeRecoveryReceipt,
+    publish_upgrade_status: bool,
 ) -> Result<(), InstallError> {
     let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
     let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
@@ -1710,17 +1796,21 @@ pub fn finalize_probe_upgrade_stage_cleanup(
             return Err(InstallError::ExistingResidue);
         }
         mark_upgrade_attempt_phase(paths, "activated")?;
-        write_operation_status(
-            paths,
-            &UpgradeAttempt {
-                operation_id: receipt.operation_id.clone(),
-                stage_owner_uid: receipt.stage_owner_uid,
-                authority_sha256: None,
-            },
-            &receipt.target_bundle_version,
-            "running",
-            None,
-        )
+        if publish_upgrade_status {
+            write_operation_status(
+                paths,
+                &UpgradeAttempt {
+                    operation_id: receipt.operation_id.clone(),
+                    stage_owner_uid: receipt.stage_owner_uid,
+                    authority_sha256: None,
+                },
+                &receipt.target_bundle_version,
+                "running",
+                None,
+            )
+        } else {
+            Ok(())
+        }
     } else {
         if phase != "aborted" {
             return Err(InstallError::ExistingResidue);

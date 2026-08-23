@@ -1305,12 +1305,41 @@ mod tests {
         assert!(status.contains("status = \"failed\""));
         assert!(status.contains("error_code = \"lifecycle.repair_unresolved\""));
         assert!(resume_probe_repair_intent(&paths).unwrap().is_none());
+        let repair_journal_path = paths
+            .bootstrap_state()
+            .join("probe-repair-attempt.toml");
+        let unresolved_capsule = fs::read_to_string(&repair_journal_path).unwrap();
+        let unresolved_status = status.clone();
+        let mut rejected_systemd = Systemd::default();
+        let mut rejected_cleanup = false;
+        assert_eq!(
+            execute_authorized_probe_repair(
+                &paths,
+                &consumed,
+                &mut rejected_systemd,
+                |_, _| {
+                    rejected_cleanup = true;
+                    Ok(())
+                },
+            ),
+            Err(InstallError::ExistingResidue),
+        );
+        assert_eq!(
+            fs::read_to_string(&repair_journal_path).unwrap(),
+            unresolved_capsule
+        );
+        assert_eq!(
+            fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap(),
+            unresolved_status
+        );
+        assert!(rejected_systemd.calls.is_empty());
+        assert!(!rejected_cleanup);
 
         let repair_required = progressed
             .replace("phase = \"activated\"", "phase = \"repair-required\"")
             .replace("activated_targets = 20", "activated_targets = 3")
             .replace("finalized_targets = 20", "finalized_targets = 0");
-        fs::write(&journal_path, repair_required).unwrap();
+        fs::write(&journal_path, &repair_required).unwrap();
         let fresh = issue_probe_repair_evidence(
             &paths,
             1_725_000_002_000,
@@ -1363,14 +1392,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resumed.repair_operation_id, "repair-operation-2");
-        fs::write(&journal_path, &progressed).unwrap();
+        let cleanup_required = repair_required
+            .replace("phase = \"repair-required\"", "phase = \"stage-cleanup-required\"")
+            .replace("activated_targets = 3", "activated_targets = 20")
+            .replace("finalized_targets = 0", "finalized_targets = 20");
+        fs::write(&journal_path, cleanup_required).unwrap();
+
+        let repair_write = paths
+            .bootstrap_state()
+            .join(".probe-repair-attempt.toml.enoki-write");
+        fs::create_dir(&repair_write).unwrap();
+        fs::write(repair_write.join("blocks-replace"), b"fault").unwrap();
+        let repair_running_status = fs::read_to_string(
+            paths.state().join("probe-operation-status.toml"),
+        )
+        .unwrap();
+        let mut systemd = Systemd::default();
+        assert_eq!(
+            execute_authorized_probe_repair(&paths, &resumed, &mut systemd, |_, _| {
+                Ok(())
+            }),
+            Err(InstallError::Io),
+        );
+        assert_eq!(
+            fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap(),
+            repair_running_status,
+            "Repair finalization must not republish the failed Upgrade status",
+        );
+        assert!(fs::read_to_string(&journal_path)
+            .unwrap()
+            .contains("phase = \"activated\""));
+        persist_probe_repair_execution_failure(&paths, &resumed).unwrap();
+        let resumed = resume_probe_repair_intent(&paths).unwrap().unwrap();
+        assert_eq!(resumed.state, RepairIntentState::Consumed);
+        assert!(systemd.calls.is_empty());
+        fs::remove_dir_all(&repair_write).unwrap();
 
         let status_write = paths
             .state()
             .join(".probe-operation-status.toml.enoki-write");
         fs::create_dir(&status_write).unwrap();
         fs::write(status_write.join("blocks-replace"), b"fault").unwrap();
-        let mut systemd = Systemd::default();
         assert_eq!(
             execute_authorized_probe_repair(&paths, &resumed, &mut systemd, |_, _| {
                 panic!("an activated Upgrade must not reacquire or clean a stage")
@@ -1379,18 +1441,20 @@ mod tests {
         );
         let pending = resume_probe_repair_intent(&paths).unwrap().unwrap();
         assert_eq!(pending.state, RepairIntentState::CompletionPending);
-        assert!(systemd.calls.is_empty());
         fs::remove_dir_all(&status_write).unwrap();
+        assert_eq!(
+            mark_probe_repair_unresolved(&paths, &pending),
+            Err(InstallError::ExistingResidue),
+        );
+        assert_eq!(
+            resume_probe_repair_intent(&paths).unwrap().unwrap().state,
+            RepairIntentState::CompletionPending,
+        );
 
-        let repair_write = paths
-            .bootstrap_state()
-            .join(".probe-repair-attempt.toml.enoki-write");
         fs::create_dir(&repair_write).unwrap();
         fs::write(repair_write.join("blocks-replace"), b"fault").unwrap();
         assert_eq!(
-            execute_authorized_probe_repair(&paths, &pending, &mut systemd, |_, _| {
-                panic!("completion commit must not repeat recovery or stage cleanup")
-            }),
+            complete_authorized_probe_repair(&paths, &pending),
             Err(InstallError::Io),
         );
         persist_probe_repair_execution_failure(&paths, &pending).unwrap();
@@ -1400,10 +1464,7 @@ mod tests {
         assert!(status.contains("status = \"running\""));
         assert!(!status.contains("status = \"failed\""));
         fs::remove_dir_all(&repair_write).unwrap();
-        execute_authorized_probe_repair(&paths, &pending, &mut systemd, |_, _| {
-            panic!("completion resume must not repeat recovery or stage cleanup")
-        })
-        .unwrap();
+        complete_authorized_probe_repair(&paths, &pending).unwrap();
         assert!(resume_probe_repair_intent(&paths).unwrap().is_none());
         assert!(systemd.calls.is_empty());
     }

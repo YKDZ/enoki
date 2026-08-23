@@ -21,11 +21,11 @@ use enoki_probe_bootstrap::{
         ConsumeBeforeOuterError, FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd,
         UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeRecoveryReceipt,
         VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
-        consume_probe_repair_authority, consume_signed_before_upgrade_outer_checks,
-        execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
-        issue_probe_repair_evidence, persist_probe_repair_execution_failure,
-        recover_incomplete_probe_upgrade, resume_probe_repair_intent,
-        upgrade_current_probe_for_operation,
+        complete_authorized_probe_repair, consume_probe_repair_authority,
+        consume_signed_before_upgrade_outer_checks, execute_authorized_probe_repair,
+        finalize_probe_upgrade_stage_cleanup, issue_probe_repair_evidence,
+        persist_probe_repair_execution_failure, recover_incomplete_probe_upgrade,
+        resume_probe_repair_intent, upgrade_current_probe_for_operation,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
@@ -1323,15 +1323,20 @@ fn run_authorized_probe_repair_for_invoking_admin(
         .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?
     };
     let mut systemd = SystemSystemd::for_live_upgrade();
-    let repaired = execute_authorized_probe_repair(
-        &paths,
-        &consumed,
-        &mut systemd,
-        |operation_id, owner_uid| {
-            remove_verified_probe_upgrade_stage(operation_id, owner_uid)
-                .map_err(|_| enoki_probe_bootstrap::install::InstallError::Io)
-        },
-    );
+    let repaired =
+        if consumed.state == enoki_probe_bootstrap::install::RepairIntentState::CompletionPending {
+            complete_authorized_probe_repair(&paths, &consumed)
+        } else {
+            execute_authorized_probe_repair(
+                &paths,
+                &consumed,
+                &mut systemd,
+                |operation_id, owner_uid| {
+                    remove_verified_probe_upgrade_stage(operation_id, owner_uid)
+                        .map_err(|_| enoki_probe_bootstrap::install::InstallError::Io)
+                },
+            )
+        };
     if repaired.is_err() {
         persist_probe_repair_execution_failure(&paths, &consumed)
             .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
