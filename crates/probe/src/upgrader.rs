@@ -277,6 +277,27 @@ enum UninstallCapsulePhase {
     TerminalAcknowledged,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResumeDecision {
+    Completed,
+    RecoveryPending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompanionBinaryFacts {
+    regular_file: bool,
+    link_count: u64,
+    owner_uid: u32,
+    mode: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PostCommitSelfFinalizeFacts {
+    install_metadata_absent: bool,
+    install_state_absent: bool,
+    companion_binary: CompanionBinaryFacts,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct UninstallRecoveryCapsule {
@@ -1685,18 +1706,14 @@ pub fn run_lifecycle_companion(
         bootstrap_config_path: metadata.identity_path.clone(),
     };
     let mut systemd = SystemProbeUpgraderSystemdRunner;
-    match execute_lifecycle_uninstall(
+    lifecycle_response_from_resume_decision(execute_lifecycle_uninstall(
         request,
         &input,
         &metadata,
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         transport,
         &mut systemd,
-    ) {
-        Ok(true) => LifecycleResponse::succeeded(),
-        Ok(false) => LifecycleResponse::recovery_pending(),
-        Err(error) => LifecycleResponse::failed(error.code()),
-    }
+    ))
 }
 
 fn execute_lifecycle_uninstall(
@@ -1706,7 +1723,7 @@ fn execute_lifecycle_uninstall(
     install_metadata_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<bool, ProbeUpgraderRunError> {
+) -> Result<ResumeDecision, ProbeUpgraderRunError> {
     let capsule_path = uninstall_capsule_path(install_metadata_path)?;
     let authority_sha256 = lifecycle_authority_sha256(request)?;
     let capsule = read_uninstall_capsule(&capsule_path)?;
@@ -1759,8 +1776,10 @@ fn execute_lifecycle_uninstall(
         transport,
         systemd,
     };
-    execute_uninstall_lifecycle(&mut effects, commit_policy)
-        .map(|completion| completion == LifecycleCompletion::Complete)
+    execute_uninstall_lifecycle(&mut effects, commit_policy).map(|completion| match completion {
+        LifecycleCompletion::Complete => ResumeDecision::Completed,
+        LifecycleCompletion::RecoveryPending => ResumeDecision::RecoveryPending,
+    })
 }
 
 struct ProbeUninstallLifecycleEffects<'a, T, S> {
@@ -1935,15 +1954,21 @@ pub fn resume_lifecycle_companion(
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
-    match resume_lifecycle_companion_at(
+    lifecycle_response_from_resume_decision(resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Path::new(PRODUCTION_INSTALL_STATE_DIR),
         Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
         transport,
         &mut SystemProbeUpgraderSystemdRunner,
-    ) {
-        Ok(true) => LifecycleResponse::succeeded(),
-        Ok(false) => LifecycleResponse::recovery_pending(),
+    ))
+}
+
+fn lifecycle_response_from_resume_decision(
+    decision: Result<ResumeDecision, ProbeUpgraderRunError>,
+) -> LifecycleResponse {
+    match decision {
+        Ok(ResumeDecision::Completed) => LifecycleResponse::succeeded(),
+        Ok(ResumeDecision::RecoveryPending) => LifecycleResponse::recovery_pending(),
         Err(error) => LifecycleResponse::failed(error.code()),
     }
 }
@@ -1954,15 +1979,19 @@ fn resume_lifecycle_companion_at(
     companion_binary_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<bool, ProbeUpgraderRunError> {
+) -> Result<ResumeDecision, ProbeUpgraderRunError> {
     let capsule_path = uninstall_capsule_path(install_metadata_path)?;
     let Some(capsule) = read_uninstall_capsule(&capsule_path)? else {
-        require_post_commit_self_finalize_facts(
+        let facts = read_post_commit_self_finalize_facts(
             install_metadata_path,
             install_state_dir,
             companion_binary_path,
         )?;
-        return Ok(true);
+        return post_commit_self_finalize_policy(facts).map_err(|()| {
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "lifecycle resume is not a committed uninstall",
+            )
+        });
     };
     let request = LifecycleRequest::decode(capsule.request_json.as_bytes()).map_err(|_| {
         ProbeUpgraderRunError::InvalidInstallMetadata("uninstall capsule request is invalid")
@@ -1980,33 +2009,45 @@ fn resume_lifecycle_companion_at(
     )
 }
 
-fn require_post_commit_self_finalize_facts(
+fn read_post_commit_self_finalize_facts(
     install_metadata_path: &Path,
     install_state_dir: &Path,
     companion_binary_path: &Path,
-) -> Result<(), ProbeUpgraderRunError> {
-    for path in [install_metadata_path, install_state_dir] {
-        match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => {
-                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "lifecycle resume is not a committed uninstall",
-                ));
-            }
-            Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
-        }
-    }
+) -> Result<PostCommitSelfFinalizeFacts, ProbeUpgraderRunError> {
+    let install_metadata_absent = path_absence_fact(install_metadata_path)?;
+    let install_state_absent = path_absence_fact(install_state_dir)?;
     let binary = fs::symlink_metadata(companion_binary_path).map_err(ProbeUpgraderRunError::Io)?;
-    if !binary.file_type().is_file()
-        || binary.nlink() != 1
-        || binary.uid() != 0
-        || binary.mode() & 0o777 != 0o755
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "lifecycle resume binary is not trusted",
-        ));
+    Ok(PostCommitSelfFinalizeFacts {
+        install_metadata_absent,
+        install_state_absent,
+        companion_binary: CompanionBinaryFacts {
+            regular_file: binary.file_type().is_file(),
+            link_count: binary.nlink(),
+            owner_uid: binary.uid(),
+            mode: binary.mode() & 0o777,
+        },
+    })
+}
+
+fn path_absence_fact(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Ok(_) => Ok(false),
+        Err(error) => Err(ProbeUpgraderRunError::Io(error)),
     }
-    Ok(())
+}
+
+fn post_commit_self_finalize_policy(
+    facts: PostCommitSelfFinalizeFacts,
+) -> Result<ResumeDecision, ()> {
+    (facts.install_metadata_absent
+        && facts.install_state_absent
+        && facts.companion_binary.regular_file
+        && facts.companion_binary.link_count == 1
+        && facts.companion_binary.owner_uid == 0
+        && facts.companion_binary.mode == 0o755)
+        .then_some(ResumeDecision::Completed)
+        .ok_or(())
 }
 
 pub fn run_local_lifecycle_companion(
@@ -6892,7 +6933,7 @@ mod tests {
             &mut systemd,
         )
         .expect("Hub acknowledgement stays terminal when finalization pauses");
-        assert!(!completed, "Hub ACK exposes stable recovery-pending");
+        assert_eq!(completed, ResumeDecision::RecoveryPending);
         assert!(
             retry_transport.url.is_empty(),
             "trusted capsule skips revalidation"
@@ -6982,7 +7023,7 @@ mod tests {
             &mut systemd,
         )
         .expect("resume only from the persisted capsule");
-        assert!(completed);
+        assert_eq!(completed, ResumeDecision::Completed);
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
         remove_path_if_exists(Path::new(&binary_path))
@@ -7004,45 +7045,60 @@ mod tests {
     }
 
     #[test]
-    fn empty_resume_without_capsule_only_self_finalizes_the_fixed_binary() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let metadata = temporary.path().join("etc/enoki/probe-install.toml");
-        let state = temporary.path().join("var/lib/enoki-probe");
-        let binary = temporary
-            .path()
-            .join("usr/local/bin/enoki-probe-lifecycle-companion");
-        fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("metadata parent");
-        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary parent");
-        fs::write(&binary, "companion").expect("companion binary");
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
-            .expect("trusted companion mode");
-        let mut transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
+    fn post_commit_self_finalize_policy_uses_explicit_trusted_facts() {
+        let trusted = PostCommitSelfFinalizeFacts {
+            install_metadata_absent: true,
+            install_state_absent: true,
+            companion_binary: CompanionBinaryFacts {
+                regular_file: true,
+                link_count: 1,
+                owner_uid: 0,
+                mode: 0o755,
+            },
+        };
+        assert_eq!(
+            post_commit_self_finalize_policy(trusted),
+            Ok(ResumeDecision::Completed)
+        );
 
-        assert!(
-            resume_lifecycle_companion_at(
-                &metadata,
-                &state,
-                &binary,
-                &mut transport,
-                &mut systemd,
-            )
-                .expect("self finalization")
+        for rejected in [
+            PostCommitSelfFinalizeFacts {
+                install_metadata_absent: false,
+                ..trusted
+            },
+            PostCommitSelfFinalizeFacts {
+                install_state_absent: false,
+                ..trusted
+            },
+            PostCommitSelfFinalizeFacts {
+                companion_binary: CompanionBinaryFacts {
+                    owner_uid: 1000,
+                    ..trusted.companion_binary
+                },
+                ..trusted
+            },
+            PostCommitSelfFinalizeFacts {
+                companion_binary: CompanionBinaryFacts {
+                    mode: 0o775,
+                    ..trusted.companion_binary
+                },
+                ..trusted
+            },
+        ] {
+            assert_eq!(post_commit_self_finalize_policy(rejected), Err(()));
+        }
+    }
+
+    #[test]
+    fn resume_decision_maps_to_the_wire_response_at_one_boundary() {
+        assert_eq!(
+            lifecycle_response_from_resume_decision(Ok(ResumeDecision::Completed)),
+            LifecycleResponse::succeeded()
         );
-        assert!(binary.exists(), "响应完成前必须保留 self-finalize binary");
-        assert!(
-            resume_lifecycle_companion_at(
-                &metadata,
-                &state,
-                &binary,
-                &mut transport,
-                &mut systemd,
-            )
-            .expect("unlink failure can retry from the same post-commit disk facts")
+        assert_eq!(
+            lifecycle_response_from_resume_decision(Ok(ResumeDecision::RecoveryPending)),
+            LifecycleResponse::recovery_pending()
         );
-        assert!(transport.url.is_empty());
-        assert!(transport.status_url.is_empty());
-        assert!(systemd.calls.is_empty());
     }
 
     #[test]
