@@ -13,7 +13,8 @@ use enoki_probe_bootstrap::{
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
     lifecycle::{
-        LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, LifecycleTransition,
+        LifecycleExecution, LifecyclePhase, LifecycleRequest, LifecycleRequestAuthority,
+        LifecycleResponse, LifecycleTransition,
     },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
@@ -79,6 +80,21 @@ fn observation_services(schema_version: u32) -> &'static [&'static str] {
     } else {
         &OBSERVATION_SERVICES_SCHEMA_THREE
     }
+}
+
+fn is_lifecycle_companion_service(service: &str) -> bool {
+    service == "enoki-probe-lifecycle-companion.socket"
+}
+
+fn is_lifecycle_companion_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            "enoki-probe-lifecycle-companion"
+                | "enoki-probe-lifecycle-companion@.service"
+                | "enoki-probe-lifecycle-companion.socket"
+        )
+    )
 }
 const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 
@@ -1560,6 +1576,10 @@ pub fn run_lifecycle_companion(
     if request.transition() != LifecycleTransition::Uninstall {
         return LifecycleResponse::not_enabled();
     }
+    let mut lifecycle = match LifecycleExecution::begin(request.transition()) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => return LifecycleResponse::failed(error.code()),
+    };
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
@@ -1605,6 +1625,11 @@ pub fn run_lifecycle_companion(
     {
         return LifecycleResponse::failed("lifecycle.authority_mismatch");
     }
+    if lifecycle.advance(LifecyclePhase::Verified).is_err()
+        || lifecycle.advance(LifecyclePhase::Cleaning).is_err()
+    {
+        return LifecycleResponse::failed("lifecycle.invalid_state");
+    }
 
     let result = match request.authority() {
         LifecycleRequestAuthority::HubOperation {
@@ -1629,9 +1654,22 @@ pub fn run_lifecycle_companion(
         LifecycleRequestAuthority::LocalRoot { .. } => run_local_probe_uninstall().map(|_| true),
     };
     match result {
-        Ok(true) => LifecycleResponse::succeeded(),
-        Ok(false) => LifecycleResponse::failed("lifecycle.uninstall_failed"),
-        Err(error) => LifecycleResponse::failed(error.code()),
+        Ok(true) => {
+            if lifecycle.advance(LifecyclePhase::Reporting).is_err()
+                || lifecycle.advance(LifecyclePhase::Complete).is_err()
+            {
+                return LifecycleResponse::failed("lifecycle.invalid_state");
+            }
+            LifecycleResponse::succeeded()
+        }
+        Ok(false) => {
+            let _ = lifecycle.advance(LifecyclePhase::Failed);
+            LifecycleResponse::failed("lifecycle.uninstall_failed")
+        }
+        Err(error) => {
+            let _ = lifecycle.advance(LifecyclePhase::Failed);
+            LifecycleResponse::failed(error.code())
+        }
     }
 }
 
@@ -1932,6 +1970,7 @@ fn execute_probe_uninstall_cleanup(
         for service in observation_services(install_metadata.schema_version)
             .iter()
             .copied()
+            .filter(|service| !is_lifecycle_companion_service(service))
             .rev()
         {
             systemd.stop_service(service).map_err(|error| {
@@ -1981,6 +2020,9 @@ fn execute_probe_uninstall_cleanup(
         "verifying the service unit is absent",
     )?;
     for path in &install_metadata.observation_unit_paths {
+        if is_lifecycle_companion_path(path) {
+            continue;
+        }
         remove_path_if_exists(path)?;
         verify_path_absent(
             path,
@@ -2015,6 +2057,9 @@ fn execute_probe_uninstall_cleanup(
         })?;
     if matches!(install_metadata.schema_version, 3 | 4) {
         for service in observation_services(install_metadata.schema_version) {
+            if is_lifecycle_companion_service(service) {
+                continue;
+            }
             systemd.reset_failed(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_reset_failed",
@@ -2036,7 +2081,6 @@ fn execute_probe_uninstall_cleanup(
         install_metadata.observation_runtime_path.as_deref(),
         install_metadata.cpu_provider_path.as_deref(),
         install_metadata.disk_health_provider_path.as_deref(),
-        install_metadata.lifecycle_companion_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -2064,10 +2108,8 @@ fn execute_probe_uninstall_cleanup(
     if let Some(path) = install_metadata.bootstrap_state_dir.as_deref() {
         remove_owned_bootstrap_state(path)?;
     }
-    remove_path_if_exists(install_metadata_path)?;
-    remove_path_if_exists(&input.bootstrap_config_path)?;
-    remove_empty_parent_dir(&input.bootstrap_config_path)?;
-    remove_path_if_exists(&install_metadata.state_dir)?;
+    // 在所有易失败的账户清理完成前，保留 Companion 激活资产和可信元数据。
+    // 中断后管理员仍可从同一固定入口提交绑定到该安装收据的显式卸载请求。
     systemd
         .remove_service_identity(
             &install_metadata.service_user,
@@ -2091,6 +2133,66 @@ fn execute_probe_uninstall_cleanup(
                 )
             })?;
     }
+
+    if install_metadata.schema_version == 4 {
+        // 自删除是最后一个角色清理阶段；当前进程持有已打开的可执行文件，
+        // 不需要第二套执行器或运行时选择的路径。
+        let companion_service = "enoki-probe-lifecycle-companion.socket";
+        systemd.stop_service(companion_service).map_err(|error| {
+            probe_uninstall_cleanup_error(
+                "probe_uninstall_service_stop_failed",
+                "stopping the lifecycle companion socket",
+                error,
+            )
+        })?;
+        systemd
+            .disable_service(companion_service)
+            .map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_disable_failed",
+                    "disabling the lifecycle companion socket",
+                    error,
+                )
+            })?;
+        for path in install_metadata
+            .observation_unit_paths
+            .iter()
+            .filter(|path| is_lifecycle_companion_path(path))
+        {
+            remove_path_if_exists(path)?;
+        }
+        if let Some(path) = install_metadata.lifecycle_companion_path.as_deref() {
+            remove_path_if_exists(path)?;
+        }
+        systemd.daemon_reload().map_err(|error| {
+            probe_uninstall_cleanup_error(
+                "probe_uninstall_daemon_reload_failed",
+                "reloading systemd after lifecycle companion removal",
+                error,
+            )
+        })?;
+        systemd.reset_failed(companion_service).map_err(|error| {
+            probe_uninstall_cleanup_error(
+                "probe_uninstall_service_reset_failed",
+                "resetting the lifecycle companion socket failed state",
+                error,
+            )
+        })?;
+        systemd
+            .verify_service_absent(companion_service)
+            .map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_verification_failed",
+                    "verifying the lifecycle companion socket is absent",
+                    error,
+                )
+            })?;
+    }
+
+    remove_path_if_exists(install_metadata_path)?;
+    remove_path_if_exists(&input.bootstrap_config_path)?;
+    remove_empty_parent_dir(&input.bootstrap_config_path)?;
+    remove_path_if_exists(&install_metadata.state_dir)?;
 
     verify_probe_uninstall_cleanup(plan, systemd)
 }
@@ -4781,6 +4883,7 @@ mod tests {
         calls: Vec<String>,
         failure: Option<String>,
         failure_step: Option<&'static str>,
+        paths_required_during_identity_removal: Vec<PathBuf>,
         restarted: Vec<String>,
     }
 
@@ -4964,6 +5067,15 @@ mod tests {
             self.calls.push(format!(
                 "remove-service-identity {service_user}:{service_group}"
             ));
+            if self
+                .paths_required_during_identity_removal
+                .iter()
+                .any(|path| !path.exists())
+            {
+                return Err(ProbeUpgraderRunError::RestartFailure(
+                    "lifecycle recovery assets disappeared too early".to_string(),
+                ));
+            }
             if self.failure_step == Some("remove-account") {
                 return Err(ProbeUpgraderRunError::RestartFailure(
                     "service account removal failed".to_string(),
@@ -5999,7 +6111,15 @@ mod tests {
             target_manifest_sha256: Some("c".repeat(64)),
             bundle_version: Some("1.2.3".to_owned()),
         };
-        let mut systemd = RecordingSystemdRunner::default();
+        let mut systemd = RecordingSystemdRunner {
+            paths_required_during_identity_removal: vec![
+                binaries[4].clone(),
+                units[7].clone(),
+                units[8].clone(),
+                metadata_path.clone(),
+            ],
+            ..RecordingSystemdRunner::default()
+        };
         execute_probe_uninstall_with_install_metadata_path(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: identity_path,
@@ -6017,6 +6137,17 @@ mod tests {
             assert!(systemd.calls.contains(&format!("stop {service}")));
             assert!(systemd.calls.contains(&format!("disable {service}")));
         }
+        let identity_removed = systemd
+            .calls
+            .iter()
+            .position(|call| call == "remove-service-identity enoki-probe:enoki-probe")
+            .expect("service identity cleanup");
+        let companion_stopped = systemd
+            .calls
+            .iter()
+            .position(|call| call == "stop enoki-probe-lifecycle-companion.socket")
+            .expect("companion socket cleanup");
+        assert!(identity_removed < companion_stopped);
         assert!(
             systemd
                 .calls

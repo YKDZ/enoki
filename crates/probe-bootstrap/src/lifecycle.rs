@@ -284,6 +284,7 @@ pub enum TransitionAvailability {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleRejection {
     InvalidAuthority,
+    InvalidState,
     TransitionNotEnabled,
 }
 
@@ -292,6 +293,7 @@ impl LifecycleRejection {
     pub const fn code(self) -> &'static str {
         match self {
             Self::InvalidAuthority => "lifecycle.invalid_authority",
+            Self::InvalidState => "lifecycle.invalid_state",
             Self::TransitionNotEnabled => "lifecycle.transition_not_enabled",
         }
     }
@@ -389,6 +391,97 @@ impl LifecyclePlan {
     #[must_use]
     pub const fn transition(self) -> LifecycleTransition {
         self.transition
+    }
+}
+
+/// 所有本机生命周期转换共享的有限执行状态。转换各自拥有一条固定路径，
+/// 因而新装不能伪装成清理，卸载也不能进入暂存或激活阶段。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecyclePhase {
+    Authorized,
+    Verified,
+    Staged,
+    Activating,
+    Cleaning,
+    Reporting,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LifecycleExecution {
+    transition: LifecycleTransition,
+    phase: LifecyclePhase,
+}
+
+impl LifecycleExecution {
+    pub fn begin(transition: LifecycleTransition) -> Result<Self, LifecycleRejection> {
+        LifecyclePlan::for_transition(transition)?;
+        Ok(Self {
+            transition,
+            phase: LifecyclePhase::Authorized,
+        })
+    }
+
+    pub fn advance(&mut self, next: LifecyclePhase) -> Result<(), LifecycleRejection> {
+        let valid = match (self.transition, self.phase, next) {
+            (
+                LifecycleTransition::FreshInstall,
+                LifecyclePhase::Authorized,
+                LifecyclePhase::Verified,
+            )
+            | (
+                LifecycleTransition::FreshInstall,
+                LifecyclePhase::Verified,
+                LifecyclePhase::Staged,
+            )
+            | (
+                LifecycleTransition::FreshInstall,
+                LifecyclePhase::Staged,
+                LifecyclePhase::Activating,
+            )
+            | (
+                LifecycleTransition::FreshInstall,
+                LifecyclePhase::Activating,
+                LifecyclePhase::Complete,
+            )
+            | (
+                LifecycleTransition::Uninstall,
+                LifecyclePhase::Authorized,
+                LifecyclePhase::Verified,
+            )
+            | (
+                LifecycleTransition::Uninstall,
+                LifecyclePhase::Verified,
+                LifecyclePhase::Cleaning,
+            )
+            | (
+                LifecycleTransition::Uninstall,
+                LifecyclePhase::Cleaning,
+                LifecyclePhase::Reporting,
+            )
+            | (
+                LifecycleTransition::Uninstall,
+                LifecyclePhase::Reporting,
+                LifecyclePhase::Complete,
+            ) => true,
+            (_, phase, LifecyclePhase::Failed)
+                if !matches!(phase, LifecyclePhase::Complete | LifecyclePhase::Failed) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(LifecycleRejection::InvalidState);
+        }
+        self.phase = next;
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn phase(self) -> LifecyclePhase {
+        self.phase
     }
 }
 
@@ -507,6 +600,48 @@ mod tests {
         assert_eq!(
             LifecycleRequest::decode(invalid.as_bytes()),
             Err(LifecycleRejection::InvalidAuthority),
+        );
+    }
+
+    #[test]
+    fn enabled_transitions_share_one_closed_execution_state_machine() {
+        let mut install =
+            LifecycleExecution::begin(LifecycleTransition::FreshInstall).expect("新装已启用");
+        assert_eq!(install.phase(), LifecyclePhase::Authorized);
+        for phase in [
+            LifecyclePhase::Verified,
+            LifecyclePhase::Staged,
+            LifecyclePhase::Activating,
+            LifecyclePhase::Complete,
+        ] {
+            install.advance(phase).expect("新装状态合法");
+        }
+
+        let mut uninstall =
+            LifecycleExecution::begin(LifecycleTransition::Uninstall).expect("卸载已启用");
+        for phase in [
+            LifecyclePhase::Verified,
+            LifecyclePhase::Cleaning,
+            LifecyclePhase::Reporting,
+            LifecyclePhase::Complete,
+        ] {
+            uninstall.advance(phase).expect("卸载状态合法");
+        }
+    }
+
+    #[test]
+    fn lifecycle_execution_rejects_cross_transition_phase_disguise() {
+        let mut install =
+            LifecycleExecution::begin(LifecycleTransition::FreshInstall).expect("新装已启用");
+        assert_eq!(
+            install.advance(LifecyclePhase::Cleaning),
+            Err(LifecycleRejection::InvalidState),
+        );
+        let mut uninstall =
+            LifecycleExecution::begin(LifecycleTransition::Uninstall).expect("卸载已启用");
+        assert_eq!(
+            uninstall.advance(LifecyclePhase::Staged),
+            Err(LifecycleRejection::InvalidState),
         );
     }
 }

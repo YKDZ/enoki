@@ -17,6 +17,7 @@ use crate::{
         SYSTEM_STATE_PERMISSION_PROFILE,
     },
     handoff::Enrollment,
+    lifecycle::{LifecycleExecution, LifecyclePhase, LifecycleTransition},
     trust::{BootstrapRole, BuildTrust},
     verifier::VerifiedBundle,
 };
@@ -628,6 +629,8 @@ fn activate_current_probe_with_observation_files(
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
 ) -> Result<(), InstallError> {
+    let mut lifecycle = LifecycleExecution::begin(LifecycleTransition::FreshInstall)
+        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
     let trust_version = trust.version.strip_prefix('v').unwrap_or(trust.version);
     let runtime_receipt = bundle.component_receipt("observation-runtime");
     let cpu_provider_receipt = bundle.component_receipt("system-state-provider");
@@ -661,6 +664,9 @@ fn activate_current_probe_with_observation_files(
             lifecycle_companion_receipt.expect("checked").1,
         )?;
     }
+    lifecycle
+        .advance(LifecyclePhase::Verified)
+        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
     let _activation_lock = ActivationLock::acquire(
         &paths.bootstrap_state(),
         paths.expected_root_uid(),
@@ -751,8 +757,14 @@ fn activate_current_probe_with_observation_files(
             ));
         }
     };
+    lifecycle
+        .advance(LifecyclePhase::Staged)
+        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
     let mut enabled = false;
     let mut started = false;
+    lifecycle
+        .advance(LifecyclePhase::Activating)
+        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
     let result = (|| {
         ports
             .files
@@ -879,7 +891,12 @@ fn activate_current_probe_with_observation_files(
         Ok(())
     })();
     match result {
-        Ok(()) => journal.commit_layout(&paths.bootstrap_state(), &bundle.version),
+        Ok(()) => {
+            journal.commit_layout(&paths.bootstrap_state(), &bundle.version)?;
+            lifecycle
+                .advance(LifecyclePhase::Complete)
+                .map_err(|_| InstallError::InvalidVerifiedComponent)
+        }
         Err(install_error) => {
             let rollback_deadline = Instant::now() + ROLLBACK_COMMAND_BUDGET;
             ports.accounts.set_command_deadline(rollback_deadline);
