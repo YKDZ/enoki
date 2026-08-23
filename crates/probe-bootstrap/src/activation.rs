@@ -7,6 +7,7 @@ use crate::{
         FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd,
         VerifiedCompleteFreshComponents, activate_complete_fresh_current_probe,
     },
+    lifecycle::{LifecycleRequest, LifecycleResponse},
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
         VerificationPolicy, VerifiedBundle, verify_acquirer_receipt, verify_activator_receipt,
@@ -16,13 +17,19 @@ use crate::{
 use std::{
     ffi::CString,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::fd::{AsRawFd, FromRawFd, RawFd},
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 use zeroize::Zeroize;
 
 const INBOX_DIRECTORY: &str = "inbox";
+const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
+const REPLACEMENT_COMPANION_BUDGET: Duration = Duration::from_secs(90);
+const REPLACEMENT_COMPANION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 static COMPONENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Eq, PartialEq)]
@@ -34,6 +41,7 @@ pub enum ActivationError {
     Verification,
     Io,
     Install(InstallError),
+    Replacement,
 }
 
 impl From<HandoffError> for ActivationError {
@@ -110,6 +118,11 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
+        prepare_replacement_migration(
+            &self.enrollment,
+            &self.bundle,
+            &mut self.lifecycle_companion,
+        )?;
         activate_complete_fresh_current_probe(
             VerifiedCompleteFreshComponents {
                 probe: &mut self.component,
@@ -140,6 +153,178 @@ impl ReceivedRootHandoff {
             .map_err(|_| ActivationError::Io)?;
         Ok(&mut self.component)
     }
+}
+
+fn prepare_replacement_migration(
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    companion: &mut File,
+) -> Result<(), ActivationError> {
+    let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
+        .try_exists()
+        .map_err(|_| ActivationError::Io)?;
+    let Some(request) =
+        replacement_request_for_installed_state(has_installed_metadata, enrollment, bundle)?
+    else {
+        return Ok(());
+    };
+    invoke_replacement_companion(&request, companion, bundle)
+}
+
+fn replacement_request_for_installed_state(
+    has_installed_metadata: bool,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> Result<Option<LifecycleRequest>, ActivationError> {
+    if !has_installed_metadata {
+        return Ok(None);
+    }
+    LifecycleRequest::replacement_migration(
+        enrollment.enrollment_token(),
+        enrollment.hub_origin(),
+        &format!("sha256:{}", bundle.asset_set_manifest_sha256),
+        &bundle.manifest_sha256,
+        &bundle.version,
+    )
+    .map(Some)
+    .map_err(|_| ActivationError::Replacement)
+}
+
+fn invoke_replacement_companion(
+    request: &LifecycleRequest,
+    source: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), ActivationError> {
+    let executable = sealed_lifecycle_companion(source, bundle)?;
+    let executable_path = format!("/proc/self/fd/{}", executable.as_raw_fd());
+    let mut command = Command::new(executable_path);
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // 候选角色可能创建子进程；超时清理整个固定进程组并回收主进程。
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+    let mut child = command.spawn().map_err(|_| ActivationError::Replacement)?;
+    let Some(mut stdin) = child.stdin.take() else {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    };
+    let encoded = request.encode().map_err(|_| ActivationError::Replacement)?;
+    if stdin
+        .write_all(&encoded)
+        .and_then(|()| stdin.flush())
+        .is_err()
+    {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    }
+    drop(stdin);
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    };
+    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
+    {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    }
+    let deadline = Instant::now() + REPLACEMENT_COMPANION_BUDGET;
+    let mut response = Vec::new();
+    let mut status = None;
+    loop {
+        let mut chunk = [0_u8; 512];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) if status.is_some() => {
+                    let succeeded = status
+                        .is_some_and(|status: std::process::ExitStatus| status.success())
+                        && LifecycleResponse::decode(&response)
+                            == Ok(LifecycleResponse::succeeded());
+                    return succeeded.then_some(()).ok_or(ActivationError::Replacement);
+                }
+                Ok(0) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&chunk[..read]);
+                    if response.len() > crate::lifecycle::MAX_LIFECYCLE_REQUEST_BYTES {
+                        terminate_and_reap(&mut child);
+                        return Err(ActivationError::Replacement);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    terminate_and_reap(&mut child);
+                    return Err(ActivationError::Replacement);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            terminate_and_reap(&mut child);
+            return Err(ActivationError::Replacement);
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(next) => status = next,
+                Err(_) => {
+                    terminate_and_reap(&mut child);
+                    return Err(ActivationError::Replacement);
+                }
+            }
+        }
+        std::thread::sleep(REPLACEMENT_COMPANION_POLL_INTERVAL);
+    }
+}
+
+fn sealed_lifecycle_companion(
+    source: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<File, ActivationError> {
+    source.rewind().map_err(|_| ActivationError::Io)?;
+    let name = CString::new("enoki-probe-lifecycle-companion")
+        .map_err(|_| ActivationError::Replacement)?;
+    let descriptor =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if descriptor < 0 {
+        return Err(ActivationError::Replacement);
+    }
+    let mut sealed = unsafe { File::from_raw_fd(descriptor) };
+    let copied = io::copy(source, &mut sealed).map_err(|_| ActivationError::Replacement)?;
+    let (_, expected_size) = bundle
+        .component_receipt("lifecycle-companion")
+        .ok_or(ActivationError::Verification)?;
+    if copied != expected_size {
+        return Err(ActivationError::Verification);
+    }
+    sealed
+        .sync_all()
+        .map_err(|_| ActivationError::Replacement)?;
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    if unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, seals) } != 0
+        || unsafe { libc::fcntl(descriptor, libc::F_GET_SEALS) } != seals
+    {
+        return Err(ActivationError::Replacement);
+    }
+    verify_role_component(&mut sealed, bundle, "lifecycle-companion")
+        .map_err(|_| ActivationError::Verification)?;
+    Ok(sealed)
+}
+
+fn terminate_and_reap(child: &mut std::process::Child) {
+    let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl Drop for ReceivedRootHandoff {
@@ -720,6 +905,68 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn installed_state_maps_the_verified_candidate_to_one_replacement_request() {
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+
+        assert!(
+            replacement_request_for_installed_state(false, &received.enrollment, &received.bundle)
+                .unwrap()
+                .is_none()
+        );
+        let request =
+            replacement_request_for_installed_state(true, &received.enrollment, &received.bundle)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            request.transition(),
+            crate::lifecycle::LifecycleTransition::ReplacementMigration
+        );
+        assert_eq!(
+            request.authority(),
+            &crate::lifecycle::LifecycleRequestAuthority::ReplacementEnrollment {
+                enrollment_token: "enk_enroll_test".to_string(),
+                hub_origin: "https://hub.example".to_string(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    received.bundle.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+                bundle_version: "1.2.3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn replacement_companion_execution_fd_is_the_exact_sealed_candidate_role() {
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let mut received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+
+        let mut sealed =
+            sealed_lifecycle_companion(&mut received.lifecycle_companion, &received.bundle)
+                .unwrap();
+        let mut bytes = Vec::new();
+        sealed.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"lifecycle-companion");
+        assert_eq!(
+            unsafe { libc::fcntl(sealed.as_raw_fd(), libc::F_GET_SEALS) },
+            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL
+        );
     }
 
     #[test]

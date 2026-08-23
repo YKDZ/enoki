@@ -244,6 +244,7 @@ mod tests {
     }
     fn bundle() -> VerifiedBundle {
         VerifiedBundle {
+            asset_set_manifest_sha256: "c".repeat(64),
             version: "1.2.3".into(),
             target: "x86_64-unknown-linux-gnu".into(),
             manifest_sha256: "b".repeat(64),

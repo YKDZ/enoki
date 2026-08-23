@@ -1654,9 +1654,6 @@ pub fn run_lifecycle_companion(
     request: &LifecycleRequest,
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> LifecycleResponse {
-    if request.transition() != LifecycleTransition::Uninstall {
-        return LifecycleResponse::not_enabled();
-    }
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
@@ -1664,8 +1661,7 @@ pub fn run_lifecycle_companion(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         None,
     ) {
-        Ok(metadata) if metadata.schema_version == 4 => metadata,
-        Ok(_) => return LifecycleResponse::failed("lifecycle.replacement_required"),
+        Ok(metadata) => metadata,
         Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
     };
     let identity = match read_trusted_probe_install_preflight(
@@ -1675,6 +1671,15 @@ pub fn run_lifecycle_companion(
         Ok(identity) => identity,
         Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
     };
+    if request.transition() == LifecycleTransition::ReplacementMigration {
+        return run_probe_replacement_migration(request, &metadata, &identity);
+    }
+    if request.transition() != LifecycleTransition::Uninstall {
+        return LifecycleResponse::not_enabled();
+    }
+    if metadata.schema_version != 4 {
+        return LifecycleResponse::failed("lifecycle.replacement_required");
+    }
     let (probe_id, install_state, manifest, version) = match request.authority() {
         LifecycleRequestAuthority::HubOperation {
             probe_id,
@@ -1694,6 +1699,9 @@ pub fn run_lifecycle_companion(
             target_manifest_sha256,
             bundle_version,
         ),
+        LifecycleRequestAuthority::ReplacementEnrollment { .. } => {
+            return LifecycleResponse::not_enabled();
+        }
     };
     if identity.probe_id != *probe_id
         || metadata.install_state_sha256.as_deref() != Some(install_state)
@@ -1714,6 +1722,72 @@ pub fn run_lifecycle_companion(
         transport,
         &mut systemd,
     ))
+}
+
+fn run_probe_replacement_migration(
+    request: &LifecycleRequest,
+    metadata: &TrustedProbeInstallMetadata,
+    identity: &TrustedProbeInstallPreflight,
+) -> LifecycleResponse {
+    let LifecycleRequestAuthority::ReplacementEnrollment {
+        enrollment_token,
+        hub_origin,
+        target_asset_set_digest,
+        target_manifest_sha256: _,
+        bundle_version,
+    } = request.authority()
+    else {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    };
+    let mut registration = crate::registration::HttpRegistrationTransport;
+    let inspected = crate::registration::inspect_probe_installation(
+        crate::registration::ProbeInstallationInspectionInput {
+            enrollment_token: enrollment_token.clone(),
+            hub_url: hub_origin.clone(),
+        },
+        &mut registration,
+    );
+    let Ok(crate::registration::ProbeInstallationTarget::ManualReinstall(authority)) = inspected
+    else {
+        return LifecycleResponse::failed("lifecycle.authority_rejected");
+    };
+    if !replacement_authority_matches(
+        hub_origin,
+        target_asset_set_digest,
+        bundle_version,
+        &authority,
+        metadata,
+        identity,
+    ) {
+        return LifecycleResponse::failed("lifecycle.authority_mismatch");
+    }
+    match cleanup_trusted_probe_install_for_reenrollment(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        None,
+    ) {
+        Ok(()) => LifecycleResponse::succeeded(),
+        Err(_) => LifecycleResponse::failed("lifecycle.replacement_cleanup_failed"),
+    }
+}
+
+fn replacement_authority_matches(
+    hub_origin: &str,
+    target_asset_set_digest: &str,
+    bundle_version: &str,
+    authority: &crate::registration::ProbeReplacementAuthorization,
+    metadata: &TrustedProbeInstallMetadata,
+    identity: &TrustedProbeInstallPreflight,
+) -> bool {
+    authority.expected_hub_origin == hub_origin
+        && identity.hub_url == hub_origin
+        && metadata.hub_url == hub_origin
+        && authority.expected_probe_id == identity.probe_id
+        && metadata
+            .bundle_version
+            .as_deref()
+            .is_none_or(|installed| installed == authority.source_probe_version)
+        && authority.target_asset_set_digest == target_asset_set_digest
+        && authority.target_probe_version == bundle_version
 }
 
 fn execute_lifecycle_uninstall(
@@ -1748,6 +1822,7 @@ fn execute_lifecycle_uninstall(
             ..
         } => Some((operation_id.as_str(), operation_token.as_str())),
         LifecycleRequestAuthority::LocalRoot { .. } => None,
+        LifecycleRequestAuthority::ReplacementEnrollment { .. } => None,
     };
     let terminal_was_acknowledged = matches!(
         capsule.as_ref().map(|capsule| capsule.phase),
@@ -1806,6 +1881,7 @@ where
                 ..
             } => Some((operation_id, operation_token)),
             LifecycleRequestAuthority::LocalRoot { .. } => None,
+            LifecycleRequestAuthority::ReplacementEnrollment { .. } => None,
         }
     }
 
@@ -2183,7 +2259,7 @@ pub(crate) fn cleanup_trusted_probe_install_for_reenrollment(
     let plan =
         plan_probe_uninstall_cleanup(&input, &install_metadata, &install_metadata_path, false)?;
     let mut systemd = SystemProbeUpgraderSystemdRunner;
-    execute_probe_uninstall_cleanup(&plan, &mut systemd, UninstallCleanupExtent::Complete)
+    execute_probe_uninstall_cleanup(&plan, &mut systemd, UninstallCleanupExtent::Replacement)
 }
 
 fn rebase_trusted_install_metadata_paths(
@@ -2241,7 +2317,9 @@ struct ProbeUninstallCleanupPlan<'a> {
 enum UninstallCleanupExtent {
     Prepare,
     RecoverableFinalize,
+    #[cfg(test)]
     Complete,
+    Replacement,
 }
 
 /// Establishes every local deletion target before systemd or filesystem
@@ -2533,7 +2611,7 @@ fn execute_probe_uninstall_cleanup(
         {
             remove_path_if_exists(path)?;
         }
-        if extent == UninstallCleanupExtent::Complete
+        if extent != UninstallCleanupExtent::RecoverableFinalize
             && let Some(path) = install_metadata.lifecycle_companion_path.as_deref()
         {
             remove_path_if_exists(path)?;
@@ -2563,6 +2641,18 @@ fn execute_probe_uninstall_cleanup(
             })?;
     }
 
+    if extent == UninstallCleanupExtent::Replacement {
+        // 手动重装必须让可信 metadata 活过全部可失败清理与核验。删除 metadata
+        // 是最后一个可失败动作；成功后候选 Activator 可立即进入 fresh transaction。
+        return finalize_replacement_local_state_with(
+            &input.bootstrap_config_path,
+            &install_metadata.state_dir,
+            plan.install_metadata_path,
+            remove_path_if_exists,
+            || verify_probe_uninstall_cleanup(plan, systemd, extent),
+        );
+    }
+
     remove_uninstall_local_state_with(plan, remove_path_if_exists)?;
     remove_empty_parent_dir(&input.bootstrap_config_path)?;
 
@@ -2576,6 +2666,19 @@ fn remove_uninstall_local_state_with(
     remove(plan.install_metadata_path)?;
     remove(&plan.input.bootstrap_config_path)?;
     remove(&plan.install_metadata.state_dir)
+}
+
+fn finalize_replacement_local_state_with(
+    bootstrap_config_path: &Path,
+    state_dir: &Path,
+    install_metadata_path: &Path,
+    mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+    verify: impl FnOnce() -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    remove(bootstrap_config_path)?;
+    remove(state_dir)?;
+    verify()?;
+    remove(install_metadata_path)
 }
 
 fn verify_probe_uninstall_cleanup(
@@ -2616,7 +2719,9 @@ fn verify_probe_uninstall_cleanup(
             "verifying the service unit is absent",
         ),
     ] {
-        verify_path_absent(path, code, action)?;
+        if extent != UninstallCleanupExtent::Replacement || path != plan.install_metadata_path {
+            verify_path_absent(path, code, action)?;
+        }
     }
     for (path, code, action) in [
         (
@@ -5334,6 +5439,7 @@ fn capsule_receipt_matches_request(
             bundle_version,
             ..
         } => (install_state_sha256, target_manifest_sha256, bundle_version),
+        LifecycleRequestAuthority::ReplacementEnrollment { .. } => return false,
     };
     metadata.schema_version == 4
         && metadata.install_state_sha256.as_deref() == Some(install_state)
@@ -5485,6 +5591,100 @@ mod tests {
         failure_step: Option<&'static str>,
         paths_required_during_identity_removal: Vec<PathBuf>,
         restarted: Vec<String>,
+    }
+
+    #[test]
+    fn replacement_migration_requires_one_exact_hub_and_identity_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let status = temporary.path().join("probe-operation-status.toml");
+        let mut metadata = trusted_install_metadata_for_hub(
+            "https://hub.example",
+            &temporary.path().join("enoki-probe"),
+            &status,
+            "a".repeat(64),
+        );
+        metadata.schema_version = 4;
+        metadata.bundle_version = Some("1.2.2".to_string());
+        let identity = TrustedProbeInstallPreflight {
+            hub_url: "https://hub.example".to_string(),
+            probe_id: "probe_old_01".to_string(),
+        };
+        let authority = crate::registration::ProbeReplacementAuthorization {
+            expected_hub_origin: "https://hub.example".to_string(),
+            expected_probe_id: "probe_old_01".to_string(),
+            source_probe_version: "1.2.2".to_string(),
+            target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
+            target_probe_version: "1.2.3".to_string(),
+        };
+
+        assert!(replacement_authority_matches(
+            "https://hub.example",
+            &format!("sha256:{}", "b".repeat(64)),
+            "1.2.3",
+            &authority,
+            &metadata,
+            &identity,
+        ));
+        metadata.bundle_version = Some("1.2.1".to_string());
+        assert!(!replacement_authority_matches(
+            "https://hub.example",
+            &format!("sha256:{}", "b".repeat(64)),
+            "1.2.3",
+            &authority,
+            &metadata,
+            &identity,
+        ));
+    }
+
+    #[test]
+    fn replacement_cleanup_keeps_trusted_metadata_until_every_other_check_succeeds() {
+        let config = PathBuf::from("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
+        let state = PathBuf::from("/var/lib/enoki-probe");
+        let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
+        let mut failed_calls = Vec::new();
+        let failed = finalize_replacement_local_state_with(
+            &config,
+            &state,
+            &metadata,
+            |path| {
+                failed_calls.push(format!("remove {}", path.display()));
+                Ok(())
+            },
+            || {
+                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                    "ordinary cleanup verification failure",
+                )))
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(
+            failed_calls,
+            [
+                format!("remove {}", config.display()),
+                format!("remove {}", state.display()),
+            ]
+        );
+
+        let mut completed_calls = Vec::new();
+        finalize_replacement_local_state_with(
+            &config,
+            &state,
+            &metadata,
+            |path| {
+                completed_calls.push(format!("remove {}", path.display()));
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            completed_calls,
+            [
+                format!("remove {}", config.display()),
+                format!("remove {}", state.display()),
+                format!("remove {}", metadata.display()),
+            ]
+        );
     }
 
     impl RecordingSystemdRunner {

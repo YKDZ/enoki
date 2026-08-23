@@ -85,6 +85,9 @@ fn caller_is_authorized(
         LifecycleRequestAuthority::LocalRoot { .. } => {
             peer_uid.map_or(process_uid == 0, |uid| uid == 0)
         }
+        LifecycleRequestAuthority::ReplacementEnrollment { .. } => {
+            peer_uid.map_or(process_uid == 0, |uid| uid == 0)
+        }
     }
 }
 
@@ -176,6 +179,19 @@ mod tests {
             .clone()
     }
 
+    fn replacement_authority() -> LifecycleRequestAuthority {
+        LifecycleRequest::replacement_migration(
+            "enk_enroll_test",
+            "https://hub.example",
+            &format!("sha256:{}", "a".repeat(64)),
+            &"b".repeat(64),
+            "1.2.3",
+        )
+        .unwrap()
+        .authority()
+        .clone()
+    }
+
     #[test]
     fn hub_authority_requires_an_authenticated_socket_peer() {
         assert!(caller_is_authorized(&hub_authority(), Some(1000), 0));
@@ -188,6 +204,18 @@ mod tests {
         assert!(!caller_is_authorized(&local_authority(), Some(1000), 0));
         assert!(caller_is_authorized(&local_authority(), None, 0));
         assert!(!caller_is_authorized(&local_authority(), None, 1000));
+    }
+
+    #[test]
+    fn replacement_enrollment_requires_the_root_activator_caller() {
+        assert!(caller_is_authorized(&replacement_authority(), Some(0), 0));
+        assert!(!caller_is_authorized(
+            &replacement_authority(),
+            Some(1000),
+            0
+        ));
+        assert!(caller_is_authorized(&replacement_authority(), None, 0));
+        assert!(!caller_is_authorized(&replacement_authority(), None, 1000));
     }
 
     #[test]

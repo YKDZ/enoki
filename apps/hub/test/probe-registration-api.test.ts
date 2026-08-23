@@ -68,7 +68,11 @@ async function registerProbe(
   enrollmentToken: string,
   hostname = "managed-host-01",
   headers: Record<string, string> = {},
-  options: { publicKey?: boolean; publicKeyPem?: string } = {},
+  options: {
+    probeVersion?: string;
+    publicKey?: boolean;
+    publicKeyPem?: string;
+  } = {},
 ) {
   const identity = createTestProbeIdentity();
   const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
@@ -82,7 +86,12 @@ async function registerProbe(
         snapshots: [
           {
             collectorId: "official.host-profile",
-            hostProfile: sampleHostProfile({ hostname }),
+            hostProfile: sampleHostProfile({
+              hostname,
+              ...(options.probeVersion
+                ? { probeVersion: options.probeVersion }
+                : {}),
+            }),
           },
         ],
       }),
@@ -591,6 +600,106 @@ describe("Probe registration API", () => {
         .prepare("select count(*) as count from enrollment_tokens")
         .get(),
     ).toEqual({ count: 0 });
+
+    database.close();
+  });
+
+  it("replaces one Probe identity at the authorized target version while preserving its Host history", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = Date.now();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const firstRegistration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const firstIdentity = await decodeRegisteredProbe(firstRegistration);
+    const host = database.sqlite
+      .prepare("select id, probe_id as probeId from managed_hosts")
+      .get() as { id: number; probeId: string };
+    database.metrics.recordSample({
+      bootId: "pre-replacement-boot",
+      collectedAtMs: 1_725_000_001_000,
+      cpuPercent: 12,
+      hostId: host.id,
+      probeId: firstIdentity.probeId,
+      receivedAtMs: 1_725_000_001_100,
+      sequence: 2,
+    });
+    const enrollmentToken = `enk_enroll_${"m".repeat(32)}`;
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: nowMs,
+        enrollmentId: `enr_${"m".repeat(24)}`,
+        expiresAtMs: nowMs + 3_600_000,
+        target: {
+          expectedHubOrigin: "https://hub.example",
+          expectedProbeId: firstIdentity.probeId,
+          expectedProbeVersion: "0.1.0",
+          hostId: host.id,
+          kind: "manual_reinstall",
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion: "0.2.0",
+        },
+        tokenHash: hashSecret(enrollmentToken),
+      }).kind,
+    ).toBe("created");
+
+    const wrongVersion = await registerProbe(app, enrollmentToken);
+    expect(wrongVersion.status).toBe(401);
+    const replacement = await registerProbe(
+      app,
+      enrollmentToken,
+      "replacement-host",
+      {},
+      { probeVersion: "0.2.0" },
+    );
+    expect(replacement.status).toBe(200);
+    const replacementIdentity = await decodeRegisteredProbe(replacement);
+
+    expect(replacementIdentity.probeId).not.toBe(firstIdentity.probeId);
+    expect(
+      database.sqlite
+        .prepare(
+          "select id, probe_id as probeId, probe_version as probeVersion from managed_hosts",
+        )
+        .all(),
+    ).toEqual([
+      {
+        id: host.id,
+        probeId: replacementIdentity.probeId,
+        probeVersion: "0.2.0",
+      },
+    ]);
+    expect(
+      database.metrics.findSamplesForHost({
+        fromCollectedAtMs: 1_725_000_001_000,
+        hostId: host.id,
+        toCollectedAtMs: 1_725_000_001_000,
+      }),
+    ).toEqual([expect.objectContaining({ probeId: firstIdentity.probeId })]);
+    const replacementAudit = database.audit
+      .recent()
+      .find(
+        (event) => event.action === "probe.manual_reinstall_identity_replaced",
+      );
+    expect(replacementAudit).toEqual(
+      expect.objectContaining({ subjectId: String(host.id) }),
+    );
+    expect(JSON.parse(replacementAudit?.detailsJson ?? "null")).toEqual(
+      expect.objectContaining({
+        newProbeId: replacementIdentity.probeId,
+        oldProbeId: firstIdentity.probeId,
+        targetProbeVersion: "0.2.0",
+      }),
+    );
 
     database.close();
   });

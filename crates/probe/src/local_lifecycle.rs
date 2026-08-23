@@ -2473,12 +2473,15 @@ mod tests {
             _url: &str,
             _body: Vec<u8>,
         ) -> Result<Vec<u8>, crate::registration::RegistrationError> {
-            let target_kind = match self.target {
+            let target_kind = match &self.target {
                 ProbeInstallationTarget::NewHost => {
                     crate::protocol::enoki::v1::ProbeEnrollmentTargetKind::NewHost
                 }
                 ProbeInstallationTarget::ExistingHost => {
                     crate::protocol::enoki::v1::ProbeEnrollmentTargetKind::ExistingHost
+                }
+                ProbeInstallationTarget::ManualReinstall(_) => {
+                    crate::protocol::enoki::v1::ProbeEnrollmentTargetKind::ManualReinstall
                 }
             };
             Ok(crate::protocol::enoki::v1::ProbeRegistrationResponse {
@@ -2487,6 +2490,7 @@ mod tests {
                 installation_inspection: Some(
                     crate::protocol::enoki::v1::ProbeInstallationInspectionResponse {
                         target_kind: target_kind as i32,
+                        ..Default::default()
                     },
                 ),
                 probe_id: String::new(),

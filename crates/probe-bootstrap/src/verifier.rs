@@ -54,6 +54,7 @@ pub struct VerificationPolicy<'a> {
 pub struct VerifiedBundle {
     pub version: String,
     pub target: String,
+    pub asset_set_manifest_sha256: String,
     pub manifest_sha256: String,
     pub delegation_generation: u64,
     pub component_len: u64,
@@ -180,12 +181,13 @@ pub fn verify_metadata(
     if sha256_hex(&handoff.bundle_manifest) != outer.asset.bundle_manifest_sha256 {
         return Err(VerificationError::BundleManifest);
     }
-    let bundle = verify_bundle_manifest(
+    let mut bundle = verify_bundle_manifest(
         &handoff.bundle_manifest,
         &outer.version,
         &outer.asset,
         outer.delegation_generation,
     )?;
+    bundle.asset_set_manifest_sha256 = sha256_hex(&handoff.manifest);
     Ok(VerifiedMetadata {
         asset: outer.asset,
         bundle,
@@ -888,6 +890,7 @@ fn verify_bundle_manifest(
     Ok(VerifiedBundle {
         version: version.to_owned(),
         target: a.target.clone(),
+        asset_set_manifest_sha256: String::new(),
         manifest_sha256: sha256_hex(bytes),
         delegation_generation: generation,
         component_len: probe_size,

@@ -630,7 +630,8 @@ export function createEnrollmentRepository(
               !pending.targetAssetSetDigest ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
-              existingHost.probeVersion !== pending.expectedProbeVersion)
+              existingHost.probeVersion !== pending.expectedProbeVersion ||
+              input.host.probeVersion !== pending.targetProbeVersion)
           ) {
             return null;
           }

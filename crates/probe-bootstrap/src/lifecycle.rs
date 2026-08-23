@@ -40,6 +40,13 @@ pub enum LifecycleRequestAuthority {
         target_manifest_sha256: String,
         bundle_version: String,
     },
+    ReplacementEnrollment {
+        enrollment_token: String,
+        hub_origin: String,
+        target_asset_set_digest: String,
+        target_manifest_sha256: String,
+        bundle_version: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -182,6 +189,28 @@ impl LifecycleRequest {
         Ok(request)
     }
 
+    pub fn replacement_migration(
+        enrollment_token: &str,
+        hub_origin: &str,
+        target_asset_set_digest: &str,
+        target_manifest_sha256: &str,
+        bundle_version: &str,
+    ) -> Result<Self, LifecycleRejection> {
+        let request = Self {
+            schema_version: 1,
+            transition: LifecycleTransition::ReplacementMigration,
+            authority: LifecycleRequestAuthority::ReplacementEnrollment {
+                enrollment_token: enrollment_token.to_owned(),
+                hub_origin: hub_origin.to_owned(),
+                target_asset_set_digest: target_asset_set_digest.to_owned(),
+                target_manifest_sha256: target_manifest_sha256.to_owned(),
+                bundle_version: bundle_version.to_owned(),
+            },
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, LifecycleRejection> {
         if bytes.is_empty() || bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES {
             return Err(LifecycleRejection::InvalidAuthority);
@@ -242,6 +271,26 @@ impl LifecycleRequest {
                 target_manifest_sha256,
                 bundle_version,
             ),
+            LifecycleRequestAuthority::ReplacementEnrollment {
+                enrollment_token,
+                hub_origin,
+                target_asset_set_digest,
+                target_manifest_sha256,
+                bundle_version,
+            } => {
+                if self.transition != LifecycleTransition::ReplacementMigration
+                    || enrollment_token.is_empty()
+                    || enrollment_token.len() > MAX_OPERATION_TOKEN_BYTES
+                    || enrollment_token.bytes().any(|byte| byte.is_ascii_control())
+                    || !valid_hub_origin(hub_origin)
+                    || !is_prefixed_sha256(target_asset_set_digest)
+                    || !is_sha256_hex(target_manifest_sha256)
+                    || !valid_bundle_version(bundle_version)
+                {
+                    return Err(LifecycleRejection::InvalidAuthority);
+                }
+                return Ok(());
+            }
         };
         if !valid_identifier(probe_id)
             || !is_sha256_hex(install_state)
@@ -276,10 +325,10 @@ impl LifecycleTransition {
     #[must_use]
     pub const fn availability(self) -> TransitionAvailability {
         match self {
-            Self::FreshInstall | Self::Uninstall => TransitionAvailability::Enabled,
-            Self::Upgrade | Self::Repair | Self::ReplacementMigration => {
-                TransitionAvailability::NotEnabled
+            Self::FreshInstall | Self::ReplacementMigration | Self::Uninstall => {
+                TransitionAvailability::Enabled
             }
+            Self::Upgrade | Self::Repair => TransitionAvailability::NotEnabled,
         }
     }
 }
@@ -402,6 +451,14 @@ fn is_sha256_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_prefixed_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(is_sha256_hex)
+}
+
+fn valid_hub_origin(value: &str) -> bool {
+    crate::handoff::normalize_hub_origin(value).as_deref() == Some(value)
+}
+
 fn valid_bundle_version(value: &str) -> bool {
     (1..=64).contains(&value.len())
         && value
@@ -414,21 +471,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transition_registry_keeps_only_fresh_install_and_uninstall_enabled() {
+    fn transition_registry_enables_only_delivered_lifecycle_paths() {
         assert_eq!(LifecycleTransition::ALL.len(), 5);
         assert_eq!(
             LifecycleTransition::FreshInstall.availability(),
             TransitionAvailability::Enabled
         );
         assert_eq!(
+            LifecycleTransition::ReplacementMigration.availability(),
+            TransitionAvailability::Enabled
+        );
+        assert_eq!(
             LifecycleTransition::Uninstall.availability(),
             TransitionAvailability::Enabled
         );
-        for transition in [
-            LifecycleTransition::Upgrade,
-            LifecycleTransition::Repair,
-            LifecycleTransition::ReplacementMigration,
-        ] {
+        for transition in [LifecycleTransition::Upgrade, LifecycleTransition::Repair] {
             assert_eq!(
                 transition.availability(),
                 TransitionAvailability::NotEnabled
@@ -437,12 +494,24 @@ mod tests {
     }
 
     #[test]
+    fn replacement_migration_authority_roundtrips_as_one_bounded_request() {
+        let request = LifecycleRequest::replacement_migration(
+            "enk_enroll_test",
+            "https://hub.example",
+            &format!("sha256:{}", "a".repeat(64)),
+            &"b".repeat(64),
+            "1.2.3",
+        )
+        .unwrap();
+        let encoded = request.encode().unwrap();
+
+        assert!(encoded.len() <= MAX_LIFECYCLE_REQUEST_BYTES);
+        assert_eq!(LifecycleRequest::decode(&encoded), Ok(request));
+    }
+
+    #[test]
     fn disabled_transitions_return_one_stable_result_before_planning() {
-        for transition in [
-            LifecycleTransition::Upgrade,
-            LifecycleTransition::Repair,
-            LifecycleTransition::ReplacementMigration,
-        ] {
+        for transition in [LifecycleTransition::Upgrade, LifecycleTransition::Repair] {
             assert_eq!(
                 LifecyclePlan::for_transition(transition),
                 Err(LifecycleRejection::TransitionNotEnabled),
