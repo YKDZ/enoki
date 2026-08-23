@@ -2322,6 +2322,12 @@ enum UninstallCleanupExtent {
     Replacement,
 }
 
+impl UninstallCleanupExtent {
+    fn removes_bootstrap_state(self) -> bool {
+        self != Self::Replacement
+    }
+}
+
 /// Establishes every local deletion target before systemd or filesystem
 /// mutation. Both the offline public command and Hub-authorized operation
 /// invoke this planner through the same executor below.
@@ -2540,7 +2546,9 @@ fn execute_probe_uninstall_cleanup(
     {
         remove_path_if_exists(path)?;
     }
-    if let Some(path) = install_metadata.bootstrap_state_dir.as_deref() {
+    if extent.removes_bootstrap_state()
+        && let Some(path) = install_metadata.bootstrap_state_dir.as_deref()
+    {
         remove_owned_bootstrap_state(path)?;
     }
     // 在所有易失败的账户清理完成前，保留 Companion 激活资产和可信元数据。
@@ -2789,7 +2797,9 @@ fn verify_probe_uninstall_cleanup(
             verify_path_absent(path, code, action)?;
         }
     }
-    if let Some(path) = metadata.bootstrap_state_dir.as_deref() {
+    if extent.removes_bootstrap_state()
+        && let Some(path) = metadata.bootstrap_state_dir.as_deref()
+    {
         verify_path_absent(
             path,
             "probe_uninstall_bootstrap_state_residue",
@@ -5638,6 +5648,8 @@ mod tests {
 
     #[test]
     fn replacement_cleanup_keeps_trusted_metadata_until_every_other_check_succeeds() {
+        assert!(!UninstallCleanupExtent::Replacement.removes_bootstrap_state());
+        assert!(UninstallCleanupExtent::Complete.removes_bootstrap_state());
         let config = PathBuf::from("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
         let state = PathBuf::from("/var/lib/enoki-probe");
         let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
