@@ -1,18 +1,14 @@
-import {
-  createHash,
-  createPrivateKey,
-  createPublicKey,
-  generateKeyPairSync,
-  sign,
-} from "node:crypto";
+import { createHmac } from "node:crypto";
 
-const signingDomain = Buffer.from("enoki/lifecycle-upgrade-authority/v1\0");
-
-export type LifecycleAuthorityKeyPair = {
-  privateKeyPem: string;
-  publicKeyPem: string;
-  publicKeySha256: string;
-};
+const installKeySalt = Buffer.from(
+  "enoki/lifecycle-authority/install-key/hkdf-sha256/v1\0",
+);
+const installKeyInfoDomain = Buffer.from(
+  "enoki/lifecycle-authority/hub-origin/hkdf-sha256/v1\0",
+);
+const signingDomain = Buffer.from(
+  "enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0",
+);
 
 export type LifecycleUpgradeAuthority = {
   schemaVersion: 1;
@@ -36,55 +32,32 @@ export function canonicalLifecycleUpgradeAuthority(
   return Buffer.from(JSON.stringify(authority), "utf8");
 }
 
-export function generateLifecycleAuthorityKeyPair(): LifecycleAuthorityKeyPair {
-  const pair = generateKeyPairSync("rsa", {
-    modulusLength: 3072,
-    publicExponent: 0x10001,
-    privateKeyEncoding: { format: "pem", type: "pkcs8" },
-    publicKeyEncoding: { format: "pem", type: "spki" },
-  });
-  return lifecycleAuthorityKeyPair(pair.privateKey, pair.publicKey);
-}
-
-export function lifecycleAuthorityKeyPair(
-  privateKeyPem: string,
-  publicKeyPem: string,
-): LifecycleAuthorityKeyPair {
-  const canonicalPublic = createPublicKey(publicKeyPem).export({
-    format: "pem",
-    type: "spki",
-  }) as string;
-  if (
-    !createPublicKey(createPrivateKey(privateKeyPem)).equals(
-      createPublicKey(canonicalPublic),
-    )
-  ) {
-    throw new Error("Lifecycle authority keypair does not match.");
+export function deriveLifecycleAuthorityKey(
+  enrollmentTokenSha256: Uint8Array,
+  normalizedHubOrigin: string,
+) {
+  if (enrollmentTokenSha256.byteLength !== 32) {
+    throw new Error("Lifecycle authority IKM must be one SHA-256 digest.");
   }
-  return {
-    privateKeyPem,
-    publicKeyPem: canonicalPublic,
-    publicKeySha256: createHash("sha256").update(canonicalPublic).digest("hex"),
-  };
-}
-
-export function lifecycleAuthorityKeyPairFromPrivate(
-  privateKeyPem: string,
-): LifecycleAuthorityKeyPair {
-  const publicKeyPem = createPublicKey(createPrivateKey(privateKeyPem)).export({
-    format: "pem",
-    type: "spki",
-  }) as string;
-  return lifecycleAuthorityKeyPair(privateKeyPem, publicKeyPem);
+  const prk = createHmac("sha256", installKeySalt)
+    .update(enrollmentTokenSha256)
+    .digest();
+  return createHmac("sha256", prk)
+    .update(installKeyInfoDomain)
+    .update(normalizedHubOrigin, "utf8")
+    .update(Buffer.from([1]))
+    .digest();
 }
 
 export function signLifecycleUpgradeAuthority(
   canonicalAuthority: Uint8Array,
-  key: LifecycleAuthorityKeyPair,
+  installKey: Uint8Array,
 ) {
-  return sign(
-    "RSA-SHA256",
-    Buffer.concat([signingDomain, Buffer.from(canonicalAuthority)]),
-    key.privateKeyPem,
-  ).toString("hex");
+  if (installKey.byteLength !== 32) {
+    throw new Error("Lifecycle authority key must be 32 bytes.");
+  }
+  return createHmac("sha256", installKey)
+    .update(signingDomain)
+    .update(canonicalAuthority)
+    .digest("hex");
 }

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash, createVerify } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,7 +19,7 @@ import {
 } from "../src/probe/operation-token";
 import {
   canonicalLifecycleUpgradeAuthority,
-  generateLifecycleAuthorityKeyPair,
+  deriveLifecycleAuthorityKey,
   type LifecycleUpgradeAuthority,
 } from "../src/probe/lifecycle-authority";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
@@ -3163,7 +3163,6 @@ describe("Probe report API", () => {
       targetVersion: "1.4.0",
       transition: "compatible",
     });
-    const authorityKey = generateLifecycleAuthorityKeyPair();
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -3171,7 +3170,6 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
-      lifecycleAuthorityKey: authorityKey,
       now: () => 1_725_000_010_000,
       probeApiOrigin: "https://hub.example",
       probeAssets: {
@@ -3250,16 +3248,16 @@ describe("Probe report API", () => {
       verifiedStageSha256: "c".repeat(64),
       expiresAtMs: 1_725_000_310_000,
     });
-    const verifier = createVerify("RSA-SHA256");
-    verifier.update("enoki/lifecycle-upgrade-authority/v1\0");
-    verifier.update(canonicalLifecycleUpgradeAuthority(body.authority));
-    verifier.end();
-    expect(
-      verifier.verify(
-        authorityKey.publicKeyPem,
-        Buffer.from(body.signature, "hex"),
-      ),
-    ).toBe(true);
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    expect(body.signature).toBe(
+      createHmac("sha256", installKey)
+        .update("enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0")
+        .update(canonicalLifecycleUpgradeAuthority(body.authority))
+        .digest("hex"),
+    );
     expect(database.probeOperations.findById(operation.id ?? 0)).toMatchObject({
       acceptedAtMs: 1_725_000_010_000,
       runningAtMs: 1_725_000_010_000,
@@ -3516,8 +3514,12 @@ describe("Probe report API", () => {
       }).operation,
     );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const startupHostProfile = sampleHostProfileSnapshot();
+    const startupHostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "0.1.0",
+    });
     const upgradedHostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.2.0",
       probeVersion: "0.2.0",
     });
     const upgradedHostProfileHash = hashStableHostProfile(upgradedHostProfile);
@@ -3530,6 +3532,7 @@ describe("Probe report API", () => {
         ReportRequest.encode(
           ReportRequest.create({
             bootId: "boot-after-upgrade",
+            probeAssetBundleVersion: "0.2.0",
             operationAcknowledgements: [{ operationId: String(operation.id) }],
             operationStatuses: [
               {

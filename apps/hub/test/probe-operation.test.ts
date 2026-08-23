@@ -353,9 +353,11 @@ describe("Probe Upgrade Request lifecycle", () => {
     };
 
     const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+      bootProbeAssetBundleVersion: "0.2.0",
       nowMs: 1_725_000_030_000,
       operation: running,
       hostProfile: {
+        probeAssetBundleVersion: "0.2.0",
         probeVersion: "0.2.0",
       },
     });
@@ -375,22 +377,50 @@ describe("Probe Upgrade Request lifecycle", () => {
     ).toEqual({ error: null, operation: succeeded });
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        bootProbeAssetBundleVersion: "0.2.0",
         nowMs: 1_725_000_030_000,
         operation: running,
         hostProfile: {
+          probeAssetBundleVersion: "0.2.0",
           probeVersion: "0.1.0",
         },
       }),
     ).toBeNull();
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        bootProbeAssetBundleVersion: "0.2.0",
         nowMs: 1_725_000_030_000,
         operation: running,
         hostProfile: {
+          probeAssetBundleVersion: "0.2.0",
           probeVersion: "0.2.0",
         },
       }),
     ).toEqual(succeeded);
+    for (const input of [
+      {
+        bootProbeAssetBundleVersion: "0.1.0",
+        hostProfile: {
+          probeAssetBundleVersion: "0.2.0",
+          probeVersion: "0.2.0",
+        },
+      },
+      {
+        bootProbeAssetBundleVersion: "0.2.0",
+        hostProfile: {
+          probeAssetBundleVersion: "0.1.0",
+          probeVersion: "0.2.0",
+        },
+      },
+    ]) {
+      expect(
+        succeedProbeUpgradeRequestFromHostProfile({
+          ...input,
+          nowMs: 1_725_000_030_000,
+          operation: running,
+        }),
+      ).toBeNull();
+    }
   });
 
   it("succeeds when Host Profile reports a tag-prefixed Probe version", () => {
@@ -412,9 +442,11 @@ describe("Probe Upgrade Request lifecycle", () => {
 
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        bootProbeAssetBundleVersion: "v0.2.0",
         nowMs: 1_725_000_030_000,
         operation: running,
         hostProfile: {
+          probeAssetBundleVersion: "v0.2.0",
           probeVersion: "v0.2.0",
         },
       }),
@@ -490,7 +522,11 @@ describe("Probe Upgrade Request lifecycle", () => {
     });
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
-        hostProfile: { probeVersion: "0.2.0" },
+        bootProbeAssetBundleVersion: "0.2.0",
+        hostProfile: {
+          probeAssetBundleVersion: "0.2.0",
+          probeVersion: "0.2.0",
+        },
         nowMs: 1_725_000_010_000,
         operation,
       }),

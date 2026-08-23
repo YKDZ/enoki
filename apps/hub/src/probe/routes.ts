@@ -59,9 +59,8 @@ import {
 } from "./operation.js";
 import {
   canonicalLifecycleUpgradeAuthority,
-  generateLifecycleAuthorityKeyPair,
+  deriveLifecycleAuthorityKey,
   signLifecycleUpgradeAuthority,
-  type LifecycleAuthorityKeyPair,
   type LifecycleUpgradeAuthority,
 } from "./lifecycle-authority.js";
 import { readProbeReleaseContextFromDirectory } from "./release-context.js";
@@ -81,7 +80,6 @@ const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
 const enrollmentVerificationTtlMs = 60 * 1000;
 const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
-const defaultLifecycleAuthorityKey = generateLifecycleAuthorityKeyPair();
 
 type ProtoMessage = Record<string, any>;
 
@@ -109,7 +107,6 @@ export type ProbeRouteServices = {
   liveUpdates?: LiveUpdateBroadcaster | null;
   now?: () => number;
   probeOperationTokenSecret?: string;
-  lifecycleAuthorityKey?: LifecycleAuthorityKeyPair;
   probeAssetDir?: string;
   probeDistributionRootPublicKeyPem?: Buffer | string;
   probeApiOrigin?: string;
@@ -127,18 +124,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     return next();
   });
-
-  routes.get("/lifecycle-authority-key", (context) =>
-    context.body(
-      services.lifecycleAuthorityKey?.publicKeyPem ??
-        defaultLifecycleAuthorityKey.publicKeyPem,
-      200,
-      {
-        "cache-control": "no-store",
-        "content-type": "application/x-pem-file",
-      },
-    ),
-  );
 
   routes.post("/register", async (context) => {
     if (
@@ -850,6 +835,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           ? services.snapshotCollectors.hostProfile.read(host.id)
           : null;
       markProbeUpgradeSucceededFromHostProfile({
+        bootProbeAssetBundleVersion:
+          bootBundleVersion ?? storedBootBundleVersion,
         hostId: host.id,
         hostProfile: reportedHostProfile ?? storedReportedHostProfile,
         nowMs: reportReceivedAtMs,
@@ -1097,7 +1084,17 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       verifiedStageSha256: body.verifiedStageSha256,
       expiresAtMs: operationNowMs + defaultProbeOperationTokenTtlMs,
     };
-    const key = services.lifecycleAuthorityKey ?? defaultLifecycleAuthorityKey;
+    const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
+      host.id,
+    );
+    const hubOrigin = services.probeApiOrigin ?? "";
+    if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+      return probeJsonError("probe_upgrade_authority_unavailable", 503);
+    }
+    const key = deriveLifecycleAuthorityKey(
+      Buffer.from(tokenHash, "hex"),
+      hubOrigin,
+    );
     return context.json(
       {
         authority,
@@ -1787,8 +1784,10 @@ function completeProbeUninstallIfSucceeded(input: {
 }
 
 function markProbeUpgradeSucceededFromHostProfile(input: {
+  bootProbeAssetBundleVersion: string | null;
   hostId: number;
   hostProfile: {
+    probeAssetBundleVersion?: string | null;
     probeVersion?: string | null;
   } | null;
   nowMs: number;
@@ -1806,6 +1805,7 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
   }
 
   const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+    bootProbeAssetBundleVersion: input.bootProbeAssetBundleVersion,
     hostProfile: input.hostProfile,
     nowMs: input.nowMs,
     operation: active,

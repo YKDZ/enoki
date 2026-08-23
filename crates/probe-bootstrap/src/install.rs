@@ -18,13 +18,15 @@ use crate::{
         SYSTEM_STATE_PERMISSION_PROFILE,
     },
     handoff::Enrollment,
-    lifecycle::{FreshInstallLifecycleEffects, execute_fresh_install_lifecycle},
+    lifecycle::{
+        FreshInstallLifecycleEffects, derive_lifecycle_authority_install_key,
+        execute_fresh_install_lifecycle,
+    },
     trust::{BootstrapRole, BuildTrust},
     verifier::VerifiedBundle,
 };
 use command::run_bounded;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Seek, SeekFrom, Write},
@@ -1361,16 +1363,12 @@ fn install_metadata(
             UNIT,
         ));
     }
-    #[cfg(not(test))]
-    let lifecycle_authority_public_key = enrollment
-        .lifecycle_authority_public_key()
-        .ok_or(InstallError::InvalidVerifiedComponent)?;
-    #[cfg(test)]
-    let lifecycle_authority_public_key = enrollment
-        .lifecycle_authority_public_key()
-        .unwrap_or(b"TEST_ONLY_UNPINNED");
+    let lifecycle_authority_install_key = derive_lifecycle_authority_install_key(
+        enrollment.enrollment_token(),
+        enrollment.hub_origin(),
+    );
     Ok(format!(
-        "schema_version = 5\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nlifecycle_authority_public_key_pem = {:?}\nlifecycle_authority_public_key_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\nlifecycle_upgrade_service_unit_path = {:?}\nlifecycle_upgrade_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 5\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nlifecycle_authority_install_key = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\nlifecycle_upgrade_service_unit_path = {:?}\nlifecycle_upgrade_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1384,8 +1382,10 @@ fn install_metadata(
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
         trust.root_fingerprint,
-        String::from_utf8_lossy(lifecycle_authority_public_key),
-        format!("{:x}", Sha256::digest(lifecycle_authority_public_key)),
+        lifecycle_authority_install_key
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
         bundle.install_state_sha256(),
         bundle.manifest_sha256,
         bundle.version,
@@ -1567,9 +1567,9 @@ use account::create_static_service_identity_with_commands;
 use filesystem::*;
 pub use systemd::SystemSystemd;
 pub use upgrade::{
-    InstalledUpgradeBinding, UpgradeAttempt, VerifiedUpgradeComponents,
-    inspect_installed_probe_for_upgrade, upgrade_current_probe,
-    upgrade_current_probe_for_operation,
+    InstalledUpgradeBinding, UpgradeAttempt, UpgradeRecoveryReceipt, VerifiedUpgradeComponents,
+    finalize_probe_upgrade_stage_cleanup, inspect_installed_probe_for_upgrade,
+    recover_incomplete_probe_upgrade, upgrade_current_probe, upgrade_current_probe_for_operation,
 };
 
 include!("install/tests.rs");

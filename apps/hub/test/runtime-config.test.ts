@@ -1,7 +1,6 @@
 import {
   mkdtempSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,9 +53,6 @@ describe("Hub runtime configuration", () => {
       runningTimeoutMs: 900_000,
       tokenSigningSecret: undefined,
     });
-    expect(config.probeOperations.lifecycleAuthorityKey?.publicKeySha256).toMatch(
-      /^[0-9a-f]{64}$/,
-    );
   });
 
   it("allows deployment configuration to override persistence and Metrics retention", () => {
@@ -113,34 +109,6 @@ describe("Hub runtime configuration", () => {
       runningTimeoutMs: 600_000,
       tokenSigningSecret: "stable-token-secret",
     });
-  });
-
-  it("durably reuses the lifecycle authority and recovers its public projection", () => {
-    const dataRoot = mkdtempSync(path.join(tmpdir(), "enoki-config-"));
-    const environment = {
-      ENOKI_DATA_ROOT: dataRoot,
-      ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
-      OWNER_PASSWORD: "correct horse battery staple",
-    };
-
-    const first = createHubRuntimeConfigFromEnvironment(environment)
-      .probeOperations.lifecycleAuthorityKey;
-    const second = createHubRuntimeConfigFromEnvironment(environment)
-      .probeOperations.lifecycleAuthorityKey;
-    expect(second).toEqual(first);
-    expect(
-      statSync(path.join(dataRoot, "lifecycle-authority-private.pem")).mode &
-        0o777,
-    ).toBe(0o600);
-    expect(
-      statSync(path.join(dataRoot, "lifecycle-authority-public.pem")).mode &
-        0o777,
-    ).toBe(0o644);
-
-    unlinkSync(path.join(dataRoot, "lifecycle-authority-public.pem"));
-    const recovered = createHubRuntimeConfigFromEnvironment(environment)
-      .probeOperations.lifecycleAuthorityKey;
-    expect(recovered).toEqual(first);
   });
 
   it("rejects Host Status thresholds where offline is not after stale", () => {

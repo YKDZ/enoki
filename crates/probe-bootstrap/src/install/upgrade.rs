@@ -1,5 +1,6 @@
 use super::*;
 use crate::lifecycle::{UpgradeCompletion, UpgradeLifecycleEffects, execute_upgrade_lifecycle};
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::os::fd::AsRawFd;
 
@@ -9,6 +10,17 @@ const OPERATION_STATUS_FILE: &str = "probe-operation-status.toml";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UpgradeAttempt {
     pub operation_id: String,
+    pub stage_owner_uid: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeRecoveryReceipt {
+    pub operation_id: String,
+    pub probe_id: String,
+    pub stage_owner_uid: u32,
+    pub source_bundle_version: String,
+    pub target_bundle_version: String,
+    pub activated: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,15 +223,15 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
     type Error = InstallError;
 
     fn verify_and_prepare(&mut self) -> Result<(), Self::Error> {
+        if let Some(attempt) = self.attempt {
+            begin_upgrade_attempt(self.paths, attempt, self.expected_source, self.bundle)?;
+        }
         let actual = inspect_installed_probe_for_upgrade(self.paths)?;
         if &actual != self.expected_source
             || self.bundle.version == actual.source_bundle_version
             || !version_is_newer(&self.bundle.version, &actual.source_bundle_version)
         {
             return Err(InstallError::ExistingResidue);
-        }
-        if let Some(attempt) = self.attempt {
-            begin_upgrade_attempt(self.paths, attempt, self.expected_source, self.bundle)?;
         }
         let components = self
             .components
@@ -229,12 +241,7 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         let prepared = prepare_upgrade(components, self.bundle, self.paths, &actual);
         let prepared = match prepared {
             Ok(prepared) => prepared,
-            Err(error) => {
-                if self.attempt.is_some() {
-                    let _ = clear_upgrade_attempt(self.paths);
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         if let Some(attempt) = self.attempt
             && write_upgrade_attempt(
@@ -243,10 +250,11 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
                 self.expected_source,
                 self.bundle,
                 "prepared",
+                0,
+                0,
             )
             .is_err()
         {
-            let _ = clear_upgrade_attempt(self.paths);
             return Err(InstallError::Io);
         }
         self.prepared = Some(prepared);
@@ -264,30 +272,79 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
                     self.expected_source,
                     self.bundle,
                     "activation-started",
+                    0,
+                    0,
                 )?;
                 write_operation_status(self.paths, attempt, &self.bundle.version, "running", None)?;
             }
             self.systemd
                 .set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
             self.systemd.stop()?;
-            for (temporary, destination) in prepared.staged.iter().zip(&prepared.destinations) {
+            for (index, (temporary, destination)) in prepared
+                .staged
+                .iter()
+                .zip(&prepared.destinations)
+                .enumerate()
+            {
                 fs::rename(temporary, destination).map_err(|_| InstallError::Io)?;
+                sync_directory(destination.parent().ok_or(InstallError::Io)?)?;
+                if let Some(attempt) = self.attempt {
+                    write_upgrade_attempt(
+                        self.paths,
+                        attempt,
+                        self.expected_source,
+                        self.bundle,
+                        "activation-started",
+                        index + 1,
+                        0,
+                    )?;
+                }
             }
-            sync_destination_directories(&prepared.destinations)?;
             self.systemd.daemon_reload()?;
             self.systemd.start()?;
             self.systemd.wait_local_activated()?;
-            for backup in &prepared.backups {
-                fs::remove_file(backup).map_err(|_| InstallError::Io)?;
-            }
-            sync_destination_directories(&prepared.backups)?;
             if let Some(attempt) = self.attempt {
                 write_upgrade_attempt(
                     self.paths,
                     attempt,
                     self.expected_source,
                     self.bundle,
-                    "activated",
+                    "finalizing",
+                    prepared.destinations.len(),
+                    0,
+                )?;
+            }
+            for (index, backup) in prepared.backups.iter().enumerate() {
+                fs::remove_file(backup).map_err(|_| InstallError::Io)?;
+                sync_directory(backup.parent().ok_or(InstallError::Io)?)?;
+                if let Some(attempt) = self.attempt {
+                    write_upgrade_attempt(
+                        self.paths,
+                        attempt,
+                        self.expected_source,
+                        self.bundle,
+                        "finalizing",
+                        prepared.destinations.len(),
+                        index + 1,
+                    )?;
+                }
+            }
+            if let Some(attempt) = self.attempt {
+                write_upgrade_attempt(
+                    self.paths,
+                    attempt,
+                    self.expected_source,
+                    self.bundle,
+                    "stage-cleanup-required",
+                    prepared.destinations.len(),
+                    prepared.backups.len(),
+                )?;
+                write_operation_status(
+                    self.paths,
+                    attempt,
+                    &self.bundle.version,
+                    "failed",
+                    Some("lifecycle.upgrade_repair_required"),
                 )?;
             }
             prepared.retain_for_repair = false;
@@ -301,18 +358,32 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
                 attempt,
                 &self.bundle.version,
                 "failed",
-                Some("lifecycle_upgrade_repair_required"),
+                Some("lifecycle.upgrade_repair_required"),
             );
-            let _ = write_upgrade_attempt(
-                self.paths,
-                attempt,
-                self.expected_source,
-                self.bundle,
-                "repair-required",
-            );
+            let _ = mark_upgrade_attempt_phase(self.paths, "repair-required");
         }
         activated
     }
+}
+
+fn mark_upgrade_attempt_phase(paths: &FixedInstallPaths, phase: &str) -> Result<(), InstallError> {
+    let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    let contents = fs::read_to_string(&journal).map_err(|_| InstallError::Io)?;
+    let mut replacements = 0_u8;
+    let mut updated = String::new();
+    for line in contents.lines() {
+        if line.starts_with("phase = ") {
+            replacements += 1;
+            updated.push_str(&format!("phase = {phase:?}\n"));
+        } else {
+            updated.push_str(line);
+            updated.push('\n');
+        }
+    }
+    if replacements != 1 {
+        return Err(InstallError::ExistingResidue);
+    }
+    atomic_durable_write(&journal, updated.as_bytes(), 0o600)
 }
 
 fn verify_component_lengths(
@@ -624,18 +695,21 @@ fn begin_upgrade_attempt(
         let prior_operation = journal_string(&contents, "operation_id")?;
         let phase = journal_string(&contents, "phase")?;
         if prior_operation == attempt.operation_id
-            || matches!(phase, "activation-started" | "repair-required")
+            || matches!(
+                phase,
+                "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
+            )
         {
             return Err(InstallError::ExistingResidue);
         }
-        if !matches!(phase, "admitted" | "prepared" | "activated") {
+        if !matches!(phase, "admitted" | "prepared" | "activated" | "aborted") {
             return Err(InstallError::ExistingResidue);
         }
         cleanup_pre_activation_residue(paths)?;
     } else if journal.exists() {
         return Err(InstallError::ExistingResidue);
     }
-    write_upgrade_attempt(paths, attempt, source, bundle, "admitted")
+    write_upgrade_attempt(paths, attempt, source, bundle, "admitted", 0, 0)
 }
 
 fn journal_string<'a>(contents: &'a str, key: &str) -> Result<&'a str, InstallError> {
@@ -652,7 +726,8 @@ fn journal_string<'a>(contents: &'a str, key: &str) -> Result<&'a str, InstallEr
 }
 
 fn cleanup_pre_activation_residue(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    for destination in upgrade_destinations(paths) {
+    let destinations = upgrade_destinations(paths);
+    for destination in &destinations {
         let name = destination
             .file_name()
             .and_then(|name| name.to_str())
@@ -661,23 +736,248 @@ fn cleanup_pre_activation_residue(paths: &FixedInstallPaths) -> Result<(), Insta
             destination.with_file_name(format!(".{name}.enoki-upgrade-new")),
             destination.with_file_name(format!(".{name}.enoki-upgrade-old")),
         ] {
-            match fs::remove_file(residue) {
+            match fs::remove_file(&residue) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return Err(InstallError::Io),
             }
         }
     }
-    clear_upgrade_attempt(paths)
+    sync_destination_directories(&destinations)
 }
 
-fn clear_upgrade_attempt(paths: &FixedInstallPaths) -> Result<(), InstallError> {
-    let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
-    match fs::remove_file(&journal) {
-        Ok(()) => sync_directory(paths.bootstrap_state().as_path()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(InstallError::Io),
+fn journal_usize(contents: &str, key: &str) -> Result<usize, InstallError> {
+    let prefix = format!("{key} = ");
+    let mut values = contents
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .map(str::parse::<usize>);
+    let value = values
+        .next()
+        .ok_or(InstallError::ExistingResidue)?
+        .map_err(|_| InstallError::ExistingResidue)?;
+    if values.next().is_some() {
+        return Err(InstallError::ExistingResidue);
     }
+    Ok(value)
+}
+
+pub fn recover_incomplete_probe_upgrade(
+    paths: &FixedInstallPaths,
+    systemd: &mut impl SystemdPort,
+) -> Result<Option<UpgradeRecoveryReceipt>, InstallError> {
+    let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    if !journal_path.exists() {
+        return Ok(None);
+    }
+    let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
+    if metadata_scalar(&contents, "schema_version").as_deref() != Some("1") {
+        return Err(InstallError::ExistingResidue);
+    }
+    let operation_id = journal_string(&contents, "operation_id")?.to_owned();
+    let probe_id = journal_string(&contents, "source_probe_id")?.to_owned();
+    let target_bundle_version = journal_string(&contents, "target_bundle_version")?.to_owned();
+    let source_bundle_version = journal_string(&contents, "source_bundle_version")?.to_owned();
+    let stage_owner_uid = journal_usize(&contents, "stage_owner_uid")?
+        .try_into()
+        .map_err(|_| InstallError::ExistingResidue)?;
+    let phase = journal_string(&contents, "phase")?;
+    let destinations = upgrade_destinations(paths);
+    let activated_targets = journal_usize(&contents, "activated_targets")?;
+    let finalized_targets = journal_usize(&contents, "finalized_targets")?;
+    if activated_targets > destinations.len() || finalized_targets > destinations.len() {
+        return Err(InstallError::ExistingResidue);
+    }
+    let receipt = UpgradeRecoveryReceipt {
+        operation_id: operation_id.clone(),
+        probe_id,
+        stage_owner_uid,
+        source_bundle_version,
+        target_bundle_version: target_bundle_version.clone(),
+        activated: !matches!(phase, "admitted" | "prepared" | "aborted"),
+    };
+    let attempt = UpgradeAttempt {
+        operation_id,
+        stage_owner_uid,
+    };
+
+    let recovered = (|| {
+        match phase {
+            "admitted" | "prepared" => {
+                cleanup_pre_activation_residue(paths)?;
+                mark_upgrade_attempt_phase(paths, "aborted")?;
+                write_operation_status(
+                    paths,
+                    &attempt,
+                    &target_bundle_version,
+                    "failed",
+                    Some("lifecycle.upgrade_repair_required"),
+                )?;
+            }
+            "aborted" => {}
+            "activation-started" | "repair-required" | "finalizing" => {
+                systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
+                systemd.stop()?;
+                for (index, destination) in destinations.iter().enumerate() {
+                    let name = destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or(InstallError::Io)?;
+                    let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+                    if staged.exists() {
+                        fs::rename(&staged, destination).map_err(|_| InstallError::Io)?;
+                        sync_directory(destination.parent().ok_or(InstallError::Io)?)?;
+                    } else if !destination.exists() {
+                        return Err(InstallError::ExistingResidue);
+                    }
+                    write_upgrade_attempt_from_journal(
+                        paths,
+                        &contents,
+                        "activation-started",
+                        index + 1,
+                        finalized_targets,
+                    )?;
+                }
+                systemd.daemon_reload()?;
+                systemd.start()?;
+                systemd.wait_local_activated()?;
+                write_upgrade_attempt_from_journal(
+                    paths,
+                    &contents,
+                    "finalizing",
+                    destinations.len(),
+                    finalized_targets,
+                )?;
+                for (index, destination) in destinations.iter().enumerate() {
+                    let name = destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or(InstallError::Io)?;
+                    let backup = destination.with_file_name(format!(".{name}.enoki-upgrade-old"));
+                    match fs::remove_file(&backup) {
+                        Ok(()) => sync_directory(backup.parent().ok_or(InstallError::Io)?)?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(InstallError::Io),
+                    }
+                    write_upgrade_attempt_from_journal(
+                        paths,
+                        &contents,
+                        "finalizing",
+                        destinations.len(),
+                        index + 1,
+                    )?;
+                }
+                write_upgrade_attempt_from_journal(
+                    paths,
+                    &contents,
+                    "stage-cleanup-required",
+                    destinations.len(),
+                    destinations.len(),
+                )?;
+                write_operation_status(
+                    paths,
+                    &attempt,
+                    &target_bundle_version,
+                    "failed",
+                    Some("lifecycle.upgrade_repair_required"),
+                )?;
+            }
+            "stage-cleanup-required" => {}
+            "activated" => return Ok(None),
+            _ => return Err(InstallError::ExistingResidue),
+        }
+        Ok(Some(receipt))
+    })();
+    if recovered.is_err() && !matches!(phase, "admitted" | "prepared" | "aborted") {
+        let _ = mark_upgrade_attempt_phase(paths, "repair-required");
+        let _ = write_operation_status(
+            paths,
+            &attempt,
+            &target_bundle_version,
+            "failed",
+            Some("lifecycle.upgrade_repair_required"),
+        );
+    }
+    recovered
+}
+
+pub fn finalize_probe_upgrade_stage_cleanup(
+    paths: &FixedInstallPaths,
+    receipt: &UpgradeRecoveryReceipt,
+) -> Result<(), InstallError> {
+    let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
+    if journal_string(&contents, "operation_id")? != receipt.operation_id
+        || journal_usize(&contents, "stage_owner_uid")? != receipt.stage_owner_uid as usize
+        || journal_string(&contents, "target_bundle_version")? != receipt.target_bundle_version
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let phase = journal_string(&contents, "phase")?;
+    if receipt.activated {
+        if phase != "stage-cleanup-required" {
+            return Err(InstallError::ExistingResidue);
+        }
+        mark_upgrade_attempt_phase(paths, "activated")?;
+        write_operation_status(
+            paths,
+            &UpgradeAttempt {
+                operation_id: receipt.operation_id.clone(),
+                stage_owner_uid: receipt.stage_owner_uid,
+            },
+            &receipt.target_bundle_version,
+            "running",
+            None,
+        )
+    } else {
+        if phase != "aborted" {
+            return Err(InstallError::ExistingResidue);
+        }
+        write_operation_status(
+            paths,
+            &UpgradeAttempt {
+                operation_id: receipt.operation_id.clone(),
+                stage_owner_uid: receipt.stage_owner_uid,
+            },
+            &receipt.target_bundle_version,
+            "failed",
+            Some("lifecycle.upgrade_failed_before_activation"),
+        )
+    }
+}
+
+fn write_upgrade_attempt_from_journal(
+    paths: &FixedInstallPaths,
+    prior: &str,
+    phase: &str,
+    activated_targets: usize,
+    finalized_targets: usize,
+) -> Result<(), InstallError> {
+    let mut counts = [0_u8; 3];
+    let mut output = String::new();
+    for line in prior.lines() {
+        if line.starts_with("phase = ") {
+            counts[0] += 1;
+            output.push_str(&format!("phase = {phase:?}\n"));
+        } else if line.starts_with("activated_targets = ") {
+            counts[1] += 1;
+            output.push_str(&format!("activated_targets = {activated_targets}\n"));
+        } else if line.starts_with("finalized_targets = ") {
+            counts[2] += 1;
+            output.push_str(&format!("finalized_targets = {finalized_targets}\n"));
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if counts != [1, 1, 1] {
+        return Err(InstallError::ExistingResidue);
+    }
+    atomic_durable_write(
+        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+        output.as_bytes(),
+        0o600,
+    )
 }
 
 fn write_upgrade_attempt(
@@ -686,10 +986,16 @@ fn write_upgrade_attempt(
     source: &InstalledUpgradeBinding,
     bundle: &VerifiedBundle,
     phase: &str,
+    activated_targets: usize,
+    finalized_targets: usize,
 ) -> Result<(), InstallError> {
+    let authority_sha256 = upgrade_authority_sha256(attempt, source, bundle);
     let contents = format!(
-        "schema_version = 1\noperation_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_install_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nphase = {:?}\n",
+        "schema_version = 1\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_install_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nphase = {:?}\nactivated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\n",
         attempt.operation_id,
+        attempt.stage_owner_uid,
+        authority_sha256,
+        source.probe_id,
         source.source_bundle_version,
         source.source_install_state_sha256,
         source.source_manifest_sha256,
@@ -703,6 +1009,24 @@ fn write_upgrade_attempt(
         contents.as_bytes(),
         0o600,
     )
+}
+
+fn upgrade_authority_sha256(
+    attempt: &UpgradeAttempt,
+    source: &InstalledUpgradeBinding,
+    bundle: &VerifiedBundle,
+) -> String {
+    let canonical = format!(
+        "enoki/lifecycle-upgrade-consumption/v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        attempt.operation_id,
+        source.hub_origin,
+        source.probe_id,
+        source.source_bundle_version,
+        source.source_install_state_sha256,
+        bundle.version,
+        bundle.manifest_sha256,
+    );
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
 fn write_operation_status(
@@ -770,7 +1094,7 @@ fn sync_directory(path: &Path) -> Result<(), InstallError> {
         .map_err(|_| InstallError::Io)
 }
 
-fn upgrade_destinations(paths: &FixedInstallPaths) -> Vec<PathBuf> {
+pub(super) fn upgrade_destinations(paths: &FixedInstallPaths) -> Vec<PathBuf> {
     vec![
         paths.binary(),
         paths.observation_runtime_binary(),

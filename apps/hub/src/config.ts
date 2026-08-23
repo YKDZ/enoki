@@ -1,19 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  existsSync,
-  fchmodSync,
-  fstatSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -22,12 +8,6 @@ import {
   type AuthEnvironment,
 } from "./auth/config.js";
 import { HubConfigurationError } from "./config-error.js";
-import {
-  generateLifecycleAuthorityKeyPair,
-  lifecycleAuthorityKeyPair,
-  lifecycleAuthorityKeyPairFromPrivate,
-  type LifecycleAuthorityKeyPair,
-} from "./probe/lifecycle-authority.js";
 import { type InstallationCommandConfig } from "./enrollment/install-command.js";
 import { createNoopHubLogger, type HubLogger } from "./hub-logger.js";
 import {
@@ -86,7 +66,6 @@ export type ProbeOperationConfig = {
   acceptedTimeoutMs: number;
   runningTimeoutMs: number;
   tokenSigningSecret?: string;
-  lifecycleAuthorityKey?: LifecycleAuthorityKeyPair;
 };
 
 export type HubRuntimeConfig = {
@@ -178,100 +157,8 @@ export function createHubRuntimeConfigFromEnvironment(
         environment.ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET,
         "ENOKI_PROBE_OPERATION_TOKEN_SIGNING_SECRET",
       ),
-      lifecycleAuthorityKey: loadOrCreateLifecycleAuthorityKey(dataRoot),
     },
   };
-}
-
-function loadOrCreateLifecycleAuthorityKey(
-  dataRoot: string,
-): LifecycleAuthorityKeyPair {
-  mkdirSync(dataRoot, { mode: 0o700, recursive: true });
-  const privatePath = path.join(dataRoot, "lifecycle-authority-private.pem");
-  const publicPath = path.join(dataRoot, "lifecycle-authority-public.pem");
-  if (existsSync(privatePath)) {
-    const key = lifecycleAuthorityKeyPairFromPrivate(
-      readTrustedLifecycleAuthorityKey(privatePath, 0o600),
-    );
-    if (existsSync(publicPath)) {
-      return lifecycleAuthorityKeyPair(
-        key.privateKeyPem,
-        readTrustedLifecycleAuthorityKey(publicPath, 0o644),
-      );
-    }
-    durableWriteFile(publicPath, key.publicKeyPem, 0o644);
-    return key;
-  }
-  if (existsSync(publicPath)) {
-    throw new HubConfigurationError(
-      "Hub lifecycle authority keypair is incomplete.",
-    );
-  }
-  const key = generateLifecycleAuthorityKeyPair();
-  durableWriteFile(privatePath, key.privateKeyPem, 0o600);
-  durableWriteFile(publicPath, key.publicKeyPem, 0o644);
-  return key;
-}
-
-function readTrustedLifecycleAuthorityKey(target: string, mode: number) {
-  let descriptor: number | null = null;
-  try {
-    descriptor = openSync(
-      target,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
-    const metadata = fstatSync(descriptor);
-    const effectiveUid = process.geteuid?.();
-    if (
-      !metadata.isFile() ||
-      metadata.nlink !== 1 ||
-      (metadata.mode & 0o777) !== mode ||
-      (effectiveUid !== undefined && metadata.uid !== effectiveUid)
-    ) {
-      throw new HubConfigurationError(
-        "Hub lifecycle authority key file is not trusted.",
-      );
-    }
-    return readFileSync(descriptor, "utf8");
-  } finally {
-    if (descriptor !== null) {
-      closeSync(descriptor);
-    }
-  }
-}
-
-function durableWriteFile(target: string, contents: string, mode: number) {
-  const parent = path.dirname(target);
-  const temporary = path.join(
-    parent,
-    `.${path.basename(target)}.${randomUUID()}.tmp`,
-  );
-  let descriptor: number | null = null;
-  try {
-    descriptor = openSync(temporary, "wx", mode);
-    writeFileSync(descriptor, contents);
-    fchmodSync(descriptor, mode);
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = null;
-    renameSync(temporary, target);
-    const directory = openSync(parent, "r");
-    try {
-      fsyncSync(directory);
-    } finally {
-      closeSync(directory);
-    }
-  } catch (error) {
-    if (descriptor !== null) {
-      closeSync(descriptor);
-    }
-    try {
-      unlinkSync(temporary);
-    } catch {
-      // 临时文件可能已经完成 rename，或尚未创建。
-    }
-    throw error;
-  }
 }
 
 export function createHubPersistentStateConfigFromEnvironment(

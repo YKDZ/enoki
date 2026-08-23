@@ -70,6 +70,7 @@ export type RegisterNewHostEnrollmentInput = {
 };
 
 export type EnrollmentRepository = {
+  lifecycleAuthorityTokenHashForHost: (hostId: number) => string | null;
   inspectPending: (input: {
     nowMs: number;
     tokenHash: string;
@@ -111,6 +112,21 @@ export function createEnrollmentRepository(
   database: EnrollmentDatabase,
 ): EnrollmentRepository {
   return {
+    lifecycleAuthorityTokenHashForHost(hostId) {
+      return (
+        database
+          .select({ tokenHash: enrollmentTokens.tokenHash })
+          .from(enrollmentTokens)
+          .where(eq(enrollmentTokens.hostId, hostId))
+          .orderBy(
+            desc(enrollmentTokens.usedAtMs),
+            desc(enrollmentTokens.createdAtMs),
+            desc(enrollmentTokens.id),
+          )
+          .limit(1)
+          .get()?.tokenHash ?? null
+      );
+    },
     inspectPending(input) {
       const pending = database
         .select({

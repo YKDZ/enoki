@@ -462,7 +462,11 @@ fn run_reporting_loop(
     let mut pending_configuration_error = None;
     let mut sequence = 1;
     let mut reports_sent = 0;
-    let mut operation_reports = ProbeOperationReportQueue::default();
+    let mut operation_reports = ProbeOperationReportQueue::with_seen_operation_ids(
+        local_operation_statuses
+            .iter()
+            .map(|status| status.operation_id.clone()),
+    );
     let request = startup_report(StartupReportInput {
         boot_id: &boot_id,
         enrollment_id: bootstrap_config
@@ -483,6 +487,7 @@ fn run_reporting_loop(
     notify_ready().map_err(ProbeRunError::Notify)?;
     refresh_probe_request_auth(&mut request_auth, &response);
     reports_sent += 1;
+    operation_reports.observe_response(&response, operation_runner);
     if !report_limit_reached(reports_sent, control) {
         let outcome = apply_newer_configuration_if_needed(
             transport,
@@ -494,7 +499,6 @@ fn run_reporting_loop(
         )?;
         active_configuration = outcome.active_configuration;
         pending_configuration_error = outcome.configuration_error;
-        operation_reports.observe_response(&response, operation_runner);
     }
 
     while !report_limit_reached(reports_sent, control) {
@@ -574,6 +578,7 @@ fn run_reporting_loop(
         refresh_probe_request_auth(&mut request_auth, &response);
         full_host_profile_reported |= send_full_host_profile;
         reports_sent += 1;
+        operation_reports.observe_response(&response, operation_runner);
         if !report_limit_reached(reports_sent, control) {
             let outcome = apply_newer_configuration_if_needed(
                 transport,
@@ -585,7 +590,6 @@ fn run_reporting_loop(
             )?;
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
-            operation_reports.observe_response(&response, operation_runner);
         }
 
         if host_profile_snapshot_requested(&response)
@@ -1076,6 +1080,13 @@ struct ProbeOperationReportQueue {
 }
 
 impl ProbeOperationReportQueue {
+    fn with_seen_operation_ids(ids: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            seen_operation_ids: ids.into_iter().filter(|id| !id.is_empty()).collect(),
+            statuses: Vec::new(),
+        }
+    }
+
     fn observe_response(
         &mut self,
         response: &ProbeReportResponse,
@@ -2716,16 +2727,37 @@ mod tests {
         .expect("bootstrap config");
         fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
             .expect("bootstrap permissions");
+        let pending_operation = crate::protocol::enoki::v1::ProbeOperation {
+            id: "41".to_string(),
+            operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
+                current_probe_version: "1.2.3".to_string(),
+                host_id: "7".to_string(),
+                operation_token: "must-not-run".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                target_manifest_sha256: "b".repeat(64),
+                target_probe_version: "1.2.4".to_string(),
+            })),
+        };
         let mut transport = StartupRetryTransport {
             report_attempts: Vec::new(),
-            report_responses: VecDeque::from([Ok(ProbeReportResponse {
-                accepted_sequence_end: 1,
-                current_probe_configuration_version: "default-v1".to_string(),
-                pending_operation: None,
-                requested_snapshot_collector_ids: Vec::new(),
-                server_time_ms: 1,
-            }
-            .encode_to_vec())]),
+            report_responses: VecDeque::from([
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: Some(pending_operation.clone()),
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec()),
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 2,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: Some(pending_operation),
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 2,
+                }
+                .encode_to_vec()),
+            ]),
         };
 
         run_probe_with_loop_control_and_runner_factory(
@@ -2735,7 +2767,7 @@ mod tests {
             &mut transport,
             &mut NoopSleeper,
             RunLoopControl {
-                max_reports: Some(1),
+                max_reports: Some(2),
             },
             |_config, _path| MustNotRun,
         )
@@ -2750,6 +2782,7 @@ mod tests {
                 status: Some(Status::Running(_)),
             }] if operation_id == "41"
         ));
+        assert_eq!(transport.report_attempts.len(), 2);
     }
 
     #[test]

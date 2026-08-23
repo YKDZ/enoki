@@ -7,6 +7,7 @@ mod tests {
         owned_ipc_group_record_matches,
         remove_owned_ipc_group_with_commands,
     };
+    use super::upgrade::upgrade_destinations;
     use crate::handoff::Enrollment;
     use crate::lifecycle::UpgradeCompletion;
     use crate::trust::BootstrapRole;
@@ -736,6 +737,7 @@ mod tests {
             &source,
             &UpgradeAttempt {
                 operation_id: "41".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
             },
             &paths,
             &mut systemd,
@@ -744,6 +746,18 @@ mod tests {
 
         assert_eq!(completion, UpgradeCompletion::Activated);
         assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
+        finalize_probe_upgrade_stage_cleanup(
+            &paths,
+            &UpgradeRecoveryReceipt {
+                operation_id: "41".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.3".to_owned(),
+                target_bundle_version: "1.2.4".to_owned(),
+                activated: true,
+            },
+        )
+        .unwrap();
         let identity_after = fs::read_to_string(paths.identity()).unwrap();
         assert_ne!(identity_after, identity_before);
         assert!(identity_after.contains("probe_id = \"probe_01\""));
@@ -802,6 +816,7 @@ mod tests {
             &next_source,
             &UpgradeAttempt {
                 operation_id: "42".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
             },
             &paths,
             &mut systemd,
@@ -817,7 +832,7 @@ mod tests {
         .unwrap();
         assert!(status.contains("operation_id = \"42\""));
         assert!(status.contains("status = \"failed\""));
-        assert!(status.contains("error_code = \"lifecycle_upgrade_repair_required\""));
+        assert!(status.contains("error_code = \"lifecycle.upgrade_repair_required\""));
         let journal = fs::read_to_string(
             temporary
                 .path()
@@ -826,6 +841,174 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"42\""));
         assert!(journal.contains("phase = \"repair-required\""));
+
+        systemd.fail_start = false;
+        systemd.calls.clear();
+        assert_eq!(
+            recover_incomplete_probe_upgrade(&paths, &mut systemd).unwrap(),
+            Some(UpgradeRecoveryReceipt {
+                operation_id: "42".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.4".to_owned(),
+                target_bundle_version: "1.2.5".to_owned(),
+                activated: true,
+            })
+        );
+        assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
+        finalize_probe_upgrade_stage_cleanup(
+            &paths,
+            &UpgradeRecoveryReceipt {
+                operation_id: "42".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.4".to_owned(),
+                target_bundle_version: "1.2.5".to_owned(),
+                activated: true,
+            },
+        )
+        .unwrap();
+        let journal = fs::read_to_string(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe-bootstrap/probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains("phase = \"activated\""));
+        assert!(journal.contains("activated_targets = 20"));
+        assert!(journal.contains("finalized_targets = 20"));
+    }
+
+    #[test]
+    fn upgrade_authority_is_consumed_before_preparation_and_prepared_recovery_is_explicit() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let source_bundle = bundle().with_test_complete_receipts(5);
+        let [mut source_probe, mut source_runtime, mut source_system_state, mut source_disk_health, mut source_lifecycle, mut source_acquirer, mut source_activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut source_probe,
+                observation_runtime: &mut source_runtime,
+                cpu_provider: &mut source_system_state,
+                disk_health_provider: &mut source_disk_health,
+                lifecycle_companion: &mut source_lifecycle,
+                bootstrap_acquirer: &mut source_acquirer,
+                bootstrap_activator: &mut source_activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &source_bundle,
+            &trust(),
+            &paths,
+            &mut Accounts::default(),
+            &mut Systemd::default(),
+        )
+        .unwrap();
+        let mut identity = fs::read_to_string(paths.identity()).unwrap();
+        identity.push_str("probe_id = \"probe_01\"\n");
+        fs::write(paths.identity(), identity).unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
+        let mut target_bundle = bundle().with_test_complete_receipts(5);
+        target_bundle.version = "1.2.4".to_owned();
+        target_bundle.manifest_sha256 = "d".repeat(64);
+        target_bundle.asset_set_manifest_sha256 = "e".repeat(64);
+        let attempt = UpgradeAttempt {
+            operation_id: "consume-1".to_owned(),
+            stage_owner_uid: unsafe { libc::geteuid() },
+        };
+
+        let [mut invalid_probe, mut invalid_runtime, mut invalid_system_state, mut invalid_disk_health, mut invalid_lifecycle, mut invalid_acquirer, mut invalid_activator] =
+            std::array::from_fn(|_| component());
+        invalid_probe.set_len(4).unwrap();
+        assert_eq!(
+            upgrade_current_probe_for_operation(
+                VerifiedUpgradeComponents {
+                    probe: &mut invalid_probe,
+                    observation_runtime: &mut invalid_runtime,
+                    system_state_provider: &mut invalid_system_state,
+                    disk_health_provider: &mut invalid_disk_health,
+                    lifecycle_companion: &mut invalid_lifecycle,
+                    bootstrap_acquirer: &mut invalid_acquirer,
+                    bootstrap_activator: &mut invalid_activator,
+                },
+                &target_bundle,
+                &source,
+                &attempt,
+                &paths,
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::InvalidVerifiedComponent)
+        );
+        let journal_path = paths
+            .bootstrap_state()
+            .join("probe-upgrade-attempt.toml");
+        let admitted = fs::read_to_string(&journal_path).unwrap();
+        assert!(admitted.contains("phase = \"admitted\""));
+
+        let [mut retry_probe, mut retry_runtime, mut retry_system_state, mut retry_disk_health, mut retry_lifecycle, mut retry_acquirer, mut retry_activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            upgrade_current_probe_for_operation(
+                VerifiedUpgradeComponents {
+                    probe: &mut retry_probe,
+                    observation_runtime: &mut retry_runtime,
+                    system_state_provider: &mut retry_system_state,
+                    disk_health_provider: &mut retry_disk_health,
+                    lifecycle_companion: &mut retry_lifecycle,
+                    bootstrap_acquirer: &mut retry_acquirer,
+                    bootstrap_activator: &mut retry_activator,
+                },
+                &target_bundle,
+                &source,
+                &attempt,
+                &paths,
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::ExistingResidue),
+            "the consumed authority cannot be replayed after pre-activation failure"
+        );
+
+        fs::write(&journal_path, admitted.replace("phase = \"admitted\"", "phase = \"prepared\""))
+            .unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        for destination in upgrade_destinations(&paths) {
+            let name = destination.file_name().unwrap().to_str().unwrap();
+            fs::hard_link(
+                &destination,
+                destination.with_file_name(format!(".{name}.enoki-upgrade-old")),
+            )
+            .unwrap();
+            fs::write(
+                destination.with_file_name(format!(".{name}.enoki-upgrade-new")),
+                b"prepared",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            recover_incomplete_probe_upgrade(&paths, &mut Systemd::default()).unwrap(),
+            Some(UpgradeRecoveryReceipt {
+                operation_id: "consume-1".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                source_bundle_version: "1.2.3".to_owned(),
+                target_bundle_version: "1.2.4".to_owned(),
+                activated: false,
+            })
+        );
+        let recovered = fs::read_to_string(&journal_path).unwrap();
+        assert!(recovered.contains("phase = \"aborted\""));
+        assert!(upgrade_destinations(&paths).iter().all(|destination| {
+            fs::metadata(destination).unwrap().nlink() == 1
+        }));
     }
 
     #[test]

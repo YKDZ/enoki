@@ -450,9 +450,7 @@ fn receive_root_handoff(
     // A root-private component sink is staging only, never installed Host
     // state, so the generation floor must not advance until its exact content
     // has also been verified.
-    let mut enrollment = Handoff::read_enrollment(input)?;
-    validate_lifecycle_authority_public_key(&handoff.lifecycle_authority_public_key)?;
-    enrollment.bind_lifecycle_authority_public_key(handoff.lifecycle_authority_public_key.clone());
+    let enrollment = Handoff::read_enrollment(input)?;
 
     let inbox = ensure_private_directory_at(
         generation_lease.state_directory().as_raw_fd(),
@@ -592,21 +590,6 @@ fn receive_root_handoff(
         let _ = unlink_at(inbox.as_raw_fd(), &activator_name);
     }
     result
-}
-
-fn validate_lifecycle_authority_public_key(bytes: &[u8]) -> Result<(), ActivationError> {
-    use rsa::pkcs8::DecodePublicKey;
-
-    if bytes.is_empty()
-        || bytes.len() > 16 * 1024
-        || std::str::from_utf8(bytes)
-            .ok()
-            .and_then(|pem| rsa::RsaPublicKey::from_public_key_pem(pem).ok())
-            .is_none()
-    {
-        return Err(ActivationError::Verification);
-    }
-    Ok(())
 }
 
 fn ensure_private_directory_at(
@@ -1123,7 +1106,6 @@ mod tests {
             manifest_signature,
             signing_key: daily_pem,
             bundle_manifest: bundle,
-            lifecycle_authority_public_key: root_pem.clone(),
         };
         let mut stream = Vec::new();
         handoff

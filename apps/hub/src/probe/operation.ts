@@ -416,8 +416,10 @@ export function succeedReportedProbeOperation(input: {
 }
 
 export function succeedProbeUpgradeRequestFromHostProfile(input: {
+  bootProbeAssetBundleVersion: string | null | undefined;
   hostProfile:
     | {
+        probeAssetBundleVersion?: string | null;
         probeVersion?: string | null;
       }
     | null
@@ -429,6 +431,10 @@ export function succeedProbeUpgradeRequestFromHostProfile(input: {
     input.operation.kind !== "probe_upgrade" ||
     hasUnavailableProbeUpgradeTarget(input.operation) ||
     !isActiveProbeOperation(input.operation) ||
+    normalizeProbeVersion(input.bootProbeAssetBundleVersion) !==
+      normalizeProbeVersion(input.operation.targetProbeVersion) ||
+    normalizeProbeVersion(input.hostProfile?.probeAssetBundleVersion) !==
+      normalizeProbeVersion(input.operation.targetProbeVersion) ||
     normalizeProbeVersion(input.hostProfile?.probeVersion) !==
       normalizeProbeVersion(input.operation.targetProbeVersion)
   ) {

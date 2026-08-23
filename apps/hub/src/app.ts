@@ -44,7 +44,6 @@ import {
   type ProbeAssetRouteOptions,
 } from "./probe/assets.js";
 import { createProbeRoutes } from "./probe/routes.js";
-import type { LifecycleAuthorityKeyPair } from "./probe/lifecycle-authority.js";
 import { createWebAssetHandler } from "./web-assets.js";
 
 type HubHealth = {
@@ -68,7 +67,6 @@ export type HubAppOptions = {
   requestId?: () => string;
   probeOperations?: ProbeOperationConfig;
   probeOperationTokenSecret?: string;
-  lifecycleAuthorityKey?: LifecycleAuthorityKeyPair;
   probeApiOrigin?: string;
   trustedProxyCidrs?: import("./network.js").TrustedProxyCidr[];
   liveUpdates?: LiveUpdateBroadcaster;
@@ -92,7 +90,6 @@ export type ProbeApiAppOptions = Pick<
   | "logger"
   | "now"
   | "probeOperationTokenSecret"
-  | "lifecycleAuthorityKey"
   | "probeOperations"
   | "probeAssets"
   | "requestId"
@@ -329,7 +326,6 @@ export function createHubAppFromEnvironment(
     clockSkewThresholdMs: config.clockSkew.thresholdMs,
     hostStatus: config.hostStatus,
     probeOperationTokenSecret: config.probeOperations.tokenSigningSecret,
-    lifecycleAuthorityKey: config.probeOperations.lifecycleAuthorityKey,
     probeOperations: config.probeOperations,
     probeApiOrigin: config.network.probeApiOrigin,
     trustedProxyCidrs: config.network.trustedProxyCidrs,
@@ -365,7 +361,6 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
       liveUpdates: options.liveUpdates ?? null,
       now: options.now,
       probeOperationTokenSecret: options.probeOperationTokenSecret,
-      lifecycleAuthorityKey: options.lifecycleAuthorityKey,
       probeAssetDir: options.probeAssets?.assetDir,
       probeDistributionRootPublicKeyPem:
         options.probeAssets?.trustedRootPublicKeyPem,

@@ -869,6 +869,7 @@ function readProbeUpgradeReleaseContext(services: HostRouteServices) {
 function succeedActiveProbeUpgradeRequestFromHostProfile(input: {
   hostId: number;
   hostProfile: {
+    probeAssetBundleVersion?: string | null;
     probeVersion?: string | null;
   } | null;
   nowMs: number;
@@ -881,6 +882,9 @@ function succeedActiveProbeUpgradeRequestFromHostProfile(input: {
   }
 
   const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+    bootProbeAssetBundleVersion:
+      input.services.hosts.findActiveById(input.hostId)
+        ?.probeAssetBundleVersion ?? null,
     hostProfile: input.hostProfile,
     nowMs: input.nowMs,
     operation: activeOperation,

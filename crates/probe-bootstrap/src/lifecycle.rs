@@ -1,6 +1,65 @@
 //! 探针本机生命周期的封闭领域合同。
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const LIFECYCLE_INSTALL_KEY_SALT: &[u8] = b"enoki/lifecycle-authority/install-key/hkdf-sha256/v1\0";
+const LIFECYCLE_INSTALL_KEY_INFO_DOMAIN: &[u8] =
+    b"enoki/lifecycle-authority/hub-origin/hkdf-sha256/v1\0";
+const LIFECYCLE_AUTHORITY_SIGNING_DOMAIN: &[u8] =
+    b"enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0";
+
+type HmacSha256 = Hmac<Sha256>;
+
+pub fn derive_lifecycle_authority_install_key(
+    enrollment_token: &str,
+    normalized_hub_origin: &str,
+) -> [u8; 32] {
+    let ikm = Sha256::digest(enrollment_token.as_bytes());
+    let mut extract = HmacSha256::new_from_slice(LIFECYCLE_INSTALL_KEY_SALT)
+        .expect("HMAC accepts the fixed lifecycle salt");
+    extract.update(&ikm);
+    let prk = extract.finalize().into_bytes();
+    let mut expand =
+        HmacSha256::new_from_slice(&prk).expect("HMAC accepts the HKDF pseudorandom key");
+    expand.update(LIFECYCLE_INSTALL_KEY_INFO_DOMAIN);
+    expand.update(normalized_hub_origin.as_bytes());
+    expand.update(&[1]);
+    expand.finalize().into_bytes().into()
+}
+
+pub fn verify_lifecycle_upgrade_authority_signature(
+    install_key: &[u8; 32],
+    canonical_authority: &[u8],
+    signature_hex: &str,
+) -> bool {
+    let Some(signature) = decode_lower_hex_32(signature_hex) else {
+        return false;
+    };
+    let mut verifier = HmacSha256::new_from_slice(install_key)
+        .expect("HMAC accepts the fixed-size lifecycle install key");
+    verifier.update(LIFECYCLE_AUTHORITY_SIGNING_DOMAIN);
+    verifier.update(canonical_authority);
+    verifier.verify_slice(&signature).is_ok()
+}
+
+fn decode_lower_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let mut output = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        output[index] = ((high << 4) | low) as u8;
+    }
+    Some(output)
+}
 
 pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 8 * 1024;
 pub const MAX_OPERATION_TOKEN_BYTES: usize = 2 * 1024;
@@ -472,10 +531,11 @@ impl LifecycleTransition {
     #[must_use]
     pub const fn availability(self) -> TransitionAvailability {
         match self {
-            Self::FreshInstall | Self::Upgrade | Self::ReplacementMigration | Self::Uninstall => {
-                TransitionAvailability::Enabled
-            }
-            Self::Repair => TransitionAvailability::NotEnabled,
+            Self::FreshInstall
+            | Self::Upgrade
+            | Self::Repair
+            | Self::ReplacementMigration
+            | Self::Uninstall => TransitionAvailability::Enabled,
         }
     }
 }
@@ -666,7 +726,7 @@ mod tests {
         );
         assert_eq!(
             LifecycleTransition::Repair.availability(),
-            TransitionAvailability::NotEnabled
+            TransitionAvailability::Enabled
         );
     }
 
@@ -713,10 +773,12 @@ mod tests {
     }
 
     #[test]
-    fn repair_returns_one_stable_disabled_result_before_planning() {
+    fn repair_is_an_enabled_explicit_lifecycle_transition() {
         assert_eq!(
-            LifecyclePlan::for_transition(LifecycleTransition::Repair),
-            Err(LifecycleRejection::TransitionNotEnabled),
+            LifecyclePlan::for_transition(LifecycleTransition::Repair)
+                .expect("Repair is explicitly enabled")
+                .transition(),
+            LifecycleTransition::Repair,
         );
     }
 
