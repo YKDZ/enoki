@@ -7456,6 +7456,657 @@ export const enoki = $root.enoki = (() => {
             return DiskHealthMetric;
         })();
 
+        v1.DiskHealthDeviceResourceFact = (function() {
+
+            /**
+             * Properties of a DiskHealthDeviceResourceFact.
+             * @memberof enoki.v1
+             * @interface IDiskHealthDeviceResourceFact
+             * @property {string|null} [deviceName] DiskHealthDeviceResourceFact deviceName
+             * @property {Uint8Array|null} [smartctlJson] DiskHealthDeviceResourceFact smartctlJson
+             * @property {number|null} [exitCode] DiskHealthDeviceResourceFact exitCode
+             */
+
+            /**
+             * Constructs a new DiskHealthDeviceResourceFact.
+             * @memberof enoki.v1
+             * @classdesc Represents a DiskHealthDeviceResourceFact.
+             * @implements IDiskHealthDeviceResourceFact
+             * @constructor
+             * @param {enoki.v1.IDiskHealthDeviceResourceFact=} [properties] Properties to set
+             */
+            function DiskHealthDeviceResourceFact(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * DiskHealthDeviceResourceFact deviceName.
+             * @member {string} deviceName
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @instance
+             */
+            DiskHealthDeviceResourceFact.prototype.deviceName = "";
+
+            /**
+             * DiskHealthDeviceResourceFact smartctlJson.
+             * @member {Uint8Array} smartctlJson
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @instance
+             */
+            DiskHealthDeviceResourceFact.prototype.smartctlJson = $util.newBuffer([]);
+
+            /**
+             * DiskHealthDeviceResourceFact exitCode.
+             * @member {number} exitCode
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @instance
+             */
+            DiskHealthDeviceResourceFact.prototype.exitCode = 0;
+
+            /**
+             * Creates a new DiskHealthDeviceResourceFact instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {enoki.v1.IDiskHealthDeviceResourceFact=} [properties] Properties to set
+             * @returns {enoki.v1.DiskHealthDeviceResourceFact} DiskHealthDeviceResourceFact instance
+             */
+            DiskHealthDeviceResourceFact.create = function create(properties) {
+                return new DiskHealthDeviceResourceFact(properties);
+            };
+
+            /**
+             * Encodes the specified DiskHealthDeviceResourceFact message. Does not implicitly {@link enoki.v1.DiskHealthDeviceResourceFact.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {enoki.v1.IDiskHealthDeviceResourceFact} message DiskHealthDeviceResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            DiskHealthDeviceResourceFact.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.deviceName);
+                if (message.smartctlJson != null && Object.hasOwnProperty.call(message, "smartctlJson"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).bytes(message.smartctlJson);
+                if (message.exitCode != null && Object.hasOwnProperty.call(message, "exitCode"))
+                    writer.uint32(/* id 3, wireType 0 =*/24).int32(message.exitCode);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified DiskHealthDeviceResourceFact message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthDeviceResourceFact.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {enoki.v1.IDiskHealthDeviceResourceFact} message DiskHealthDeviceResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            DiskHealthDeviceResourceFact.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a DiskHealthDeviceResourceFact message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.DiskHealthDeviceResourceFact} DiskHealthDeviceResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            DiskHealthDeviceResourceFact.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.DiskHealthDeviceResourceFact();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.deviceName = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.smartctlJson = reader.bytes();
+                            break;
+                        }
+                    case 3: {
+                            message.exitCode = reader.int32();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a DiskHealthDeviceResourceFact message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.DiskHealthDeviceResourceFact} DiskHealthDeviceResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            DiskHealthDeviceResourceFact.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a DiskHealthDeviceResourceFact message.
+             * @function verify
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            DiskHealthDeviceResourceFact.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
+                    if (!$util.isString(message.deviceName))
+                        return "deviceName: string expected";
+                if (message.smartctlJson != null && Object.hasOwnProperty.call(message, "smartctlJson"))
+                    if (!(message.smartctlJson && typeof message.smartctlJson.length === "number" || $util.isString(message.smartctlJson)))
+                        return "smartctlJson: buffer expected";
+                if (message.exitCode != null && Object.hasOwnProperty.call(message, "exitCode"))
+                    if (!$util.isInteger(message.exitCode))
+                        return "exitCode: integer expected";
+                return null;
+            };
+
+            /**
+             * Creates a DiskHealthDeviceResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.DiskHealthDeviceResourceFact} DiskHealthDeviceResourceFact
+             */
+            DiskHealthDeviceResourceFact.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.DiskHealthDeviceResourceFact)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.DiskHealthDeviceResourceFact: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.DiskHealthDeviceResourceFact();
+                if (object.deviceName != null)
+                    message.deviceName = String(object.deviceName);
+                if (object.smartctlJson != null)
+                    if (typeof object.smartctlJson === "string")
+                        $util.base64.decode(object.smartctlJson, message.smartctlJson = $util.newBuffer($util.base64.length(object.smartctlJson)), 0);
+                    else if (object.smartctlJson.length >= 0)
+                        message.smartctlJson = object.smartctlJson;
+                if (object.exitCode != null)
+                    message.exitCode = object.exitCode | 0;
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a DiskHealthDeviceResourceFact message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {enoki.v1.DiskHealthDeviceResourceFact} message DiskHealthDeviceResourceFact
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            DiskHealthDeviceResourceFact.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.deviceName = "";
+                    if (options.bytes === String)
+                        object.smartctlJson = "";
+                    else {
+                        object.smartctlJson = [];
+                        if (options.bytes !== Array)
+                            object.smartctlJson = $util.newBuffer(object.smartctlJson);
+                    }
+                    object.exitCode = 0;
+                }
+                if (message.deviceName != null && Object.hasOwnProperty.call(message, "deviceName"))
+                    object.deviceName = message.deviceName;
+                if (message.smartctlJson != null && Object.hasOwnProperty.call(message, "smartctlJson"))
+                    object.smartctlJson = options.bytes === String ? $util.base64.encode(message.smartctlJson, 0, message.smartctlJson.length) : options.bytes === Array ? Array.prototype.slice.call(message.smartctlJson) : message.smartctlJson;
+                if (message.exitCode != null && Object.hasOwnProperty.call(message, "exitCode"))
+                    object.exitCode = message.exitCode;
+                return object;
+            };
+
+            /**
+             * Converts this DiskHealthDeviceResourceFact to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            DiskHealthDeviceResourceFact.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for DiskHealthDeviceResourceFact
+             * @function getTypeUrl
+             * @memberof enoki.v1.DiskHealthDeviceResourceFact
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            DiskHealthDeviceResourceFact.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.DiskHealthDeviceResourceFact";
+            };
+
+            return DiskHealthDeviceResourceFact;
+        })();
+
+        v1.DiskHealthResourceResult = (function() {
+
+            /**
+             * Properties of a DiskHealthResourceResult.
+             * @memberof enoki.v1
+             * @interface IDiskHealthResourceResult
+             * @property {Array.<enoki.v1.IDiskHealthDeviceResourceFact>|null} [devices] DiskHealthResourceResult devices
+             * @property {enoki.v1.DiskHealthCollectorCapabilityStatus|null} [capabilityStatus] DiskHealthResourceResult capabilityStatus
+             * @property {string|null} [failureCode] DiskHealthResourceResult failureCode
+             * @property {string|null} [unraidDisksIni] DiskHealthResourceResult unraidDisksIni
+             */
+
+            /**
+             * Constructs a new DiskHealthResourceResult.
+             * @memberof enoki.v1
+             * @classdesc Represents a DiskHealthResourceResult.
+             * @implements IDiskHealthResourceResult
+             * @constructor
+             * @param {enoki.v1.IDiskHealthResourceResult=} [properties] Properties to set
+             */
+            function DiskHealthResourceResult(properties) {
+                this.devices = [];
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * DiskHealthResourceResult devices.
+             * @member {Array.<enoki.v1.IDiskHealthDeviceResourceFact>} devices
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @instance
+             */
+            DiskHealthResourceResult.prototype.devices = $util.emptyArray;
+
+            /**
+             * DiskHealthResourceResult capabilityStatus.
+             * @member {enoki.v1.DiskHealthCollectorCapabilityStatus} capabilityStatus
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @instance
+             */
+            DiskHealthResourceResult.prototype.capabilityStatus = 0;
+
+            /**
+             * DiskHealthResourceResult failureCode.
+             * @member {string} failureCode
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @instance
+             */
+            DiskHealthResourceResult.prototype.failureCode = "";
+
+            /**
+             * DiskHealthResourceResult unraidDisksIni.
+             * @member {string} unraidDisksIni
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @instance
+             */
+            DiskHealthResourceResult.prototype.unraidDisksIni = "";
+
+            /**
+             * Creates a new DiskHealthResourceResult instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {enoki.v1.IDiskHealthResourceResult=} [properties] Properties to set
+             * @returns {enoki.v1.DiskHealthResourceResult} DiskHealthResourceResult instance
+             */
+            DiskHealthResourceResult.create = function create(properties) {
+                return new DiskHealthResourceResult(properties);
+            };
+
+            /**
+             * Encodes the specified DiskHealthResourceResult message. Does not implicitly {@link enoki.v1.DiskHealthResourceResult.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {enoki.v1.IDiskHealthResourceResult} message DiskHealthResourceResult message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            DiskHealthResourceResult.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.devices != null && message.devices.length)
+                    for (let i = 0; i < message.devices.length; ++i)
+                        $root.enoki.v1.DiskHealthDeviceResourceFact.encode(message.devices[i], writer.uint32(/* id 1, wireType 2 =*/10).fork(), q + 1).ldelim();
+                if (message.capabilityStatus != null && Object.hasOwnProperty.call(message, "capabilityStatus"))
+                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.capabilityStatus);
+                if (message.failureCode != null && Object.hasOwnProperty.call(message, "failureCode"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.failureCode);
+                if (message.unraidDisksIni != null && Object.hasOwnProperty.call(message, "unraidDisksIni"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.unraidDisksIni);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified DiskHealthResourceResult message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthResourceResult.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {enoki.v1.IDiskHealthResourceResult} message DiskHealthResourceResult message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            DiskHealthResourceResult.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a DiskHealthResourceResult message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.DiskHealthResourceResult} DiskHealthResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            DiskHealthResourceResult.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.DiskHealthResourceResult();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            if (!(message.devices && message.devices.length))
+                                message.devices = [];
+                            message.devices.push($root.enoki.v1.DiskHealthDeviceResourceFact.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 2: {
+                            message.capabilityStatus = reader.int32();
+                            break;
+                        }
+                    case 3: {
+                            message.failureCode = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.unraidDisksIni = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a DiskHealthResourceResult message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.DiskHealthResourceResult} DiskHealthResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            DiskHealthResourceResult.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a DiskHealthResourceResult message.
+             * @function verify
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            DiskHealthResourceResult.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.devices != null && Object.hasOwnProperty.call(message, "devices")) {
+                    if (!Array.isArray(message.devices))
+                        return "devices: array expected";
+                    for (let i = 0; i < message.devices.length; ++i) {
+                        let error = $root.enoki.v1.DiskHealthDeviceResourceFact.verify(message.devices[i], long + 1);
+                        if (error)
+                            return "devices." + error;
+                    }
+                }
+                if (message.capabilityStatus != null && Object.hasOwnProperty.call(message, "capabilityStatus"))
+                    switch (message.capabilityStatus) {
+                    default:
+                        return "capabilityStatus: enum value expected";
+                    case 0:
+                    case 1:
+                    case 2:
+                    case 3:
+                    case 4:
+                    case 5:
+                    case 6:
+                    case 7:
+                        break;
+                    }
+                if (message.failureCode != null && Object.hasOwnProperty.call(message, "failureCode"))
+                    if (!$util.isString(message.failureCode))
+                        return "failureCode: string expected";
+                if (message.unraidDisksIni != null && Object.hasOwnProperty.call(message, "unraidDisksIni"))
+                    if (!$util.isString(message.unraidDisksIni))
+                        return "unraidDisksIni: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a DiskHealthResourceResult message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.DiskHealthResourceResult} DiskHealthResourceResult
+             */
+            DiskHealthResourceResult.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.DiskHealthResourceResult)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.DiskHealthResourceResult: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.DiskHealthResourceResult();
+                if (object.devices) {
+                    if (!Array.isArray(object.devices))
+                        throw TypeError(".enoki.v1.DiskHealthResourceResult.devices: array expected");
+                    message.devices = [];
+                    for (let i = 0; i < object.devices.length; ++i) {
+                        if (!$util.isObject(object.devices[i]))
+                            throw TypeError(".enoki.v1.DiskHealthResourceResult.devices: object expected");
+                        message.devices[i] = $root.enoki.v1.DiskHealthDeviceResourceFact.fromObject(object.devices[i], long + 1);
+                    }
+                }
+                switch (object.capabilityStatus) {
+                default:
+                    if (typeof object.capabilityStatus === "number") {
+                        message.capabilityStatus = object.capabilityStatus;
+                        break;
+                    }
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSPECIFIED":
+                case 0:
+                    message.capabilityStatus = 0;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_AVAILABLE":
+                case 1:
+                    message.capabilityStatus = 1;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MISSING_SMARTCTL":
+                case 2:
+                    message.capabilityStatus = 2;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_INSUFFICIENT_LOCAL_PRIVILEGE":
+                case 3:
+                    message.capabilityStatus = 3;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_HELPER_FAILED":
+                case 4:
+                    message.capabilityStatus = 4;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_SCAN_FAILED":
+                case 5:
+                    message.capabilityStatus = 5;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSUPPORTED_SMART_DATA":
+                case 6:
+                    message.capabilityStatus = 6;
+                    break;
+                case "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_MALFORMED_OUTPUT":
+                case 7:
+                    message.capabilityStatus = 7;
+                    break;
+                }
+                if (object.failureCode != null)
+                    message.failureCode = String(object.failureCode);
+                if (object.unraidDisksIni != null)
+                    message.unraidDisksIni = String(object.unraidDisksIni);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a DiskHealthResourceResult message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {enoki.v1.DiskHealthResourceResult} message DiskHealthResourceResult
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            DiskHealthResourceResult.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.arrays || options.defaults)
+                    object.devices = [];
+                if (options.defaults) {
+                    object.capabilityStatus = options.enums === String ? "DISK_HEALTH_COLLECTOR_CAPABILITY_STATUS_UNSPECIFIED" : 0;
+                    object.failureCode = "";
+                    object.unraidDisksIni = "";
+                }
+                if (message.devices && message.devices.length) {
+                    object.devices = [];
+                    for (let j = 0; j < message.devices.length; ++j)
+                        object.devices[j] = $root.enoki.v1.DiskHealthDeviceResourceFact.toObject(message.devices[j], options, q + 1);
+                }
+                if (message.capabilityStatus != null && Object.hasOwnProperty.call(message, "capabilityStatus"))
+                    object.capabilityStatus = options.enums === String ? $root.enoki.v1.DiskHealthCollectorCapabilityStatus[message.capabilityStatus] === undefined ? message.capabilityStatus : $root.enoki.v1.DiskHealthCollectorCapabilityStatus[message.capabilityStatus] : message.capabilityStatus;
+                if (message.failureCode != null && Object.hasOwnProperty.call(message, "failureCode"))
+                    object.failureCode = message.failureCode;
+                if (message.unraidDisksIni != null && Object.hasOwnProperty.call(message, "unraidDisksIni"))
+                    object.unraidDisksIni = message.unraidDisksIni;
+                return object;
+            };
+
+            /**
+             * Converts this DiskHealthResourceResult to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            DiskHealthResourceResult.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for DiskHealthResourceResult
+             * @function getTypeUrl
+             * @memberof enoki.v1.DiskHealthResourceResult
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            DiskHealthResourceResult.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.DiskHealthResourceResult";
+            };
+
+            return DiskHealthResourceResult;
+        })();
+
         v1.CpuCounterResourceFact = (function() {
 
             /**

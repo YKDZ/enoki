@@ -41,6 +41,7 @@ use crate::{
 
 const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-runtime";
 const CPU_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-cpu-resource-provider";
+const DISK_HEALTH_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const OBSERVATION_RUNTIME_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-observation-runtime.service";
 const OBSERVATION_RUNTIME_SOCKET_UNIT_PATH: &str =
@@ -49,10 +50,15 @@ const CPU_PROVIDER_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-cpu-resource-provider@.service";
 const CPU_PROVIDER_SOCKET_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-cpu-resource-provider.socket";
-const OBSERVATION_SERVICES: [&str; 3] = [
+const DISK_HEALTH_PROVIDER_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-disk-health-resource-provider@.service";
+const DISK_HEALTH_PROVIDER_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-disk-health-resource-provider.socket";
+const OBSERVATION_SERVICES: [&str; 4] = [
     "enoki-observation-runtime.service",
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
 ];
 const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 
@@ -1694,6 +1700,7 @@ fn rebase_trusted_install_metadata_paths(
     for path in [
         &mut metadata.observation_runtime_path,
         &mut metadata.cpu_provider_path,
+        &mut metadata.disk_health_provider_path,
     ]
     .into_iter()
     .flatten()
@@ -1748,6 +1755,7 @@ fn plan_probe_uninstall_cleanup<'a>(
     for path in [
         install_metadata.observation_runtime_path.as_deref(),
         install_metadata.cpu_provider_path.as_deref(),
+        install_metadata.disk_health_provider_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -1879,6 +1887,7 @@ fn execute_probe_uninstall_cleanup(
     for path in [
         install_metadata.observation_runtime_path.as_deref(),
         install_metadata.cpu_provider_path.as_deref(),
+        install_metadata.disk_health_provider_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -2002,6 +2011,7 @@ fn verify_probe_uninstall_cleanup(
     for path in [
         metadata.observation_runtime_path.as_deref(),
         metadata.cpu_provider_path.as_deref(),
+        metadata.disk_health_provider_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -2377,6 +2387,7 @@ struct TrustedProbeInstallMetadata {
     old_sudoers_paths: Vec<PathBuf>,
     observation_runtime_path: Option<PathBuf>,
     cpu_provider_path: Option<PathBuf>,
+    disk_health_provider_path: Option<PathBuf>,
     observation_unit_paths: Vec<PathBuf>,
     observation_ipc_group: Option<String>,
 }
@@ -2728,6 +2739,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
     let (
         observation_runtime_path,
         cpu_provider_path,
+        disk_health_provider_path,
         observation_unit_paths,
         observation_ipc_group,
     ) = if schema_version == 3 {
@@ -2741,7 +2753,26 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "cpu_provider_path",
             CPU_PROVIDER_BINARY_PATH,
         )?;
-        let units = [
+        let has_disk_health_provider = value.get("disk_health_provider_path").is_some();
+        let has_disk_health_units = value
+            .get("disk_health_provider_service_unit_path")
+            .is_some()
+            && value.get("disk_health_provider_socket_unit_path").is_some();
+        if has_disk_health_provider != has_disk_health_units {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "schema 3 Disk Health Provider inventory is partial",
+            ));
+        }
+        let disk_health_provider = if has_disk_health_provider {
+            required_fixed_install_metadata_path(
+                &value,
+                "disk_health_provider_path",
+                DISK_HEALTH_PROVIDER_BINARY_PATH,
+            )?
+        } else {
+            None
+        };
+        let mut unit_specs = vec![
             (
                 "observation_runtime_service_unit_path",
                 OBSERVATION_RUNTIME_SERVICE_UNIT_PATH,
@@ -2758,22 +2789,41 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
                 "cpu_provider_socket_unit_path",
                 CPU_PROVIDER_SOCKET_UNIT_PATH,
             ),
-        ]
-        .into_iter()
-        .map(|(key, expected)| required_fixed_install_metadata_path(&value, key, expected))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        ];
+        if has_disk_health_provider {
+            unit_specs.extend([
+                (
+                    "disk_health_provider_service_unit_path",
+                    DISK_HEALTH_PROVIDER_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "disk_health_provider_socket_unit_path",
+                    DISK_HEALTH_PROVIDER_SOCKET_UNIT_PATH,
+                ),
+            ]);
+        }
+        let units = unit_specs
+            .into_iter()
+            .map(|(key, expected)| required_fixed_install_metadata_path(&value, key, expected))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         let ipc_group = required_install_metadata_string(&value, "observation_ipc_group")?;
         if ipc_group != OBSERVATION_IPC_GROUP {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "observation IPC group must use the fixed installation identity",
             ));
         }
-        (runtime, provider, units, Some(ipc_group))
+        (
+            runtime,
+            provider,
+            disk_health_provider,
+            units,
+            Some(ipc_group),
+        )
     } else {
-        (None, None, Vec::new(), None)
+        (None, None, None, Vec::new(), None)
     };
 
     if service_name != "enoki-probe" {
@@ -2825,6 +2875,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         },
         observation_runtime_path,
         cpu_provider_path,
+        disk_health_provider_path,
         observation_unit_paths,
         observation_ipc_group,
     })
@@ -3174,6 +3225,12 @@ fn execute_schema_three_probe_upgrade(
     let provider_path = install_metadata.cpu_provider_path.as_deref().ok_or(
         ProbeUpgraderRunError::InvalidInstallMetadata("schema 3 Provider path is missing"),
     )?;
+    let disk_health_provider_path = install_metadata
+        .disk_health_provider_path
+        .as_deref()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "schema 3 Disk Health Provider path is missing",
+        ))?;
     let hub_url = &install_metadata.hub_url;
     let root_key = download_hub_asset(transport, hub_url, "root-key.pem")?;
     let provisional = Handoff {
@@ -3231,6 +3288,7 @@ fn execute_schema_three_probe_upgrade(
     let mut probe = Vec::new();
     let mut runtime = Vec::new();
     let mut provider = Vec::new();
+    let mut disk_health_provider = Vec::new();
     let mut bootstrap_acquirer = Vec::new();
     let mut bootstrap_activator = Vec::new();
     let verified_bundle = verify_archive_and_extract_lifecycle_roles(
@@ -3240,13 +3298,14 @@ fn execute_schema_three_probe_upgrade(
         &mut probe,
         &mut runtime,
         &mut provider,
+        &mut disk_health_provider,
         &mut bootstrap_acquirer,
         &mut bootstrap_activator,
     )
     .map_err(|_| ProbeUpgraderRunError::UnsafeArchive("Bundle role verification failed"))?;
 
     preflight_local_operation_status_writable(install_metadata)?;
-    if install_metadata.observation_unit_paths.len() != 4 {
+    if install_metadata.observation_unit_paths.len() != 6 {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "schema 3 observation unit inventory is incomplete",
         ));
@@ -3259,6 +3318,11 @@ fn execute_schema_three_probe_upgrade(
         ),
         (runtime_path, runtime.as_slice(), 0o755),
         (provider_path, provider.as_slice(), 0o755),
+        (
+            disk_health_provider_path,
+            disk_health_provider.as_slice(),
+            0o755,
+        ),
     ];
     let bootstrap_acquirer_path = install_metadata.bootstrap_acquirer_path.as_deref().ok_or(
         ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -3348,7 +3412,7 @@ fn execute_schema_three_probe_upgrade(
 fn render_target_observation_integration(
     bootstrap_state: &Path,
     verified_activator: &[u8],
-) -> Result<[Vec<u8>; 4], ProbeUpgraderRunError> {
+) -> Result<[Vec<u8>; 6], ProbeUpgraderRunError> {
     const MAX_INTEGRATION_BYTES: u64 = 256 * 1024;
     let mut activator =
         tempfile::NamedTempFile::new_in(bootstrap_state).map_err(ProbeUpgraderRunError::Io)?;
@@ -3406,7 +3470,7 @@ fn render_target_observation_integration(
     parse_observation_integration_v1(&rendered)
 }
 
-fn parse_observation_integration_v1(bytes: &[u8]) -> Result<[Vec<u8>; 4], ProbeUpgraderRunError> {
+fn parse_observation_integration_v1(bytes: &[u8]) -> Result<[Vec<u8>; 6], ProbeUpgraderRunError> {
     const MAGIC: &[u8] = b"enoki.observation-integration.v1\n";
     if !bytes.starts_with(MAGIC) {
         return Err(ProbeUpgraderRunError::UnsafeArchive(
@@ -3414,8 +3478,8 @@ fn parse_observation_integration_v1(bytes: &[u8]) -> Result<[Vec<u8>; 4], ProbeU
         ));
     }
     let mut offset = MAGIC.len();
-    let mut units = Vec::with_capacity(4);
-    for _ in 0..4 {
+    let mut units = Vec::with_capacity(6);
+    for _ in 0..6 {
         let line_end = bytes[offset..]
             .iter()
             .position(|byte| *byte == b'\n')
@@ -3728,37 +3792,7 @@ fn write_collector_helper_sudoers_from_installed_probe(
     let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {
         return Ok(());
     };
-    let output = Command::new(&install_metadata.install_path)
-        .arg("internal-render-collector-helper-sudoers")
-        .arg("--service-user")
-        .arg(&install_metadata.service_user)
-        .arg("--probe-binary")
-        .arg(&install_metadata.install_path)
-        .output()
-        .map_err(ProbeUpgraderRunError::Io)?;
-
-    if !output.status.success() {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "collector-helper sudoers planner failed",
-        ));
-    }
-
-    let content = String::from_utf8(output.stdout).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata(
-            "collector-helper sudoers planner output is not UTF-8",
-        )
-    })?;
-    if content.is_empty() {
-        return remove_path_if_exists(sudoers_path);
-    }
-
-    if let Some(parent) = sudoers_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-
-    fs::write(sudoers_path, content).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
-        .map_err(ProbeUpgraderRunError::Io)
+    remove_path_if_exists(sudoers_path)
 }
 
 fn remove_old_sudoers_paths(
@@ -5807,6 +5841,7 @@ mod tests {
             old_sudoers_paths: Vec::new(),
             observation_runtime_path: None,
             cpu_provider_path: None,
+            disk_health_provider_path: None,
             observation_unit_paths: Vec::new(),
             observation_ipc_group: None,
         };
@@ -5924,6 +5959,7 @@ mod tests {
             old_sudoers_paths: Vec::new(),
             observation_runtime_path: Some(runtime_path.clone()),
             cpu_provider_path: Some(provider_path.clone()),
+            disk_health_provider_path: None,
             observation_unit_paths: observation_units.to_vec(),
             observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_string()),
         };
@@ -5953,7 +5989,7 @@ mod tests {
         assert!(systemd.calls.iter().all(|call| !call.contains("@.service")));
         assert_eq!(
             systemd.calls.first().map(String::as_str),
-            Some("stop enoki-cpu-resource-provider.socket")
+            Some("stop enoki-disk-health-resource-provider.socket")
         );
         assert!(systemd.calls.contains(&format!(
             "remove-service-identity {OBSERVATION_IPC_GROUP}:{OBSERVATION_IPC_GROUP}"
@@ -5999,6 +6035,7 @@ mod tests {
             old_sudoers_paths: Vec::new(),
             observation_runtime_path: None,
             cpu_provider_path: None,
+            disk_health_provider_path: None,
             observation_unit_paths: Vec::new(),
             observation_ipc_group: None,
         };
@@ -7618,8 +7655,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_probe_upgrader_renders_collector_helper_sudoers_with_newly_installed_probe_binary()
-    {
+    fn internal_probe_upgrader_removes_the_retired_collector_helper_sudoers() {
         let temp = tempfile::tempdir().expect("temp dir");
         let install_path = temp.path().join("bin/enoki-probe");
         fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
@@ -7703,26 +7739,17 @@ echo replacement probe
                 .expect("legacy sudoers"),
         )
         .expect("operation sudoers");
-        let collector_helper_sudoers = fs::read_to_string(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-        )
-        .expect("collector-helper sudoers");
         assert!(operation_sudoers.contains("internal-upgrader --config"));
         assert!(operation_sudoers.contains("internal-uninstaller --config"));
         assert!(!operation_sudoers.contains("internal-privileged-collector-helper"));
-        assert!(collector_helper_sudoers.contains("replacement-helper-from-new-binary"));
-        assert!(!collector_helper_sudoers.contains("disk-health.smartctl"));
-        assert!(!collector_helper_sudoers.contains("internal-upgrader --config"));
-        assert_eq!(
-            fs::read_to_string(planner_log_path).expect("planner invocation log"),
-            "internal-render-collector-helper-sudoers --service-user enoki-probe --probe-binary "
-                .to_string()
-                + install_path.to_str().expect("install path")
-                + "\n",
+        assert!(
+            !install_metadata
+                .collector_helper_sudoers_path
+                .as_ref()
+                .expect("legacy sudoers")
+                .exists()
         );
+        assert!(!planner_log_path.exists());
         assert!(!old_sudoers_path.exists());
         assert_eq!(systemd.restarted, vec!["enoki-probe".to_string()]);
     }
@@ -8463,7 +8490,7 @@ printf '%s\n' '{}'
         files: HashMap<String, Vec<u8>>,
         manifest: Vec<u8>,
         root_fingerprint: String,
-        target_units: [Vec<u8>; 4],
+        target_units: [Vec<u8>; 6],
     }
 
     fn complete_bundle_assets(version: &str) -> CompleteBundleAssets {
@@ -8484,6 +8511,7 @@ printf '%s\n' '{}'
         let probe = b"new probe".to_vec();
         let runtime = b"new runtime".to_vec();
         let provider = b"new provider".to_vec();
+        let disk_health_provider = b"new disk health provider".to_vec();
         let acquirer = b"acquirer".to_vec();
         let target_units = enoki_probe_bootstrap::install::fixed_observation_unit_contents()
             .map(|unit| [unit, b"# target-version-integration\n"].concat());
@@ -8501,7 +8529,7 @@ printf '%s\n' '{}'
         )
         .into_bytes();
         let bundle_manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v2\",\"resourceContract\":\"system-state-v2\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v2\",\"resourceContract\":\"system-state-v2\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v1\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
             hex_sha256(&acquirer),
             acquirer.len(),
             hex_sha256(&activator),
@@ -8512,6 +8540,8 @@ printf '%s\n' '{}'
             runtime.len(),
             hex_sha256(&provider),
             provider.len(),
+            hex_sha256(&disk_health_provider),
+            disk_health_provider.len(),
         )
         .into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
@@ -8521,6 +8551,7 @@ printf '%s\n' '{}'
             ("enoki-probe", probe),
             ("enoki-observation-runtime", runtime),
             ("enoki-cpu-resource-provider", provider),
+            ("enoki-disk-health-resource-provider", disk_health_provider),
             ("bootstrap/enoki-probe-bootstrap-acquire", acquirer),
             ("bootstrap/enoki-probe-bootstrap-activate", activator),
         ] {
@@ -8600,6 +8631,7 @@ printf '%s\n' '{}'
         let probe_path = binary_dir.join("enoki-probe");
         let runtime_path = binary_dir.join("enoki-observation-runtime");
         let provider_path = binary_dir.join("enoki-cpu-resource-provider");
+        let disk_health_provider_path = binary_dir.join("enoki-disk-health-resource-provider");
         let bootstrap_acquirer_path = binary_dir.join("enoki-probe-bootstrap-acquire");
         let bootstrap_activator_path = binary_dir.join("enoki-probe-bootstrap-activate");
         let unit_dir = temporary.path().join("systemd");
@@ -8609,12 +8641,15 @@ printf '%s\n' '{}'
             "enoki-observation-runtime.socket",
             "enoki-cpu-resource-provider@.service",
             "enoki-cpu-resource-provider.socket",
+            "enoki-disk-health-resource-provider@.service",
+            "enoki-disk-health-resource-provider.socket",
         ]
         .map(|name| unit_dir.join(name));
         for path in [
             &probe_path,
             &runtime_path,
             &provider_path,
+            &disk_health_provider_path,
             &bootstrap_acquirer_path,
             &bootstrap_activator_path,
         ] {
@@ -8636,6 +8671,7 @@ printf '%s\n' '{}'
         install_metadata.bootstrap_activator_path = Some(bootstrap_activator_path.clone());
         install_metadata.observation_runtime_path = Some(runtime_path.clone());
         install_metadata.cpu_provider_path = Some(provider_path.clone());
+        install_metadata.disk_health_provider_path = Some(disk_health_provider_path.clone());
         install_metadata.observation_ipc_group = Some(OBSERVATION_IPC_GROUP.to_string());
         install_metadata.observation_unit_paths = unit_paths.to_vec();
         install_metadata.operation_sudoers_path = None;
@@ -8676,6 +8712,10 @@ printf '%s\n' '{}'
         assert_eq!(fs::read(&runtime_path).expect("runtime"), b"new runtime");
         assert_eq!(fs::read(&provider_path).expect("provider"), b"new provider");
         assert_eq!(
+            fs::read(&disk_health_provider_path).expect("Disk Health Provider"),
+            b"new disk health provider"
+        );
+        assert_eq!(
             fs::read(&bootstrap_acquirer_path).expect("Bootstrap Acquirer"),
             b"acquirer"
         );
@@ -8709,14 +8749,67 @@ printf '%s\n' '{}'
                 .any(|url| url.ends_with(&archive_file))
         );
         assert_eq!(
-            &systemd.calls[..4],
+            &systemd.calls[..5],
             [
+                "stop enoki-disk-health-resource-provider.socket",
                 "stop enoki-cpu-resource-provider.socket",
                 "stop enoki-observation-runtime.socket",
                 "stop enoki-observation-runtime.service",
                 "stop enoki-probe",
             ]
         );
+    }
+
+    #[test]
+    fn legacy_schema_three_inventory_requires_signed_replacement_before_upgrade() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let probe_path = temporary.path().join("enoki-probe");
+        let status_path = temporary.path().join("status.toml");
+        let mut metadata = trusted_install_metadata(&probe_path, &status_path, String::new());
+        metadata.schema_version = 3;
+        metadata.probe_distribution_root_sha256 = Some("a".repeat(64));
+        metadata.bootstrap_state_dir = Some(temporary.path().join("bootstrap-state"));
+        metadata.observation_runtime_path = Some(temporary.path().join("runtime"));
+        metadata.cpu_provider_path = Some(temporary.path().join("system-state-provider"));
+        metadata.disk_health_provider_path = None;
+        metadata.observation_unit_paths = vec![
+            temporary.path().join("runtime.service"),
+            temporary.path().join("runtime.socket"),
+            temporary.path().join("provider@.service"),
+            temporary.path().join("provider.socket"),
+        ];
+        metadata.observation_ipc_group = Some(OBSERVATION_IPC_GROUP.to_string());
+        let operation = ProbeUpgraderOperationMetadata {
+            operation_id: "42".into(),
+            target_asset_set_digest: format!("sha256:{}", "0".repeat(64)),
+            target_probe_version: "0.2.0".into(),
+            token: "token".into(),
+        };
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let error = execute_schema_three_probe_upgrade(
+            &operation,
+            &temporary.path().join("identity.toml"),
+            &metadata,
+            &mut transport,
+            &mut systemd,
+            "0.1.0",
+            true,
+        )
+        .expect_err("旧闭包不能被当作同合同原地升级");
+
+        assert!(
+            matches!(
+                error,
+                ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "schema 3 Disk Health Provider path is missing"
+                )
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert!(transport.downloads.is_empty());
+        assert!(systemd.calls.is_empty());
     }
 
     #[test]
@@ -9058,6 +9151,7 @@ printf '%s\n' '{}'
             old_sudoers_paths: Vec::new(),
             observation_runtime_path: None,
             cpu_provider_path: None,
+            disk_health_provider_path: None,
             observation_unit_paths: Vec::new(),
             observation_ipc_group: None,
         }

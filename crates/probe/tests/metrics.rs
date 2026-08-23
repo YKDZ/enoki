@@ -539,7 +539,7 @@ fn disk_health_collector_result_updates_host_profile_capability() {
             .collect(&mut sample)
             .expect("successful disk health collection emits metrics")
     );
-    assert_eq!(local_disk_health_capability(), Some(true));
+    assert_eq!(local_disk_health_capability(), Some(false));
 
     let mut unsupported_collector = DiskHealthMetricCollector::new(FakeDiskHealthRunner {
         batches: vec![vec![]],
@@ -585,7 +585,7 @@ fn disk_health_success_updates_host_profile_with_domain_status() {
 
     assert_eq!(
         local_disk_health_capability_status(),
-        Some(DiskHealthCollectorCapabilityStatus::Available)
+        Some(DiskHealthCollectorCapabilityStatus::Unspecified)
     );
 }
 
@@ -622,10 +622,13 @@ fn disk_health_failures_update_host_profile_with_domain_status() {
             DiskHealthMetricCollector::new(FailingDiskHealthRunner { status, diagnostic });
 
         assert!(collector.collect(&mut sample).is_err());
-        assert_eq!(local_disk_health_capability_status(), Some(status));
+        assert_eq!(
+            local_disk_health_capability_status(),
+            Some(DiskHealthCollectorCapabilityStatus::Unspecified)
+        );
         assert_eq!(
             local_disk_health_capability_diagnostic(),
-            Some(diagnostic.to_string())
+            Some(String::new())
         );
     }
 }

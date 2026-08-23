@@ -551,6 +551,8 @@ mod tests {
         let runtime = observation_runtime_unit();
         let provider_socket = cpu_provider_socket_unit();
         let provider = cpu_provider_unit();
+        let disk_provider_socket = disk_health_provider_socket_unit();
+        let disk_provider = disk_health_provider_unit();
 
         assert!(probe.contains("Requires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket"));
         assert!(runtime_socket.contains("SocketGroup=enoki-probe"));
@@ -573,6 +575,19 @@ mod tests {
             "CPU Provider 必须能读取非进程类顶层 /proc/stat"
         );
         assert!(!provider.contains('%'));
+        assert!(runtime.contains("Requires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket"));
+        assert!(disk_provider_socket.contains("SocketGroup=enoki-observation-ipc"));
+        assert!(disk_provider_socket.contains("MaxConnections=1"));
+        assert!(disk_provider_socket.contains("TriggerLimitBurst=2"));
+        assert!(disk_provider.contains("ExecStart=/usr/local/bin/enoki-disk-health-resource-provider"));
+        assert!(disk_provider.contains("RuntimeMaxSec=10s"));
+        assert!(disk_provider.contains("KillMode=control-group"));
+        assert!(disk_provider.contains("CapabilityBoundingSet=CAP_SYS_RAWIO"));
+        assert!(disk_provider.contains("DevicePolicy=closed"));
+        assert!(disk_provider.contains("DeviceAllow=block-* rw"));
+        assert!(disk_provider.contains("IPAddressDeny=any"));
+        assert!(disk_provider.contains("SocketBindDeny=any"));
+        assert!(disk_provider.contains("BindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl"));
     }
 
     #[test]
@@ -613,6 +628,7 @@ mod tests {
         let mut probe = component();
         let mut runtime = component();
         let mut provider = component();
+        let mut disk_health_provider = component();
         let mut acquirer = component();
         let mut activator = component();
         let mut accounts = Accounts::default();
@@ -626,6 +642,7 @@ mod tests {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
                 cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health_provider,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
             },
@@ -654,6 +671,7 @@ mod tests {
         let mut probe = component();
         let mut runtime = component();
         let mut provider = component();
+        let mut disk_health_provider = component();
         let mut acquirer = component();
         let mut activator = component();
         let mut accounts = Accounts::default();
@@ -663,6 +681,7 @@ mod tests {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
                 cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health_provider,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
             },

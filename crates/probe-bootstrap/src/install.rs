@@ -38,6 +38,7 @@ const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 const BINARY: &str = "/usr/local/bin/enoki-probe";
 const OBSERVATION_RUNTIME_BINARY: &str = "/usr/local/bin/enoki-observation-runtime";
 const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
+const DISK_HEALTH_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const STATE: &str = "/var/lib/enoki-probe";
 const IDENTITY_DIR: &str = "/var/lib/enoki-probe/identity";
 const IDENTITY: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
@@ -48,6 +49,10 @@ const OBSERVATION_RUNTIME_SOCKET_UNIT: &str =
     "/etc/systemd/system/enoki-observation-runtime.socket";
 const CPU_PROVIDER_UNIT: &str = "/etc/systemd/system/enoki-cpu-resource-provider@.service";
 const CPU_PROVIDER_SOCKET_UNIT: &str = "/etc/systemd/system/enoki-cpu-resource-provider.socket";
+const DISK_HEALTH_PROVIDER_UNIT: &str =
+    "/etc/systemd/system/enoki-disk-health-resource-provider@.service";
+const DISK_HEALTH_PROVIDER_SOCKET_UNIT: &str =
+    "/etc/systemd/system/enoki-disk-health-resource-provider.socket";
 const BOOTSTRAP_ACQUIRER: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const BOOTSTRAP_ACTIVATOR: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const BOOTSTRAP_STATE: &str = "/var/lib/enoki-probe-bootstrap";
@@ -381,6 +386,9 @@ impl FixedInstallPaths {
     fn cpu_provider_binary(&self) -> PathBuf {
         self.map(CPU_PROVIDER_BINARY)
     }
+    fn disk_health_provider_binary(&self) -> PathBuf {
+        self.map(DISK_HEALTH_PROVIDER_BINARY)
+    }
     fn state(&self) -> PathBuf {
         self.map(STATE)
     }
@@ -410,6 +418,12 @@ impl FixedInstallPaths {
     }
     fn cpu_provider_socket_unit(&self) -> PathBuf {
         self.map(CPU_PROVIDER_SOCKET_UNIT)
+    }
+    fn disk_health_provider_unit(&self) -> PathBuf {
+        self.map(DISK_HEALTH_PROVIDER_UNIT)
+    }
+    fn disk_health_provider_socket_unit(&self) -> PathBuf {
+        self.map(DISK_HEALTH_PROVIDER_SOCKET_UNIT)
     }
     fn bootstrap_acquirer(&self) -> PathBuf {
         self.map(BOOTSTRAP_ACQUIRER)
@@ -474,6 +488,7 @@ pub struct VerifiedCompleteFreshComponents<'a> {
     pub probe: &'a mut File,
     pub observation_runtime: &'a mut File,
     pub cpu_provider: &'a mut File,
+    pub disk_health_provider: &'a mut File,
     pub bootstrap_acquirer: &'a mut File,
     pub bootstrap_activator: &'a mut File,
 }
@@ -518,7 +533,11 @@ pub fn activate_complete_fresh_current_probe(
     let mut files = SystemInstallFiles;
     activate_current_probe_with_observation_files(
         components.probe,
-        Some((components.observation_runtime, components.cpu_provider)),
+        Some((
+            components.observation_runtime,
+            components.cpu_provider,
+            components.disk_health_provider,
+        )),
         Some((
             components.bootstrap_acquirer,
             components.bootstrap_activator,
@@ -597,7 +616,7 @@ fn activate_current_probe_with_files(
 #[allow(clippy::too_many_arguments)]
 fn activate_current_probe_with_observation_files(
     component: &mut File,
-    mut observation_components: Option<(&mut File, &mut File)>,
+    mut observation_components: Option<(&mut File, &mut File, &mut File)>,
     bootstrap_components: Option<(&mut File, &mut File)>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -608,20 +627,27 @@ fn activate_current_probe_with_observation_files(
     let trust_version = trust.version.strip_prefix('v').unwrap_or(trust.version);
     let runtime_receipt = bundle.component_receipt("observation-runtime");
     let cpu_provider_receipt = bundle.component_receipt("system-state-provider");
+    let disk_health_provider_receipt = bundle.component_receipt("disk-health-provider");
     if !trust.is_for(BootstrapRole::Activator)
         || bundle.target != trust.target
         || bundle.version != trust_version
         || bundle.component_len == 0
         || (observation_components.is_some()
-            && (runtime_receipt.is_none() || cpu_provider_receipt.is_none()))
+            && (runtime_receipt.is_none()
+                || cpu_provider_receipt.is_none()
+                || disk_health_provider_receipt.is_none()))
     {
         return Err(InstallError::InvalidVerifiedComponent);
     }
     validate_component(component, bundle.component_len)?;
     let install_observation = observation_components.is_some();
-    if let Some((runtime, cpu_provider)) = observation_components.as_mut() {
+    if let Some((runtime, cpu_provider, disk_health_provider)) = observation_components.as_mut() {
         validate_component(runtime, runtime_receipt.expect("checked").1)?;
         validate_component(cpu_provider, cpu_provider_receipt.expect("checked").1)?;
+        validate_component(
+            disk_health_provider,
+            disk_health_provider_receipt.expect("checked").1,
+        )?;
     }
     let _activation_lock = ActivationLock::acquire(
         &paths.bootstrap_state(),
@@ -739,10 +765,16 @@ fn activate_current_probe_with_observation_files(
             &mut journal,
             RollbackStep::RemoveBinary,
         )?;
-        if let Some((runtime, cpu_provider)) = observation_components {
+        if let Some((runtime, cpu_provider, disk_health_provider)) = observation_components {
             ports.files.install_binary(
                 runtime,
                 &paths.observation_runtime_binary(),
+                &mut journal,
+                RollbackStep::RemoveBinary,
+            )?;
+            ports.files.install_binary(
+                disk_health_provider,
+                &paths.disk_health_provider_binary(),
                 &mut journal,
                 RollbackStep::RemoveBinary,
             )?;
@@ -796,6 +828,14 @@ fn activate_current_probe_with_observation_files(
                 ),
                 (paths.cpu_provider_unit(), cpu_provider_unit()),
                 (paths.cpu_provider_socket_unit(), cpu_provider_socket_unit()),
+                (
+                    paths.disk_health_provider_unit(),
+                    disk_health_provider_unit(),
+                ),
+                (
+                    paths.disk_health_provider_socket_unit(),
+                    disk_health_provider_socket_unit(),
+                ),
             ])
             .into_iter()
             .flatten()
@@ -1199,12 +1239,13 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\noperation_sudoers_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\noperation_sudoers_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
         OBSERVATION_RUNTIME_BINARY,
         CPU_PROVIDER_BINARY,
+        DISK_HEALTH_PROVIDER_BINARY,
         OBSERVATION_IPC_GROUP,
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
@@ -1220,6 +1261,8 @@ fn install_metadata(
         OBSERVATION_RUNTIME_SOCKET_UNIT,
         CPU_PROVIDER_UNIT,
         CPU_PROVIDER_SOCKET_UNIT,
+        DISK_HEALTH_PROVIDER_UNIT,
+        DISK_HEALTH_PROVIDER_SOCKET_UNIT,
         OPERATION_SUDOERS,
         COLLECTOR_SUDOERS,
     )
@@ -1240,7 +1283,7 @@ fn observation_runtime_socket_unit() -> &'static str {
 }
 
 fn observation_runtime_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictAddressFamilies=AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /etc/os-release /usr/lib/os-release\n"
+    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictAddressFamilies=AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /etc/os-release /usr/lib/os-release\n"
 }
 
 fn cpu_provider_socket_unit() -> &'static str {
@@ -1251,13 +1294,23 @@ fn cpu_provider_unit() -> &'static str {
     "[Unit]\nDescription=Enoki one-shot System State Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nRestrictAddressFamilies=AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nPrivateTmp=true\nProtectHome=read-only\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=ptraceable\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
 }
 
+fn disk_health_provider_socket_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki Disk Health Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-disk-health-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nMaxConnections=1\nTriggerLimitIntervalSec=60s\nTriggerLimitBurst=2\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+}
+
+fn disk_health_provider_unit() -> &'static str {
+    "[Unit]\nDescription=Enoki one-shot Disk Health Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-disk-health-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=10s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=CAP_SYS_RAWIO\nAmbientCapabilities=\nDevicePolicy=closed\nDeviceAllow=block-* rw\nRestrictAddressFamilies=\nIPAddressDeny=any\nSocketBindDeny=any\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=invisible\nInaccessiblePaths=/boot /home /media /mnt /opt /root /srv\nBindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl -/var/local/emhttp/disks.ini\n"
+}
+
 /// Upgrader 与首次安装共享的固定 systemd integration assets。
-pub fn fixed_observation_unit_contents() -> [&'static [u8]; 4] {
+pub fn fixed_observation_unit_contents() -> [&'static [u8]; 6] {
     [
         observation_runtime_unit().as_bytes(),
         observation_runtime_socket_unit().as_bytes(),
         cpu_provider_unit().as_bytes(),
         cpu_provider_socket_unit().as_bytes(),
+        disk_health_provider_unit().as_bytes(),
+        disk_health_provider_socket_unit().as_bytes(),
     ]
 }
 

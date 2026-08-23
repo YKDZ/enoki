@@ -1,11 +1,13 @@
 use enoki_probe::observation_runtime::{
-    ObservationRuntime, ObservationWindowRequest, ResourceAccess, SYSTEM_STATE_RESOURCE,
-    SystemStateProvider, SystemStateResourceResult, decode_system_state_resource_result,
+    DISK_HEALTH_RESOURCE, DiskHealthProvider, ObservationRuntime, ObservationWindowRequest,
+    ResourceAccess, SYSTEM_STATE_RESOURCE, SystemStateProvider, SystemStateResourceResult,
+    decode_disk_health_resource_result, decode_system_state_resource_result,
     static_collector_registry,
 };
 use enoki_probe::protocol::enoki::v1::{
-    BatterySupplyResourceFact, CpuCounterResourceFact, FilesystemCapacityResourceFact,
-    SystemStateResourceResult as WireSystemStateResourceResult,
+    BatterySupplyResourceFact, CpuCounterResourceFact, DiskHealthCollectorCapabilityStatus,
+    DiskHealthDeviceResourceFact, DiskHealthResourceResult as WireDiskHealthResourceResult,
+    FilesystemCapacityResourceFact, SystemStateResourceResult as WireSystemStateResourceResult,
 };
 use prost::Message;
 use std::time::Duration;
@@ -230,6 +232,94 @@ fn one_device_fact_failure_does_not_discard_other_collector_results() {
     );
     assert_eq!(sample.temperature_celsius, Some(41.0));
     assert_eq!(sample.battery_percent, Some(80));
+}
+
+#[test]
+fn disk_health_uses_a_distinct_fixed_resource_and_runtime_owned_cadence() {
+    let descriptor = static_collector_registry()
+        .resource(DISK_HEALTH_RESOURCE)
+        .expect("Disk Health Resource is build-fixed");
+    assert_eq!(descriptor.access, ResourceAccess::DiskHealth);
+    assert_eq!(descriptor.max_results_per_attempt, 1);
+    assert!(!descriptor.request_accepts_caller_input);
+
+    struct FixedDiskHealthProvider {
+        calls: std::rc::Rc<std::cell::Cell<usize>>,
+        result: enoki_probe::observation_runtime::DiskHealthResourceResult,
+    }
+    impl DiskHealthProvider for FixedDiskHealthProvider {
+        fn pull_disk_health(
+            &mut self,
+            _request: enoki_probe::observation_runtime::DiskHealthPullRequest,
+        ) -> Result<
+            enoki_probe::observation_runtime::DiskHealthResourceResult,
+            enoki_probe::observation_runtime::DiskHealthResourceAcquisitionFailure,
+        > {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.result.clone())
+        }
+    }
+    let wire = WireDiskHealthResourceResult {
+        devices: vec![DiskHealthDeviceResourceFact {
+            device_name: "/dev/sda".into(),
+            smartctl_json: br#"{"smart_status":{"passed":true},"model_name":"Example","user_capacity":{"bytes":1000}}"#.to_vec(),
+            exit_code: 0,
+        }],
+        capability_status: DiskHealthCollectorCapabilityStatus::Available as i32,
+        ..Default::default()
+    };
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let mut runtime = ObservationRuntime::new(FixedSystemStateProvider { calls: 0 })
+        .with_disk_health_provider(FixedDiskHealthProvider {
+            calls: calls.clone(),
+            result: decode_disk_health_resource_result(&wire.encode_to_vec()).unwrap(),
+        });
+    let request = ObservationWindowRequest::new(Duration::from_secs(5)).unwrap();
+    let before_due = runtime
+        .observe(request.with_sequence_start(11).unwrap())
+        .unwrap();
+    let due = runtime
+        .observe(request.with_sequence_start(12).unwrap())
+        .unwrap();
+
+    assert!(before_due.disk_health.is_empty());
+    assert_eq!(calls.get(), 1);
+    assert_eq!(due.disk_health.len(), 1);
+    assert_eq!(due.disk_health[0].device_name, "/dev/sda");
+    assert!(due.collector_outcomes.iter().any(|outcome| {
+        outcome.collector_id == "official.disk-health"
+            && outcome.state
+                == enoki_probe::protocol::enoki::v1::CollectorOutcomeState::Produced as i32
+    }));
+}
+
+#[test]
+fn disk_health_resource_envelope_rejects_noncanonical_or_unbounded_fields() {
+    let valid = WireDiskHealthResourceResult {
+        devices: vec![DiskHealthDeviceResourceFact {
+            device_name: "/dev/sda".into(),
+            smartctl_json: br#"{"smart_status":{"passed":true}}"#.to_vec(),
+            exit_code: 0,
+        }],
+        capability_status: DiskHealthCollectorCapabilityStatus::Available as i32,
+        ..Default::default()
+    };
+    assert!(decode_disk_health_resource_result(&valid.encode_to_vec()).is_some());
+
+    let mut noncanonical = valid.encode_to_vec();
+    noncanonical.extend_from_slice(&[0x98, 0x06, 0x00]);
+    assert!(decode_disk_health_resource_result(&noncanonical).is_none());
+
+    let invalid_device = WireDiskHealthResourceResult {
+        devices: vec![DiskHealthDeviceResourceFact {
+            device_name: "../../dev/sda".into(),
+            smartctl_json: Vec::new(),
+            exit_code: 0,
+        }],
+        capability_status: DiskHealthCollectorCapabilityStatus::Available as i32,
+        ..Default::default()
+    };
+    assert!(decode_disk_health_resource_result(&invalid_device.encode_to_vec()).is_none());
 }
 
 #[test]

@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod collectors;
+pub mod disk_health_resource_sandbox;
 pub mod host_profile;
 pub mod local_lifecycle;
 pub mod local_privilege_boundary;

@@ -54,6 +54,28 @@ pub struct DiskHealthMetric {
     #[prost(string, tag = "10")]
     pub role: ::prost::alloc::string::String,
 }
+/// Disk Health Provider 对一个内部发现设备返回的有界原始结果。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiskHealthDeviceResourceFact {
+    #[prost(string, tag = "1")]
+    pub device_name: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub smartctl_json: ::prost::alloc::vec::Vec<u8>,
+    #[prost(int32, tag = "3")]
+    pub exit_code: i32,
+}
+/// 一次固定 pull 的 typed Disk Health Resource Result。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskHealthResourceResult {
+    #[prost(message, repeated, tag = "1")]
+    pub devices: ::prost::alloc::vec::Vec<DiskHealthDeviceResourceFact>,
+    #[prost(enumeration = "DiskHealthCollectorCapabilityStatus", tag = "2")]
+    pub capability_status: i32,
+    #[prost(string, tag = "3")]
+    pub failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub unraid_disks_ini: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum DiskHealthCollectorCapabilityStatus {

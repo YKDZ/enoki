@@ -305,6 +305,7 @@ pub(crate) struct VerifiedAcquisition {
     component: File,
     runtime: File,
     cpu_provider: File,
+    disk_health_provider: File,
     activator: File,
 }
 
@@ -332,6 +333,10 @@ impl VerifiedAcquisition {
             .bundle
             .component_receipt("system-state-provider")
             .ok_or(AcquisitionFailure::Permanent)?;
+        let (_, disk_health_provider_len) = self
+            .bundle
+            .component_receipt("disk-health-provider")
+            .ok_or(AcquisitionFailure::Permanent)?;
         let (acquirer_sha256, acquirer_len) = self
             .bundle
             .acquirer_receipt()
@@ -348,6 +353,9 @@ impl VerifiedAcquisition {
         self.cpu_provider
             .rewind()
             .map_err(|_| AcquisitionFailure::Local)?;
+        self.disk_health_provider
+            .rewind()
+            .map_err(|_| AcquisitionFailure::Local)?;
         handoff
             .write_from(
                 enrollment,
@@ -357,6 +365,8 @@ impl VerifiedAcquisition {
                 runtime_len,
                 &mut self.cpu_provider,
                 cpu_provider_len,
+                &mut self.disk_health_provider,
+                disk_health_provider_len,
                 &mut acquirer,
                 acquirer_len,
                 output,
@@ -468,6 +478,7 @@ fn acquire_local(
     let mut component = create_exclusive_staging_file(asset_dir)?;
     let mut runtime = create_exclusive_staging_file(asset_dir)?;
     let mut cpu_provider = create_exclusive_staging_file(asset_dir)?;
+    let mut disk_health_provider = create_exclusive_staging_file(asset_dir)?;
     let mut activator = create_exclusive_staging_file(asset_dir)?;
     let bundle = verify_archive_and_extract_roles(
         &mut archive,
@@ -476,6 +487,7 @@ fn acquire_local(
         &mut component,
         &mut runtime,
         &mut cpu_provider,
+        &mut disk_health_provider,
         &mut std::io::sink(),
         &mut activator,
     )
@@ -487,6 +499,9 @@ fn acquire_local(
     cpu_provider
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
+    disk_health_provider
+        .sync_all()
+        .map_err(|_| AcquisitionFailure::Local)?;
     activator
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
@@ -496,6 +511,7 @@ fn acquire_local(
         component,
         runtime,
         cpu_provider,
+        disk_health_provider,
         activator,
     })
 }
@@ -678,6 +694,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
     let mut component = create_exclusive_staging_file(&request.staging_dir)?;
     let mut runtime = create_exclusive_staging_file(&request.staging_dir)?;
     let mut cpu_provider = create_exclusive_staging_file(&request.staging_dir)?;
+    let mut disk_health_provider = create_exclusive_staging_file(&request.staging_dir)?;
     let mut activator = create_exclusive_staging_file(&request.staging_dir)?;
     let bundle = verify_archive_and_extract_roles(
         &mut archive,
@@ -686,6 +703,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut component,
         &mut runtime,
         &mut cpu_provider,
+        &mut disk_health_provider,
         &mut std::io::sink(),
         &mut activator,
     )
@@ -694,6 +712,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut component,
         &mut runtime,
         &mut cpu_provider,
+        &mut disk_health_provider,
         &mut activator,
     ] {
         role.sync_all().map_err(|_| AcquisitionFailure::Local)?;
@@ -704,6 +723,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         component,
         runtime,
         cpu_provider,
+        disk_health_provider,
         activator,
     })
 }

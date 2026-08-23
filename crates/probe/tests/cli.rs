@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use enoki_probe::cli::{ProbeCommand, parse_probe_command, render_probe_output};
-use enoki_probe::local_privilege_boundary::PrivilegedCollectorHelperId;
 
 #[test]
 fn renders_version_output_for_owner_smoke_checks() {
@@ -187,7 +186,7 @@ fn probe_repair_forbidden_arguments_exit_nonzero_with_a_stable_code() {
 }
 
 #[test]
-fn parses_internal_privileged_collector_helper_command_for_compiled_helper_id_only() {
+fn retired_privileged_collector_helper_command_is_not_reachable() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-privileged-collector-helper".to_string(),
@@ -195,16 +194,11 @@ fn parses_internal_privileged_collector_helper_command_for_compiled_helper_id_on
         "disk-health.smartctl".to_string(),
     ]);
 
-    assert_eq!(
-        command,
-        ProbeCommand::InternalPrivilegedCollectorHelper {
-            helper_id: PrivilegedCollectorHelperId::DiskHealthSmartctl,
-        },
-    );
+    assert_eq!(command, ProbeCommand::Help);
 }
 
 #[test]
-fn parses_internal_collector_helper_sudoers_render_command_for_installer_boundary() {
+fn retired_collector_helper_sudoers_command_is_not_reachable() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-render-collector-helper-sudoers".to_string(),
@@ -214,13 +208,7 @@ fn parses_internal_collector_helper_sudoers_render_command_for_installer_boundar
         "/usr/local/bin/enoki-probe".to_string(),
     ]);
 
-    assert_eq!(
-        command,
-        ProbeCommand::InternalRenderCollectorHelperSudoers {
-            service_user: "enoki-probe".to_string(),
-            probe_binary: PathBuf::from("/usr/local/bin/enoki-probe"),
-        },
-    );
+    assert_eq!(command, ProbeCommand::Help);
 }
 
 #[test]

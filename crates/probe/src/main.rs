@@ -5,11 +5,6 @@ use enoki_probe::{
         format_probe_local_lifecycle_failure, probe_local_install_input_from_environment,
         run_probe_local_install,
     },
-    local_privilege_boundary::{
-        CollectorHelperSudoersPlanInput, CollectorHelperSudoersPlanner,
-        LocalCollectorHelperExposureEnvironment,
-    },
-    privileged_collector_helpers::run_compiled_privileged_collector_helper,
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{
         ProbeRunInput, probe_run_exit_status, run_loop_control_from_environment,
@@ -32,32 +27,6 @@ fn main() {
         }
         ProbeCommand::Version => {
             print!("{}", render_probe_output(ProbeCommand::Version));
-        }
-        ProbeCommand::InternalPrivilegedCollectorHelper { helper_id } => {
-            match run_compiled_privileged_collector_helper(helper_id) {
-                Ok(output) => {
-                    println!("{output}");
-                }
-                Err(error) => {
-                    eprintln!("Privileged Collector Helper failed: {error}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        ProbeCommand::InternalRenderCollectorHelperSudoers {
-            service_user,
-            probe_binary,
-        } => {
-            let environment = LocalCollectorHelperExposureEnvironment;
-            let plan = CollectorHelperSudoersPlanner::new(&environment).plan(
-                CollectorHelperSudoersPlanInput {
-                    service_user,
-                    probe_binary,
-                },
-            );
-            if let Some(content) = plan.content {
-                print!("{content}");
-            }
         }
         ProbeCommand::InternalLocalLifecycle { candidate_binary } => {
             let input = match probe_local_install_input_from_environment(candidate_binary) {

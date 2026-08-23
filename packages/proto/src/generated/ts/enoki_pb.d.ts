@@ -2561,6 +2561,230 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
+        /** Properties of a DiskHealthDeviceResourceFact. */
+        interface IDiskHealthDeviceResourceFact {
+
+            /** DiskHealthDeviceResourceFact deviceName */
+            deviceName?: (string|null);
+
+            /** DiskHealthDeviceResourceFact smartctlJson */
+            smartctlJson?: (Uint8Array|null);
+
+            /** DiskHealthDeviceResourceFact exitCode */
+            exitCode?: (number|null);
+        }
+
+        /** Represents a DiskHealthDeviceResourceFact. */
+        class DiskHealthDeviceResourceFact implements IDiskHealthDeviceResourceFact {
+
+            /**
+             * Constructs a new DiskHealthDeviceResourceFact.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IDiskHealthDeviceResourceFact);
+
+            /** DiskHealthDeviceResourceFact deviceName. */
+            public deviceName: string;
+
+            /** DiskHealthDeviceResourceFact smartctlJson. */
+            public smartctlJson: Uint8Array;
+
+            /** DiskHealthDeviceResourceFact exitCode. */
+            public exitCode: number;
+
+            /**
+             * Creates a new DiskHealthDeviceResourceFact instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns DiskHealthDeviceResourceFact instance
+             */
+            public static create(properties?: enoki.v1.IDiskHealthDeviceResourceFact): enoki.v1.DiskHealthDeviceResourceFact;
+
+            /**
+             * Encodes the specified DiskHealthDeviceResourceFact message. Does not implicitly {@link enoki.v1.DiskHealthDeviceResourceFact.verify|verify} messages.
+             * @param message DiskHealthDeviceResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IDiskHealthDeviceResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified DiskHealthDeviceResourceFact message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthDeviceResourceFact.verify|verify} messages.
+             * @param message DiskHealthDeviceResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IDiskHealthDeviceResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a DiskHealthDeviceResourceFact message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns DiskHealthDeviceResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.DiskHealthDeviceResourceFact;
+
+            /**
+             * Decodes a DiskHealthDeviceResourceFact message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns DiskHealthDeviceResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.DiskHealthDeviceResourceFact;
+
+            /**
+             * Verifies a DiskHealthDeviceResourceFact message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a DiskHealthDeviceResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns DiskHealthDeviceResourceFact
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.DiskHealthDeviceResourceFact;
+
+            /**
+             * Creates a plain object from a DiskHealthDeviceResourceFact message. Also converts values to other types if specified.
+             * @param message DiskHealthDeviceResourceFact
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.DiskHealthDeviceResourceFact, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this DiskHealthDeviceResourceFact to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for DiskHealthDeviceResourceFact
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a DiskHealthResourceResult. */
+        interface IDiskHealthResourceResult {
+
+            /** DiskHealthResourceResult devices */
+            devices?: (enoki.v1.IDiskHealthDeviceResourceFact[]|null);
+
+            /** DiskHealthResourceResult capabilityStatus */
+            capabilityStatus?: (enoki.v1.DiskHealthCollectorCapabilityStatus|null);
+
+            /** DiskHealthResourceResult failureCode */
+            failureCode?: (string|null);
+
+            /** DiskHealthResourceResult unraidDisksIni */
+            unraidDisksIni?: (string|null);
+        }
+
+        /** Represents a DiskHealthResourceResult. */
+        class DiskHealthResourceResult implements IDiskHealthResourceResult {
+
+            /**
+             * Constructs a new DiskHealthResourceResult.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IDiskHealthResourceResult);
+
+            /** DiskHealthResourceResult devices. */
+            public devices: enoki.v1.IDiskHealthDeviceResourceFact[];
+
+            /** DiskHealthResourceResult capabilityStatus. */
+            public capabilityStatus: enoki.v1.DiskHealthCollectorCapabilityStatus;
+
+            /** DiskHealthResourceResult failureCode. */
+            public failureCode: string;
+
+            /** DiskHealthResourceResult unraidDisksIni. */
+            public unraidDisksIni: string;
+
+            /**
+             * Creates a new DiskHealthResourceResult instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns DiskHealthResourceResult instance
+             */
+            public static create(properties?: enoki.v1.IDiskHealthResourceResult): enoki.v1.DiskHealthResourceResult;
+
+            /**
+             * Encodes the specified DiskHealthResourceResult message. Does not implicitly {@link enoki.v1.DiskHealthResourceResult.verify|verify} messages.
+             * @param message DiskHealthResourceResult message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IDiskHealthResourceResult, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified DiskHealthResourceResult message, length delimited. Does not implicitly {@link enoki.v1.DiskHealthResourceResult.verify|verify} messages.
+             * @param message DiskHealthResourceResult message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IDiskHealthResourceResult, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a DiskHealthResourceResult message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns DiskHealthResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.DiskHealthResourceResult;
+
+            /**
+             * Decodes a DiskHealthResourceResult message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns DiskHealthResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.DiskHealthResourceResult;
+
+            /**
+             * Verifies a DiskHealthResourceResult message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a DiskHealthResourceResult message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns DiskHealthResourceResult
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.DiskHealthResourceResult;
+
+            /**
+             * Creates a plain object from a DiskHealthResourceResult message. Also converts values to other types if specified.
+             * @param message DiskHealthResourceResult
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.DiskHealthResourceResult, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this DiskHealthResourceResult to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for DiskHealthResourceResult
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
         /** Properties of a CpuCounterResourceFact. */
         interface ICpuCounterResourceFact {
 

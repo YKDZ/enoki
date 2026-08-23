@@ -3,14 +3,17 @@
 use std::{os::fd::FromRawFd, os::unix::net::UnixListener, process::ExitCode};
 
 use enoki_probe::observation_runtime::{
-    CPU_PROVIDER_SOCKET, ObservationRuntimeServer, UnixSystemStateProvider,
-    validate_systemd_listener_fd,
+    CPU_PROVIDER_SOCKET, DISK_HEALTH_PROVIDER_SOCKET, ObservationRuntimeServer,
+    UnixDiskHealthProvider, UnixSystemStateProvider, validate_systemd_listener_fd,
 };
 
 fn main() -> ExitCode {
     match inherited_listener().and_then(|listener| {
-        ObservationRuntimeServer::new(UnixSystemStateProvider::new(CPU_PROVIDER_SOCKET))
-            .serve_fixed_probe_listener(&listener)
+        ObservationRuntimeServer::with_disk_health_provider(
+            UnixSystemStateProvider::new(CPU_PROVIDER_SOCKET),
+            UnixDiskHealthProvider::new(DISK_HEALTH_PROVIDER_SOCKET),
+        )
+        .serve_fixed_probe_listener(&listener)
     }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),

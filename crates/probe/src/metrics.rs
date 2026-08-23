@@ -257,10 +257,7 @@ pub struct CollectorRegistry {
 
 impl CollectorRegistry {
     pub fn official() -> Self {
-        let mut collectors = official::collectors();
-        collectors.push(Box::<DiskHealthMetricCollector>::default());
-
-        Self::from_collectors(collectors)
+        Self::from_collectors(official::collectors())
     }
 
     pub fn from_collectors(collectors: Vec<Box<dyn MetricCollector>>) -> Self {

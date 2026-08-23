@@ -18,12 +18,15 @@ use crate::{
         FilesystemCapacity, LoadMetrics, MemoryMetrics, NetworkCounterSnapshot,
         collect_cpu_metrics_from_counter_records,
         collect_default_route_interfaces_from_proc_routes,
-        collect_disk_counters_from_proc_diskstats_at, collect_disk_metrics_from_mounts,
+        collect_disk_counters_from_proc_diskstats_at,
+        collect_disk_health_metrics_from_smartctl_json, collect_disk_metrics_from_mounts,
         collect_network_metrics_from_proc_net_dev,
     },
     protocol::enoki::v1::{
         CollectorFailure, CollectorFailurePhase, CollectorOutcome, CollectorOutcomeState,
-        HostProfileResourceFacts, HostProfileSnapshot, MetricSample,
+        DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
+        DiskHealthResourceResult as WireDiskHealthResourceResult, HostProfileResourceFacts,
+        HostProfileSnapshot, MetricSample,
         SystemStateResourceResult as WireSystemStateResourceResult,
     },
 };
@@ -34,8 +37,13 @@ pub const SYSTEM_STATE_PULL: &[u8] = b"enoki.system-state.v1\n";
 pub const OBSERVATION_WINDOW_PULL: &[u8] = b"enoki.observation-window.v2\n";
 pub const OBSERVATION_RUNTIME_SOCKET: &str = "/run/enoki-observation-runtime.sock";
 pub const CPU_PROVIDER_SOCKET: &str = "/run/enoki-cpu-resource-provider.sock";
+pub const DISK_HEALTH_PROVIDER_SOCKET: &str = "/run/enoki-disk-health-resource-provider.sock";
+pub const DISK_HEALTH_PULL: &[u8] = b"enoki.disk-health.v1\n";
+pub const DISK_HEALTH_RESOURCE: &str = "official.disk-health";
+pub const MAX_DISK_HEALTH_BYTES: usize = 512 * 1024;
 const MAX_RUNTIME_RESPONSE_BYTES: usize = 256 * 1024;
 const PROVIDER_DEADLINE: Duration = Duration::from_secs(2);
+const DISK_HEALTH_PROVIDER_DEADLINE: Duration = Duration::from_secs(9);
 const RUNTIME_REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 const RUNTIME_WINDOW_HEADROOM: Duration = Duration::from_secs(5);
 const CPU_SAMPLES_PER_WINDOW: usize = 3;
@@ -60,6 +68,7 @@ impl ObservationRuntimeSleeper for ThreadObservationRuntimeSleeper {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResourceAccess {
     SystemState,
+    DiskHealth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +87,13 @@ const SYSTEM_STATE_DESCRIPTOR: CollectorResourceDescriptor = CollectorResourceDe
     max_results_per_attempt: 1,
     request_accepts_caller_input: false,
 };
+const DISK_HEALTH_DESCRIPTOR: CollectorResourceDescriptor = CollectorResourceDescriptor {
+    id: DISK_HEALTH_RESOURCE,
+    access: ResourceAccess::DiskHealth,
+    max_result_bytes: MAX_DISK_HEALTH_BYTES,
+    max_results_per_attempt: 1,
+    request_accepts_caller_input: false,
+};
 
 /// 注册表是闭合的构建产物，不是运行时插件表。
 pub struct StaticCollectorRegistry;
@@ -86,6 +102,7 @@ impl StaticCollectorRegistry {
     pub fn resource(&self, id: &str) -> Option<&'static CollectorResourceDescriptor> {
         match id {
             SYSTEM_STATE_RESOURCE => Some(&SYSTEM_STATE_DESCRIPTOR),
+            DISK_HEALTH_RESOURCE => Some(&DISK_HEALTH_DESCRIPTOR),
             _ => None,
         }
     }
@@ -179,6 +196,47 @@ pub trait SystemStateProvider {
     ) -> Result<SystemStateResourceResult, SystemStateResourceAcquisitionFailure>;
 }
 
+pub struct DiskHealthPullRequest(());
+
+impl DiskHealthPullRequest {
+    fn fixed() -> Self {
+        Self(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiskHealthResourceResult {
+    devices: Vec<(String, Vec<u8>, i32)>,
+    capability_status: DiskHealthCollectorCapabilityStatus,
+    failure_code: Option<String>,
+    unraid_disks_ini: String,
+}
+
+pub trait DiskHealthProvider {
+    fn pull_disk_health(
+        &mut self,
+        request: DiskHealthPullRequest,
+    ) -> Result<DiskHealthResourceResult, DiskHealthResourceAcquisitionFailure>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiskHealthResourceAcquisitionFailure {
+    ActivationBudgetExhausted,
+    Malformed,
+    Unavailable,
+}
+
+struct UnavailableDiskHealthProvider;
+
+impl DiskHealthProvider for UnavailableDiskHealthProvider {
+    fn pull_disk_health(
+        &mut self,
+        _request: DiskHealthPullRequest,
+    ) -> Result<DiskHealthResourceResult, DiskHealthResourceAcquisitionFailure> {
+        Err(DiskHealthResourceAcquisitionFailure::Unavailable)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SystemStateResourceAcquisitionFailure {
     ActivationBudgetExhausted,
@@ -220,6 +278,7 @@ fn runtime_window_deadline(cadence: Duration) -> Option<Duration> {
     cadence
         .checked_mul(CPU_SAMPLES_PER_WINDOW as u32)?
         .checked_add(PROVIDER_DEADLINE.checked_mul(CPU_SAMPLES_PER_WINDOW as u32)?)?
+        .checked_add(DISK_HEALTH_PROVIDER_DEADLINE)?
         .checked_add(RUNTIME_WINDOW_HEADROOM)
 }
 
@@ -245,10 +304,12 @@ pub struct ObservationAttemptResult {
 /// Runtime 持有 Collector cadence、计算和跨窗口采样状态。
 pub struct ObservationRuntime<P> {
     provider: P,
+    disk_health_provider: Box<dyn DiskHealthProvider>,
     previous_cpu_counters: Option<CpuCounterSnapshot>,
     previous_network_counters: Option<NetworkCounterSnapshot>,
     previous_disk_counters: Option<DiskCounterSnapshot>,
     host_profile: Option<HostProfileSnapshot>,
+    disk_health_capability: DiskHealthCollectorCapability,
 }
 
 impl<P> ObservationRuntime<P>
@@ -258,18 +319,31 @@ where
     pub fn new(provider: P) -> Self {
         Self {
             provider,
+            disk_health_provider: Box::new(UnavailableDiskHealthProvider),
             previous_cpu_counters: None,
             previous_network_counters: None,
             previous_disk_counters: None,
             host_profile: None,
+            disk_health_capability: DiskHealthCollectorCapability {
+                status: DiskHealthCollectorCapabilityStatus::Unspecified as i32,
+                diagnostic: String::new(),
+            },
         }
+    }
+
+    pub fn with_disk_health_provider<D>(mut self, provider: D) -> Self
+    where
+        D: DiskHealthProvider + 'static,
+    {
+        self.disk_health_provider = Box::new(provider);
+        self
     }
 
     pub fn observe(
         &mut self,
         request: ObservationWindowRequest,
     ) -> Result<MetricSample, ObservationRuntimeFailure> {
-        self.observe_at(request, unix_time_ms(), true)
+        self.observe_at(request, request.sequence_start, unix_time_ms(), true)
             .map_err(|failure| match failure {
                 SystemStateResourceAcquisitionFailure::Malformed => {
                     ObservationRuntimeFailure::CpuResourceMalformed
@@ -284,6 +358,7 @@ where
     fn observe_at(
         &mut self,
         _request: ObservationWindowRequest,
+        sequence: u64,
         collected_at_ms: i64,
         collect_host_profile: bool,
     ) -> Result<MetricSample, SystemStateResourceAcquisitionFailure> {
@@ -426,11 +501,146 @@ where
         if collect_host_profile
             && let Some(facts) = resource
                 .host_profile_facts
-                .filter(crate::host_profile::valid_host_profile_resource_facts)
+                .as_ref()
+                .filter(|facts| crate::host_profile::valid_host_profile_resource_facts(facts))
+                .cloned()
         {
             self.host_profile = Some(crate::host_profile::host_profile_from_resource_facts(facts));
+            if let Some(profile) = self.host_profile.as_mut() {
+                crate::host_profile::set_disk_health_capability(
+                    profile,
+                    self.disk_health_capability.clone(),
+                );
+            }
+        }
+        if sequence.is_multiple_of(12) {
+            self.collect_disk_health(
+                &resource.proc_mounts,
+                &resource.filesystem_capacities,
+                &mut sample,
+            );
         }
         Ok(sample)
+    }
+
+    fn collect_disk_health(
+        &mut self,
+        proc_mounts: &str,
+        filesystem_capacities: &BTreeMap<String, FilesystemCapacity>,
+        sample: &mut MetricSample,
+    ) {
+        let resource = match self
+            .disk_health_provider
+            .pull_disk_health(DiskHealthPullRequest::fixed())
+        {
+            Ok(resource) => resource,
+            Err(failure) => {
+                let code = match failure {
+                    DiskHealthResourceAcquisitionFailure::Unavailable => {
+                        "official.disk-health.resource-unavailable"
+                    }
+                    DiskHealthResourceAcquisitionFailure::Malformed => {
+                        "official.disk-health.resource-malformed"
+                    }
+                    DiskHealthResourceAcquisitionFailure::ActivationBudgetExhausted => {
+                        "official.disk-health.activation-budget-exhausted"
+                    }
+                };
+                self.set_disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::HelperFailed,
+                    code,
+                );
+                sample
+                    .collector_outcomes
+                    .push(resource_failed_with_code("official.disk-health", code));
+                return;
+            }
+        };
+        if let Some(code) = resource.failure_code.as_deref() {
+            self.set_disk_health_capability(resource.capability_status, code);
+            sample
+                .collector_outcomes
+                .push(resource_failed_with_code("official.disk-health", code));
+            return;
+        }
+
+        let mut metrics = Vec::new();
+        let mut unsupported = 0_usize;
+        let mut malformed = 0_usize;
+        for (device_name, json, exit_code) in resource.devices {
+            if exit_code != 0 && json.is_empty() {
+                self.set_disk_health_capability(
+                    DiskHealthCollectorCapabilityStatus::HelperFailed,
+                    "official.disk-health.smartctl-failed",
+                );
+                sample.collector_outcomes.push(resource_failed_with_code(
+                    "official.disk-health",
+                    "official.disk-health.smartctl-failed",
+                ));
+                return;
+            }
+            let Ok(json) = std::str::from_utf8(&json) else {
+                malformed += 1;
+                continue;
+            };
+            match collect_disk_health_metrics_from_smartctl_json(&device_name, json) {
+                Ok(Some(metric)) => metrics.push(metric),
+                Ok(None) => unsupported += 1,
+                Err(_) => malformed += 1,
+            }
+        }
+        let failed = if metrics.is_empty() && malformed > 0 {
+            Some((
+                DiskHealthCollectorCapabilityStatus::MalformedOutput,
+                "official.disk-health.output-malformed",
+            ))
+        } else if metrics.is_empty() && unsupported > 0 {
+            Some((
+                DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+                "official.disk-health.unsupported-smart-data",
+            ))
+        } else {
+            None
+        };
+        if let Some((status, code)) = failed {
+            self.set_disk_health_capability(status, code);
+            sample
+                .collector_outcomes
+                .push(calculation_failed("official.disk-health", code));
+            return;
+        }
+        crate::metrics::disk_health::enrich_disk_health_metrics_with_resource_facts(
+            &mut metrics,
+            proc_mounts,
+            filesystem_capacities,
+            &resource.unraid_disks_ini,
+        );
+        sample.disk_health = metrics;
+        self.set_disk_health_capability(DiskHealthCollectorCapabilityStatus::Available, "");
+        sample
+            .collector_outcomes
+            .push(if sample.disk_health.is_empty() {
+                no_data("official.disk-health")
+            } else {
+                produced("official.disk-health")
+            });
+    }
+
+    fn set_disk_health_capability(
+        &mut self,
+        status: DiskHealthCollectorCapabilityStatus,
+        diagnostic: &str,
+    ) {
+        self.disk_health_capability = DiskHealthCollectorCapability {
+            status: status as i32,
+            diagnostic: diagnostic.to_owned(),
+        };
+        if let Some(profile) = self.host_profile.as_mut() {
+            crate::host_profile::set_disk_health_capability(
+                profile,
+                self.disk_health_capability.clone(),
+            );
+        }
     }
 
     pub fn collect_next_window(
@@ -443,7 +653,12 @@ where
         let mut attempts = Vec::with_capacity(CPU_SAMPLES_PER_WINDOW);
         for offset in 0..CPU_SAMPLES_PER_WINDOW {
             sleeper.sleep(request.cadence());
-            match self.observe_at(request, sleeper.now_ms(), offset == 0) {
+            match self.observe_at(
+                request,
+                request.sequence_start + offset as u64,
+                sleeper.now_ms(),
+                offset == 0,
+            ) {
                 Ok(mut sample) => {
                     if offset == 0 {
                         window_host_profile = self.host_profile.clone();
@@ -466,6 +681,10 @@ where
                 }
                 Err(outcome) => {
                     let mut sample = resource_failure_sample(sleeper.now_ms(), outcome);
+                    let sequence = request.sequence_start + offset as u64;
+                    if sequence.is_multiple_of(12) {
+                        self.collect_disk_health("", &BTreeMap::new(), &mut sample);
+                    }
                     if offset == 0 {
                         sample
                             .collector_outcomes
@@ -546,6 +765,111 @@ impl SystemStateProvider for UnixSystemStateProvider {
         decode_system_state_resource_result(&encoded)
             .ok_or(SystemStateResourceAcquisitionFailure::Malformed)
     }
+}
+
+pub struct UnixDiskHealthProvider {
+    socket_path: PathBuf,
+}
+
+impl UnixDiskHealthProvider {
+    pub fn new(socket_path: impl Into<PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+        }
+    }
+}
+
+impl DiskHealthProvider for UnixDiskHealthProvider {
+    fn pull_disk_health(
+        &mut self,
+        _request: DiskHealthPullRequest,
+    ) -> Result<DiskHealthResourceResult, DiskHealthResourceAcquisitionFailure> {
+        let mut stream = UnixStream::connect(&self.socket_path).map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::ConnectionRefused
+            ) {
+                DiskHealthResourceAcquisitionFailure::ActivationBudgetExhausted
+            } else {
+                DiskHealthResourceAcquisitionFailure::Unavailable
+            }
+        })?;
+        configure_deadline(&stream, DISK_HEALTH_PROVIDER_DEADLINE)
+            .map_err(|_| DiskHealthResourceAcquisitionFailure::Unavailable)?;
+        stream
+            .write_all(DISK_HEALTH_PULL)
+            .map_err(|_| DiskHealthResourceAcquisitionFailure::Unavailable)?;
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|_| DiskHealthResourceAcquisitionFailure::Unavailable)?;
+        let len = read_u32(&mut stream)
+            .map_err(|_| DiskHealthResourceAcquisitionFailure::Unavailable)?
+            as usize;
+        if len == 0 || len > MAX_DISK_HEALTH_BYTES {
+            return Err(DiskHealthResourceAcquisitionFailure::Malformed);
+        }
+        let mut encoded = vec![0; len];
+        stream
+            .read_exact(&mut encoded)
+            .map_err(|_| DiskHealthResourceAcquisitionFailure::Unavailable)?;
+        if stream
+            .read(&mut [0; 1])
+            .map_err(|_| DiskHealthResourceAcquisitionFailure::Unavailable)?
+            != 0
+        {
+            return Err(DiskHealthResourceAcquisitionFailure::Malformed);
+        }
+        decode_disk_health_resource_result(&encoded)
+            .ok_or(DiskHealthResourceAcquisitionFailure::Malformed)
+    }
+}
+
+pub fn decode_disk_health_resource_result(bytes: &[u8]) -> Option<DiskHealthResourceResult> {
+    if bytes.is_empty() || bytes.len() > MAX_DISK_HEALTH_BYTES {
+        return None;
+    }
+    let wire = WireDiskHealthResourceResult::decode(bytes).ok()?;
+    if wire.encode_to_vec() != bytes
+        || wire.devices.len() > 128
+        || wire.unraid_disks_ini.len() > 256 * 1024
+    {
+        return None;
+    }
+    let capability_status = DiskHealthCollectorCapabilityStatus::try_from(wire.capability_status)
+        .ok()
+        .filter(|status| *status != DiskHealthCollectorCapabilityStatus::Unspecified)?;
+    let failure_code = bounded_resource_code(
+        wire.failure_code,
+        "official.disk-health.resource-result-malformed",
+    );
+    if failure_code.is_none()
+        != (capability_status == DiskHealthCollectorCapabilityStatus::Available)
+    {
+        return None;
+    }
+    let mut names = std::collections::BTreeSet::new();
+    let devices = wire
+        .devices
+        .into_iter()
+        .map(|fact| {
+            let valid_name = fact.device_name.starts_with("/dev/")
+                && fact.device_name.len() <= 128
+                && !fact.device_name[5..].contains('/')
+                && fact.device_name[5..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            (valid_name
+                && names.insert(fact.device_name.clone())
+                && fact.smartctl_json.len() <= 64 * 1024)
+                .then_some((fact.device_name, fact.smartctl_json, fact.exit_code))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(DiskHealthResourceResult {
+        devices,
+        capability_status,
+        failure_code,
+        unraid_disks_ini: wire.unraid_disks_ini,
+    })
 }
 
 /// 解码构建期固定的 System State protobuf Resource Result。
@@ -844,6 +1168,16 @@ where
     pub fn new(provider: P) -> Self {
         Self {
             runtime: ObservationRuntime::new(provider),
+        }
+    }
+
+    pub fn with_disk_health_provider<D>(provider: P, disk_health_provider: D) -> Self
+    where
+        D: DiskHealthProvider + 'static,
+    {
+        Self {
+            runtime: ObservationRuntime::new(provider)
+                .with_disk_health_provider(disk_health_provider),
         }
     }
 
@@ -1443,11 +1777,11 @@ mod tests {
     fn window_deadline_covers_all_attempts_at_both_valid_cadence_bounds() {
         assert_eq!(
             runtime_window_deadline(Duration::from_secs(1)),
-            Some(Duration::from_secs(14))
+            Some(Duration::from_secs(23))
         );
         assert_eq!(
             runtime_window_deadline(Duration::from_secs(200)),
-            Some(Duration::from_secs(611))
+            Some(Duration::from_secs(620))
         );
         assert!(ObservationWindowRequest::new(Duration::from_secs(1)).is_some());
         assert!(ObservationWindowRequest::new(Duration::from_secs(200)).is_some());

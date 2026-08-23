@@ -20,6 +20,11 @@ export const probeBundleComponentProfiles = Object.freeze({
     permissionProfile: "system-state-provider-v2",
     resourceContract: "system-state-v2",
   }),
+  "disk-health-provider": Object.freeze({
+    path: "enoki-disk-health-resource-provider",
+    permissionProfile: "disk-health-provider-v1",
+    resourceContract: "disk-health-v1",
+  }),
 });
 
 export const probeBundledBootstrapAssets = Object.freeze([

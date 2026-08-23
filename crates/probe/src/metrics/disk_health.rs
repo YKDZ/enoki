@@ -579,6 +579,61 @@ fn enrich_disk_health_metrics_with_usage(metrics: &mut [DiskHealthMetric]) {
     }
 }
 
+pub(crate) fn enrich_disk_health_metrics_with_resource_facts(
+    metrics: &mut [DiskHealthMetric],
+    mounts: &str,
+    capacities: &BTreeMap<String, crate::metrics::FilesystemCapacity>,
+    unraid_disks_ini: &str,
+) {
+    let usage_by_device = if unraid_disks_ini.is_empty() {
+        disk_usage_by_device_from_mounts_and_capacities(mounts, capacities)
+    } else {
+        disk_usage_by_device_from_unraid_disks_ini_contents(unraid_disks_ini)
+    };
+    for metric in metrics {
+        if let Some(usage) = usage_by_device.get(&metric.device_name) {
+            apply_disk_physical_usage(metric, usage);
+        }
+    }
+}
+
+fn disk_usage_by_device_from_mounts_and_capacities(
+    contents: &str,
+    capacities: &BTreeMap<String, crate::metrics::FilesystemCapacity>,
+) -> BTreeMap<String, DiskPhysicalUsage> {
+    let mut usage_by_device = BTreeMap::new();
+    let mut seen_sources = BTreeSet::new();
+    for mount in contents.lines().filter_map(parse_mount) {
+        if EXCLUDED_USAGE_FILESYSTEMS.contains(&mount.filesystem_type.as_str())
+            || mount.mount_point.starts_with("/run/")
+            || mount.mount_point.starts_with("/var/lib/docker/")
+            || !seen_sources.insert((mount.source.clone(), mount.mount_point.clone()))
+        {
+            continue;
+        }
+        let Some(device_name) = physical_device_name(&mount.source) else {
+            continue;
+        };
+        let Some(capacity) = capacities.get(&mount.mount_point) else {
+            continue;
+        };
+        if capacity.total_bytes == 0 {
+            continue;
+        }
+        merge_disk_usage(
+            &mut usage_by_device,
+            &device_name,
+            DiskPhysicalUsage {
+                mount_point: mount.mount_point,
+                role: String::new(),
+                total_bytes: capacity.total_bytes,
+                used_bytes: capacity.total_bytes.saturating_sub(capacity.free_bytes),
+            },
+        );
+    }
+    usage_by_device
+}
+
 fn apply_disk_physical_usage(metric: &mut DiskHealthMetric, usage: &DiskPhysicalUsage) {
     metric.role = usage.role.clone();
     metric.total_bytes = metric.total_bytes.or(Some(usage.total_bytes));

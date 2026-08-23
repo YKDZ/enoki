@@ -57,6 +57,7 @@ pub struct ReceivedRootHandoff {
     component: File,
     runtime: File,
     cpu_provider: File,
+    disk_health_provider: File,
     acquirer: Option<File>,
     activator: Option<File>,
     enrollment: Enrollment,
@@ -77,6 +78,11 @@ impl ReceivedRootHandoff {
             &mut self.cpu_provider,
             &self.bundle,
             "system-state-provider",
+        )?;
+        validate_received_role(
+            &mut self.disk_health_provider,
+            &self.bundle,
+            "disk-health-provider",
         )?;
         adapter(&mut self.component, &self.enrollment, &self.bundle)
     }
@@ -103,6 +109,7 @@ impl ReceivedRootHandoff {
                 probe: &mut self.component,
                 observation_runtime: &mut self.runtime,
                 cpu_provider: &mut self.cpu_provider,
+                disk_health_provider: &mut self.disk_health_provider,
                 bootstrap_acquirer: acquirer,
                 bootstrap_activator: activator,
             },
@@ -261,6 +268,8 @@ fn receive_root_handoff(
     let (temporary_name, mut component) = create_exclusive_component(&inbox, expected_uid)?;
     let (runtime_name, mut runtime) = create_exclusive_component(&inbox, expected_uid)?;
     let (cpu_provider_name, mut cpu_provider) = create_exclusive_component(&inbox, expected_uid)?;
+    let (disk_health_provider_name, mut disk_health_provider) =
+        create_exclusive_component(&inbox, expected_uid)?;
     let (acquirer_name, mut acquirer) = create_exclusive_component(&inbox, expected_uid)?;
     let (activator_name, mut activator) = create_exclusive_component(&inbox, expected_uid)?;
     let has_bootstrap_receipts = activator_receipt.is_some();
@@ -287,6 +296,24 @@ fn receive_root_handoff(
             &mut cpu_provider,
             metadata.bundle(),
             "system-state-provider",
+        )
+        .map_err(|_| ActivationError::Verification)?;
+        let (_, disk_health_provider_len) = metadata
+            .bundle()
+            .component_receipt("disk-health-provider")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_disk_health_provider_into(
+            input,
+            &mut disk_health_provider,
+            disk_health_provider_len,
+        )?;
+        disk_health_provider
+            .sync_all()
+            .map_err(|_| ActivationError::Io)?;
+        verify_role_component(
+            &mut disk_health_provider,
+            metadata.bundle(),
+            "disk-health-provider",
         )
         .map_err(|_| ActivationError::Verification)?;
         if let Some(receipt) = activator_receipt {
@@ -319,6 +346,7 @@ fn receive_root_handoff(
         unlink_at(inbox.as_raw_fd(), &temporary_name)?;
         unlink_at(inbox.as_raw_fd(), &runtime_name)?;
         unlink_at(inbox.as_raw_fd(), &cpu_provider_name)?;
+        unlink_at(inbox.as_raw_fd(), &disk_health_provider_name)?;
         unlink_at(inbox.as_raw_fd(), &acquirer_name)?;
         unlink_at(inbox.as_raw_fd(), &activator_name)?;
         // The candidate has now passed every coherence, enrollment, exact
@@ -331,6 +359,7 @@ fn receive_root_handoff(
             component,
             runtime,
             cpu_provider,
+            disk_health_provider,
             acquirer: has_bootstrap_receipts.then_some(acquirer),
             activator: has_bootstrap_receipts.then_some(activator),
             enrollment,
@@ -341,6 +370,7 @@ fn receive_root_handoff(
         let _ = unlink_at(inbox.as_raw_fd(), &temporary_name);
         let _ = unlink_at(inbox.as_raw_fd(), &runtime_name);
         let _ = unlink_at(inbox.as_raw_fd(), &cpu_provider_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &disk_health_provider_name);
         let _ = unlink_at(inbox.as_raw_fd(), &acquirer_name);
         let _ = unlink_at(inbox.as_raw_fd(), &activator_name);
     }
@@ -763,12 +793,13 @@ mod tests {
         let daily_id = sha256(&daily_pem);
         let component = b"probe";
         let bundle = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v2\",\"resourceContract\":\"system-state-v2\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":21,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v2\",\"resourceContract\":\"system-state-v2\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":21,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v1\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
             sha256(b"a"),
             sha256(b"b"),
             sha256(component),
             sha256(b"runtime"),
             sha256(b"system-state-provider"),
+            sha256(b"disk-health-provider"),
         )
         .into_bytes();
         let delegation = format!(
@@ -808,6 +839,8 @@ mod tests {
                 7,
                 &mut Cursor::new(b"system-state-provider"),
                 21,
+                &mut Cursor::new(b"disk-health-provider"),
+                20,
                 &mut Cursor::new(b"a"),
                 1,
                 &mut stream,

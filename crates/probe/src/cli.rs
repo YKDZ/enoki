@@ -1,19 +1,8 @@
 use std::path::PathBuf;
 
-use crate::local_privilege_boundary::{
-    PrivilegedCollectorHelperId, compiled_privileged_collector_helper_spec,
-};
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeCommand {
     Help,
-    InternalPrivilegedCollectorHelper {
-        helper_id: PrivilegedCollectorHelperId,
-    },
-    InternalRenderCollectorHelperSudoers {
-        service_user: String,
-        probe_binary: PathBuf,
-    },
     InternalLocalLifecycle {
         candidate_binary: PathBuf,
     },
@@ -44,12 +33,6 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
     let _binary = args.next();
 
     match args.next().as_deref() {
-        Some("internal-privileged-collector-helper") => {
-            parse_internal_privileged_collector_helper_command(args)
-        }
-        Some("internal-render-collector-helper-sudoers") => {
-            parse_internal_render_collector_helper_sudoers_command(args)
-        }
         Some("local-install") => parse_internal_local_lifecycle_command(args),
         Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
         Some("uninstall") => {
@@ -81,74 +64,6 @@ fn parse_internal_local_lifecycle_command(mut args: impl Iterator<Item = String>
         (Some("--candidate"), Some(candidate_binary)) if args.next().is_none() => {
             ProbeCommand::InternalLocalLifecycle {
                 candidate_binary: PathBuf::from(candidate_binary),
-            }
-        }
-        _ => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_privileged_collector_helper_command(
-    mut args: impl Iterator<Item = String>,
-) -> ProbeCommand {
-    let mut helper_id = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--helper" => {
-                if helper_id.is_some() {
-                    return ProbeCommand::Help;
-                }
-                let Some(value) = args.next() else {
-                    return ProbeCommand::Help;
-                };
-                let Some(parsed_helper_id) = PrivilegedCollectorHelperId::from_internal_arg(&value)
-                else {
-                    return ProbeCommand::Help;
-                };
-                let Some(spec) = compiled_privileged_collector_helper_spec(parsed_helper_id) else {
-                    return ProbeCommand::Help;
-                };
-                helper_id = Some(spec.id);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match helper_id {
-        Some(helper_id) => ProbeCommand::InternalPrivilegedCollectorHelper { helper_id },
-        None => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_render_collector_helper_sudoers_command(
-    mut args: impl Iterator<Item = String>,
-) -> ProbeCommand {
-    let mut service_user = None;
-    let mut probe_binary = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--service-user" => {
-                if service_user.is_some() {
-                    return ProbeCommand::Help;
-                }
-                service_user = args.next();
-            }
-            "--probe-binary" => {
-                if probe_binary.is_some() {
-                    return ProbeCommand::Help;
-                }
-                probe_binary = args.next().map(PathBuf::from);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match (service_user, probe_binary) {
-        (Some(service_user), Some(probe_binary)) => {
-            ProbeCommand::InternalRenderCollectorHelperSudoers {
-                service_user,
-                probe_binary,
             }
         }
         _ => ProbeCommand::Help,
@@ -266,13 +181,6 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
-        ProbeCommand::InternalPrivilegedCollectorHelper { .. } => {
-            "Privileged Collector Helper executes a compiled helper entrypoint.\n".to_string()
-        }
-        ProbeCommand::InternalRenderCollectorHelperSudoers { .. } => {
-            "Privileged Collector Helper sudoers rendering uses compiled helper declarations.\n"
-                .to_string()
-        }
         ProbeCommand::InternalLocalLifecycle { .. } => {
             "Probe Local Lifecycle performs typed fresh installation and readiness verification.\n"
                 .to_string()

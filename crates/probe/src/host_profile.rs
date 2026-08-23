@@ -9,7 +9,6 @@ use std::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use crate::metrics::last_disk_health_collector_capability;
 use crate::protocol::enoki::v1::{
     CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
     FilesystemProfile, HostProfileResourceFacts, HostProfileSnapshot, NetworkInterfaceProfile,
@@ -132,21 +131,23 @@ fn official_collector_capabilities() -> CollectorCapabilities {
 }
 
 fn disk_health_capability() -> DiskHealthCollectorCapability {
-    if let Some(capability) = last_disk_health_collector_capability() {
-        return capability;
-    }
-
-    if Path::new("/usr/sbin/smartctl").exists() || Path::new("/usr/bin/smartctl").exists() {
-        return DiskHealthCollectorCapability {
-            status: DiskHealthCollectorCapabilityStatus::Unspecified as i32,
-            diagnostic: String::new(),
-        };
-    }
-
     DiskHealthCollectorCapability {
-        status: DiskHealthCollectorCapabilityStatus::MissingSmartctl as i32,
-        diagnostic: "smartctl is not installed".to_string(),
+        status: DiskHealthCollectorCapabilityStatus::Unspecified as i32,
+        diagnostic: String::new(),
     }
+}
+
+pub(crate) fn set_disk_health_capability(
+    profile: &mut HostProfileSnapshot,
+    capability: DiskHealthCollectorCapability,
+) {
+    let capabilities = profile
+        .collector_capabilities
+        .get_or_insert_with(CollectorCapabilities::default);
+    let official = capabilities
+        .official
+        .get_or_insert_with(OfficialCollectorCapabilities::default);
+    official.disk_health = Some(capability);
 }
 
 fn read_cpu_model(contents: &str) -> Option<String> {
