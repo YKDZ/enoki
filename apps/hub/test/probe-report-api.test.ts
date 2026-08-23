@@ -531,12 +531,33 @@ describe("Probe report API", () => {
         metrics: [
           {
             collectedAtMs: 1_725_000_000_000,
+            networkInterfaces: [{ name: "eth0", rxBytes: 10, txBytes: 20 }],
+            disks: [
+              {
+                mountPoint: "/",
+                filesystemType: "ext4",
+                totalBytes: 100,
+                usedBytes: 40,
+                availableBytes: 50,
+              },
+            ],
+            temperatureCelsius: 42,
+            batteryPercent: 80,
+            batteryState: "Discharging",
+            diskHealth: [
+              { deviceName: "/dev/sda", model: "Example", passed: true },
+            ],
             collectorOutcomes: [
               {
                 collectorId: "official.memory",
                 state: 3,
                 failure: { phase: 2, code: "official.memory.future-code" },
               },
+              { collectorId: "official.network", state: 1 },
+              { collectorId: "official.disk", state: 1 },
+              { collectorId: "official.temperature", state: 1 },
+              { collectorId: "official.battery", state: 1 },
+              { collectorId: "official.disk-health", state: 1 },
               { collectorId: "official.host-profile", state: 1 },
             ],
             sequence: 2,
@@ -569,6 +590,24 @@ describe("Probe report API", () => {
         .all(),
     ).toEqual([
       {
+        collector_id: "official.battery",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.disk",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.disk-health",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
         collector_id: "official.host-profile",
         state: 1,
         failure_phase: null,
@@ -580,7 +619,51 @@ describe("Probe report API", () => {
         failure_phase: 2,
         failure_code: "official.memory.future-code",
       },
+      {
+        collector_id: "official.network",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.temperature",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
     ]);
+    expect(
+      database.sqlite
+        .prepare(
+          "select name, rx_bytes, tx_bytes from metric_network_interfaces",
+        )
+        .get(),
+    ).toEqual({ name: "eth0", rx_bytes: 10, tx_bytes: 20 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select mount_point, total_bytes, used_bytes from metric_disks",
+        )
+        .get(),
+    ).toEqual({ mount_point: "/", total_bytes: 100, used_bytes: 40 });
+    expect(
+      database.sqlite
+        .prepare(
+          "select temperature_celsius, battery_percent, battery_state from official_metric_thermal_power",
+        )
+        .get(),
+    ).toEqual({
+      battery_percent: 80,
+      battery_state: "Discharging",
+      temperature_celsius: 42,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select device_name, model, passed from official_metric_disk_health",
+        )
+        .get(),
+    ).toEqual({ device_name: "/dev/sda", model: "Example", passed: 1 });
     database.close();
   });
 

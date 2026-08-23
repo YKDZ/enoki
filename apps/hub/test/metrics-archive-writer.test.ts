@@ -66,6 +66,36 @@ describe("Metrics Archive file writer", () => {
             failurePhase: null,
             state: 1,
           },
+          {
+            collectorId: "official.network",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.disk",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.temperature",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.battery",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.disk-health",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
         ],
         cpuCores: [
           {
@@ -208,7 +238,7 @@ describe("Metrics Archive file writer", () => {
         official_metric_network_summary: 1,
         official_metric_thermal_power: 1,
         official_metric_uptime: 1,
-        metric_collector_outcomes: 1,
+        metric_collector_outcomes: 6,
         report_observations: 1,
       }),
     });
@@ -231,9 +261,18 @@ describe("Metrics Archive file writer", () => {
       );
       expect(
         archive
-          .prepare("select collector_id, state from metric_collector_outcomes")
+          .prepare(
+            "select collector_id, state from metric_collector_outcomes order by collector_id",
+          )
           .all(),
-      ).toEqual([{ collector_id: "official.memory", state: 1 }]);
+      ).toEqual([
+        { collector_id: "official.battery", state: 1 },
+        { collector_id: "official.disk", state: 1 },
+        { collector_id: "official.disk-health", state: 1 },
+        { collector_id: "official.memory", state: 1 },
+        { collector_id: "official.network", state: 1 },
+        { collector_id: "official.temperature", state: 1 },
+      ]);
       expect(
         archive
           .prepare(

@@ -18,6 +18,15 @@ const ROLLBACK_VERIFY_UNITS: &[&str] = &[
     "enoki-disk-health-resource-provider.socket",
     "enoki-disk-health-resource-provider@*.service",
 ];
+const ROLLBACK_RESET_UNITS: &[&str] = &[
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
+    "enoki-probe.service",
+    "enoki-observation-runtime.service",
+    "enoki-cpu-resource-provider@*.service",
+    "enoki-disk-health-resource-provider@*.service",
+];
 
 fn attempt_all_fixed_units(
     units: &[&str],
@@ -32,6 +41,10 @@ fn attempt_all_fixed_units(
         }
     }
     first_error.map_or(Ok(()), Err)
+}
+
+fn rollback_unit_is_absent(state: &str) -> bool {
+    matches!(state.trim(), "inactive" | "unknown")
 }
 /// 生产 systemd adapter 不接收动态数据，所有 unit 名称和路径均为编译期常量。
 #[derive(Default)]
@@ -138,18 +151,14 @@ impl SystemdPort for SystemSystemd {
             )
         })
         .err();
-        if let Err(error) = require_success(
-            "/usr/bin/systemctl",
-            &[
-                "reset-failed",
-                "enoki-probe.service",
-                "enoki-observation-runtime.service",
-                "enoki-cpu-resource-provider@*.service",
-                "enoki-disk-health-resource-provider@*.service",
-            ],
-            InstallError::Systemd,
-            deadline,
-        ) && first_error.is_none()
+        if let Err(error) = attempt_all_fixed_units(ROLLBACK_RESET_UNITS, |unit| {
+            require_success(
+                "/usr/bin/systemctl",
+                &["reset-failed", unit],
+                InstallError::Systemd,
+                deadline,
+            )
+        }) && first_error.is_none()
         {
             first_error = Some(error);
         }
@@ -162,12 +171,7 @@ impl SystemdPort for SystemSystemd {
                 COMMAND_STEP_BUDGET,
             )?;
             let state = String::from_utf8(output.stdout).map_err(|_| InstallError::Systemd)?;
-            if state.lines().any(|value| {
-                matches!(
-                    value.trim(),
-                    "active" | "activating" | "reloading" | "deactivating"
-                )
-            }) {
+            if state.lines().count() != 1 || !state.lines().all(rollback_unit_is_absent) {
                 return Err(InstallError::Systemd);
             }
             Ok(())
@@ -191,7 +195,8 @@ impl SystemdPort for SystemSystemd {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallError, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS, attempt_all_fixed_units,
+        InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
+        attempt_all_fixed_units, rollback_unit_is_absent,
     };
 
     #[test]
@@ -211,5 +216,32 @@ mod tests {
         assert!(calls.contains(&"enoki-disk-health-resource-provider@*.service".to_owned()));
         assert!(ROLLBACK_VERIFY_UNITS.contains(&"enoki-disk-health-resource-provider.socket"));
         assert!(ROLLBACK_VERIFY_UNITS.contains(&"enoki-disk-health-resource-provider@*.service"));
+    }
+
+    #[test]
+    fn rollback_resets_every_fixed_role_in_order_and_rejects_failed_as_absent() {
+        let mut calls = Vec::new();
+        let error = attempt_all_fixed_units(ROLLBACK_RESET_UNITS, |unit| {
+            calls.push(unit.to_owned());
+            (unit != "enoki-observation-runtime.socket")
+                .then_some(())
+                .ok_or(InstallError::Systemd)
+        })
+        .expect_err("一次 reset 失败仍应返回失败");
+
+        assert_eq!(error, InstallError::Systemd);
+        assert_eq!(calls, ROLLBACK_RESET_UNITS);
+        assert_eq!(
+            &calls[..3],
+            [
+                "enoki-observation-runtime.socket",
+                "enoki-cpu-resource-provider.socket",
+                "enoki-disk-health-resource-provider.socket",
+            ]
+        );
+        assert!(rollback_unit_is_absent("inactive\n"));
+        assert!(rollback_unit_is_absent("unknown\n"));
+        assert!(!rollback_unit_is_absent("failed\n"));
+        assert!(!rollback_unit_is_absent("active\n"));
     }
 }

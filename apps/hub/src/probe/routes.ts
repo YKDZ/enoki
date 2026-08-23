@@ -2288,6 +2288,11 @@ const officialOutcomeCollectors = new Set([
   "official.load",
   "official.memory",
   "official.uptime",
+  "official.network",
+  "official.disk",
+  "official.temperature",
+  "official.battery",
+  "official.disk-health",
   "official.host-profile",
 ]);
 
