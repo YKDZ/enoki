@@ -624,6 +624,94 @@ fn system_state_with_host(hostname: &str) -> SystemStateResourceResult {
     })
 }
 
+#[test]
+fn transient_disk_health_execution_failure_does_not_replace_stable_capability() {
+    struct HostProvider;
+    impl SystemStateProvider for HostProvider {
+        fn pull_system_state(
+            &mut self,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            Ok(system_state_with_host("host"))
+        }
+    }
+    struct DiskProvider {
+        results: std::collections::VecDeque<WireDiskHealthResourceResult>,
+    }
+    impl DiskHealthProvider for DiskProvider {
+        fn pull_disk_health(
+            &mut self,
+            _request: enoki_probe::observation_runtime::DiskHealthPullRequest,
+        ) -> Result<
+            enoki_probe::observation_runtime::DiskHealthResourceResult,
+            enoki_probe::observation_runtime::DiskHealthResourceAcquisitionFailure,
+        > {
+            decode_disk_health_resource_result(
+                &self
+                    .results
+                    .pop_front()
+                    .expect("due result")
+                    .encode_to_vec(),
+            )
+            .ok_or(
+                enoki_probe::observation_runtime::DiskHealthResourceAcquisitionFailure::Malformed,
+            )
+        }
+    }
+    let available = WireDiskHealthResourceResult {
+        capability_status: DiskHealthCollectorCapabilityStatus::Available as i32,
+        ..Default::default()
+    };
+    let transient_failure = WireDiskHealthResourceResult {
+        capability_status: DiskHealthCollectorCapabilityStatus::ScanFailed as i32,
+        failure_code: "official.disk-health.scan-failed".to_owned(),
+        ..Default::default()
+    };
+    let mut runtime =
+        ObservationRuntime::new(HostProvider).with_disk_health_provider(DiskProvider {
+            results: [available, transient_failure].into_iter().collect(),
+        });
+    let request = ObservationWindowRequest::new(Duration::from_secs(1)).unwrap();
+    let first = runtime.collect_next_window(
+        request.with_sequence_start(12).unwrap(),
+        &mut RecordingSleeper::default(),
+    );
+    let second = runtime.collect_next_window(
+        request.with_sequence_start(24).unwrap(),
+        &mut RecordingSleeper::default(),
+    );
+
+    for window in [&first, &second] {
+        let capability = window
+            .host_profile
+            .as_ref()
+            .and_then(|profile| profile.collector_capabilities.as_ref())
+            .and_then(|capabilities| capabilities.official.as_ref())
+            .and_then(|official| official.disk_health.as_ref())
+            .expect("Runtime finalized profile has stable capability");
+        assert_eq!(
+            capability.status(),
+            DiskHealthCollectorCapabilityStatus::Available
+        );
+    }
+    assert!(
+        second.attempts[0]
+            .sample
+            .as_ref()
+            .unwrap()
+            .collector_outcomes
+            .iter()
+            .any(|outcome| outcome.collector_id == "official.disk-health"
+                && outcome
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.code == "official.disk-health.scan-failed"))
+    );
+}
+
 struct RecordingCpuProvider {
     results: std::collections::VecDeque<&'static str>,
     calls: usize,

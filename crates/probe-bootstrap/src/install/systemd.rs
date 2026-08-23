@@ -1,4 +1,38 @@
 use super::*;
+
+const ROLLBACK_STOP_UNITS: &[&str] = &[
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
+    "enoki-probe.service",
+    "enoki-observation-runtime.service",
+    "enoki-cpu-resource-provider@*.service",
+    "enoki-disk-health-resource-provider@*.service",
+];
+const ROLLBACK_VERIFY_UNITS: &[&str] = &[
+    "enoki-probe.service",
+    "enoki-observation-runtime.service",
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-cpu-resource-provider@*.service",
+    "enoki-disk-health-resource-provider.socket",
+    "enoki-disk-health-resource-provider@*.service",
+];
+
+fn attempt_all_fixed_units(
+    units: &[&str],
+    mut attempt: impl FnMut(&str) -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    let mut first_error = None;
+    for unit in units {
+        if let Err(error) = attempt(unit)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
 /// 生产 systemd adapter 不接收动态数据，所有 unit 名称和路径均为编译期常量。
 #[derive(Default)]
 pub struct SystemSystemd {
@@ -94,39 +128,32 @@ impl SystemdPort for SystemSystemd {
         let deadline = self
             .command_deadline
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
-        // 先关闭两个激活 socket，阻止回滚期间产生新进程，再收敛所有固定角色。
-        for unit in [
-            "enoki-observation-runtime.socket",
-            "enoki-cpu-resource-provider.socket",
-            "enoki-probe.service",
-            "enoki-observation-runtime.service",
-            "enoki-cpu-resource-provider@*.service",
-        ] {
+        // 先关闭激活 socket，阻止回滚期间产生新进程，再收敛所有固定角色。
+        let mut first_error = attempt_all_fixed_units(ROLLBACK_STOP_UNITS, |unit| {
             require_success(
                 "/usr/bin/systemctl",
                 &["stop", unit],
                 InstallError::Systemd,
                 deadline,
-            )?;
-        }
-        require_success(
+            )
+        })
+        .err();
+        if let Err(error) = require_success(
             "/usr/bin/systemctl",
             &[
                 "reset-failed",
                 "enoki-probe.service",
                 "enoki-observation-runtime.service",
                 "enoki-cpu-resource-provider@*.service",
+                "enoki-disk-health-resource-provider@*.service",
             ],
             InstallError::Systemd,
             deadline,
-        )?;
-        for unit in [
-            "enoki-probe.service",
-            "enoki-observation-runtime.service",
-            "enoki-observation-runtime.socket",
-            "enoki-cpu-resource-provider.socket",
-            "enoki-cpu-resource-provider@*.service",
-        ] {
+        ) && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+        if let Err(error) = attempt_all_fixed_units(ROLLBACK_VERIFY_UNITS, |unit| {
             let output = run_bounded(
                 "/usr/bin/systemctl",
                 &["is-active", unit],
@@ -143,8 +170,12 @@ impl SystemdPort for SystemSystemd {
             }) {
                 return Err(InstallError::Systemd);
             }
+            Ok(())
+        }) && first_error.is_none()
+        {
+            first_error = Some(error);
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
     fn disable(&mut self) -> Result<(), InstallError> {
         require_success(
@@ -154,5 +185,31 @@ impl SystemdPort for SystemSystemd {
             self.command_deadline
                 .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        InstallError, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS, attempt_all_fixed_units,
+    };
+
+    #[test]
+    fn rollback_attempts_every_fixed_role_after_one_stop_failure() {
+        let mut calls = Vec::new();
+        let error = attempt_all_fixed_units(ROLLBACK_STOP_UNITS, |unit| {
+            calls.push(unit.to_owned());
+            (unit != "enoki-cpu-resource-provider.socket")
+                .then_some(())
+                .ok_or(InstallError::Systemd)
+        })
+        .expect_err("一次停止失败仍应返回关闭失败");
+
+        assert_eq!(error, InstallError::Systemd);
+        assert_eq!(calls, ROLLBACK_STOP_UNITS);
+        assert!(calls.contains(&"enoki-disk-health-resource-provider.socket".to_owned()));
+        assert!(calls.contains(&"enoki-disk-health-resource-provider@*.service".to_owned()));
+        assert!(ROLLBACK_VERIFY_UNITS.contains(&"enoki-disk-health-resource-provider.socket"));
+        assert!(ROLLBACK_VERIFY_UNITS.contains(&"enoki-disk-health-resource-provider@*.service"));
     }
 }

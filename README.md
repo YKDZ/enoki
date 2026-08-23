@@ -67,9 +67,9 @@ Enoki 的安全边界尽量保持简单：
 - 探针只会从最初安装时配置的 Hub 下载升级资产。安装器会把 Hub 地址写入 root-owned 安装元数据，升级和卸载入口会在令牌校验、资产下载和状态上报前校验引导地址与该元数据一致
 - 官方版使用本仓库配置的资产签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针安装包
 - Hub 管理员可以触发探针升级和卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界。
-- 探针常态下不以 root 运行；升级、卸载和需要本机提权的官方采集器通过受限 systemd/sudoers 入口执行内置操作，不支持下发任意系统命令
-- 探针操作所需的 sudoers 与需要特权的指标采集器 sudoers 分开写入。采集器 sudoers 只在安装或升级时按本机前置条件暴露；官方示例特权采集器是 `disk-health.smartctl`，没有匹配前置条件时不会保留采集器 sudoers 文件
-- 特权采集器目前只有超时和网络访问限制，不是完整执行沙箱。Hub、管理员、探针配置、主机概况或指标上报不能在运行时启用 helper 或改写 sudoers
+- 常驻探针不以 root 运行，也不直接读取设备事实或执行 `smartctl`。Observation Runtime 只通过构建期固定的本机 Resource Provider 合同取得结果；Hub、管理员、探针配置、主机概况或指标上报都不能传入路径、命令、参数、权限配置或采集器列表
+- System State Provider 与 Disk Health Provider 是相互独立的一次性 systemd socket 激活进程。两者都有固定调用者身份、激活预算、运行期限和有界 typed response；Disk Health Provider 还使用固定 `smartctl` 绝对候选路径、参数、空环境、工作目录以及子进程超时与回收合同
+- Provider 的生产 unit 从 deny-first 配置派生，限制 capability、设备、地址族、文件系统视图和进程视图；文件读取还由构建期固定的 Landlock allowlist 约束。升级和卸载仍通过受限的探针操作入口执行，不支持下发任意系统命令
 
 ## 部署
 
@@ -86,7 +86,7 @@ OWNER_PASSWORD='请替换为开发密码' \
 pnpm dev
 ```
 
-探针的可选本机 helper 前置条件只在安装和升级流程中评估。例如主机后来安装了 `smartctl`，Disk Health helper 不会被 Web UI、探针配置或运行时主机概况自动启用；需要重新安装或升级探针，安装/升级流程才会重新渲染 collector-helper sudoers。相反，移除可选前置条件后也应重新安装或升级，避免保留不再需要的 helper sudoers。
+Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl` 候选路径，并把工具缺失等稳定前置条件作为 Host Profile capability 上报；单次执行失败只形成有界的 Collection Outcome，不会被误记成主机能力变化。Web UI 和远端配置不能启用额外工具或改变 Provider 权限。
 
 从对应版本的不可变 GitHub Release 下载 `enoki-probe-bootstrap.py` 与 `enoki-probe-bootstrap-recipe.json`。执行前逐项完成以下对照：
 
@@ -97,7 +97,7 @@ pnpm dev
 
 这三处共同提供同一份 exact identity 的 Hub 外对照。recipe 是一份可审计的静态获取配方，不是第二个签名归档；它只依赖目标 Linux 上的 Python 3、OpenSSL 和 sudo。不要从待信 recipe 自身推导这些对照值，也不要使用当前 Hub 返回的动态脚本或由 Hub 选择信任根来冒充此官方路径。
 
-把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和探针二进制的精确摘要与大小，再在同一个 fresh transaction 中发布三个角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
+把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和全部运行组件的精确摘要与大小，再在同一个 fresh transaction 中发布 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`bootstrap-acquirer` 与 `bootstrap-activator` 六个固定角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
 Hub 只对已安装探针所需的签名安装包提供有界分发。若在主机本机执行“卸载探针”，只会移除本机探针，不会删除 Hub 中的主机；需要两侧一并清理时，请在 Hub 中选择“卸载探针并删除主机”。
 

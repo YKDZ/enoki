@@ -3844,6 +3844,14 @@ describe("Probe report API", () => {
                     usedBytes: 1_536,
                   },
                 ],
+                diskHealth: [
+                  {
+                    deviceName: "/dev/sda",
+                    model: "Example SSD",
+                    passed: true,
+                    temperatureCelsius: 31,
+                  },
+                ],
                 load_1: 0.12,
                 load_5: 0.34,
                 load_15: 0.56,
@@ -3985,6 +3993,18 @@ describe("Probe report API", () => {
     ).toEqual({
       network_rx_bytes_delta: 4_000,
       network_tx_bytes_delta: 2_000,
+    });
+    expect(
+      database.sqlite
+        .prepare(
+          "select device_name, model, passed, temperature_celsius from official_metric_disk_health where metric_sample_id = ?",
+        )
+        .get(storedSample.id),
+    ).toEqual({
+      device_name: "/dev/sda",
+      model: "Example SSD",
+      passed: 1,
+      temperature_celsius: 31,
     });
 
     expect(

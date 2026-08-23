@@ -70,6 +70,14 @@ impl ObservationWindowClient for FixedObservationRuntime {
                             temperature_celsius: Some(42.0),
                             battery_percent: Some(72),
                             battery_state: Some("Discharging".to_owned()),
+                            disk_health: vec![
+                                enoki_probe::protocol::enoki::v1::DiskHealthMetric {
+                                    device_name: "/dev/sda".to_owned(),
+                                    model: "Example".to_owned(),
+                                    passed: true,
+                                    ..Default::default()
+                                },
+                            ],
                             collector_outcomes: [
                                 "official.cpu",
                                 "official.load",
@@ -1274,6 +1282,7 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     assert_eq!(reports[1].metrics[0].disks[0].mount_point, "/");
     assert_eq!(reports[1].metrics[0].temperature_celsius, Some(42.0));
     assert_eq!(reports[1].metrics[0].battery_percent, Some(72));
+    assert_eq!(reports[1].metrics[0].disk_health[0].device_name, "/dev/sda");
     assert_eq!(reports[2].metrics.len(), 3);
     assert_eq!(reports[2].metrics[0].sequence, 5);
 }

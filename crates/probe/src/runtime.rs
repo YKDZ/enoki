@@ -1233,6 +1233,9 @@ fn merge_runtime_metrics(
         sample.battery_percent = cpu_sample.battery_percent;
         sample.battery_state = cpu_sample.battery_state;
     }
+    if config.collector_enabled(CollectorId::DiskHealth) {
+        sample.disk_health = cpu_sample.disk_health;
+    }
 }
 
 fn apply_newer_configuration_if_needed(

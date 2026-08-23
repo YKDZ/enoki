@@ -546,10 +546,6 @@ where
                         "official.disk-health.activation-budget-exhausted"
                     }
                 };
-                self.set_disk_health_capability(
-                    DiskHealthCollectorCapabilityStatus::HelperFailed,
-                    code,
-                );
                 sample
                     .collector_outcomes
                     .push(resource_failed_with_code("official.disk-health", code));
@@ -557,7 +553,9 @@ where
             }
         };
         if let Some(code) = resource.failure_code.as_deref() {
-            self.set_disk_health_capability(resource.capability_status, code);
+            if stable_disk_health_capability(resource.capability_status) {
+                self.set_disk_health_capability(resource.capability_status, code);
+            }
             sample
                 .collector_outcomes
                 .push(resource_failed_with_code("official.disk-health", code));
@@ -569,10 +567,6 @@ where
         let mut malformed = 0_usize;
         for (device_name, json, exit_code) in resource.devices {
             if exit_code != 0 && json.is_empty() {
-                self.set_disk_health_capability(
-                    DiskHealthCollectorCapabilityStatus::HelperFailed,
-                    "official.disk-health.smartctl-failed",
-                );
                 sample.collector_outcomes.push(resource_failed_with_code(
                     "official.disk-health",
                     "official.disk-health.smartctl-failed",
@@ -603,7 +597,9 @@ where
             None
         };
         if let Some((status, code)) = failed {
-            self.set_disk_health_capability(status, code);
+            if stable_disk_health_capability(status) {
+                self.set_disk_health_capability(status, code);
+            }
             sample
                 .collector_outcomes
                 .push(calculation_failed("official.disk-health", code));
@@ -707,6 +703,16 @@ where
     pub fn into_provider(self) -> P {
         self.provider
     }
+}
+
+fn stable_disk_health_capability(status: DiskHealthCollectorCapabilityStatus) -> bool {
+    matches!(
+        status,
+        DiskHealthCollectorCapabilityStatus::Available
+            | DiskHealthCollectorCapabilityStatus::MissingSmartctl
+            | DiskHealthCollectorCapabilityStatus::InsufficientLocalPrivilege
+            | DiskHealthCollectorCapabilityStatus::UnsupportedSmartData
+    )
 }
 
 pub struct UnixSystemStateProvider {
@@ -1785,5 +1791,30 @@ mod tests {
         );
         assert!(ObservationWindowRequest::new(Duration::from_secs(1)).is_some());
         assert!(ObservationWindowRequest::new(Duration::from_secs(200)).is_some());
+    }
+
+    #[test]
+    fn disk_health_capability_only_tracks_stable_support_facts() {
+        for (status, expected) in [
+            (DiskHealthCollectorCapabilityStatus::Available, true),
+            (DiskHealthCollectorCapabilityStatus::MissingSmartctl, true),
+            (
+                DiskHealthCollectorCapabilityStatus::InsufficientLocalPrivilege,
+                true,
+            ),
+            (
+                DiskHealthCollectorCapabilityStatus::UnsupportedSmartData,
+                true,
+            ),
+            (DiskHealthCollectorCapabilityStatus::HelperFailed, false),
+            (DiskHealthCollectorCapabilityStatus::ScanFailed, false),
+            (DiskHealthCollectorCapabilityStatus::MalformedOutput, false),
+        ] {
+            assert_eq!(
+                stable_disk_health_capability(status),
+                expected,
+                "{status:?}"
+            );
+        }
     }
 }
