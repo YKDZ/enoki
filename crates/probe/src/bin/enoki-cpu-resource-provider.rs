@@ -237,14 +237,36 @@ fn collect_filesystem_capacities(mounts: &str) -> Vec<FilesystemCapacityResource
 
 fn collect_block_device_topology(mounts: &str) -> Vec<BlockDeviceTopologyResourceFact> {
     let class_entries = collect_block_class_entries();
+    block_device_topology_from_class_entries(mounts, &class_entries)
+}
+
+fn block_device_topology_from_class_entries(
+    mounts: &str,
+    class_entries: &[BlockClassEntry],
+) -> Vec<BlockDeviceTopologyResourceFact> {
     let mut seen = BTreeSet::new();
-    mounts
+    let mut sources = mounts
         .lines()
         .filter_map(|line| line.split_whitespace().next())
         .map(unescape_mount_value)
         .filter(|source| source.starts_with("/dev/") && seen.insert(source.clone()))
+        .collect::<Vec<_>>();
+    for entry in class_entries {
+        let kernel_source = format!("/dev/{}", entry.kernel_name);
+        if seen.insert(kernel_source.clone()) {
+            sources.push(kernel_source);
+        }
+        if let Some(mapper_name) = &entry.device_mapper_name {
+            let mapper_source = format!("/dev/mapper/{mapper_name}");
+            if seen.insert(mapper_source.clone()) {
+                sources.push(mapper_source);
+            }
+        }
+    }
+    sources
+        .into_iter()
         .filter_map(|source| {
-            physical_device_name(&source, &class_entries).map(|physical_device| {
+            physical_device_name(&source, class_entries).map(|physical_device| {
                 BlockDeviceTopologyResourceFact {
                     source,
                     physical_device,
@@ -267,6 +289,7 @@ fn unescape_mount_value(value: &str) -> String {
 struct BlockClassEntry {
     kernel_name: String,
     device_mapper_name: Option<String>,
+    is_partition: bool,
     slaves: Vec<String>,
 }
 
@@ -280,6 +303,7 @@ fn collect_block_class_entries() -> Vec<BlockClassEntry> {
         .filter_map(|entry| {
             let kernel_name = entry.file_name().to_str()?.to_owned();
             let device_mapper_name = read_trimmed(entry.path().join("dm/name"));
+            let is_partition = !read_trimmed(entry.path().join("partition")).is_empty();
             let mut slaves = fs::read_dir(entry.path().join("slaves"))
                 .ok()
                 .into_iter()
@@ -291,6 +315,7 @@ fn collect_block_class_entries() -> Vec<BlockClassEntry> {
             Some(BlockClassEntry {
                 kernel_name,
                 device_mapper_name: (!device_mapper_name.is_empty()).then_some(device_mapper_name),
+                is_partition,
                 slaves,
             })
         })
@@ -301,9 +326,6 @@ fn collect_block_class_entries() -> Vec<BlockClassEntry> {
 
 fn physical_device_name(source: &str, class_entries: &[BlockClassEntry]) -> Option<String> {
     let name = source.strip_prefix("/dev/")?;
-    if let Some(name) = physical_device_name_from_direct_block_name(name) {
-        return Some(name);
-    }
     let kernel_name = name.strip_prefix("mapper/").map_or_else(
         || Some(name),
         |mapper_name| {
@@ -330,42 +352,55 @@ fn physical_device_names_from_topology(
     if depth >= 32 || !visited.insert(block_name.to_owned()) {
         return physical_names;
     }
-    if let Some(name) = physical_device_name_from_direct_block_name(block_name) {
-        physical_names.insert(name);
-        return physical_names;
-    }
     let Some(entry) = class_entries
         .iter()
         .find(|entry| entry.kernel_name == block_name)
     else {
         return physical_names;
     };
-    for slave_name in entry.slaves.iter().take(256) {
-        physical_names.extend(physical_device_names_from_topology(
-            slave_name,
-            class_entries,
-            visited,
-            depth + 1,
-        ));
+    if entry.slaves.is_empty() {
+        if let Some(name) = physical_device_name_from_leaf(entry) {
+            physical_names.insert(name);
+        }
+    } else {
+        for slave_name in entry.slaves.iter().take(256) {
+            physical_names.extend(physical_device_names_from_topology(
+                slave_name,
+                class_entries,
+                visited,
+                depth + 1,
+            ));
+        }
     }
     physical_names
 }
 
-fn physical_device_name_from_direct_block_name(name: &str) -> Option<String> {
+fn physical_device_name_from_leaf(entry: &BlockClassEntry) -> Option<String> {
+    let name = entry.kernel_name.as_str();
     if name.starts_with("mapper/") || name.starts_with("md") || name.starts_with("dm-") {
         return None;
     }
-    Some(format!("/dev/{}", physical_device_basename(name)?))
+    if let Some(controller) = nvme_controller_name(name) {
+        return Some(format!("/dev/{controller}"));
+    }
+    let physical_name = if entry.is_partition {
+        partition_parent_name(name)?
+    } else {
+        name
+    };
+    Some(format!("/dev/{physical_name}"))
 }
 
-fn physical_device_basename(name: &str) -> Option<String> {
-    if let Some(controller) = nvme_controller_name(name) {
-        return Some(controller);
+fn partition_parent_name(name: &str) -> Option<&str> {
+    if let Some((parent, suffix)) = name.rsplit_once('p')
+        && parent.ends_with(|character: char| character.is_ascii_digit())
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Some(parent);
     }
-    let trimmed = name
-        .trim_end_matches(|character: char| character.is_ascii_digit())
-        .trim_end_matches('p');
-    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    let parent = name.trim_end_matches(|character: char| character.is_ascii_digit());
+    (!parent.is_empty() && parent != name).then_some(parent)
 }
 
 fn nvme_controller_name(name: &str) -> Option<String> {
@@ -479,12 +514,21 @@ fn unix_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockClassEntry, physical_device_name, unescape_mount_value};
+    use super::{
+        BlockClassEntry, block_device_topology_from_class_entries, physical_device_name,
+        unescape_mount_value,
+    };
 
-    fn entry(kernel_name: &str, mapper_name: Option<&str>, slaves: &[&str]) -> BlockClassEntry {
+    fn entry(
+        kernel_name: &str,
+        mapper_name: Option<&str>,
+        is_partition: bool,
+        slaves: &[&str],
+    ) -> BlockClassEntry {
         BlockClassEntry {
             kernel_name: kernel_name.to_owned(),
             device_mapper_name: mapper_name.map(ToOwned::to_owned),
+            is_partition,
             slaves: slaves.iter().map(|name| (*name).to_owned()).collect(),
         }
     }
@@ -492,8 +536,15 @@ mod tests {
     #[test]
     fn pure_topology_resolves_direct_nvme_dm_mapper_and_md_devices() {
         let topology = [
-            entry("dm-0", Some("vg-root"), &["nvme0n1p3"]),
-            entry("md0", None, &["sda1"]),
+            entry("sda", None, false, &[]),
+            entry("sda1", None, true, &[]),
+            entry("nvme0n1", None, false, &[]),
+            entry("nvme0n1p1", None, true, &[]),
+            entry("nvme0n1p3", None, true, &[]),
+            entry("mmcblk0", None, false, &[]),
+            entry("mmcblk0p1", None, true, &[]),
+            entry("dm-0", Some("vg-root"), false, &["nvme0n1p3"]),
+            entry("md0", None, false, &["sda1"]),
         ];
 
         assert_eq!(
@@ -516,16 +567,52 @@ mod tests {
             physical_device_name("/dev/md0", &topology).as_deref(),
             Some("/dev/sda")
         );
+        assert_eq!(
+            physical_device_name("/dev/mmcblk0", &topology).as_deref(),
+            Some("/dev/mmcblk0")
+        );
+        assert_eq!(
+            physical_device_name("/dev/mmcblk0p1", &topology).as_deref(),
+            Some("/dev/mmcblk0")
+        );
     }
 
     #[test]
     fn topology_recursion_is_bounded_and_cycles_produce_no_fact() {
         let topology = [
-            entry("dm-0", None, &["dm-1"]),
-            entry("dm-1", None, &["dm-0"]),
+            entry("dm-0", None, false, &["dm-1"]),
+            entry("dm-1", None, false, &["dm-0"]),
         ];
 
         assert_eq!(physical_device_name("/dev/dm-0", &topology), None);
+    }
+
+    #[test]
+    fn typed_topology_contains_every_mount_source_and_fixed_class_alias() {
+        let topology = [
+            entry("sda", None, false, &[]),
+            entry("sda1", None, true, &[]),
+            entry("nvme0n1", None, false, &[]),
+            entry("dm-0", Some("vg-root"), false, &["nvme0n1"]),
+        ];
+        let facts = block_device_topology_from_class_entries(
+            "/dev/sda1 / ext4 rw 0 0\n/dev/mapper/vg-root /srv xfs rw 0 0\n",
+            &topology,
+        );
+        let facts = facts
+            .into_iter()
+            .map(|fact| (fact.source, fact.physical_device))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert_eq!(facts.get("/dev/sda1").map(String::as_str), Some("/dev/sda"));
+        assert_eq!(
+            facts.get("/dev/mapper/vg-root").map(String::as_str),
+            Some("/dev/nvme0"),
+        );
+        assert_eq!(
+            facts.get("/dev/nvme0n1").map(String::as_str),
+            Some("/dev/nvme0"),
+        );
     }
 
     #[test]

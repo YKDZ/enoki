@@ -54,7 +54,7 @@ pub(crate) fn enrich_disk_health_metrics_with_resource_facts(
     let usage_by_device = if unraid_disks_ini.is_empty() {
         disk_usage_by_device_from_mounts_and_capacities(mounts, capacities, block_device_topology)
     } else {
-        disk_usage_by_device_from_unraid_disks_ini_contents(unraid_disks_ini)
+        disk_usage_by_device_from_unraid_disks_ini_contents(unraid_disks_ini, block_device_topology)
     };
     for metric in metrics {
         if let Some(usage) = usage_by_device.get(&metric.device_name) {
@@ -110,13 +110,14 @@ fn apply_disk_physical_usage(metric: &mut DiskHealthMetric, usage: &DiskPhysical
 
 fn disk_usage_by_device_from_unraid_disks_ini_contents(
     contents: &str,
+    block_device_topology: &BTreeMap<String, String>,
 ) -> BTreeMap<String, DiskPhysicalUsage> {
     let mut usage_by_device = BTreeMap::new();
     let mut current = UnraidDiskSection::default();
 
     for line in contents.lines() {
         if line.starts_with("[\"") && line.ends_with("\"]") {
-            insert_unraid_disk_usage(&mut usage_by_device, &current);
+            insert_unraid_disk_usage(&mut usage_by_device, &current, block_device_topology);
             current = UnraidDiskSection::default();
             current.name = line
                 .trim_start_matches("[\"")
@@ -138,13 +139,14 @@ fn disk_usage_by_device_from_unraid_disks_ini_contents(
         }
     }
 
-    insert_unraid_disk_usage(&mut usage_by_device, &current);
+    insert_unraid_disk_usage(&mut usage_by_device, &current, block_device_topology);
     usage_by_device
 }
 
 fn insert_unraid_disk_usage(
     usage_by_device: &mut BTreeMap<String, DiskPhysicalUsage>,
     section: &UnraidDiskSection,
+    block_device_topology: &BTreeMap<String, String>,
 ) {
     let Some(total_kib) = section.total_kib else {
         return;
@@ -167,9 +169,11 @@ fn insert_unraid_disk_usage(
         used_bytes: used_kib.saturating_mul(1024),
     };
 
-    for device_name in smartctl_device_aliases(&section.device) {
-        merge_disk_usage(usage_by_device, &device_name, usage.clone());
-    }
+    let source = format!("/dev/{}", section.device);
+    let Some(device_name) = block_device_topology.get(&source) else {
+        return;
+    };
+    merge_disk_usage(usage_by_device, device_name, usage);
 }
 
 fn merge_disk_usage(
@@ -214,51 +218,7 @@ fn physical_device_name(
     source: &str,
     block_device_topology: &BTreeMap<String, String>,
 ) -> Option<String> {
-    block_device_topology
-        .get(source)
-        .cloned()
-        .or_else(|| physical_device_name_from_direct_block_name(source.strip_prefix("/dev/")?))
-}
-
-fn physical_device_name_from_direct_block_name(name: &str) -> Option<String> {
-    if name.starts_with("mapper/") || name.starts_with("md") || name.starts_with("dm-") {
-        return None;
-    }
-
-    Some(format!("/dev/{}", physical_device_basename(name)?))
-}
-
-fn physical_device_basename(name: &str) -> Option<String> {
-    if let Some(controller) = nvme_controller_name(name) {
-        return Some(controller);
-    }
-
-    let trimmed = name
-        .trim_end_matches(|character: char| character.is_ascii_digit())
-        .trim_end_matches('p');
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-fn smartctl_device_aliases(device: &str) -> Vec<String> {
-    let mut aliases = vec![format!("/dev/{device}")];
-    if let Some(controller) = nvme_controller_name(device) {
-        aliases.push(format!("/dev/{controller}"));
-    }
-
-    aliases
-}
-
-fn nvme_controller_name(name: &str) -> Option<String> {
-    let rest = name.strip_prefix("nvme")?;
-    let digits = rest
-        .chars()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() || !rest[digits.len()..].starts_with('n') {
-        return None;
-    }
-
-    Some(format!("nvme{digits}"))
+    block_device_topology.get(source).cloned()
 }
 
 fn unescape_mount_value(value: &str) -> String {
@@ -326,6 +286,10 @@ mod tests {
 
     #[test]
     fn unraid_disks_ini_maps_devices_to_usage_bytes() {
+        let topology = BTreeMap::from([
+            ("/dev/sdc".to_owned(), "/dev/sdc".to_owned()),
+            ("/dev/nvme0n1".to_owned(), "/dev/nvme0".to_owned()),
+        ]);
         let usage = disk_usage_by_device_from_unraid_disks_ini_contents(
             r#"["disk1"]
 name="disk1"
@@ -342,6 +306,7 @@ fsMountpoint="/mnt/cache"
 fsSize="200"
 fsUsed="90"
 "#,
+            &topology,
         );
 
         assert_eq!(
@@ -365,19 +330,31 @@ fsUsed="90"
     }
 
     #[test]
-    fn physical_device_names_match_smartctl_device_names() {
+    fn disk_usage_requires_provider_topology_for_every_mount_source() {
         assert_eq!(
             physical_device_name("/dev/sda1", &BTreeMap::new()).as_deref(),
-            Some("/dev/sda")
+            None
         );
         assert_eq!(
             physical_device_name("/dev/nvme0n1p1", &BTreeMap::new()).as_deref(),
-            Some("/dev/nvme0"),
+            None,
         );
         assert_eq!(physical_device_name("/dev/md1p1", &BTreeMap::new()), None);
         assert_eq!(
             physical_device_name("/dev/mapper/vg-root", &BTreeMap::new()),
             None,
+        );
+        let topology = BTreeMap::from([
+            ("/dev/sda1".to_owned(), "/dev/sda".to_owned()),
+            ("/dev/nvme0n1p1".to_owned(), "/dev/nvme0".to_owned()),
+        ]);
+        assert_eq!(
+            physical_device_name("/dev/sda1", &topology).as_deref(),
+            Some("/dev/sda"),
+        );
+        assert_eq!(
+            physical_device_name("/dev/nvme0n1p1", &topology).as_deref(),
+            Some("/dev/nvme0"),
         );
     }
 

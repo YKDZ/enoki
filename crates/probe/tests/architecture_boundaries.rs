@@ -85,6 +85,16 @@ fn observation_roles_have_one_way_dependency_boundaries() {
             "Runtime 可达的磁盘健康计算不得打开主机资源：{forbidden}",
         );
     }
+    for forbidden in [
+        "physical_device_name_from_direct_block_name",
+        "physical_device_basename",
+        "nvme_controller_name",
+    ] {
+        assert!(
+            !DISK_HEALTH_CALCULATION.contains(forbidden),
+            "Runtime 磁盘健康计算只能消费 Provider topology map：{forbidden}",
+        );
+    }
 }
 
 #[test]
