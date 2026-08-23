@@ -1129,7 +1129,7 @@ pub fn recover_incomplete_probe_upgrade(
         }
         Ok(Some(receipt))
     })();
-    if recovered.is_err() && !matches!(phase, "admitted" | "prepared" | "aborted") {
+    if recovered.is_err() && !matches!(phase, "consumed" | "admitted" | "prepared" | "aborted") {
         let _ = mark_upgrade_attempt_phase(paths, "repair-required");
         let _ = write_operation_status(
             paths,

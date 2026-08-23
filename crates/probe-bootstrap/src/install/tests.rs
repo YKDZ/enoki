@@ -1066,6 +1066,91 @@ mod tests {
     }
 
     #[test]
+    fn consumed_recovery_persistence_failures_stay_preactivation_until_explicit_retry() {
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Cleanup,
+            AbortJournal,
+            Status,
+        }
+
+        for failure in [Failure::Cleanup, Failure::AbortJournal, Failure::Status] {
+            let temporary = tempdir().unwrap();
+            let paths = FixedInstallPaths::under(temporary.path());
+            fs::create_dir_all(paths.bootstrap_state()).unwrap();
+            fs::create_dir_all(paths.state()).unwrap();
+            consume_probe_upgrade_authority(
+                &paths,
+                &UpgradeAuthorityConsumption {
+                    operation_id: "consumed-recovery".to_owned(),
+                    stage_owner_uid: unsafe { libc::geteuid() },
+                    hub_origin: "https://hub.example".to_owned(),
+                    probe_id: "probe_01".to_owned(),
+                    source_bundle_version: "1.2.3".to_owned(),
+                    source_install_state_sha256: "a".repeat(64),
+                    source_manifest_sha256: "b".repeat(64),
+                    target_bundle_version: "1.2.4".to_owned(),
+                    target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+                    target_manifest_sha256: "d".repeat(64),
+                    verified_stage_sha256: "e".repeat(64),
+                },
+            )
+            .unwrap();
+
+            let destinations = upgrade_destinations(&paths);
+            for destination in &destinations {
+                fs::create_dir_all(destination.parent().unwrap()).unwrap();
+                fs::write(destination, b"old-source").unwrap();
+            }
+            let failed_path = match failure {
+                Failure::Cleanup => destinations[0].with_file_name(format!(
+                    ".{}.enoki-upgrade-new",
+                    destinations[0].file_name().unwrap().to_str().unwrap(),
+                )),
+                Failure::AbortJournal => paths
+                    .bootstrap_state()
+                    .join(".probe-upgrade-attempt.toml.enoki-write"),
+                Failure::Status => paths
+                    .state()
+                    .join(".probe-operation-status.toml.enoki-write"),
+            };
+            fs::create_dir(&failed_path).unwrap();
+            fs::write(failed_path.join("blocks-removal"), b"fault").unwrap();
+
+            let mut systemd = Systemd::default();
+            assert_eq!(
+                recover_incomplete_probe_upgrade(&paths, &mut systemd),
+                Err(InstallError::Io),
+            );
+            let journal_path = paths
+                .bootstrap_state()
+                .join("probe-upgrade-attempt.toml");
+            let failed_phase = fs::read_to_string(&journal_path).unwrap();
+            match failure {
+                Failure::Status => assert!(failed_phase.contains("phase = \"aborted\"")),
+                Failure::Cleanup | Failure::AbortJournal => {
+                    assert!(failed_phase.contains("phase = \"consumed\""));
+                }
+            }
+            assert!(systemd.calls.is_empty());
+
+            fs::remove_dir_all(&failed_path).unwrap();
+            let receipt = recover_incomplete_probe_upgrade(&paths, &mut systemd)
+                .unwrap()
+                .expect("explicit retry must complete the preactivation cleanup");
+            assert!(!receipt.activated);
+            assert!(systemd.calls.is_empty());
+            assert!(fs::read_to_string(&journal_path)
+                .unwrap()
+                .contains("phase = \"aborted\""));
+            finalize_probe_upgrade_stage_cleanup(&paths, &receipt).unwrap();
+            assert!(destinations
+                .iter()
+                .all(|destination| fs::read(destination).unwrap() == b"old-source"));
+        }
+    }
+
+    #[test]
     fn observation_units_keep_callers_roles_and_deadlines_fixed() {
         let probe = service_unit();
         let runtime_socket = observation_runtime_socket_unit();
