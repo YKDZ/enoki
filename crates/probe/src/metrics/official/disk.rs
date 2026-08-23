@@ -3,13 +3,8 @@ use std::{
     path::Path,
 };
 
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorId, FilesystemCapacity, unix_time_millis,
-};
+use crate::metrics::{FilesystemCapacity, unix_time_millis};
 use crate::protocol::enoki::v1::DiskUsageMetric;
-
-pub const DEFINITION: CollectorDefinition =
-    CollectorDefinition::new(CollectorId::Disk, CollectorCadence::EveryTick);
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "cgroup", "cgroup2", "debugfs", "devtmpfs", "fusectl", "overlay", "proc", "squashfs", "sysfs",

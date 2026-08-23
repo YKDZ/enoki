@@ -406,7 +406,6 @@ pub fn run_probe_local_install_with_registration_transport(
         write_install_metadata(input)?;
         write_systemd_service(input)?;
         write_operation_sudoers(input)?;
-        write_collector_helper_sudoers(input)?;
         run_systemctl(&["daemon-reload"])?;
         run_systemctl(&["enable", &unit_name(input)])?;
         service_enabled = true;
@@ -1034,38 +1033,6 @@ fn write_operation_sudoers(input: &ProbeLocalInstallInput) -> Result<(), ProbeLo
         .map_err(ProbeLocalLifecycleError::Io)
 }
 
-fn write_collector_helper_sudoers(
-    input: &ProbeLocalInstallInput,
-) -> Result<(), ProbeLocalLifecycleError> {
-    let installed_binary = rooted_path(input, &input.install_path);
-    let output = Command::new(installed_binary)
-        .args([
-            "internal-render-collector-helper-sudoers",
-            "--service-user",
-            &input.service_user,
-            "--probe-binary",
-            input
-                .install_path
-                .to_str()
-                .ok_or(ProbeLocalLifecycleError::InvalidInput(
-                    "install path is not UTF-8",
-                ))?,
-        ])
-        .output()
-        .map_err(ProbeLocalLifecycleError::Io)?;
-    if !output.status.success() {
-        return Err(ProbeLocalLifecycleError::ServiceCommand(
-            "collector helper sudoers planner failed".to_string(),
-        ));
-    }
-    let path = rooted_path(input, &input.collector_helper_sudoers_path);
-    if output.stdout.is_empty() {
-        return Ok(());
-    }
-    atomic_write(&path, &output.stdout, 0o440, root_owner(input))
-        .map_err(ProbeLocalLifecycleError::Io)
-}
-
 fn wait_for_readiness(input: &ProbeLocalInstallInput) -> Result<(), ProbeLocalLifecycleError> {
     let deadline = Instant::now() + input.readiness_timeout;
     loop {
@@ -1568,7 +1535,6 @@ mod tests {
         assert!(!legacy_sudoers.exists());
         for path in [
             rooted_path(&input, &input.operation_sudoers_path),
-            rooted_path(&input, &input.collector_helper_sudoers_path),
             rooted_path(&input, &input.service_unit_path),
         ] {
             assert_ne!(
@@ -1576,6 +1542,7 @@ mod tests {
                 "old managed residue"
             );
         }
+        assert!(!rooted_path(&input, &input.collector_helper_sudoers_path).exists());
         let command_log = fs::read_to_string(command_log).expect("command log");
         assert!(!command_log.contains("old binary invoked"));
         for cleanup_command in [

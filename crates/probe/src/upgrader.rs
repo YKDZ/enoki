@@ -28,11 +28,6 @@ use rsa::{
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-#[cfg(test)]
-use crate::local_privilege_boundary::{
-    CollectorHelperExposureEnvironment, CollectorHelperSudoersPlanInput,
-    CollectorHelperSudoersPlanner,
-};
 use crate::{
     hub_url,
     probe_auth::{ProbeRequestAuth, signed_probe_request_headers},
@@ -3759,33 +3754,6 @@ fn write_probe_operation_sudoers(
         .map_err(ProbeUpgraderRunError::Io)
 }
 
-#[cfg(test)]
-fn write_collector_helper_sudoers(
-    install_metadata: &TrustedProbeInstallMetadata,
-    collector_helper_environment: &dyn CollectorHelperExposureEnvironment,
-) -> Result<(), ProbeUpgraderRunError> {
-    let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {
-        return Ok(());
-    };
-    let plan = CollectorHelperSudoersPlanner::new(collector_helper_environment).plan(
-        CollectorHelperSudoersPlanInput {
-            service_user: install_metadata.service_user.clone(),
-            probe_binary: install_metadata.install_path.clone(),
-        },
-    );
-    if let Some(parent) = sudoers_path.parent() {
-        fs::create_dir_all(parent).map_err(ProbeUpgraderRunError::Io)?;
-    }
-
-    let Some(content) = plan.content else {
-        return remove_path_if_exists(sudoers_path);
-    };
-
-    fs::write(sudoers_path, content).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(sudoers_path, fs::Permissions::from_mode(0o440))
-        .map_err(ProbeUpgraderRunError::Io)
-}
-
 fn write_collector_helper_sudoers_from_installed_probe(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -7253,91 +7221,6 @@ mod tests {
             error,
             ProbeUpgraderRunError::InvalidInstallMetadata("sudoers command contains unsafe values")
         ));
-    }
-
-    #[test]
-    fn collector_helper_sudoers_includes_exposed_compiled_privileged_collector_helpers() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-
-        write_collector_helper_sudoers(&install_metadata, &SmartctlCollectorHelperExposure)
-            .expect("collector-helper sudoers render");
-
-        let sudoers = fs::read_to_string(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-        )
-        .expect("collector-helper sudoers");
-        assert!(
-            sudoers.contains("internal-privileged-collector-helper --helper disk-health.smartctl")
-        );
-        assert!(!sudoers.contains("internal-upgrader --config"));
-        assert!(!sudoers.contains("internal-uninstaller --config"));
-        assert!(!sudoers.contains("internal-privileged-collector --collector"));
-        assert!(!sudoers.contains("--collector disk-health.smartctl"));
-        assert!(sudoers.contains("--property=RuntimeMaxSec=10"));
-        assert!(sudoers.contains("--property=PrivateNetwork=yes"));
-        assert!(!sudoers.contains('*'));
-        assert!(!sudoers.contains("--operation-id"));
-        assert!(!sudoers.contains("--target-probe-version"));
-    }
-
-    #[test]
-    fn collector_helper_sudoers_is_absent_when_no_helper_is_exposed() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .parent()
-                .expect("sudoers parent"),
-        )
-        .expect("sudoers parent");
-        fs::write(
-            install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers"),
-            "stale collector helper sudoers",
-        )
-        .expect("stale helper sudoers");
-
-        write_collector_helper_sudoers(&install_metadata, &NoCollectorHelperExposure)
-            .expect("collector-helper sudoers omitted");
-
-        assert!(
-            !install_metadata
-                .collector_helper_sudoers_path
-                .as_ref()
-                .expect("legacy sudoers")
-                .exists()
-        );
-    }
-
-    struct NoCollectorHelperExposure;
-
-    impl CollectorHelperExposureEnvironment for NoCollectorHelperExposure {
-        fn tool_exists(&self, _path: &Path) -> bool {
-            false
-        }
-    }
-
-    struct SmartctlCollectorHelperExposure;
-
-    impl CollectorHelperExposureEnvironment for SmartctlCollectorHelperExposure {
-        fn tool_exists(&self, path: &Path) -> bool {
-            path == Path::new("/usr/sbin/smartctl")
-        }
     }
 
     #[test]

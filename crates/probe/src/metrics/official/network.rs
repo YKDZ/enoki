@@ -1,10 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::metrics::{CollectorCadence, CollectorDefinition, CollectorId};
 use crate::protocol::enoki::v1::NetworkInterfaceMetric;
-
-pub const DEFINITION: CollectorDefinition =
-    CollectorDefinition::new(CollectorId::Network, CollectorCadence::EveryTick);
 
 #[derive(Clone, Debug, Default)]
 pub struct NetworkCounterSnapshot {

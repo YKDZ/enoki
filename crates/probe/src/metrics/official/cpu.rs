@@ -1,10 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::metrics::{CollectorCadence, CollectorDefinition, CollectorId};
 use crate::protocol::enoki::v1::CpuCoreMetric;
-
-pub const DEFINITION: CollectorDefinition =
-    CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::EveryTick);
 
 #[derive(Debug)]
 pub struct CpuMetrics {
