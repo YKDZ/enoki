@@ -265,6 +265,7 @@ const PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH: &str =
 const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
+const PRODUCTION_INSTALL_STATE_DIR: &str = "/var/lib/enoki-probe";
 const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
 const MAX_UNINSTALL_CAPSULE_BYTES: u64 = 64 * 1024;
 
@@ -1936,6 +1937,7 @@ pub fn resume_lifecycle_companion(
     }
     match resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        Path::new(PRODUCTION_INSTALL_STATE_DIR),
         Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
         transport,
         &mut SystemProbeUpgraderSystemdRunner,
@@ -1948,12 +1950,18 @@ pub fn resume_lifecycle_companion(
 
 fn resume_lifecycle_companion_at(
     install_metadata_path: &Path,
-    _companion_binary_path: &Path,
+    install_state_dir: &Path,
+    companion_binary_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<bool, ProbeUpgraderRunError> {
     let capsule_path = uninstall_capsule_path(install_metadata_path)?;
     let Some(capsule) = read_uninstall_capsule(&capsule_path)? else {
+        require_post_commit_self_finalize_facts(
+            install_metadata_path,
+            install_state_dir,
+            companion_binary_path,
+        )?;
         return Ok(true);
     };
     let request = LifecycleRequest::decode(capsule.request_json.as_bytes()).map_err(|_| {
@@ -1970,6 +1978,35 @@ fn resume_lifecycle_companion_at(
         transport,
         systemd,
     )
+}
+
+fn require_post_commit_self_finalize_facts(
+    install_metadata_path: &Path,
+    install_state_dir: &Path,
+    companion_binary_path: &Path,
+) -> Result<(), ProbeUpgraderRunError> {
+    for path in [install_metadata_path, install_state_dir] {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "lifecycle resume is not a committed uninstall",
+                ));
+            }
+            Err(error) => return Err(ProbeUpgraderRunError::Io(error)),
+        }
+    }
+    let binary = fs::symlink_metadata(companion_binary_path).map_err(ProbeUpgraderRunError::Io)?;
+    if !binary.file_type().is_file()
+        || binary.nlink() != 1
+        || binary.uid() != 0
+        || binary.mode() & 0o777 != 0o755
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "lifecycle resume binary is not trusted",
+        ));
+    }
+    Ok(())
 }
 
 pub fn run_local_lifecycle_companion(
@@ -6777,7 +6814,7 @@ mod tests {
             service_group: "enoki-probe".to_owned(),
             service_unit_path,
             service_user: "enoki-probe".to_owned(),
-            state_dir,
+            state_dir: state_dir.clone(),
             operation_sudoers_path: None,
             collector_helper_sudoers_path: None,
             old_sudoers_paths: Vec::new(),
@@ -6915,6 +6952,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("ENOKI_TEST_RESUME_METADATA", &metadata_path)
+            .env("ENOKI_TEST_RESUME_STATE", &state_dir)
             .env("ENOKI_TEST_RESUME_BINARY", &companion_path)
             .status()
             .expect("start a fresh Companion recovery process");
@@ -6932,10 +6970,13 @@ mod tests {
         };
         let binary_path =
             std::env::var("ENOKI_TEST_RESUME_BINARY").expect("fixed test recovery binary");
+        let state_path =
+            std::env::var("ENOKI_TEST_RESUME_STATE").expect("fixed test install state");
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
         let completed = resume_lifecycle_companion_at(
             Path::new(&metadata_path),
+            Path::new(&state_path),
             Path::new(&binary_path),
             &mut transport,
             &mut systemd,
@@ -6966,22 +7007,70 @@ mod tests {
     fn empty_resume_without_capsule_only_self_finalizes_the_fixed_binary() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let metadata = temporary.path().join("etc/enoki/probe-install.toml");
+        let state = temporary.path().join("var/lib/enoki-probe");
         let binary = temporary
             .path()
             .join("usr/local/bin/enoki-probe-lifecycle-companion");
         fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("metadata parent");
         fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary parent");
         fs::write(&binary, "companion").expect("companion binary");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))
+            .expect("trusted companion mode");
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
 
         assert!(
-            resume_lifecycle_companion_at(&metadata, &binary, &mut transport, &mut systemd)
+            resume_lifecycle_companion_at(
+                &metadata,
+                &state,
+                &binary,
+                &mut transport,
+                &mut systemd,
+            )
                 .expect("self finalization")
         );
-        assert!(!binary.exists());
+        assert!(binary.exists(), "响应完成前必须保留 self-finalize binary");
+        assert!(
+            resume_lifecycle_companion_at(
+                &metadata,
+                &state,
+                &binary,
+                &mut transport,
+                &mut systemd,
+            )
+            .expect("unlink failure can retry from the same post-commit disk facts")
+        );
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[test]
+    fn empty_resume_rejects_a_healthy_install_without_self_finalizing() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = temporary.path().join("etc/enoki/probe-install.toml");
+        let state = temporary.path().join("var/lib/enoki-probe");
+        let binary = temporary
+            .path()
+            .join("usr/local/bin/enoki-probe-lifecycle-companion");
+        for parent in [
+            metadata.parent().unwrap(),
+            state.as_path(),
+            binary.parent().unwrap(),
+        ] {
+            fs::create_dir_all(parent).expect("fixture directory");
+        }
+        fs::write(&metadata, "healthy install metadata").expect("metadata");
+        fs::write(&binary, "companion").expect("companion binary");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        let error =
+            resume_lifecycle_companion_at(&metadata, &state, &binary, &mut transport, &mut systemd)
+                .expect_err("healthy install is not post-commit recovery");
+        assert_eq!(error.code(), "probe_uninstall_metadata_invalid");
+        assert!(binary.exists());
+        assert!(transport.url.is_empty());
         assert!(systemd.calls.is_empty());
     }
 

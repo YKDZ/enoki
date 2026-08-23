@@ -1,6 +1,9 @@
 //! 独立、短生命周期的本机生命周期角色入口。
 
-use std::{io::Read, process::ExitCode};
+use std::{
+    io::{Read, Write},
+    process::ExitCode,
+};
 
 use enoki_probe::upgrader::{
     HttpProbeUpgraderValidationTransport, finalize_lifecycle_companion_binary,
@@ -42,13 +45,34 @@ fn main() -> ExitCode {
 }
 
 fn write_lifecycle_response(response: LifecycleResponse) -> ExitCode {
-    let self_finalize = response == LifecycleResponse::succeeded();
-    let exit = write_response(response);
-    if self_finalize && !finalize_lifecycle_companion_binary() {
+    write_lifecycle_response_with(
+        response,
+        &mut std::io::stdout(),
+        finalize_lifecycle_companion_binary,
+    )
+}
+
+fn write_lifecycle_response_with(
+    response: LifecycleResponse,
+    writer: &mut impl Write,
+    finalize: impl FnOnce() -> bool,
+) -> ExitCode {
+    let frame = response.encode();
+    if writer.write_all(&frame).is_err() || writer.flush().is_err() {
         return ExitCode::from(1);
     }
-    // 自删除刻意保持为生产进程最后一个可失败动作。
-    exit
+    if response != LifecycleResponse::succeeded() {
+        return lifecycle_response_exit(&response);
+    }
+    if finalize() {
+        // unlink 成功后直接返回；这里之后没有 writer、filesystem 或其他
+        // 可失败端口调用，客户端只在进程关闭形成 EOF 后观察到成功。
+        return ExitCode::SUCCESS;
+    }
+    // binary 仍在，可由固定空 Resume 再试。追加 JSON 协议外字节并刷新，
+    // 确保客户端不会把这次本机未完成误判为 canonical success。
+    let _ = writer.write_all(b"\n").and_then(|()| writer.flush());
+    ExitCode::from(1)
 }
 
 fn caller_is_authorized(
@@ -85,11 +109,14 @@ fn stdin_peer_uid() -> Option<u32> {
 }
 
 fn write_response(response: LifecycleResponse) -> ExitCode {
-    use std::io::Write;
-
-    if std::io::stdout().write_all(&response.encode()).is_err() {
+    let mut stdout = std::io::stdout();
+    if stdout.write_all(&response.encode()).is_err() || stdout.flush().is_err() {
         return ExitCode::from(1);
     }
+    lifecycle_response_exit(&response)
+}
+
+fn lifecycle_response_exit(response: &LifecycleResponse) -> ExitCode {
     match response.status() {
         enoki_probe_bootstrap::lifecycle::LifecycleResultStatus::Succeeded => ExitCode::SUCCESS,
         enoki_probe_bootstrap::lifecycle::LifecycleResultStatus::Failed
@@ -100,6 +127,33 @@ fn write_response(response: LifecycleResponse) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        bytes: Vec<u8>,
+        calls: Vec<&'static str>,
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.calls.push("write");
+            if self.fail_write {
+                return Err(std::io::Error::other("ordinary write failure"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.calls.push("flush");
+            if self.fail_flush {
+                return Err(std::io::Error::other("ordinary flush failure"));
+            }
+            Ok(())
+        }
+    }
 
     fn hub_authority() -> LifecycleRequestAuthority {
         LifecycleRequest::hub_uninstall(
@@ -134,5 +188,58 @@ mod tests {
         assert!(!caller_is_authorized(&local_authority(), Some(1000), 0));
         assert!(caller_is_authorized(&local_authority(), None, 0));
         assert!(!caller_is_authorized(&local_authority(), None, 1000));
+    }
+
+    #[test]
+    fn response_write_or_flush_failure_never_starts_self_finalization() {
+        for mut writer in [
+            RecordingWriter {
+                fail_write: true,
+                ..RecordingWriter::default()
+            },
+            RecordingWriter {
+                fail_flush: true,
+                ..RecordingWriter::default()
+            },
+        ] {
+            let mut finalized = false;
+            let exit =
+                write_lifecycle_response_with(LifecycleResponse::succeeded(), &mut writer, || {
+                    finalized = true;
+                    true
+                });
+            assert_eq!(exit, ExitCode::from(1));
+            assert!(!finalized);
+        }
+    }
+
+    #[test]
+    fn unlink_failure_invalidates_the_flushed_success_frame_and_keeps_resume_possible() {
+        let mut writer = RecordingWriter::default();
+        let exit =
+            write_lifecycle_response_with(LifecycleResponse::succeeded(), &mut writer, || false);
+
+        assert_eq!(exit, ExitCode::from(1));
+        assert!(LifecycleResponse::decode(&writer.bytes).is_err());
+        assert_eq!(writer.calls, ["write", "flush", "write", "flush"]);
+    }
+
+    #[test]
+    fn successful_unlink_is_the_last_fallible_effect() {
+        let mut writer = RecordingWriter::default();
+        let mut events = Vec::new();
+        let exit =
+            write_lifecycle_response_with(LifecycleResponse::succeeded(), &mut writer, || {
+                events.push("unlink");
+                true
+            });
+
+        assert_eq!(exit, ExitCode::SUCCESS);
+        assert_eq!(writer.calls, ["write", "flush"]);
+        assert_eq!(events, ["unlink"]);
+        assert_eq!(
+            LifecycleResponse::decode(&writer.bytes),
+            Ok(LifecycleResponse::succeeded())
+        );
     }
 }
