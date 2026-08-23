@@ -1908,23 +1908,21 @@ where
             self.systemd,
             UninstallCleanupExtent::RecoverableFinalize,
         )?;
-        commit_lifecycle_self_removal_with(
-            &self.capsule_path,
-            companion_binary,
-            remove_path_if_exists,
-        )
+        let _ = companion_binary;
+        commit_lifecycle_capsule_with(&self.capsule_path, remove_path_if_exists)
     }
 }
 
-fn commit_lifecycle_self_removal_with(
+fn commit_lifecycle_capsule_with(
     capsule_path: &Path,
-    companion_binary: &Path,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
-    remove(capsule_path)?;
-    // capsule 删除后，这是最后一个可失败动作；成功后不得再执行
-    // filesystem、systemd、network 或验证操作。
-    remove(companion_binary)
+    remove(capsule_path)
+}
+
+/// 响应已经完整写出后，Companion binary unlink 是进程最后一个可失败动作。
+pub fn finalize_lifecycle_companion_binary() -> bool {
+    remove_path_if_exists(Path::new(LIFECYCLE_COMPANION_BINARY_PATH)).is_ok()
 }
 
 /// 固定恢复入口不接受运行时参数；它只消费安装目录中的 root-owned
@@ -1950,13 +1948,12 @@ pub fn resume_lifecycle_companion(
 
 fn resume_lifecycle_companion_at(
     install_metadata_path: &Path,
-    companion_binary_path: &Path,
+    _companion_binary_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<bool, ProbeUpgraderRunError> {
     let capsule_path = uninstall_capsule_path(install_metadata_path)?;
     let Some(capsule) = read_uninstall_capsule(&capsule_path)? else {
-        remove_path_if_exists(companion_binary_path)?;
         return Ok(true);
     };
     let request = LifecycleRequest::decode(capsule.request_json.as_bytes()).map_err(|_| {
@@ -6947,30 +6944,22 @@ mod tests {
         assert!(completed);
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
+        remove_path_if_exists(Path::new(&binary_path))
+            .expect("fresh Companion process performs its final self-unlink");
     }
 
     #[test]
-    fn lifecycle_commit_tail_keeps_binary_until_capsule_delete_and_has_no_late_work() {
+    fn lifecycle_commit_deletes_only_the_capsule_before_process_self_finalization() {
         let capsule = Path::new("/etc/enoki/probe-uninstall.capsule");
-        let binary = Path::new("/usr/local/bin/enoki-probe-lifecycle-companion");
-        for failed in [capsule, binary] {
-            let mut calls = Vec::new();
-            let result = commit_lifecycle_self_removal_with(capsule, binary, |path| {
-                calls.push(path.to_path_buf());
-                if path == failed {
-                    return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                        "injected ordinary transaction failure",
-                    )));
-                }
-                Ok(())
-            });
-            assert!(result.is_err());
-            if failed == capsule {
-                assert_eq!(calls, [capsule]);
-            } else {
-                assert_eq!(calls, [capsule, binary]);
-            }
-        }
+        let mut calls = Vec::new();
+        let result = commit_lifecycle_capsule_with(capsule, |path| {
+            calls.push(path.to_path_buf());
+            Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                "injected ordinary transaction failure",
+            )))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, [capsule]);
     }
 
     #[test]

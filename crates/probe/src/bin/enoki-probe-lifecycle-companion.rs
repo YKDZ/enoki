@@ -3,7 +3,8 @@
 use std::{io::Read, process::ExitCode};
 
 use enoki_probe::upgrader::{
-    HttpProbeUpgraderValidationTransport, resume_lifecycle_companion, run_lifecycle_companion,
+    HttpProbeUpgraderValidationTransport, finalize_lifecycle_companion_binary,
+    resume_lifecycle_companion, run_lifecycle_companion,
 };
 use enoki_probe_bootstrap::lifecycle::{
     LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, MAX_LIFECYCLE_REQUEST_BYTES,
@@ -29,7 +30,7 @@ fn main() -> ExitCode {
         if peer_uid.is_some() || process_uid != 0 {
             return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
         }
-        return write_response(resume_lifecycle_companion(&mut transport));
+        return write_lifecycle_response(resume_lifecycle_companion(&mut transport));
     }
     let Ok(request) = LifecycleRequest::decode(&bytes) else {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
@@ -37,7 +38,17 @@ fn main() -> ExitCode {
     if !caller_is_authorized(request.authority(), peer_uid, process_uid) {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
     }
-    write_response(run_lifecycle_companion(&request, &mut transport))
+    write_lifecycle_response(run_lifecycle_companion(&request, &mut transport))
+}
+
+fn write_lifecycle_response(response: LifecycleResponse) -> ExitCode {
+    let self_finalize = response == LifecycleResponse::succeeded();
+    let exit = write_response(response);
+    if self_finalize && !finalize_lifecycle_companion_binary() {
+        return ExitCode::from(1);
+    }
+    // 自删除刻意保持为生产进程最后一个可失败动作。
+    exit
 }
 
 fn caller_is_authorized(
