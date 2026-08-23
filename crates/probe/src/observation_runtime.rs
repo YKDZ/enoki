@@ -48,6 +48,7 @@ const RUNTIME_REQUEST_DEADLINE: Duration = Duration::from_secs(3);
 const RUNTIME_WINDOW_HEADROOM: Duration = Duration::from_secs(5);
 const RUNTIME_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
 const ADMISSION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const ADMISSION_COMPLETION_DEADLINE: Duration = Duration::from_secs(1);
 const CPU_SAMPLES_PER_WINDOW: usize = 3;
 const MIN_COLLECTION_CADENCE_SECONDS: u16 = 1;
 const MAX_COLLECTION_CADENCE_SECONDS: u16 = 200;
@@ -1317,6 +1318,16 @@ struct AdmittedWindow {
     stream: UnixStream,
 }
 
+struct DeliveredWindow {
+    sequence_end: u64,
+    stream: UnixStream,
+}
+
+struct AdmissionCompletion {
+    acknowledged: std::sync::mpsc::SyncSender<()>,
+    delivered_sequence_end: Option<u64>,
+}
+
 enum AdmittedWindowError {
     Connection(io::Error),
     Progress(io::Error),
@@ -1389,10 +1400,17 @@ where
             return write_window_failure(&mut stream);
         }
         let delivered = self.serve_admitted_window(stream, request, sleeper, progress);
-        self.admission.complete(delivered.as_ref().ok().copied());
-        delivered
-            .map(|_| ())
-            .map_err(AdmittedWindowError::into_io_error)
+        match delivered {
+            Ok(delivered) => {
+                self.admission.complete(Some(delivered.sequence_end));
+                let _ = delivered.stream.shutdown(std::net::Shutdown::Write);
+                Ok(())
+            }
+            Err(error) => {
+                self.admission.complete(None);
+                Err(error.into_io_error())
+            }
+        }
     }
 
     fn serve_admitted_window(
@@ -1401,7 +1419,7 @@ where
         request: ObservationWindowRequest,
         sleeper: &mut impl ObservationRuntimeSleeper,
         progress: &mut dyn ObservationRuntimeProgressNotifier,
-    ) -> Result<u64, AdmittedWindowError> {
+    ) -> Result<DeliveredWindow, AdmittedWindowError> {
         let deadline = runtime_window_deadline(request.cadence()).ok_or_else(|| {
             AdmittedWindowError::Connection(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1425,7 +1443,11 @@ where
             })?;
         write_window_success(&mut stream, crate::version::probe_version(), &result)
             .map_err(AdmittedWindowError::Connection)?;
-        Ok(delivered_sequence_end)
+        stream.flush().map_err(AdmittedWindowError::Connection)?;
+        Ok(DeliveredWindow {
+            sequence_end: delivered_sequence_end,
+            stream,
+        })
     }
 
     pub fn serve_listener(&mut self, listener: &UnixListener) -> io::Result<()> {
@@ -1497,7 +1519,7 @@ where
     fn serve_admitted_windows(
         &mut self,
         admission_receiver: &std::sync::mpsc::Receiver<AdmissionMessage>,
-        completion_sender: &std::sync::mpsc::SyncSender<Option<u64>>,
+        completion_sender: &std::sync::mpsc::SyncSender<AdmissionCompletion>,
         progress: &mut dyn ObservationRuntimeProgressNotifier,
     ) -> io::Result<()> {
         progress.notify_ready()?;
@@ -1523,80 +1545,136 @@ where
                 &mut sleeper,
                 progress,
             );
-            let delivered_sequence_end = delivered.as_ref().ok().copied();
-            if completion_sender.send(delivered_sequence_end).is_err() {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "Runtime admission completion failed",
-                ));
-            }
-            if let Err(AdmittedWindowError::Progress(error)) = delivered {
-                return Err(error);
+            match delivered {
+                Ok(mut delivered) => {
+                    if let Err(error) =
+                        commit_admission_completion(completion_sender, Some(delivered.sequence_end))
+                    {
+                        // completion 未提交时追加一个协议外字节，避免客户端把已写字节误认作成功窗口。
+                        let _ = delivered.stream.write_all(&[1]);
+                        return Err(error);
+                    }
+                    let _ = delivered.stream.shutdown(std::net::Shutdown::Write);
+                }
+                Err(AdmittedWindowError::Progress(error)) => {
+                    commit_admission_completion(completion_sender, None)?;
+                    return Err(error);
+                }
+                Err(AdmittedWindowError::Connection(_)) => {
+                    commit_admission_completion(completion_sender, None)?;
+                }
             }
         }
     }
+}
+
+fn commit_admission_completion(
+    completion_sender: &std::sync::mpsc::SyncSender<AdmissionCompletion>,
+    delivered_sequence_end: Option<u64>,
+) -> io::Result<()> {
+    let (acknowledged, acknowledgement) = std::sync::mpsc::sync_channel(0);
+    completion_sender
+        .send(AdmissionCompletion {
+            acknowledged,
+            delivered_sequence_end,
+        })
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Runtime admission completion failed",
+            )
+        })?;
+    acknowledgement
+        .recv_timeout(ADMISSION_COMPLETION_DEADLINE)
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Runtime admission acknowledgement failed",
+            )
+        })
 }
 
 fn serve_runtime_admission(
     listener: &UnixListener,
     admission: &mut ObservationWindowAdmission,
     sender: &std::sync::mpsc::SyncSender<AdmissionMessage>,
-    completion_receiver: &std::sync::mpsc::Receiver<Option<u64>>,
+    completion_receiver: &std::sync::mpsc::Receiver<AdmissionCompletion>,
+) {
+    serve_runtime_admission_with(
+        listener,
+        admission,
+        sender,
+        completion_receiver,
+        |socket_fd| require_peer_uid(socket_fd, c"enoki-probe").is_ok(),
+        Instant::now,
+    );
+}
+
+fn serve_runtime_admission_with(
+    listener: &UnixListener,
+    admission: &mut ObservationWindowAdmission,
+    sender: &std::sync::mpsc::SyncSender<AdmissionMessage>,
+    completion_receiver: &std::sync::mpsc::Receiver<AdmissionCompletion>,
+    mut peer_is_authorized: impl FnMut(RawFd) -> bool,
+    mut now: impl FnMut() -> Instant,
 ) {
     loop {
-        let mut accepted_connection = false;
-        loop {
-            let mut connection = match listener.accept() {
-                Ok((connection, _)) => connection,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) if recoverable_accept_error(&error) => continue,
-                Err(error) => {
-                    let _ = sender.send(AdmissionMessage::ListenerFailed(error));
+        // 每次 accept 前先提交主线程 completion；listener 持续可读也不能饿死状态提交。
+        match completion_receiver.try_recv() {
+            Ok(completion) => {
+                admission.complete(completion.delivered_sequence_end);
+                if completion.acknowledged.send(()).is_err() {
                     return;
                 }
-            };
-            accepted_connection = true;
-            if require_peer_uid(connection.as_raw_fd(), c"enoki-probe").is_err() {
                 continue;
             }
-            if admission.active {
-                let _ = configure_deadline(&connection, RUNTIME_REQUEST_DEADLINE)
-                    .and_then(|()| write_window_failure(&mut connection));
-                continue;
-            }
-            if configure_deadline(&connection, RUNTIME_REQUEST_DEADLINE).is_err() {
-                continue;
-            }
-            let request = match read_runtime_request(&mut connection) {
-                Ok(Some(RuntimeRequest::Window(request))) => request,
-                Ok(None) => {
-                    let _ = write_window_failure(&mut connection);
-                    continue;
-                }
-                Err(_) => continue,
-            };
-            if admission.arrive(request, Instant::now()) == WindowAdmissionDecision::Reject {
-                let _ = write_window_failure(&mut connection);
-                continue;
-            }
-            if sender
-                .send(AdmissionMessage::Window(AdmittedWindow {
-                    request,
-                    stream: connection,
-                }))
-                .is_err()
-            {
-                return;
-            }
-        }
-
-        match completion_receiver.try_recv() {
-            Ok(delivered_sequence_end) => admission.complete(delivered_sequence_end),
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
         }
-        if !accepted_connection {
-            std::thread::sleep(ADMISSION_POLL_INTERVAL);
+
+        let mut connection = match listener.accept() {
+            Ok((connection, _)) => connection,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(ADMISSION_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) if recoverable_accept_error(&error) => continue,
+            Err(error) => {
+                let _ = sender.send(AdmissionMessage::ListenerFailed(error));
+                return;
+            }
+        };
+        if !peer_is_authorized(connection.as_raw_fd()) {
+            continue;
+        }
+        if admission.active {
+            let _ = configure_deadline(&connection, RUNTIME_REQUEST_DEADLINE)
+                .and_then(|()| write_window_failure(&mut connection));
+            continue;
+        }
+        if configure_deadline(&connection, RUNTIME_REQUEST_DEADLINE).is_err() {
+            continue;
+        }
+        let request = match read_runtime_request(&mut connection) {
+            Ok(Some(RuntimeRequest::Window(request))) => request,
+            Ok(None) => {
+                let _ = write_window_failure(&mut connection);
+                continue;
+            }
+            Err(_) => continue,
+        };
+        if admission.arrive(request, now()) == WindowAdmissionDecision::Reject {
+            let _ = write_window_failure(&mut connection);
+            continue;
+        }
+        if sender
+            .send(AdmissionMessage::Window(AdmittedWindow {
+                request,
+                stream: connection,
+            }))
+            .is_err()
+        {
+            return;
         }
     }
 }
@@ -2074,6 +2152,97 @@ mod tests {
             admission.arrive(recovery, recovery_at),
             WindowAdmissionDecision::Admit
         );
+    }
+
+    #[test]
+    fn successful_window_completion_precedes_the_next_eligible_normal_connection() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("runtime.sock");
+        let listener = UnixListener::bind(&socket).expect("listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let (admission_sender, admission_receiver) = std::sync::mpsc::sync_channel(1);
+        let (completion_sender, completion_receiver) = std::sync::mpsc::sync_channel(1);
+        let started_at = Instant::now();
+        let eligible_at = started_at + Duration::from_secs(3);
+        let mut times = [started_at, eligible_at].into_iter();
+        let admission_thread = std::thread::spawn(move || {
+            serve_runtime_admission_with(
+                &listener,
+                &mut ObservationWindowAdmission::default(),
+                &admission_sender,
+                &completion_receiver,
+                |_| true,
+                || times.next().expect("one time for each normal Window"),
+            )
+        });
+
+        let first_request = ObservationWindowRequest::new(Duration::from_secs(1)).unwrap();
+        let mut first_client = UnixStream::connect(&socket).expect("first normal connection");
+        first_client
+            .write_all(&encode_window_request(first_request))
+            .expect("first request");
+        first_client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish first request");
+        let AdmissionMessage::Window(mut first_window) = admission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first Window admitted")
+        else {
+            panic!("listener failed");
+        };
+        first_window
+            .stream
+            .write_all(b"complete")
+            .expect("complete response bytes");
+        first_window.stream.flush().expect("flush response bytes");
+
+        let mut pending = Vec::new();
+        for _ in 0..16 {
+            let connection = UnixStream::connect(&socket).expect("ordinary pending connection");
+            connection
+                .shutdown(std::net::Shutdown::Write)
+                .expect("finish empty request");
+            pending.push(connection);
+        }
+        let (acknowledged, acknowledgement) = std::sync::mpsc::sync_channel(0);
+        completion_sender
+            .send(AdmissionCompletion {
+                acknowledged,
+                delivered_sequence_end: Some(3),
+            })
+            .expect("submit completion");
+        acknowledgement
+            .recv_timeout(Duration::from_secs(1))
+            .expect("pending listener cannot starve completion");
+        drop(first_window.stream);
+        let mut completed = Vec::new();
+        first_client
+            .read_to_end(&mut completed)
+            .expect("client observes response completion");
+        assert_eq!(completed, b"complete");
+
+        let next_request = first_request.with_sequence_start(4).unwrap();
+        let mut next_client = UnixStream::connect(&socket).expect("next normal connection");
+        next_client
+            .write_all(&encode_window_request(next_request))
+            .expect("next request");
+        next_client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish next request");
+        let AdmissionMessage::Window(next_window) = admission_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("next eligible Window admitted")
+        else {
+            panic!("listener failed");
+        };
+        assert_eq!(next_window.request.sequence_start, 4);
+
+        drop(next_window.stream);
+        drop(completion_sender);
+        drop(admission_receiver);
+        admission_thread.join().expect("admission exits");
     }
 
     struct UnusedProvider;
