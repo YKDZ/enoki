@@ -402,6 +402,51 @@ fsUsed="90"
     }
 
     #[test]
+    fn smartctl_json_preserves_health_and_optional_device_fields() {
+        let metric = collect_disk_health_metrics_from_smartctl_json(
+            "/dev/sda",
+            r#"{
+  "model_name": "Samsung SSD 870 EVO 1TB",
+  "serial_number": "S6PTEST",
+  "smart_status": { "passed": true },
+  "temperature": { "current": 31 },
+  "power_on_time": { "hours": 12345 }
+}"#,
+        )
+        .expect("smartctl JSON")
+        .expect("SMART data");
+
+        assert_eq!(metric.device_name, "/dev/sda");
+        assert_eq!(metric.model, "Samsung SSD 870 EVO 1TB");
+        assert_eq!(metric.serial_number, "S6PTEST");
+        assert!(metric.passed);
+        assert_eq!(metric.temperature_celsius, Some(31.0));
+        assert_eq!(metric.power_on_hours, Some(12_345));
+    }
+
+    #[test]
+    fn smartctl_json_distinguishes_unsupported_and_malformed_results() {
+        let unsupported = collect_disk_health_metrics_from_smartctl_json(
+            "/dev/vda",
+            r#"{"smart_support":{"available":false}}"#,
+        )
+        .expect("unsupported SMART is a typed result");
+        assert_eq!(unsupported, None);
+
+        let warning = collect_disk_health_metrics_from_smartctl_json(
+            "/dev/sdb",
+            r#"{"smart_status":{"passed":false}}"#,
+        )
+        .expect("warning JSON")
+        .expect("warning metric");
+        assert!(!warning.passed);
+        assert_eq!(warning.temperature_celsius, None);
+        assert_eq!(warning.power_on_hours, None);
+
+        assert!(collect_disk_health_metrics_from_smartctl_json("/dev/sdc", "{").is_err());
+    }
+
+    #[test]
     fn disk_usage_enrichment_does_not_override_physical_capacity() {
         let mut metric = DiskHealthMetric {
             device_name: "/dev/nvme0".to_string(),

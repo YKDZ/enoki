@@ -468,13 +468,7 @@ where
             });
         }
 
-        sample.temperature_celsius = resource
-            .temperature_inputs
-            .iter()
-            .filter_map(|raw| raw.parse::<f64>().ok())
-            .map(|raw| if raw > 1_000.0 { raw / 1_000.0 } else { raw })
-            .filter(|value| (0.0..200.0).contains(value))
-            .reduce(f64::max);
+        sample.temperature_celsius = temperature_celsius_from_inputs(&resource.temperature_inputs);
         sample.collector_outcomes.push(
             if let Some(code) = resource.temperature_failure_code.as_deref() {
                 resource_failed_with_code("official.temperature", code)
@@ -1037,6 +1031,15 @@ fn canonical_device_path(value: &str) -> bool {
         && relative
             .split('/')
             .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn temperature_celsius_from_inputs(inputs: &[String]) -> Option<f64> {
+    inputs
+        .iter()
+        .filter_map(|raw| raw.parse::<f64>().ok())
+        .map(|raw| if raw > 1_000.0 { raw / 1_000.0 } else { raw })
+        .filter(|value| (0.0..200.0).contains(value))
+        .reduce(f64::max)
 }
 
 fn produced(id: &str) -> CollectorOutcome {
@@ -1854,5 +1857,32 @@ mod tests {
                 "{status:?}"
             );
         }
+    }
+
+    #[test]
+    fn typed_resource_facts_preserve_temperature_and_battery_calculation_inputs() {
+        let wire = WireSystemStateResourceResult {
+            temperature_inputs: vec!["42000".to_owned(), "38".to_owned()],
+            battery_supplies: vec![crate::protocol::enoki::v1::BatterySupplyResourceFact {
+                supply_type: "Battery".to_owned(),
+                capacity: "87".to_owned(),
+                status: "Discharging".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let resource = decode_system_state_resource_result(&wire.encode_to_vec())
+            .expect("typed System State result");
+
+        assert_eq!(
+            temperature_celsius_from_inputs(&resource.temperature_inputs),
+            Some(42.0),
+        );
+        assert_eq!(
+            resource.battery_supplies,
+            vec![BatteryMetrics {
+                percent: 87,
+                state: "Discharging".to_owned(),
+            }],
+        );
     }
 }

@@ -46,3 +46,22 @@ fn meminfo_kilobytes(contents: &str, key: &str) -> Option<u64> {
 
     line.split_whitespace().nth(1)?.parse().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_meminfo_preserves_byte_units_and_linux_cache_semantics() {
+        let metrics = collect_memory_metrics_from_proc_meminfo(
+            "MemTotal: 2048000 kB\nMemAvailable: 1536000 kB\nBuffers: 64000 kB\nCached: 256000 kB\nSReclaimable: 32000 kB\nShmem: 16000 kB\nSwapTotal: 1024000 kB\nSwapFree: 768000 kB\n",
+        )
+        .expect("memory metrics");
+
+        assert_eq!(metrics.total_bytes, 2_097_152_000);
+        assert_eq!(metrics.used_bytes, 524_288_000);
+        assert_eq!(metrics.cache_bytes, 344_064_000);
+        assert_eq!(metrics.swap_total_bytes, 1_048_576_000);
+        assert_eq!(metrics.swap_used_bytes, 262_144_000);
+    }
+}

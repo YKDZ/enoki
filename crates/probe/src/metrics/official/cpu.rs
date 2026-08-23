@@ -276,3 +276,50 @@ impl CpuCounterDelta {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_stat_counters_establish_baseline_and_compute_deltas() {
+        let previous = collect_cpu_metrics_from_proc_stat(
+            "cpu 100 10 40 850 0 0 0 0\ncpu0 60 5 20 400 0 0 0 0\ncpu1 40 5 20 450 0 0 0 0\n",
+            None,
+        )
+        .expect("CPU baseline");
+        assert_close(previous.aggregate_percent, 0.0);
+        assert!(previous.cores.iter().all(|core| core.usage_percent == 0.0));
+
+        let current = collect_cpu_metrics_from_proc_stat(
+            "cpu 110 15 45 930 0 0 0 0\ncpu0 70 5 25 450 0 0 0 0\ncpu1 40 10 20 480 0 0 0 0\n",
+            Some(&previous.snapshot),
+        )
+        .expect("CPU delta");
+
+        assert_close(current.aggregate_percent, 20.0);
+        assert_close(current.breakdown.user_percent, 15.0);
+        assert_close(current.breakdown.system_percent, 5.0);
+        assert_close(current.breakdown.idle_percent, 80.0);
+        assert_eq!(
+            current
+                .cores
+                .iter()
+                .map(|core| (
+                    core.name.as_str(),
+                    core.user,
+                    core.nice,
+                    core.system,
+                    core.idle
+                ))
+                .collect::<Vec<_>>(),
+            vec![("cpu0", 70, 5, 25, 450), ("cpu1", 40, 10, 20, 480)],
+        );
+        assert_close(current.cores[0].usage_percent, 23.076_923_076_923_077);
+        assert_close(current.cores[1].usage_percent, 14.285_714_285_714_285);
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 0.000_000_1);
+    }
+}
