@@ -1663,10 +1663,23 @@ async function runBaselineUpgradeUninstallScenario({
     evidence.metrics.beforeUpgrade = compactMetricsEvidence(beforeMetrics);
     evidence.probeConfiguration.beforeUpgrade =
       await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
-    const baselineHostProjection = stableHubHostProjection(compatibleHost);
+    const configuredCompatibleHost = await waitForObservation({
+      code: "baseline_probe_configuration_projection_timeout",
+      label: "Release Baseline Probe Configuration reporting projection",
+      observe: () => hub.getHost(hostId),
+      poll,
+      ready: (value) =>
+        value?.id === hostId &&
+        isCandidateHostReady(value, releaseBaselineProbeVersion(baseline)) &&
+        value.reportedProbeConfigurationVersion ===
+          evidence.probeConfiguration.beforeUpgrade.reportedVersion,
+    });
+    const baselineHostProjection = stableHubHostProjection(
+      configuredCompatibleHost,
+    );
     const baselineMetricHistory = metricsHistoryEvidence(beforeMetrics);
     evidence.compatibility = {
-      host: compactHostEvidence(compatibleHost),
+      host: compactHostEvidence(configuredCompatibleHost),
       status: "succeeded",
     };
 
@@ -1795,10 +1808,13 @@ async function runBaselineUpgradeUninstallScenario({
         );
       }
       evidence.migrationRetention = {
-        configuration: retainedConfiguration,
+        configuration: effectiveProbeConfigurationEvidence(
+          retainedConfiguration,
+        ),
         hostAfter: candidateHostProjection,
         hostBefore: baselineHostProjection,
         metricHistory: baselineMetricHistory,
+        postMetricHistory: null,
       };
     }
     if (!migrationBaseline && evidence.manualRecovery === null) {
@@ -1831,6 +1847,12 @@ async function runBaselineUpgradeUninstallScenario({
       throw assertionError(
         "manual_reinstall_metric_history_not_retained",
         "Trust Epoch manual reinstall did not retain pre-replacement Metrics history",
+      );
+    }
+    if (migrationBaseline) {
+      evidence.migrationRetention.postMetricHistory = metricsHistoryEvidence(
+        afterMetrics,
+        { retain: baselineMetricHistory.anchors },
       );
     }
     evidence.probeConfiguration.afterUpgrade =
@@ -5805,6 +5827,13 @@ function sameEffectiveProbeConfiguration(current, expected) {
   );
 }
 
+function effectiveProbeConfigurationEvidence(value) {
+  return {
+    configuration: canonicalSemanticValue(value?.configuration),
+    mode: value?.mode,
+  };
+}
+
 function metricsAdvanceBeyond(samples, previous) {
   const compact = compactMetricsEvidence(samples);
   const latest = compact.at(-1);
@@ -6117,6 +6146,7 @@ function serializedError(error) {
 function redactSensitiveEvidence(value, secrets, key = "") {
   if (
     key &&
+    !/(?:digest|fingerprint|sha256)$/i.test(key) &&
     /(?:authorization|cookie|enrollment.?token|headers?|owner.?password|private.?key|signing.?secret|install.?command)/i.test(
       key,
     )

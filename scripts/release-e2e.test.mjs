@@ -38,6 +38,7 @@ import {
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
 } from "./release-e2e-lib.mjs";
+import { createMatrixGateResult } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -132,10 +133,11 @@ describe("Release E2E business assertions", () => {
   it("executes Trust Epoch baseline migration through production manual reinstall with replacement evidence", async () => {
     const calls = [];
     const written = [];
+    const candidateManifest = candidateManifestWithMigrationBaseline();
     await expect(
       runReleaseE2EScenario({
-        candidateManifest: candidateManifestWithMigrationBaseline(),
-        environment: migrationBaselineEnvironment(calls),
+        candidateManifest,
+        environment: migrationBaselineEnvironment(calls, candidateManifest),
         evidenceSink: {
           write: async (evidence) => written.push(evidence),
         },
@@ -160,6 +162,49 @@ describe("Release E2E business assertions", () => {
       result: { status: "succeeded" },
       uninstall: { hubSoftDeleted: true, status: "succeeded" },
     });
+    const evidence = written.at(-1);
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+      candidateManifest,
+      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+    expect(evidence.migrationRetention.postMetricHistory.anchors).toEqual(
+      expect.arrayContaining(evidence.migrationRetention.metricHistory.anchors),
+    );
+    expect(
+      evidence.migrationRetention.metricHistory.anchors.length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(
+      evidence.migrationRetention.postMetricHistory.anchors.length,
+    ).toBeLessThanOrEqual(
+      evidence.migrationRetention.metricHistory.anchors.length + 3,
+    );
+    expect(
+      evidence.migrationRetention.postMetricHistory.anchors.some(
+        (anchor) =>
+          anchor.sequence >
+            evidence.migrationRetention.metricHistory.anchors.at(-1).sequence &&
+          anchor.collectedAtMs >
+            evidence.migrationRetention.metricHistory.anchors.at(-1)
+              .collectedAtMs,
+      ),
+    ).toBe(true);
+    expect(evidence.migrationRetention.configuration).toEqual({
+      configuration: evidence.probeConfiguration.beforeUpgrade.configuration,
+      mode: evidence.probeConfiguration.beforeUpgrade.mode,
+    });
+    expect(
+      evidence.migrationRetention.hostBefore.reportedProbeConfigurationVersion,
+    ).toBe(evidence.probeConfiguration.beforeUpgrade.reportedVersion);
+    expect(
+      evidence.migrationRetention.hostAfter.reportedProbeConfigurationVersion,
+    ).toBe(evidence.probeConfiguration.beforeUpgrade.version);
+    expect(gate.evidenceValidationErrors).toEqual([]);
+    expect(gate.outcome).toBe("succeeded");
   });
 
   it("fails Trust Epoch Hub Restore closed before claiming impossible Candidate Probe compatibility", async () => {
@@ -6817,10 +6862,50 @@ function candidateManifestWithBaseline({
 }
 
 function candidateManifestWithMigrationBaseline() {
+  const base = candidateManifest();
+  const recipeRecord = bootstrapRecipeRecord(base);
+  const recordBytes = Buffer.from(`${JSON.stringify(recipeRecord, null, 2)}\n`);
   return createReleaseCandidateManifest({
-    ...candidateManifest(),
+    ...base,
+    bootstrapRecipe: {
+      ...base.bootstrapRecipe,
+      recordSha256: createHash("sha256").update(recordBytes).digest("hex"),
+      recordSize: recordBytes.byteLength,
+    },
     releaseBaseline: migrationReleaseBaseline(),
   });
+}
+
+function bootstrapRecipeRecord(manifest) {
+  return {
+    bundleVersion: manifest.bootstrapRecipe.bundleVersion,
+    distribution: manifest.bootstrapRecipe.distribution,
+    kind: manifest.bootstrapRecipe.kind,
+    recipe: {
+      file: manifest.bootstrapRecipe.file,
+      sha256: manifest.bootstrapRecipe.sha256,
+      size: manifest.bootstrapRecipe.size,
+      version: manifest.bootstrapRecipe.version,
+    },
+    rootFingerprint: manifest.bootstrapRecipe.rootFingerprint,
+    schemaVersion: manifest.bootstrapRecipe.schemaVersion,
+    targets: manifest.bootstrapRecipe.targets,
+  };
+}
+
+function candidateRecipeProvenance(manifest) {
+  const record = bootstrapRecipeRecord(manifest);
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
+  return {
+    activeHub: "candidate",
+    hubDigest: manifest.hub.digest,
+    kind: "enoki-release-e2e-bootstrap-recipe-provenance",
+    record,
+    recordFile: manifest.bootstrapRecipe.recordFile,
+    recordSha256: createHash("sha256").update(recordBytes).digest("hex"),
+    recordSize: recordBytes.byteLength,
+    schemaVersion: 1,
+  };
 }
 
 function migrationReleaseBaseline() {
@@ -7328,7 +7413,7 @@ function portableMetric(overrides = {}) {
   };
 }
 
-function migrationBaselineEnvironment(calls) {
+function migrationBaselineEnvironment(calls, candidateManifest) {
   const legacyIdentity = {
     identitySha256: "a".repeat(64),
     probeId: "probe_release_legacy",
@@ -7370,7 +7455,7 @@ function migrationBaselineEnvironment(calls) {
   };
   let configurationSequence = 0;
   let listCalls = 0;
-  let metricSequence = 2;
+  let metricSequence = 3;
   let replaced = false;
   const hostMetadata = {
     connectAddress: "release-test-host",
@@ -7414,10 +7499,40 @@ function migrationBaselineEnvironment(calls) {
       subjectType: "host",
     },
   ];
+  const successfulInstallResult = (runId, bootstrapRecipeProvenance) => ({
+    bootstrapRecipeProvenance,
+    output: {
+      code: 0,
+      stderr: "",
+      stdout: productInstallerOutput(),
+    },
+    runId,
+  });
   const host = {
     async assertDisposable() {},
     async assertInstalled() {
-      return { probeVersion: replaced ? "1.2.3" : "0.1.74" };
+      if (!replaced) return { probeVersion: "0.1.74" };
+      return {
+        delegationGeneration: 1,
+        inventory: {
+          accounts: { group: true, user: true },
+          files: [
+            "/usr/local/bin/enoki-probe",
+            "/etc/systemd/system/enoki-probe.service",
+          ],
+          units: ["enoki-probe.service"],
+        },
+        probeVersion: "1.2.3",
+        service: {
+          ActiveState: "active",
+          FragmentPath: "/etc/systemd/system/enoki-probe.service",
+          Group: "enoki-probe",
+          LoadState: "loaded",
+          SubState: "running",
+          User: "enoki-probe",
+        },
+        sudoers: "",
+      };
     },
     async cleanup() {
       return { clean: true };
@@ -7425,18 +7540,22 @@ function migrationBaselineEnvironment(calls) {
     async collectEvidence() {
       return { journaldRetained: true };
     },
-    async install(enrollment) {
+    async install(enrollment, runId) {
       calls.push("host.install:legacy-v0.1.74");
       expect(enrollment.installCommand).toBe(
         "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
       );
+      return successfulInstallResult(runId, null);
     },
-    async manualReinstall(enrollment) {
+    async manualReinstall(enrollment, runId) {
       calls.push(`host.manualReinstall:${enrollment.target.kind}`);
       expect(enrollment.installCommand).toBe(officialInstallCommand);
       replaced = true;
       metricSequence += 1;
-      return { status: "succeeded" };
+      return successfulInstallResult(
+        runId,
+        candidateRecipeProvenance(candidateManifest),
+      );
     },
     async readProbeIdentity() {
       return replaced ? replacementIdentity : legacyIdentity;
@@ -7555,7 +7674,29 @@ function migrationBaselineEnvironment(calls) {
       return { clean: true };
     },
     async start() {
-      return { host, hub };
+      return {
+        host,
+        hub,
+        infrastructure: {
+          artifactAccess: "github-actions",
+          connection: "local",
+          kind: "ci",
+          matrixCellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+          provisioning: "github-hosted-runner",
+        },
+        releaseTestHost: {
+          architecture: "x86_64",
+          deviceView: true,
+          journaldSocket: true,
+          operatingSystem: "ubuntu",
+          operatingSystemVersion: "22.04",
+          pid1: "systemd",
+          rootFilesystem: true,
+          systemdNotifySocket: true,
+          unifiedCgroup: true,
+          virtualization: "kvm",
+        },
+      };
     },
   };
 }

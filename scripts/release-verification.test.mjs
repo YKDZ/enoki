@@ -1044,10 +1044,17 @@ describe("verify-only release workflow", () => {
       probeId: "probe_release_replacement",
     };
     const candidateHost = evidenceHost("1.2.3");
-    const hostProjection = {
+    const candidateHostProjection = {
       hostMetadata: candidateHost.hostMetadata,
       hostProfile: candidateHost.hostProfile,
       id: candidateHost.id,
+      reportedProbeConfigurationVersion: "host-7-1",
+    };
+    const baselineHost = evidenceHost("0.1.74");
+    const baselineHostProjection = {
+      hostMetadata: baselineHost.hostMetadata,
+      hostProfile: baselineHost.hostProfile,
+      id: baselineHost.id,
       reportedProbeConfigurationVersion: "host-7-1",
     };
     evidence.candidateHost = candidateHost;
@@ -1073,16 +1080,29 @@ describe("verify-only release workflow", () => {
       }),
     };
     evidence.identityContinuity = { after, before, hostId: 7 };
-    evidence.migrationRetention = {
-      configuration: structuredClone(evidence.probeConfiguration.beforeUpgrade),
-      hostAfter: hostProjection,
-      hostBefore: hostProjection,
-      metricHistory: metricsHistoryEvidence(evidenceMetrics(1)),
-    };
-    evidence.metrics.afterUpgrade = [
-      ...evidenceMetrics(1),
+    const beforeHistorySamples = evidenceMetrics(1);
+    const postReplacementSamples = [
+      ...beforeHistorySamples,
       ...evidenceMetrics(3),
     ];
+    evidence.metrics.afterUpgrade = [
+      postReplacementSamples[0],
+      postReplacementSamples.at(-1),
+    ];
+    evidence.migrationRetention = {
+      configuration: {
+        configuration: structuredClone(
+          evidence.probeConfiguration.beforeUpgrade.configuration,
+        ),
+        mode: evidence.probeConfiguration.beforeUpgrade.mode,
+      },
+      hostAfter: candidateHostProjection,
+      hostBefore: baselineHostProjection,
+      metricHistory: metricsHistoryEvidence(beforeHistorySamples),
+      postMetricHistory: metricsHistoryEvidence(postReplacementSamples, {
+        retain: beforeHistorySamples,
+      }),
+    };
     evidence.auditLog = [
       ...lifecycleAuditLog(),
       {
@@ -1129,6 +1149,22 @@ describe("verify-only release workflow", () => {
     expect(gateFor(badHistoryHash).evidenceValidationErrors).toContain(
       "Trust Epoch Host, metadata, configuration, or history retention is invalid",
     );
+    const staleConfigurationProjection = structuredClone(evidence);
+    staleConfigurationProjection.migrationRetention.hostBefore.reportedProbeConfigurationVersion =
+      "default-v1";
+    expect(
+      gateFor(staleConfigurationProjection).evidenceValidationErrors,
+    ).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const widenedEffectiveConfiguration = structuredClone(evidence);
+    widenedEffectiveConfiguration.migrationRetention.configuration.reportedVersion =
+      evidence.probeConfiguration.beforeUpgrade.reportedVersion;
+    expect(
+      gateFor(widenedEffectiveConfiguration).evidenceValidationErrors,
+    ).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
     const foreignHost = structuredClone(evidence);
     foreignHost.migrationRetention.hostAfter.id = 8;
     expect(gateFor(foreignHost).evidenceValidationErrors).toContain(
@@ -1144,6 +1180,60 @@ describe("verify-only release workflow", () => {
     expect(
       gateFor(missingPostReplacementAnchor).evidenceValidationErrors,
     ).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const missingMiddleAnchor = structuredClone(evidence);
+    missingMiddleAnchor.migrationRetention.postMetricHistory.anchors =
+      missingMiddleAnchor.migrationRetention.postMetricHistory.anchors.filter(
+        (anchor) => anchor.sequence !== 2,
+      );
+    missingMiddleAnchor.migrationRetention.postMetricHistory.sha256 =
+      createHash("sha256")
+        .update(
+          JSON.stringify(
+            missingMiddleAnchor.migrationRetention.postMetricHistory.anchors,
+          ),
+        )
+        .digest("hex");
+    expect(gateFor(missingMiddleAnchor).evidenceValidationErrors).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const noContinuedSample = structuredClone(evidence);
+    noContinuedSample.migrationRetention.postMetricHistory = structuredClone(
+      noContinuedSample.migrationRetention.metricHistory,
+    );
+    expect(gateFor(noContinuedSample).evidenceValidationErrors).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const widenedAnchor = structuredClone(evidence);
+    widenedAnchor.migrationRetention.postMetricHistory.anchors[0].source =
+      "unbounded";
+    widenedAnchor.migrationRetention.postMetricHistory.sha256 = createHash(
+      "sha256",
+    )
+      .update(
+        JSON.stringify(
+          widenedAnchor.migrationRetention.postMetricHistory.anchors,
+        ),
+      )
+      .digest("hex");
+    expect(gateFor(widenedAnchor).evidenceValidationErrors).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const unboundedPostHistory = structuredClone(evidence);
+    unboundedPostHistory.migrationRetention.postMetricHistory.anchors.push(
+      ...evidenceMetrics(5),
+      ...evidenceMetrics(7),
+    );
+    unboundedPostHistory.migrationRetention.postMetricHistory.sha256 =
+      createHash("sha256")
+        .update(
+          JSON.stringify(
+            unboundedPostHistory.migrationRetention.postMetricHistory.anchors,
+          ),
+        )
+        .digest("hex");
+    expect(gateFor(unboundedPostHistory).evidenceValidationErrors).toContain(
       "Trust Epoch Host, metadata, configuration, or history retention is invalid",
     );
   });

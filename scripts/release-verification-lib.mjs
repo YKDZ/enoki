@@ -543,6 +543,7 @@ function validateMetricsHistoryPreservation(evidence, errors) {
 
 function validMetricsHistory(value) {
   return (
+    sameKeySet(value ?? {}, { anchors: null, sha256: null }) &&
     Array.isArray(value?.anchors) &&
     value.anchors.length >= 2 &&
     value.anchors.every(validMetricAnchor) &&
@@ -560,6 +561,14 @@ function validMetricsHistory(value) {
 
 function validMetricAnchor(value) {
   return (
+    sameKeySet(value ?? {}, {
+      collectedAtMs: null,
+      cpuPercent: null,
+      memoryTotalBytes: null,
+      memoryUsedBytes: null,
+      sequence: null,
+      uptimeSeconds: null,
+    }) &&
     Number.isSafeInteger(value?.sequence) &&
     value.sequence >= 0 &&
     Number.isSafeInteger(value?.collectedAtMs) &&
@@ -1045,6 +1054,16 @@ function validateMetricsProgression(before, after, label, errors) {
 
 function validateProbeConfiguration(configuration, errors) {
   if (
+    !sameKeySet(configuration ?? {}, {
+      configuration: null,
+      mode: null,
+      reportedVersion: null,
+      version: null,
+    }) ||
+    !validEffectiveProbeConfiguration({
+      configuration: configuration?.configuration,
+      mode: configuration?.mode,
+    }) ||
     configuration?.mode !== "override" ||
     !configuration?.configuration ||
     !Array.isArray(configuration.configuration.enabledCollectorIds) ||
@@ -1209,12 +1228,19 @@ function validateMigrationRetention(
   } = {},
 ) {
   const metricHistory = retention?.metricHistory;
+  const postMetricHistory = retention?.postMetricHistory;
+  const expectedEffectiveConfiguration = {
+    configuration: expectedConfiguration?.configuration,
+    mode: expectedConfiguration?.mode,
+  };
+  const latestBeforeAnchor = metricHistory?.anchors?.at(-1);
   if (
     !sameKeySet(retention ?? {}, {
       configuration: null,
       hostAfter: null,
       hostBefore: null,
       metricHistory: null,
+      postMetricHistory: null,
     }) ||
     !validRetainedHostProjection(retention?.hostBefore) ||
     !validRetainedHostProjection(retention?.hostAfter) ||
@@ -1233,25 +1259,58 @@ function validateMigrationRetention(
       expectedConfiguration?.reportedVersion ||
     retention.hostAfter.reportedProbeConfigurationVersion !==
       expectedConfiguration?.reportedVersion ||
-    retention?.configuration?.mode !== "override" ||
-    !Array.isArray(
-      retention?.configuration?.configuration?.enabledCollectorIds,
-    ) ||
-    !Number.isSafeInteger(
-      retention?.configuration?.configuration?.metricsCollectionIntervalSeconds,
-    ) ||
-    (expectedConfiguration !== undefined &&
-      JSON.stringify(retention?.configuration) !==
-        JSON.stringify(expectedConfiguration)) ||
+    retention.hostBefore.reportedProbeConfigurationVersion !==
+      expectedConfiguration?.version ||
+    retention.hostAfter.reportedProbeConfigurationVersion !==
+      expectedConfiguration?.version ||
+    !validEffectiveProbeConfiguration(retention?.configuration) ||
+    JSON.stringify(retention?.configuration) !==
+      JSON.stringify(expectedEffectiveConfiguration) ||
     !validMetricsHistory(metricHistory) ||
-    !metricHistory.anchors.every((anchor) =>
-      (afterMetrics ?? []).some((sample) => sameMetricAnchor(anchor, sample)),
+    metricHistory?.anchors?.length > 3 ||
+    !validMetricsHistory(postMetricHistory) ||
+    postMetricHistory?.anchors?.length > metricHistory?.anchors?.length + 3 ||
+    (afterMetrics ?? []).length !== 2 ||
+    !metricHistory?.anchors?.every((anchor) =>
+      postMetricHistory?.anchors?.some((sample) =>
+        sameMetricAnchor(anchor, sample),
+      ),
+    ) ||
+    !(afterMetrics ?? []).every((sample) =>
+      postMetricHistory?.anchors?.some((anchor) =>
+        sameMetricAnchor(anchor, sample),
+      ),
+    ) ||
+    !postMetricHistory?.anchors?.some(
+      (anchor) =>
+        anchor.sequence > latestBeforeAnchor?.sequence &&
+        anchor.collectedAtMs > latestBeforeAnchor?.collectedAtMs,
     )
   ) {
     errors.push(
       "Trust Epoch Host, metadata, configuration, or history retention is invalid",
     );
   }
+}
+
+function validEffectiveProbeConfiguration(value) {
+  const configuration = value?.configuration;
+  return (
+    sameKeySet(value ?? {}, { configuration: null, mode: null }) &&
+    value.mode === "override" &&
+    sameKeySet(configuration ?? {}, {
+      enabledCollectorIds: null,
+      metricsCollectionIntervalSeconds: null,
+      version: null,
+    }) &&
+    Array.isArray(configuration.enabledCollectorIds) &&
+    configuration.enabledCollectorIds.every(
+      (collectorId) => typeof collectorId === "string",
+    ) &&
+    Number.isSafeInteger(configuration.metricsCollectionIntervalSeconds) &&
+    typeof configuration.version === "string" &&
+    configuration.version.length > 0
+  );
 }
 
 function validRetainedHostProjection(value) {
