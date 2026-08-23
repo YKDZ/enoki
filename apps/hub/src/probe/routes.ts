@@ -1276,6 +1276,7 @@ function probeUpgradeOperationMessage(
     id: String(operation.id),
     probeUpgrade: {
       currentProbeVersion: operation.currentProbeVersion ?? "",
+      hostId: String(operation.hostId),
       operationToken: issueProbeOperationToken({
         expiresAtMs: tokenInput.expiresAtMs,
         operation,
@@ -1283,6 +1284,8 @@ function probeUpgradeOperationMessage(
         secret: tokenInput.secret,
       }),
       targetAssetSetDigest: operation.targetAssetSetDigest ?? "",
+      targetManifestSha256:
+        operation.targetAssetSetDigest?.replace(/^sha256:/, "") ?? "",
       targetProbeVersion: operation.targetProbeVersion,
     },
   };

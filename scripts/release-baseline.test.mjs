@@ -977,7 +977,7 @@ async function writeProbeArchive(
       components: [
         {
           path: "enoki-probe",
-          permissionProfile: "probe-v4",
+          permissionProfile: "probe-v5",
           resourceContract: "hub-reporting-v1",
           role: "probe",
           sha256: sha256(binary),
@@ -1013,7 +1013,7 @@ async function writeProbeArchive(
         },
         {
           path: "enoki-probe-lifecycle-companion",
-          permissionProfile: "lifecycle-companion-v2",
+          permissionProfile: "lifecycle-companion-v3",
           resourceContract: "local-lifecycle-v1",
           role: "lifecycle-companion",
           sha256: sha256(binary),

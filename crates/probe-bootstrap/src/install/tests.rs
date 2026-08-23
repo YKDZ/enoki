@@ -8,6 +8,7 @@ mod tests {
         remove_owned_ipc_group_with_commands,
     };
     use crate::handoff::Enrollment;
+    use crate::lifecycle::UpgradeCompletion;
     use crate::trust::BootstrapRole;
     use tempfile::tempdir;
 
@@ -673,6 +674,81 @@ mod tests {
     }
 
     #[test]
+    fn compatible_upgrade_switches_the_complete_bundle_and_preserves_identity() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let source_bundle = bundle().with_test_complete_receipts(5);
+        let [mut source_probe, mut source_runtime, mut source_system_state, mut source_disk_health, mut source_lifecycle, mut source_acquirer, mut source_activator] =
+            std::array::from_fn(|_| component());
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut source_probe,
+                observation_runtime: &mut source_runtime,
+                cpu_provider: &mut source_system_state,
+                disk_health_provider: &mut source_disk_health,
+                lifecycle_companion: &mut source_lifecycle,
+                bootstrap_acquirer: &mut source_acquirer,
+                bootstrap_activator: &mut source_activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &source_bundle,
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+        )
+        .unwrap();
+        let mut registered_identity = fs::read_to_string(paths.identity()).unwrap();
+        registered_identity.push_str("probe_id = \"probe_01\"\n");
+        fs::write(paths.identity(), registered_identity).unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        let identity_before = fs::read(paths.identity()).unwrap();
+        let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
+        let mut target_bundle = bundle().with_test_complete_receipts(5);
+        target_bundle.version = "1.2.4".to_owned();
+        target_bundle.manifest_sha256 = "d".repeat(64);
+        target_bundle.asset_set_manifest_sha256 = "e".repeat(64);
+        let [mut target_probe, mut target_runtime, mut target_system_state, mut target_disk_health, mut target_lifecycle, mut target_acquirer, mut target_activator] =
+            std::array::from_fn(|_| component());
+        systemd.calls.clear();
+
+        let completion = upgrade_current_probe(
+            VerifiedUpgradeComponents {
+                probe: &mut target_probe,
+                observation_runtime: &mut target_runtime,
+                system_state_provider: &mut target_system_state,
+                disk_health_provider: &mut target_disk_health,
+                lifecycle_companion: &mut target_lifecycle,
+                bootstrap_acquirer: &mut target_acquirer,
+                bootstrap_activator: &mut target_activator,
+            },
+            &target_bundle,
+            &source,
+            &paths,
+            &mut systemd,
+        )
+        .unwrap();
+
+        assert_eq!(completion, UpgradeCompletion::Activated);
+        assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
+        assert_eq!(fs::read(paths.identity()).unwrap(), identity_before);
+        let metadata = fs::read_to_string(paths.metadata()).unwrap();
+        assert!(metadata.contains("schema_version = 5"));
+        assert!(metadata.contains("bundle_version = \"1.2.4\""));
+        assert!(metadata.contains(&format!("target_manifest_sha256 = {:?}", "d".repeat(64))));
+    }
+
+    #[test]
     fn observation_units_keep_callers_roles_and_deadlines_fixed() {
         let probe = service_unit();
         let runtime_socket = observation_runtime_socket_unit();
@@ -681,6 +757,8 @@ mod tests {
         let provider = cpu_provider_unit();
         let disk_provider_socket = disk_health_provider_socket_unit();
         let disk_provider = disk_health_provider_unit();
+        let upgrade_socket = lifecycle_upgrade_socket_unit();
+        let upgrade = lifecycle_upgrade_unit();
 
         assert!(probe.contains("Wants=network-online.target enoki-observation-runtime.socket\n"));
         assert!(!probe.contains("Requires=enoki-cpu-resource-provider.socket"));
@@ -688,6 +766,7 @@ mod tests {
         assert!(probe.contains("SupplementaryGroups=enoki-probe-ipc"));
         assert!(probe.contains("StateDirectory=enoki-probe"));
         assert!(probe.contains("StateDirectoryMode=0700"));
+        assert!(probe.contains("Wants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket"));
         assert!(runtime_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(runtime.contains("User=enoki-observation-runtime"));
         assert!(runtime.contains("PrivateNetwork=true"));
@@ -721,6 +800,12 @@ mod tests {
         assert!(disk_provider.contains("IPAddressDeny=any"));
         assert!(disk_provider.contains("SocketBindDeny=any"));
         assert!(disk_provider.contains("BindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl"));
+        assert!(upgrade_socket.contains("ListenStream=/run/enoki-probe-lifecycle-upgrade.sock"));
+        assert!(upgrade_socket.contains("SocketGroup=enoki-probe-ipc"));
+        assert!(upgrade.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade"));
+        assert!(upgrade.contains("PrivateNetwork=true"));
+        assert!(upgrade.contains("RestrictAddressFamilies=AF_UNIX"));
+        assert!(upgrade.contains("IPAddressDeny=any"));
     }
 
     #[test]
@@ -729,11 +814,11 @@ mod tests {
         assert_eq!(
             role_units.each_ref().map(|(profile, _)| *profile),
             [
-                "probe-v4",
+                "probe-v5",
                 "observation-runtime-v4",
                 "system-state-provider-v5",
                 "disk-health-provider-v3",
-                "lifecycle-companion-v2",
+                "lifecycle-companion-v3",
             ],
         );
         for (role, unit) in &role_units {

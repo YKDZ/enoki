@@ -2495,8 +2495,10 @@ fn report_response_with_operation(
             id: operation_id.to_string(),
             operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                 current_probe_version: current_probe_version.to_string(),
+                host_id: "7".to_string(),
                 operation_token: "operation-token-01".to_string(),
                 target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                target_manifest_sha256: "a".repeat(64),
                 target_probe_version: target_probe_version.to_string(),
             })),
         }),

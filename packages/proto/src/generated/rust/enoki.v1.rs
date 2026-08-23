@@ -579,6 +579,10 @@ pub struct ProbeUpgradeOperation {
     pub operation_token: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub target_asset_set_digest: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub host_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub target_manifest_sha256: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeUninstallOperation {

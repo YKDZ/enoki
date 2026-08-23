@@ -16,6 +16,8 @@ message ProbeUpgradeOperation {
   string target_probe_version = 2;
   string operation_token = 3;
   string target_asset_set_digest = 4;
+  string host_id = 5;
+  string target_manifest_sha256 = 6;
 }
 
 message ProbeUninstallOperation {

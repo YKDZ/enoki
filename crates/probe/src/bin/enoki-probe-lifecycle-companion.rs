@@ -7,14 +7,29 @@ use std::{
 
 use enoki_probe::upgrader::{
     HttpProbeUpgraderValidationTransport, finalize_lifecycle_companion_binary,
-    resume_lifecycle_companion, run_lifecycle_companion,
+    resume_lifecycle_companion, run_lifecycle_companion_from_peer,
 };
 use enoki_probe_bootstrap::lifecycle::{
     LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, MAX_LIFECYCLE_REQUEST_BYTES,
 };
 
 fn main() -> ExitCode {
-    if std::env::args_os().len() != 1 {
+    let mode = match std::env::args_os().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => CompanionMode::General,
+        [argument] if argument == "--upgrade" => CompanionMode::Upgrade,
+        _ => return ExitCode::from(2),
+    };
+    run(mode)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompanionMode {
+    General,
+    Upgrade,
+}
+
+fn run(mode: CompanionMode) -> ExitCode {
+    if mode == CompanionMode::Upgrade && unsafe { libc::getuid() } != 0 {
         return ExitCode::from(2);
     }
     let mut bytes = Vec::new();
@@ -30,7 +45,7 @@ fn main() -> ExitCode {
     let process_uid = unsafe { libc::getuid() };
     let mut transport = HttpProbeUpgraderValidationTransport;
     if bytes.is_empty() {
-        if peer_uid.is_some() || process_uid != 0 {
+        if mode == CompanionMode::Upgrade || peer_uid.is_some() || process_uid != 0 {
             return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
         }
         return write_lifecycle_response(resume_lifecycle_companion(&mut transport));
@@ -38,10 +53,25 @@ fn main() -> ExitCode {
     let Ok(request) = LifecycleRequest::decode(&bytes) else {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
     };
+    if !mode_accepts(mode, request.transition()) {
+        return write_response(LifecycleResponse::not_enabled());
+    }
     if !caller_is_authorized(request.authority(), peer_uid, process_uid) {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
     }
-    write_lifecycle_response(run_lifecycle_companion(&request, &mut transport))
+    write_lifecycle_response(run_lifecycle_companion_from_peer(
+        &request,
+        &mut transport,
+        peer_uid,
+    ))
+}
+
+fn mode_accepts(
+    mode: CompanionMode,
+    transition: enoki_probe_bootstrap::lifecycle::LifecycleTransition,
+) -> bool {
+    (mode == CompanionMode::Upgrade)
+        == (transition == enoki_probe_bootstrap::lifecycle::LifecycleTransition::Upgrade)
 }
 
 fn write_lifecycle_response(response: LifecycleResponse) -> ExitCode {
@@ -81,7 +111,8 @@ fn caller_is_authorized(
     process_uid: u32,
 ) -> bool {
     match authority {
-        LifecycleRequestAuthority::HubOperation { .. } => peer_uid.is_some(),
+        LifecycleRequestAuthority::HubUpgrade { .. }
+        | LifecycleRequestAuthority::HubOperation { .. } => peer_uid.is_some(),
         LifecycleRequestAuthority::LocalRoot { .. } => {
             peer_uid.map_or(process_uid == 0, |uid| uid == 0)
         }
@@ -130,6 +161,28 @@ fn lifecycle_response_exit(response: &LifecycleResponse) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_mode_accepts_only_upgrade_and_general_mode_never_accepts_upgrade() {
+        use enoki_probe_bootstrap::lifecycle::LifecycleTransition;
+
+        assert!(mode_accepts(
+            CompanionMode::Upgrade,
+            LifecycleTransition::Upgrade
+        ));
+        assert!(!mode_accepts(
+            CompanionMode::Upgrade,
+            LifecycleTransition::Uninstall
+        ));
+        assert!(!mode_accepts(
+            CompanionMode::General,
+            LifecycleTransition::Upgrade
+        ));
+        assert!(mode_accepts(
+            CompanionMode::General,
+            LifecycleTransition::Uninstall
+        ));
+    }
 
     #[derive(Default)]
     struct RecordingWriter {

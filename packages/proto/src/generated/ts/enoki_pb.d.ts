@@ -4528,6 +4528,12 @@ export namespace enoki {
 
             /** ProbeUpgradeOperation targetAssetSetDigest */
             targetAssetSetDigest?: (string|null);
+
+            /** ProbeUpgradeOperation hostId */
+            hostId?: (string|null);
+
+            /** ProbeUpgradeOperation targetManifestSha256 */
+            targetManifestSha256?: (string|null);
         }
 
         /** Represents a ProbeUpgradeOperation. */
@@ -4550,6 +4556,12 @@ export namespace enoki {
 
             /** ProbeUpgradeOperation targetAssetSetDigest. */
             public targetAssetSetDigest: string;
+
+            /** ProbeUpgradeOperation hostId. */
+            public hostId: string;
+
+            /** ProbeUpgradeOperation targetManifestSha256. */
+            public targetManifestSha256: string;
 
             /**
              * Creates a new ProbeUpgradeOperation instance using the specified properties.

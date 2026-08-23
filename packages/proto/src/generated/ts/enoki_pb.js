@@ -14109,6 +14109,8 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [targetProbeVersion] ProbeUpgradeOperation targetProbeVersion
              * @property {string|null} [operationToken] ProbeUpgradeOperation operationToken
              * @property {string|null} [targetAssetSetDigest] ProbeUpgradeOperation targetAssetSetDigest
+             * @property {string|null} [hostId] ProbeUpgradeOperation hostId
+             * @property {string|null} [targetManifestSha256] ProbeUpgradeOperation targetManifestSha256
              */
 
             /**
@@ -14159,6 +14161,22 @@ export const enoki = $root.enoki = (() => {
             ProbeUpgradeOperation.prototype.targetAssetSetDigest = "";
 
             /**
+             * ProbeUpgradeOperation hostId.
+             * @member {string} hostId
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             */
+            ProbeUpgradeOperation.prototype.hostId = "";
+
+            /**
+             * ProbeUpgradeOperation targetManifestSha256.
+             * @member {string} targetManifestSha256
+             * @memberof enoki.v1.ProbeUpgradeOperation
+             * @instance
+             */
+            ProbeUpgradeOperation.prototype.targetManifestSha256 = "";
+
+            /**
              * Creates a new ProbeUpgradeOperation instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeUpgradeOperation
@@ -14194,6 +14212,10 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 3, wireType 2 =*/26).string(message.operationToken);
                 if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
                     writer.uint32(/* id 4, wireType 2 =*/34).string(message.targetAssetSetDigest);
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    writer.uint32(/* id 5, wireType 2 =*/42).string(message.hostId);
+                if (message.targetManifestSha256 != null && Object.hasOwnProperty.call(message, "targetManifestSha256"))
+                    writer.uint32(/* id 6, wireType 2 =*/50).string(message.targetManifestSha256);
                 return writer;
             };
 
@@ -14250,6 +14272,14 @@ export const enoki = $root.enoki = (() => {
                             message.targetAssetSetDigest = reader.string();
                             break;
                         }
+                    case 5: {
+                            message.hostId = reader.string();
+                            break;
+                        }
+                    case 6: {
+                            message.targetManifestSha256 = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -14301,6 +14331,12 @@ export const enoki = $root.enoki = (() => {
                 if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
                     if (!$util.isString(message.targetAssetSetDigest))
                         return "targetAssetSetDigest: string expected";
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    if (!$util.isString(message.hostId))
+                        return "hostId: string expected";
+                if (message.targetManifestSha256 != null && Object.hasOwnProperty.call(message, "targetManifestSha256"))
+                    if (!$util.isString(message.targetManifestSha256))
+                        return "targetManifestSha256: string expected";
                 return null;
             };
 
@@ -14330,6 +14366,10 @@ export const enoki = $root.enoki = (() => {
                     message.operationToken = String(object.operationToken);
                 if (object.targetAssetSetDigest != null)
                     message.targetAssetSetDigest = String(object.targetAssetSetDigest);
+                if (object.hostId != null)
+                    message.hostId = String(object.hostId);
+                if (object.targetManifestSha256 != null)
+                    message.targetManifestSha256 = String(object.targetManifestSha256);
                 return message;
             };
 
@@ -14355,6 +14395,8 @@ export const enoki = $root.enoki = (() => {
                     object.targetProbeVersion = "";
                     object.operationToken = "";
                     object.targetAssetSetDigest = "";
+                    object.hostId = "";
+                    object.targetManifestSha256 = "";
                 }
                 if (message.currentProbeVersion != null && Object.hasOwnProperty.call(message, "currentProbeVersion"))
                     object.currentProbeVersion = message.currentProbeVersion;
@@ -14364,6 +14406,10 @@ export const enoki = $root.enoki = (() => {
                     object.operationToken = message.operationToken;
                 if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
                     object.targetAssetSetDigest = message.targetAssetSetDigest;
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    object.hostId = message.hostId;
+                if (message.targetManifestSha256 != null && Object.hasOwnProperty.call(message, "targetManifestSha256"))
+                    object.targetManifestSha256 = message.targetManifestSha256;
                 return object;
             };
 

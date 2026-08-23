@@ -26,6 +26,19 @@ pub struct LifecycleRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum LifecycleRequestAuthority {
+    HubUpgrade {
+        host_id: String,
+        probe_id: String,
+        operation_id: String,
+        operation_token: String,
+        source_bundle_version: String,
+        source_install_state_sha256: String,
+        source_manifest_sha256: String,
+        target_bundle_version: String,
+        target_asset_set_digest: String,
+        target_manifest_sha256: String,
+        verified_stage_sha256: String,
+    },
     HubOperation {
         probe_id: String,
         operation_id: String,
@@ -145,6 +158,41 @@ fn bounded_result_code(code: &str) -> String {
 }
 
 impl LifecycleRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn hub_upgrade(
+        host_id: &str,
+        probe_id: &str,
+        operation_id: &str,
+        operation_token: &str,
+        source_bundle_version: &str,
+        source_install_state_sha256: &str,
+        source_manifest_sha256: &str,
+        target_bundle_version: &str,
+        target_asset_set_digest: &str,
+        target_manifest_sha256: &str,
+        verified_stage_sha256: &str,
+    ) -> Result<Self, LifecycleRejection> {
+        let request = Self {
+            schema_version: 1,
+            transition: LifecycleTransition::Upgrade,
+            authority: LifecycleRequestAuthority::HubUpgrade {
+                host_id: host_id.to_owned(),
+                probe_id: probe_id.to_owned(),
+                operation_id: operation_id.to_owned(),
+                operation_token: operation_token.to_owned(),
+                source_bundle_version: source_bundle_version.to_owned(),
+                source_install_state_sha256: source_install_state_sha256.to_owned(),
+                source_manifest_sha256: source_manifest_sha256.to_owned(),
+                target_bundle_version: target_bundle_version.to_owned(),
+                target_asset_set_digest: target_asset_set_digest.to_owned(),
+                target_manifest_sha256: target_manifest_sha256.to_owned(),
+                verified_stage_sha256: verified_stage_sha256.to_owned(),
+            },
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
     pub fn hub_uninstall(
         probe_id: &str,
         operation_id: &str,
@@ -238,6 +286,39 @@ impl LifecycleRequest {
             return Err(LifecycleRejection::InvalidAuthority);
         }
         let (probe_id, install_state, manifest, version) = match &self.authority {
+            LifecycleRequestAuthority::HubUpgrade {
+                host_id,
+                probe_id,
+                operation_id,
+                operation_token,
+                source_bundle_version,
+                source_install_state_sha256,
+                source_manifest_sha256,
+                target_bundle_version,
+                target_asset_set_digest,
+                target_manifest_sha256,
+                verified_stage_sha256,
+            } => {
+                if self.transition != LifecycleTransition::Upgrade
+                    || !valid_identifier(host_id)
+                    || !valid_identifier(probe_id)
+                    || !valid_identifier(operation_id)
+                    || operation_token.is_empty()
+                    || operation_token.len() > MAX_OPERATION_TOKEN_BYTES
+                    || operation_token.bytes().any(|byte| byte.is_ascii_control())
+                    || !valid_bundle_version(source_bundle_version)
+                    || !is_sha256_hex(source_install_state_sha256)
+                    || !is_sha256_hex(source_manifest_sha256)
+                    || !valid_bundle_version(target_bundle_version)
+                    || source_bundle_version == target_bundle_version
+                    || !is_prefixed_sha256(target_asset_set_digest)
+                    || !is_sha256_hex(target_manifest_sha256)
+                    || !is_sha256_hex(verified_stage_sha256)
+                {
+                    return Err(LifecycleRejection::InvalidAuthority);
+                }
+                return Ok(());
+            }
             LifecycleRequestAuthority::HubOperation {
                 probe_id,
                 operation_id,
@@ -325,10 +406,10 @@ impl LifecycleTransition {
     #[must_use]
     pub const fn availability(self) -> TransitionAvailability {
         match self {
-            Self::FreshInstall | Self::ReplacementMigration | Self::Uninstall => {
+            Self::FreshInstall | Self::Upgrade | Self::ReplacementMigration | Self::Uninstall => {
                 TransitionAvailability::Enabled
             }
-            Self::Upgrade | Self::Repair => TransitionAvailability::NotEnabled,
+            Self::Repair => TransitionAvailability::NotEnabled,
         }
     }
 }
@@ -380,6 +461,34 @@ impl LifecyclePlan {
 pub enum LifecycleCompletion {
     Complete,
     RecoveryPending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpgradeCompletion {
+    Activated,
+    RepairRequired,
+}
+
+pub trait UpgradeLifecycleEffects {
+    type Error;
+
+    /// 校验 Hub authority、当前 root-owned 安装收据与固定 stage；不得产生安装变更。
+    fn verify_and_prepare(&mut self) -> Result<(), Self::Error>;
+
+    /// 此调用即不可逆的激活分界；返回错误时调用方只能进入 Repair。
+    fn activate_complete_bundle(&mut self) -> Result<(), Self::Error>;
+}
+
+pub fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
+    effects: &mut E,
+) -> Result<UpgradeCompletion, E::Error> {
+    LifecyclePlan::for_transition(LifecycleTransition::Upgrade)
+        .expect("构建期固定的兼容升级转换必须保持启用");
+    effects.verify_and_prepare()?;
+    match effects.activate_complete_bundle() {
+        Ok(()) => Ok(UpgradeCompletion::Activated),
+        Err(_) => Ok(UpgradeCompletion::RepairRequired),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,12 +594,38 @@ mod tests {
             LifecycleTransition::Uninstall.availability(),
             TransitionAvailability::Enabled
         );
-        for transition in [LifecycleTransition::Upgrade, LifecycleTransition::Repair] {
-            assert_eq!(
-                transition.availability(),
-                TransitionAvailability::NotEnabled
-            );
-        }
+        assert_eq!(
+            LifecycleTransition::Upgrade.availability(),
+            TransitionAvailability::Enabled
+        );
+        assert_eq!(
+            LifecycleTransition::Repair.availability(),
+            TransitionAvailability::NotEnabled
+        );
+    }
+
+    #[test]
+    fn compatible_upgrade_authority_roundtrips_with_source_target_and_stage_bindings() {
+        let request = LifecycleRequest::hub_upgrade(
+            "host_01",
+            "probe_01",
+            "operation_01",
+            "opaque-operation-token",
+            "1.2.2",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+            &format!("sha256:{}", "c".repeat(64)),
+            &"d".repeat(64),
+            &"e".repeat(64),
+        )
+        .expect("升级授权有效");
+
+        assert_eq!(request.transition(), LifecycleTransition::Upgrade);
+        assert_eq!(
+            LifecycleRequest::decode(&request.encode().unwrap()),
+            Ok(request)
+        );
     }
 
     #[test]
@@ -566,6 +701,52 @@ mod tests {
         let result = execute_fresh_install_lifecycle(&mut effects);
         assert_eq!(result, Ok(()));
         assert_eq!(effects.0, ["verify", "stage-and-activate"]);
+    }
+
+    #[test]
+    fn upgrade_runner_distinguishes_preactivation_failure_from_repair_required() {
+        struct Effects {
+            calls: Vec<&'static str>,
+            fail: Option<&'static str>,
+        }
+        impl UpgradeLifecycleEffects for Effects {
+            type Error = &'static str;
+            fn verify_and_prepare(&mut self) -> Result<(), Self::Error> {
+                self.calls.push("verify-and-prepare");
+                (self.fail != Some("verify-and-prepare"))
+                    .then_some(())
+                    .ok_or("upgrade-failed")
+            }
+            fn activate_complete_bundle(&mut self) -> Result<(), Self::Error> {
+                self.calls.push("activate-complete-bundle");
+                (self.fail != Some("activate-complete-bundle"))
+                    .then_some(())
+                    .ok_or("upgrade-failed")
+            }
+        }
+
+        let mut before = Effects {
+            calls: Vec::new(),
+            fail: Some("verify-and-prepare"),
+        };
+        assert_eq!(
+            execute_upgrade_lifecycle(&mut before),
+            Err("upgrade-failed")
+        );
+        assert_eq!(before.calls, ["verify-and-prepare"]);
+
+        let mut after = Effects {
+            calls: Vec::new(),
+            fail: Some("activate-complete-bundle"),
+        };
+        assert_eq!(
+            execute_upgrade_lifecycle(&mut after),
+            Ok(UpgradeCompletion::RepairRequired)
+        );
+        assert_eq!(
+            after.calls,
+            ["verify-and-prepare", "activate-complete-bundle"]
+        );
     }
 
     #[test]

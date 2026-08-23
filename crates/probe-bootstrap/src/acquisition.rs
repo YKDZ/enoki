@@ -26,13 +26,233 @@ use url::Url;
 use sha2::{Digest, Sha256};
 
 use crate::{
+    generation::{DelegationGenerationLease, acquire_delegation_generation},
     handoff::{Enrollment, Handoff},
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
         MAX_COMPONENT_BYTES, VerificationPolicy, VerifiedBundle, read_bundle_manifest,
-        verify_archive_and_extract_roles, verify_metadata, verify_outer_metadata,
+        verify_metadata, verify_outer_metadata,
     },
 };
+
+pub const PROBE_UPGRADE_STAGE_ROOT: &str = "/var/lib/enoki-probe/upgrade-stages";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeUpgradeAcquisition {
+    pub hub_origin: String,
+    pub operation_id: String,
+    pub target_asset_set_digest: String,
+    pub target_manifest_sha256: String,
+    pub target_version: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedUpgradeStageReceipt {
+    pub operation_id: String,
+    pub target_asset_set_digest: String,
+    pub target_manifest_sha256: String,
+    pub target_version: String,
+    pub verified_stage_sha256: String,
+}
+
+pub struct VerifiedProbeUpgradeStage {
+    pub probe: File,
+    pub observation_runtime: File,
+    pub system_state_provider: File,
+    pub disk_health_provider: File,
+    pub lifecycle_companion: File,
+    pub bootstrap_acquirer: File,
+    pub bootstrap_activator: File,
+    pub bundle: VerifiedBundle,
+    _generation: DelegationGenerationLease,
+}
+
+/// root只从构建期固定stage目录打开同一operation的文件，并独立复验签名、
+/// generation floor与固定5+2角色收据。
+pub fn open_verified_probe_upgrade_stage(
+    receipt: &VerifiedUpgradeStageReceipt,
+    expected_owner_uid: u32,
+) -> Result<VerifiedProbeUpgradeStage, AcquisitionFailure> {
+    open_verified_probe_upgrade_stage_at(
+        Path::new(PROBE_UPGRADE_STAGE_ROOT),
+        receipt,
+        expected_owner_uid,
+    )
+}
+
+fn open_verified_probe_upgrade_stage_at(
+    root: &Path,
+    receipt: &VerifiedUpgradeStageReceipt,
+    expected_owner_uid: u32,
+) -> Result<VerifiedProbeUpgradeStage, AcquisitionFailure> {
+    if unsafe { libc::geteuid() } != 0 || !valid_stage_identifier(&receipt.operation_id) {
+        return Err(AcquisitionFailure::RootRefused);
+    }
+    let directory = root.join(&receipt.operation_id);
+    validate_stage_directory(root, expected_owner_uid)?;
+    validate_stage_directory(&directory, expected_owner_uid)?;
+    let delegation = read_stage_metadata(&directory, "trust-delegation.json", expected_owner_uid)?;
+    let delegation_signature =
+        read_stage_metadata(&directory, "trust-delegation.json.sig", expected_owner_uid)?;
+    let manifest = read_stage_metadata(&directory, "manifest.json", expected_owner_uid)?;
+    let manifest_signature =
+        read_stage_metadata(&directory, "manifest.json.sig", expected_owner_uid)?;
+    let signing_key = read_stage_metadata(&directory, "signing-key.pem", expected_owner_uid)?;
+    let bundle_manifest =
+        read_stage_metadata(&directory, "bundle-manifest.json", expected_owner_uid)?;
+    let handoff = Handoff {
+        delegation,
+        delegation_signature,
+        manifest,
+        manifest_signature,
+        signing_key,
+        bundle_manifest,
+    };
+    let trust = embedded_production_trust_for(BootstrapRole::Activator)
+        .ok_or(AcquisitionFailure::BuildTrustUnavailable)?;
+    let metadata = verify_metadata(
+        &handoff,
+        &VerificationPolicy {
+            distribution: trust.distribution,
+            expected_target: trust.target,
+            highest_accepted_delegation_generation: 0,
+            external_root_fingerprint: trust.root_fingerprint.to_owned(),
+            external_root_pem: Some(trust.root_pem.as_bytes()),
+        },
+    )
+    .map_err(|_| AcquisitionFailure::Permanent)?;
+    let bundle = metadata.bundle().clone();
+    if bundle.version != receipt.target_version
+        || receipt.target_asset_set_digest.strip_prefix("sha256:")
+            != Some(bundle.asset_set_manifest_sha256.as_str())
+        || bundle.manifest_sha256 != receipt.target_manifest_sha256
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let mut files = Vec::new();
+    let mut stage_digest = Sha256::new();
+    for (name, bytes) in [
+        ("trust-delegation.json", handoff.delegation.as_slice()),
+        (
+            "trust-delegation.json.sig",
+            handoff.delegation_signature.as_slice(),
+        ),
+        ("manifest.json", handoff.manifest.as_slice()),
+        ("manifest.json.sig", handoff.manifest_signature.as_slice()),
+        ("signing-key.pem", handoff.signing_key.as_slice()),
+        ("bundle-manifest.json", handoff.bundle_manifest.as_slice()),
+    ] {
+        update_stage_digest(&mut stage_digest, name, bytes);
+    }
+    for name in [
+        "enoki-probe",
+        "enoki-observation-runtime",
+        "enoki-cpu-resource-provider",
+        "enoki-disk-health-resource-provider",
+        "enoki-probe-lifecycle-companion",
+        "enoki-probe-bootstrap-acquire",
+        "enoki-probe-bootstrap-activate",
+    ] {
+        let mut file = open_stage_file(&directory, name, expected_owner_uid, MAX_COMPONENT_BYTES)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|_| AcquisitionFailure::Local)?;
+        update_stage_digest(&mut stage_digest, name, &bytes);
+        file.rewind().map_err(|_| AcquisitionFailure::Local)?;
+        files.push(file);
+    }
+    if format!("{:x}", stage_digest.finalize()) != receipt.verified_stage_sha256 {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let mut probe = files.remove(0);
+    let mut observation_runtime = files.remove(0);
+    let mut system_state_provider = files.remove(0);
+    let mut disk_health_provider = files.remove(0);
+    let mut lifecycle_companion = files.remove(0);
+    let mut bootstrap_acquirer = files.remove(0);
+    let mut bootstrap_activator = files.remove(0);
+    crate::verifier::verify_upgrade_role_receipts(
+        &mut probe,
+        &mut observation_runtime,
+        &mut system_state_provider,
+        &mut disk_health_provider,
+        &mut lifecycle_companion,
+        &bundle,
+    )
+    .map_err(|_| AcquisitionFailure::Permanent)?;
+    crate::verifier::verify_acquirer_receipt(&mut bootstrap_acquirer, &bundle)
+        .map_err(|_| AcquisitionFailure::Permanent)?;
+    crate::verifier::verify_activator_receipt(&mut bootstrap_activator, &bundle)
+        .map_err(|_| AcquisitionFailure::Permanent)?;
+    let generation = acquire_delegation_generation(bundle.delegation_generation())
+        .map_err(|_| AcquisitionFailure::Permanent)?;
+    Ok(VerifiedProbeUpgradeStage {
+        probe,
+        observation_runtime,
+        system_state_provider,
+        disk_health_provider,
+        lifecycle_companion,
+        bootstrap_acquirer,
+        bootstrap_activator,
+        bundle,
+        _generation: generation,
+    })
+}
+
+fn validate_stage_directory(path: &Path, expected_uid: u32) -> Result<(), AcquisitionFailure> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| AcquisitionFailure::Local)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    Ok(())
+}
+
+fn read_stage_metadata(
+    directory: &Path,
+    name: &str,
+    expected_uid: u32,
+) -> Result<Vec<u8>, AcquisitionFailure> {
+    let mut file = open_stage_file(directory, name, expected_uid, MAX_METADATA_BYTES as u64)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| AcquisitionFailure::Local)?;
+    Ok(bytes)
+}
+
+fn open_stage_file(
+    directory: &Path,
+    name: &str,
+    expected_uid: u32,
+    maximum: u64,
+) -> Result<File, AcquisitionFailure> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(directory.join(name))
+        .map_err(|_| AcquisitionFailure::Local)?;
+    let metadata = file.metadata().map_err(|_| AcquisitionFailure::Local)?;
+    if !metadata.is_file()
+        || metadata.uid() != expected_uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+        || metadata.len() == 0
+        || metadata.len() > maximum
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    Ok(file)
+}
+
+fn update_stage_digest(digest: &mut Sha256, name: &str, bytes: &[u8]) {
+    digest.update((name.len() as u64).to_be_bytes());
+    digest.update(name.as_bytes());
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+}
 
 /// The only network boundary used by acquisition.  Production uses a client
 /// with redirects disabled; tests can provide a deterministic peer.
@@ -299,6 +519,65 @@ pub(crate) fn acquire_production(
     )
 }
 
+/// 为一次显式 Probe Upgrade 完成单次下载、完整验证与固定stage发布。
+/// 此入口不包含自动重试；失败后的下一次尝试只能来自新的Hub操作。
+pub fn acquire_probe_upgrade_once(
+    request: ProbeUpgradeAcquisition,
+) -> Result<VerifiedUpgradeStageReceipt, AcquisitionFailure> {
+    if unsafe { libc::geteuid() } == 0 {
+        return Err(AcquisitionFailure::RootRefused);
+    }
+    let trust = embedded_production_trust_for(BootstrapRole::Acquirer)
+        .ok_or(AcquisitionFailure::BuildTrustUnavailable)?;
+    let Some(origin) = exact_origin(&request.hub_origin) else {
+        return Err(AcquisitionFailure::InvalidOrigin);
+    };
+    let stage_root = PathBuf::from(PROBE_UPGRADE_STAGE_ROOT);
+    let mut transport = UreqTransport;
+    let mut dependencies = AcquisitionDependencies {
+        transport: &mut transport,
+        privilege: EffectivePrivilege,
+        clock: MonotonicClock::default(),
+        random: OsRandom,
+        sleeper: ThreadSleeper,
+    };
+    let acquisition_request = AcquisitionRequest {
+        hub_origin: request.hub_origin.clone(),
+        policy: VerificationPolicy {
+            distribution: trust.distribution,
+            expected_target: trust.target,
+            highest_accepted_delegation_generation: 0,
+            external_root_fingerprint: trust.root_fingerprint.to_owned(),
+            external_root_pem: Some(trust.root_pem.as_bytes()),
+        },
+        staging_dir: stage_root.clone(),
+        deadline_ms: 60_000,
+    };
+    let deadline_at = dependencies.clock.now_ms().saturating_add(60_000);
+    let mut acquired = acquire_once(
+        &acquisition_request,
+        &mut dependencies,
+        &origin,
+        deadline_at,
+    )?;
+    if acquired.bundle.version != request.target_version
+        || request.target_asset_set_digest.strip_prefix("sha256:")
+            != Some(acquired.bundle.asset_set_manifest_sha256.as_str())
+        || acquired.bundle.manifest_sha256 != request.target_manifest_sha256
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let verified_stage_sha256 =
+        acquired.persist_upgrade_stage_at(&stage_root, &request.operation_id)?;
+    Ok(VerifiedUpgradeStageReceipt {
+        operation_id: request.operation_id,
+        target_asset_set_digest: request.target_asset_set_digest,
+        target_manifest_sha256: request.target_manifest_sha256,
+        target_version: request.target_version,
+        verified_stage_sha256,
+    })
+}
+
 pub(crate) struct VerifiedAcquisition {
     pub handoff: Handoff,
     pub bundle: VerifiedBundle,
@@ -307,6 +586,7 @@ pub(crate) struct VerifiedAcquisition {
     cpu_provider: File,
     disk_health_provider: File,
     lifecycle_companion: File,
+    bootstrap_acquirer: File,
     activator: File,
 }
 
@@ -412,6 +692,137 @@ impl VerifiedAcquisition {
             .then_some(())
             .ok_or(AcquisitionFailure::Local)
     }
+
+    fn persist_upgrade_stage_at(
+        &mut self,
+        root: &Path,
+        operation_id: &str,
+    ) -> Result<String, AcquisitionFailure> {
+        if !valid_stage_identifier(operation_id) {
+            return Err(AcquisitionFailure::Permanent);
+        }
+        ensure_private_staging(root)?;
+        let pending = root.join(format!(".pending-{operation_id}"));
+        let destination = root.join(operation_id);
+        let _ = fs::remove_dir_all(&pending);
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&pending)
+            .map_err(|_| AcquisitionFailure::Local)?;
+        let result = (|| {
+            let mut digest = Sha256::new();
+            for (name, bytes) in [
+                ("trust-delegation.json", self.handoff.delegation.as_slice()),
+                (
+                    "trust-delegation.json.sig",
+                    self.handoff.delegation_signature.as_slice(),
+                ),
+                ("manifest.json", self.handoff.manifest.as_slice()),
+                (
+                    "manifest.json.sig",
+                    self.handoff.manifest_signature.as_slice(),
+                ),
+                ("signing-key.pem", self.handoff.signing_key.as_slice()),
+                (
+                    "bundle-manifest.json",
+                    self.handoff.bundle_manifest.as_slice(),
+                ),
+            ] {
+                write_stage_bytes(&pending, name, bytes, &mut digest)?;
+            }
+            for (name, file) in [
+                ("enoki-probe", &mut self.component),
+                ("enoki-observation-runtime", &mut self.runtime),
+                ("enoki-cpu-resource-provider", &mut self.cpu_provider),
+                (
+                    "enoki-disk-health-resource-provider",
+                    &mut self.disk_health_provider,
+                ),
+                (
+                    "enoki-probe-lifecycle-companion",
+                    &mut self.lifecycle_companion,
+                ),
+                (
+                    "enoki-probe-bootstrap-acquire",
+                    &mut self.bootstrap_acquirer,
+                ),
+                ("enoki-probe-bootstrap-activate", &mut self.activator),
+            ] {
+                file.rewind().map_err(|_| AcquisitionFailure::Local)?;
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes)
+                    .map_err(|_| AcquisitionFailure::Local)?;
+                file.rewind().map_err(|_| AcquisitionFailure::Local)?;
+                write_stage_bytes(&pending, name, &bytes, &mut digest)?;
+            }
+            File::open(&pending)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| AcquisitionFailure::Local)?;
+            fs::rename(&pending, &destination).map_err(|_| AcquisitionFailure::Local)?;
+            File::open(root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| AcquisitionFailure::Local)?;
+            Ok(format!("{:x}", digest.finalize()))
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&pending);
+        }
+        result
+    }
+}
+
+impl VerifiedProbeUpgradeStage {
+    pub fn persist_generation_before_activation(&mut self) -> Result<(), AcquisitionFailure> {
+        self._generation
+            .persist_before_mutation()
+            .map_err(|_| AcquisitionFailure::Permanent)
+    }
+}
+
+pub fn remove_verified_probe_upgrade_stage(
+    operation_id: &str,
+    expected_owner_uid: u32,
+) -> Result<(), AcquisitionFailure> {
+    if unsafe { libc::geteuid() } != 0 || !valid_stage_identifier(operation_id) {
+        return Err(AcquisitionFailure::RootRefused);
+    }
+    let root = Path::new(PROBE_UPGRADE_STAGE_ROOT);
+    let directory = root.join(operation_id);
+    validate_stage_directory(root, expected_owner_uid)?;
+    validate_stage_directory(&directory, expected_owner_uid)?;
+    fs::remove_dir_all(&directory).map_err(|_| AcquisitionFailure::Local)?;
+    File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| AcquisitionFailure::Local)
+}
+
+fn write_stage_bytes(
+    directory: &Path,
+    name: &str,
+    bytes: &[u8],
+    digest: &mut Sha256,
+) -> Result<(), AcquisitionFailure> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(directory.join(name))
+        .map_err(|_| AcquisitionFailure::Local)?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| AcquisitionFailure::Local)?;
+    digest.update((name.len() as u64).to_be_bytes());
+    digest.update(name.as_bytes());
+    digest.update((bytes.len() as u64).to_be_bytes());
+    digest.update(bytes);
+    Ok(())
+}
+
+fn valid_stage_identifier(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn sealed_activator_fd(
@@ -490,8 +901,9 @@ fn acquire_local(
     let mut cpu_provider = create_exclusive_staging_file(asset_dir)?;
     let mut disk_health_provider = create_exclusive_staging_file(asset_dir)?;
     let mut lifecycle_companion = create_exclusive_staging_file(asset_dir)?;
+    let mut bootstrap_acquirer = create_exclusive_staging_file(asset_dir)?;
     let mut activator = create_exclusive_staging_file(asset_dir)?;
-    let bundle = verify_archive_and_extract_roles(
+    let bundle = crate::verifier::verify_archive_and_extract_lifecycle_roles(
         &mut archive,
         &handoff,
         &metadata,
@@ -500,7 +912,7 @@ fn acquire_local(
         &mut cpu_provider,
         &mut disk_health_provider,
         &mut lifecycle_companion,
-        &mut std::io::sink(),
+        &mut bootstrap_acquirer,
         &mut activator,
     )
     .map_err(|_| AcquisitionFailure::Permanent)?;
@@ -517,6 +929,9 @@ fn acquire_local(
     lifecycle_companion
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
+    bootstrap_acquirer
+        .sync_all()
+        .map_err(|_| AcquisitionFailure::Local)?;
     activator
         .sync_all()
         .map_err(|_| AcquisitionFailure::Local)?;
@@ -528,6 +943,7 @@ fn acquire_local(
         cpu_provider,
         disk_health_provider,
         lifecycle_companion,
+        bootstrap_acquirer,
         activator,
     })
 }
@@ -712,8 +1128,9 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
     let mut cpu_provider = create_exclusive_staging_file(&request.staging_dir)?;
     let mut disk_health_provider = create_exclusive_staging_file(&request.staging_dir)?;
     let mut lifecycle_companion = create_exclusive_staging_file(&request.staging_dir)?;
+    let mut bootstrap_acquirer = create_exclusive_staging_file(&request.staging_dir)?;
     let mut activator = create_exclusive_staging_file(&request.staging_dir)?;
-    let bundle = verify_archive_and_extract_roles(
+    let bundle = crate::verifier::verify_archive_and_extract_lifecycle_roles(
         &mut archive,
         &handoff,
         &metadata,
@@ -722,7 +1139,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut cpu_provider,
         &mut disk_health_provider,
         &mut lifecycle_companion,
-        &mut std::io::sink(),
+        &mut bootstrap_acquirer,
         &mut activator,
     )
     .map_err(|_| AcquisitionFailure::Permanent)?;
@@ -732,6 +1149,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         &mut cpu_provider,
         &mut disk_health_provider,
         &mut lifecycle_companion,
+        &mut bootstrap_acquirer,
         &mut activator,
     ] {
         role.sync_all().map_err(|_| AcquisitionFailure::Local)?;
@@ -744,6 +1162,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
         cpu_provider,
         disk_health_provider,
         lifecycle_companion,
+        bootstrap_acquirer,
         activator,
     })
 }

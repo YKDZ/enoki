@@ -2633,7 +2633,10 @@ describe("Probe report API", () => {
       expect(response.pendingOperation?.probeUpgrade).toEqual(
         expect.objectContaining({
           currentProbeVersion: "0.1.0",
+          hostId: String(host.id),
           operationToken: expect.any(String),
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetManifestSha256: "a".repeat(64),
           targetProbeVersion: "0.2.0",
         }),
       );

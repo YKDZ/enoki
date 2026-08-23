@@ -217,8 +217,10 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
             id: "operation-01".to_string(),
             operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation {
                 current_probe_version: "0.1.0".to_string(),
+                host_id: "7".to_string(),
                 operation_token: "operation-token-01".to_string(),
                 target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                target_manifest_sha256: "a".repeat(64),
                 target_probe_version: "0.2.0".to_string(),
             })),
         }),

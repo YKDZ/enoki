@@ -5,11 +5,13 @@ const ROLLBACK_STOP_UNITS: &[&str] = &[
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
     "enoki-probe-lifecycle-companion.socket",
+    "enoki-probe-lifecycle-upgrade.socket",
     "enoki-probe.service",
     "enoki-observation-runtime.service",
     "enoki-cpu-resource-provider@*.service",
     "enoki-disk-health-resource-provider@*.service",
     "enoki-probe-lifecycle-companion@*.service",
+    "enoki-probe-lifecycle-upgrade@*.service",
 ];
 const ROLLBACK_VERIFY_UNITS: &[&str] = &[
     "enoki-probe.service",
@@ -21,17 +23,21 @@ const ROLLBACK_VERIFY_UNITS: &[&str] = &[
     "enoki-disk-health-resource-provider@*.service",
     "enoki-probe-lifecycle-companion.socket",
     "enoki-probe-lifecycle-companion@*.service",
+    "enoki-probe-lifecycle-upgrade.socket",
+    "enoki-probe-lifecycle-upgrade@*.service",
 ];
 const ROLLBACK_RESET_UNITS: &[&str] = &[
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
     "enoki-probe-lifecycle-companion.socket",
+    "enoki-probe-lifecycle-upgrade.socket",
     "enoki-probe.service",
     "enoki-observation-runtime.service",
     "enoki-cpu-resource-provider@*.service",
     "enoki-disk-health-resource-provider@*.service",
     "enoki-probe-lifecycle-companion@*.service",
+    "enoki-probe-lifecycle-upgrade@*.service",
 ];
 
 fn attempt_all_fixed_units(
@@ -56,6 +62,22 @@ fn rollback_unit_is_absent(state: &str) -> bool {
 #[derive(Default)]
 pub struct SystemSystemd {
     command_deadline: Option<Instant>,
+    preserve_live_upgrade_companion: bool,
+}
+impl SystemSystemd {
+    pub fn for_live_upgrade() -> Self {
+        Self {
+            command_deadline: None,
+            preserve_live_upgrade_companion: true,
+        }
+    }
+}
+
+fn is_live_upgrade_companion_unit(unit: &str) -> bool {
+    matches!(
+        unit,
+        "enoki-probe-lifecycle-upgrade.socket" | "enoki-probe-lifecycle-upgrade@*.service"
+    )
 }
 impl SystemdPort for SystemSystemd {
     fn set_command_deadline(&mut self, deadline: Instant) {
@@ -149,6 +171,9 @@ impl SystemdPort for SystemSystemd {
             .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
         // 先关闭激活 socket，阻止回滚期间产生新进程，再收敛所有固定角色。
         let mut first_error = attempt_all_fixed_units(ROLLBACK_STOP_UNITS, |unit| {
+            if self.preserve_live_upgrade_companion && is_live_upgrade_companion_unit(unit) {
+                return Ok(());
+            }
             require_success(
                 "/usr/bin/systemctl",
                 &["stop", unit],
@@ -158,6 +183,9 @@ impl SystemdPort for SystemSystemd {
         })
         .err();
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_RESET_UNITS, |unit| {
+            if self.preserve_live_upgrade_companion && is_live_upgrade_companion_unit(unit) {
+                return Ok(());
+            }
             require_success(
                 "/usr/bin/systemctl",
                 &["reset-failed", unit],
@@ -169,6 +197,9 @@ impl SystemdPort for SystemSystemd {
             first_error = Some(error);
         }
         if let Err(error) = attempt_all_fixed_units(ROLLBACK_VERIFY_UNITS, |unit| {
+            if self.preserve_live_upgrade_companion && is_live_upgrade_companion_unit(unit) {
+                return Ok(());
+            }
             let output = run_bounded(
                 "/usr/bin/systemctl",
                 &["is-active", unit],
@@ -202,8 +233,22 @@ impl SystemdPort for SystemSystemd {
 mod tests {
     use super::{
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        attempt_all_fixed_units, rollback_unit_is_absent,
+        attempt_all_fixed_units, is_live_upgrade_companion_unit, rollback_unit_is_absent,
     };
+
+    #[test]
+    fn live_upgrade_preserves_only_its_fixed_recovery_socket_and_instance() {
+        assert!(is_live_upgrade_companion_unit(
+            "enoki-probe-lifecycle-upgrade.socket"
+        ));
+        assert!(is_live_upgrade_companion_unit(
+            "enoki-probe-lifecycle-upgrade@*.service"
+        ));
+        assert!(!is_live_upgrade_companion_unit("enoki-probe.service"));
+        assert!(!is_live_upgrade_companion_unit(
+            "enoki-probe-lifecycle-companion.socket"
+        ));
+    }
 
     #[test]
     fn rollback_attempts_every_fixed_role_after_one_stop_failure() {

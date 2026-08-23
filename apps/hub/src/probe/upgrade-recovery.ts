@@ -10,6 +10,7 @@ const manualReinstallFailureCodes = new Set([
 ]);
 
 const probeRepairFailureCodes = new Set([
+  "lifecycle.upgrade_repair_required",
   "post_replacement_restart_failure",
   "post_replacement_status_write_failure",
   "running_timeout",
@@ -21,6 +22,9 @@ const retryProbeUpgradeFailureCodes = new Set([
   "asset_missing",
   "checksum_failure",
   "downgrade_rejected",
+  "lifecycle.upgrade_acquisition_failed",
+  "lifecycle.upgrade_candidate_invalid",
+  "lifecycle.upgrade_failed_before_activation",
   "signature_failure",
   "signing_key_untrusted",
   "target_mismatch",

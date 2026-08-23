@@ -70,7 +70,7 @@ Enoki 的安全边界尽量保持简单：
 - 常驻探针不以 root 运行，也不直接读取设备事实或执行 `smartctl`。Observation Runtime 只通过构建期固定的本机 Resource Provider 合同取得结果；Hub、管理员、探针配置、主机概况或指标上报都不能传入路径、命令、参数、权限配置或采集器列表
 - Observation Runtime 独占官方采集器的固定注册、调度、指标计算、delta 状态和有界结果；常驻探针只请求完整观测窗口，按已验证配置筛选已完成字段并沿认证上报路径转发。新安装不会创建已退役的采集 helper sudoers
 - System State Provider 与 Disk Health Provider 是相互独立的一次性 systemd socket 激活进程。两者都有固定调用者身份、激活预算、运行期限和有界 typed response；Disk Health Provider 还使用固定 `smartctl` 绝对候选路径和参数，清空继承环境并仅设置固定的 `LANG=C`，同时固定工作目录以及子进程超时与回收合同
-- 探针、观测进程、两类采集进程和生命周期进程的生产 unit 使用与签名角色一致的固定最小权限配置，限制 capability、设备、网络、文件系统、进程视图、命名空间、系统调用、任务数、内存和文件创建权限。两类采集进程还受固定并发、激活速率、执行期限和完整进程组清理约束，文件读取另由构建期固定的 Landlock allowlist 限制。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；卸载仅执行固定清单，升级和修复尚未启用
+- 探针、观测进程、两类采集进程和生命周期进程的生产 unit 使用与签名角色一致的固定最小权限配置，限制 capability、设备、网络、文件系统、进程视图、命名空间、系统调用、任务数、内存和文件创建权限。两类采集进程还受固定并发、激活速率、执行期限和完整进程组清理约束，文件读取另由构建期固定的 Landlock allowlist 限制。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；卸载仅执行固定清单，只有签名发布转换明确声明兼容的相邻新架构版本可由管理员逐台发起升级，修复仍未启用
 
 ## 部署
 
@@ -100,7 +100,7 @@ Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl`
 
 把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和全部运行组件的精确摘要与大小，再在同一个 fresh transaction 中发布 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`lifecycle-companion`、`bootstrap-acquirer` 与 `bootstrap-activator` 七个固定角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
-Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机特权操作；卸载交由独立的固定角色完成，升级和修复请求会稳定报告未启用。
+Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机特权操作；卸载与显式兼容升级交由独立的固定角色完成，修复请求会稳定报告未启用。升级候选由非特权探针一次下载并完整验证，root 角色只复验固定暂存收据且不联网；激活前失败保留旧安装，激活后未完成则进入修复状态，不会自动重试或降级。
 
 `ENOKI_PROBE_API_ORIGIN` 只能是 `scheme://host[:port]`，不支持路径前缀。若既有探针依赖未文档化的前缀，请调整网络路由后在 Hub 中使用“手动重新安装探针”；没有旧前缀兼容层。
 
