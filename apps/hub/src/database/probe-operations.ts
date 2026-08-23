@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, notExists, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lte, notExists, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 import { alias } from "drizzle-orm/sqlite-core";
 
@@ -29,6 +29,10 @@ export type ProbeOperationRepository = {
   findByRepairEvidenceSha256: (sha256: string) => ProbeUpgradeRequest | null;
   findLatestForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findLatestForHosts: (hostIds: number[]) => Map<number, ProbeUpgradeRequest>;
+  renewOrCreateProbeRepairRequest: (
+    candidate: ProbeUpgradeRequest,
+    nowMs: number,
+  ) => ProbeUpgradeRequest | null;
   updateProbeUpgradeRequest: (
     operation: ProbeUpgradeRequest,
   ) => ProbeUpgradeRequest;
@@ -167,6 +171,81 @@ export function createProbeOperationRepository(
       return new Map(
         rows.map((row) => [row.managedHostId, rowToProbeUpgradeRequest(row)]),
       );
+    },
+    renewOrCreateProbeRepairRequest(candidate, nowMs) {
+      if (
+        candidate.id !== null ||
+        candidate.kind !== "probe_repair" ||
+        candidate.state !== "accepted" ||
+        !candidate.repairEvidenceSha256 ||
+        !candidate.repairFailedOperationId
+      ) {
+        throw new Error("Invalid Probe Repair replacement candidate.");
+      }
+      return database.transaction((transaction) => {
+        const existing = transaction
+          .select()
+          .from(probeOperations)
+          .where(
+            eq(
+              probeOperations.repairEvidenceSha256,
+              candidate.repairEvidenceSha256!,
+            ),
+          )
+          .get();
+        if (existing) return rowToProbeUpgradeRequest(existing);
+
+        const active = transaction
+          .select()
+          .from(probeOperations)
+          .where(
+            and(
+              inArray(probeOperations.state, activeStates),
+              eq(probeOperations.managedHostId, candidate.hostId),
+            ),
+          )
+          .orderBy(desc(probeOperations.updatedAtMs), desc(probeOperations.id))
+          .get();
+        if (active) {
+          if (
+            active.kind !== "probe_repair" ||
+            active.state !== "accepted" ||
+            active.repairFailedOperationId !==
+              candidate.repairFailedOperationId ||
+            active.repairAuthorityExpiresAtMs === null ||
+            active.repairAuthorityExpiresAtMs > nowMs
+          ) {
+            return null;
+          }
+          const terminalized = transaction
+            .update(probeOperations)
+            .set({
+              completedAtMs: nowMs,
+              failureCode: "repair_authority_expired",
+              failureMessage: null,
+              state: "failed",
+              updatedAtMs: nowMs,
+            })
+            .where(
+              and(
+                eq(probeOperations.id, active.id),
+                eq(probeOperations.state, "accepted"),
+                lte(probeOperations.repairAuthorityExpiresAtMs, nowMs),
+              ),
+            )
+            .returning({ id: probeOperations.id })
+            .get();
+          if (!terminalized) return null;
+        }
+        const inserted = transaction
+          .insert(probeOperations)
+          .values(probeUpgradeRequestToRow(candidate))
+          .returning()
+          .get();
+        if (!inserted)
+          throw new Error("Failed to create Probe Repair Request.");
+        return rowToProbeUpgradeRequest(inserted);
+      });
     },
     updateProbeUpgradeRequest(operation) {
       if (operation.id === null) {

@@ -24,7 +24,8 @@ use enoki_probe_bootstrap::{
         consume_probe_repair_authority, consume_signed_before_upgrade_outer_checks,
         execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
         issue_probe_repair_evidence, mark_probe_repair_unresolved,
-        recover_incomplete_probe_upgrade, upgrade_current_probe_for_operation,
+        recover_incomplete_probe_upgrade, resume_probe_repair_intent,
+        upgrade_current_probe_for_operation,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
@@ -1239,77 +1240,85 @@ fn run_authorized_probe_repair_for_invoking_admin(
     if unsafe { libc::geteuid() } != 0 || invoking_uid == 0 || invoking_gid == 0 {
         return Err(ProbeRepairRunError::RootRequired);
     }
-    let mut nonce = [0_u8; 16];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut nonce))
-        .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
-    let request_nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let now_ms: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
-        .as_millis()
-        .try_into()
-        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
     let paths = FixedInstallPaths::production();
-    let signed = issue_probe_repair_evidence(
-        &paths,
-        now_ms,
-        now_ms.saturating_add(60_000),
-        &request_nonce,
-    )
-    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
-    #[derive(Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RepairAuthorizationRequest<'a> {
-        evidence: &'a enoki_probe_bootstrap::lifecycle::RepairEvidenceV1,
-        evidence_signature: &'a str,
-    }
-    let request = serde_json::to_vec(&RepairAuthorizationRequest {
-        evidence: &signed.evidence,
-        evidence_signature: &signed.signature,
-    })
-    .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
-    let mut child = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH)
-        .arg("--repair-authorize")
-        .uid(invoking_uid)
-        .gid(invoking_gid)
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
-        .write_all(&request)
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
-        return Err(repair_contract_failure(
-            "probe_repair_authority_acquire_failed",
-        ));
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct RepairAuthorizationResponse {
-        authority: RepairAuthorityV1,
-        signature: String,
-    }
-    let response: RepairAuthorizationResponse = serde_json::from_slice(&output.stdout)
-        .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
-    let consumed = consume_probe_repair_authority(
-        &paths,
-        &signed.evidence,
-        &signed.signature,
-        &response.authority,
-        &response.signature,
-        now_ms,
-    )
-    .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
+    let consumed = if let Some(consumed) = resume_probe_repair_intent(&paths)
+        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?
+    {
+        consumed
+    } else {
+        let mut nonce = [0_u8; 16];
+        fs::File::open("/dev/urandom")
+            .and_then(|mut random| random.read_exact(&mut nonce))
+            .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
+        let request_nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
+            .as_millis()
+            .try_into()
+            .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
+        let signed = issue_probe_repair_evidence(
+            &paths,
+            now_ms,
+            now_ms.saturating_add(60_000),
+            &request_nonce,
+        )
+        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RepairAuthorizationRequest<'a> {
+            evidence: &'a enoki_probe_bootstrap::lifecycle::RepairEvidenceV1,
+            evidence_signature: &'a str,
+        }
+        let request = serde_json::to_vec(&RepairAuthorizationRequest {
+            evidence: &signed.evidence,
+            evidence_signature: &signed.signature,
+        })
+        .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
+        let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
+        acquirer.arg("--repair-authorize");
+        configure_repair_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
+        let mut child = acquirer
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
+            .write_all(&request)
+            .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+        if output.status.code() == Some(3) {
+            return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+        }
+        if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
+            return Err(repair_contract_failure(
+                "probe_repair_authority_acquire_failed",
+            ));
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RepairAuthorizationResponse {
+            authority: RepairAuthorityV1,
+            signature: String,
+        }
+        let response: RepairAuthorizationResponse = serde_json::from_slice(&output.stdout)
+            .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
+        consume_probe_repair_authority(
+            &paths,
+            &signed.evidence,
+            &signed.signature,
+            &response.authority,
+            &response.signature,
+            now_ms,
+        )
+        .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?
+    };
     let mut systemd = SystemSystemd::for_live_upgrade();
     let repaired = execute_authorized_probe_repair(
         &paths,
@@ -1321,13 +1330,37 @@ fn run_authorized_probe_repair_for_invoking_admin(
         },
     );
     if repaired.is_err() {
-        let _ = mark_probe_repair_unresolved(&paths, &consumed);
+        mark_probe_repair_unresolved(&paths, &consumed)
+            .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
         return Err(repair_contract_failure("probe_repair_recovery_pending"));
     }
     Ok(ProbeRepairResult {
         probe_id: consumed.probe_id,
         repaired_version: consumed.target_bundle_version,
     })
+}
+
+fn configure_repair_acquirer_privileges(command: &mut Command, uid: u32, gid: u32) {
+    command.env_clear();
+    // SAFETY: this hook executes in the child after fork and before exec. It only invokes
+    // async-signal-safe credential syscalls with captured scalar values.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setgroups(0, std::ptr::null()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setgid(gid) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setuid(uid) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }
 
 fn repair_contract_failure(code: &'static str) -> ProbeRepairRunError {
@@ -6776,6 +6809,31 @@ mod tests {
         assert!(transport.downloads.is_empty());
         assert!(systemd.calls.is_empty());
         assert!(systemd.restarted.is_empty());
+    }
+
+    #[test]
+    fn repair_acquirer_child_has_no_supplementary_groups_and_cannot_gain_privileges() {
+        // The production parent is root. Keep this contract portable for non-root developer
+        // environments while exercising the real pre-exec boundary in the root CI lane.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("/usr/bin/id -G; /usr/bin/awk '/^NoNewPrivs:/ { print $2 }' /proc/self/status");
+        configure_repair_acquirer_privileges(&mut command, uid, gid);
+
+        let output = command.output().expect("spawn constrained child");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines();
+        let groups = lines.next().unwrap().split_whitespace().collect::<Vec<_>>();
+        assert!(!groups.is_empty());
+        assert!(groups.iter().all(|group| *group == gid.to_string()));
+        assert_eq!(lines.next(), Some("1"));
     }
 
     #[test]

@@ -3416,15 +3416,21 @@ describe("Probe report API", () => {
         installKey,
       ),
     });
-    const renewed = await app.request(requestPath, {
-      body: renewedRequestBody,
-      headers: { "content-type": "application/json" },
-      method: "POST",
-    });
+    const [renewed, concurrentRenewed] = await Promise.all(
+      [0, 1].map(() =>
+        app.request(requestPath, {
+          body: renewedRequestBody,
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        }),
+      ),
+    );
     expect(renewed.status).toBe(200);
+    expect(concurrentRenewed.status).toBe(200);
     const renewedBody = (await renewed.json()) as {
       authority: { repairOperationId: string };
     };
+    await expect(concurrentRenewed.json()).resolves.toEqual(renewedBody);
     expect(renewedBody.authority.repairOperationId).not.toBe(
       body.authority.repairOperationId,
     );
@@ -3439,6 +3445,22 @@ describe("Probe report API", () => {
       }),
     );
     expect(database.probeOperations.findById(failed.id!)).toEqual(failed);
+    for (let index = 0; index < 4; index += 1) {
+      expect(
+        await app.request(requestPath, {
+          body: renewedRequestBody,
+          headers: { "content-type": "application/json" },
+          method: "POST",
+        }),
+      ).toMatchObject({ status: 200 });
+    }
+    const rateLimited = await app.request(requestPath, {
+      body: renewedRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(rateLimited.status).toBe(429);
+    expect(rateLimited.headers.get("retry-after")).toMatch(/^\d+$/);
     database.close();
   });
 

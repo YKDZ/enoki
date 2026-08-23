@@ -70,6 +70,10 @@ import {
   verifyProbeRepairEvidence,
   type ProbeRepairEvidence,
 } from "./repair-authority.js";
+import {
+  createMemoryRepairAuthorizationBudget,
+  type RepairAuthorizationBudget,
+} from "./repair-authorization-budget.js";
 
 const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
 const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
@@ -117,12 +121,16 @@ export type ProbeRouteServices = {
   probeAssetDir?: string;
   probeDistributionRootPublicKeyPem?: Buffer | string;
   probeApiOrigin?: string;
+  repairAuthorizationBudget?: RepairAuthorizationBudget;
   trustedProxyCidrs?: TrustedProxyCidr[];
 };
 
 export function createProbeRoutes(services: ProbeRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
+  const repairAuthorizationBudget =
+    services.repairAuthorizationBudget ??
+    createMemoryRepairAuthorizationBudget({ monotonicNow: now });
 
   routes.use("*", async (context, next) => {
     if (!isIdentityContentEncoding(context.req.raw.headers)) {
@@ -1130,6 +1138,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   );
 
   routes.post("/operations/:operationId/repair-authorize", async (context) => {
+    const anonymousBudget = repairAuthorizationBudget.consumeAnonymous(
+      observedIpFromContext(context, services.trustedProxyCidrs) ?? "unknown",
+    );
+    if (!anonymousBudget.accepted) {
+      return probeJsonError("probe_repair_rate_limited", 429, {
+        "retry-after": String(anonymousBudget.retryAfterSeconds),
+      });
+    }
     const requestBody = await readCappedRequestBody(
       context.req.raw,
       maxProbeOperationPayloadBytes,
@@ -1191,31 +1207,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         "cache-control": "no-store",
       });
     }
+    const hostBudget = repairAuthorizationBudget.consumeVerifiedHost(
+      String(host.id),
+    );
+    if (!hostBudget.accepted) {
+      return probeJsonError("probe_repair_rate_limited", 429, {
+        "retry-after": String(hostBudget.retryAfterSeconds),
+      });
+    }
 
     let repair = services.probeOperations?.findByRepairEvidenceSha256(
       verified.repairEvidenceSha256,
     );
     if (!repair) {
-      const active = services.probeOperations?.findActiveForHost(host.id);
-      if (active) {
-        if (
-          active.kind !== "probe_repair" ||
-          active.state !== "accepted" ||
-          active.repairFailedOperationId !== failedUpgrade.id ||
-          !active.repairAuthorityExpiresAtMs ||
-          active.repairAuthorityExpiresAtMs > operationNowMs
-        ) {
-          return probeJsonError("probe_operation_status_invalid", 409);
-        }
-        services.probeOperations?.updateProbeUpgradeRequest({
-          ...active,
-          completedAtMs: operationNowMs,
-          failureCode: "repair_authority_expired",
-          failureMessage: null,
-          state: "failed",
-          updatedAtMs: operationNowMs,
-        });
-      }
       const candidate = createProbeRepairRequest({
         authorityExpiresAtMs: operationNowMs + probeRepairAuthorityTtlMs,
         evidenceSha256: verified.repairEvidenceSha256,
@@ -1231,7 +1235,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         });
       }
       try {
-        repair = services.probeOperations?.createProbeUpgradeRequest(candidate);
+        repair = services.probeOperations?.renewOrCreateProbeRepairRequest(
+          candidate,
+          operationNowMs,
+        );
       } catch {
         repair = services.probeOperations?.findByRepairEvidenceSha256(
           verified.repairEvidenceSha256,
@@ -2465,12 +2472,14 @@ async function readCappedRequestBody(request: Request, maxBytes: number) {
 
 function probeJsonError(
   error: string,
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 503,
+  status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 503,
+  headers: Record<string, string> = {},
 ) {
   return new Response(JSON.stringify({ error }), {
     headers: {
       "cache-control": "no-store",
       "content-type": "application/json",
+      ...headers,
     },
     status,
   });

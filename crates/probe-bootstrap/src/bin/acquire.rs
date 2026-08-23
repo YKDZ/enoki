@@ -32,6 +32,10 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         // Deliberately never include the environment-provided enrollment token.
+        Err(enoki_probe_bootstrap::acquisition::AcquisitionFailure::ManualReinstallRequired) => {
+            eprintln!("Probe Repair requires manual reinstall");
+            ExitCode::from(3)
+        }
         Err(_) => {
             eprintln!("Probe Bootstrap acquisition failed");
             ExitCode::from(1)

@@ -23,6 +23,92 @@ pub struct ConsumedRepairAuthority {
     pub failed_operation_id: String,
     pub probe_id: String,
     pub target_bundle_version: String,
+    pub state: RepairIntentState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepairIntentState {
+    Consumed,
+    Unresolved,
+    CompletionPending,
+}
+
+const MAX_REPAIR_CANONICAL_BYTES: usize = 8 * 1024;
+
+pub fn resume_probe_repair_intent(
+    paths: &FixedInstallPaths,
+) -> Result<Option<ConsumedRepairAuthority>, InstallError> {
+    let repair_journal = paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE);
+    if !repair_journal.exists() {
+        return Ok(None);
+    }
+    let capsule = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
+    if metadata_scalar(&capsule, "schema_version").as_deref() != Some("2") {
+        return Err(InstallError::ExistingResidue);
+    }
+    let state = journal_string(&capsule, "state")?;
+    if state == "completed" {
+        return Ok(None);
+    }
+    let state = match state {
+        "consumed" => RepairIntentState::Consumed,
+        "unresolved" => RepairIntentState::Unresolved,
+        "completion-pending" => RepairIntentState::CompletionPending,
+        _ => return Err(InstallError::ExistingResidue),
+    };
+    let evidence_bytes = decode_bounded_hex(
+        journal_string(&capsule, "evidence_canonical_hex")?,
+        MAX_REPAIR_CANONICAL_BYTES,
+    )?;
+    let authority_bytes = decode_bounded_hex(
+        journal_string(&capsule, "authority_canonical_hex")?,
+        MAX_REPAIR_CANONICAL_BYTES,
+    )?;
+    let evidence: RepairEvidenceV1 =
+        serde_json::from_slice(&evidence_bytes).map_err(|_| InstallError::ExistingResidue)?;
+    let authority: RepairAuthorityV1 =
+        serde_json::from_slice(&authority_bytes).map_err(|_| InstallError::ExistingResidue)?;
+    if evidence.canonical_bytes() != evidence_bytes
+        || authority.canonical_bytes() != authority_bytes
+        || evidence.sha256() != journal_string(&capsule, "repair_evidence_sha256")?
+        || format!("{:x}", Sha256::digest(&authority_bytes))
+            != journal_string(&capsule, "repair_authority_sha256")?
+        || authority.repair_operation_id != journal_string(&capsule, "repair_operation_id")?
+        || authority.failed_operation_id != journal_string(&capsule, "failed_operation_id")?
+        || authority.repair_nonce != journal_string(&capsule, "repair_nonce")?
+        || authority.repair_evidence_sha256 != evidence.sha256()
+        || authority.hub_origin != evidence.hub_origin
+        || authority.host_id != evidence.host_id
+        || authority.probe_id != evidence.probe_id
+        || authority.failed_operation_id != evidence.failed_operation_id
+        || authority.target_bundle_version != evidence.target_bundle_version
+        || authority.target_asset_set_digest != evidence.target_asset_set_digest
+        || authority.target_manifest_sha256 != evidence.target_manifest_sha256
+        || authority.verified_stage_sha256 != evidence.verified_stage_sha256
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
+    let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
+        .as_deref()
+        .and_then(decode_lower_sha256)
+        .ok_or(InstallError::ExistingResidue)?;
+    if !evidence.verify(
+        &install_key,
+        journal_string(&capsule, "evidence_signature")?,
+    ) || !authority.verify(
+        &install_key,
+        journal_string(&capsule, "authority_signature")?,
+    ) {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(Some(ConsumedRepairAuthority {
+        repair_operation_id: authority.repair_operation_id,
+        failed_operation_id: authority.failed_operation_id,
+        probe_id: authority.probe_id,
+        target_bundle_version: authority.target_bundle_version,
+        state,
+    }))
 }
 
 pub fn consume_probe_repair_authority(
@@ -80,6 +166,7 @@ pub fn consume_probe_repair_authority(
                 failed_operation_id: authority.failed_operation_id.clone(),
                 probe_id: authority.probe_id.clone(),
                 target_bundle_version: authority.target_bundle_version.clone(),
+                state: RepairIntentState::Consumed,
             };
             write_repair_running_status(paths, &consumed)?;
             return Ok(consumed);
@@ -92,12 +179,16 @@ pub fn consume_probe_repair_authority(
     atomic_durable_write(
         &repair_journal,
         format!(
-            "schema_version = 1\nrepair_operation_id = {:?}\nfailed_operation_id = {:?}\nrepair_nonce = {:?}\nrepair_evidence_sha256 = {:?}\nrepair_authority_sha256 = {:?}\nstate = \"consumed\"\n",
+            "schema_version = 2\nrepair_operation_id = {:?}\nfailed_operation_id = {:?}\nrepair_nonce = {:?}\nrepair_evidence_sha256 = {:?}\nrepair_authority_sha256 = {:?}\nevidence_canonical_hex = {:?}\nevidence_signature = {:?}\nauthority_canonical_hex = {:?}\nauthority_signature = {:?}\nstate = \"consumed\"\n",
             authority.repair_operation_id,
             authority.failed_operation_id,
             authority.repair_nonce,
             authority.repair_evidence_sha256,
             authority_sha256,
+            encode_lower_hex(&evidence.canonical_bytes()),
+            evidence_signature,
+            encode_lower_hex(&authority.canonical_bytes()),
+            authority_signature,
         )
         .as_bytes(),
         0o600,
@@ -107,6 +198,7 @@ pub fn consume_probe_repair_authority(
         failed_operation_id: authority.failed_operation_id.clone(),
         probe_id: authority.probe_id.clone(),
         target_bundle_version: authority.target_bundle_version.clone(),
+        state: RepairIntentState::Consumed,
     };
     if write_repair_running_status(paths, &consumed).is_err() {
         let current = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
@@ -120,6 +212,35 @@ pub fn consume_probe_repair_authority(
         return Err(InstallError::Io);
     }
     Ok(consumed)
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn decode_bounded_hex(value: &str, max_bytes: usize) -> Result<Vec<u8>, InstallError> {
+    if value.is_empty()
+        || value.len() % 2 != 0
+        || value.len() > max_bytes.saturating_mul(2)
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char)
+                .to_digit(16)
+                .ok_or(InstallError::ExistingResidue)?;
+            let low = (pair[1] as char)
+                .to_digit(16)
+                .ok_or(InstallError::ExistingResidue)?;
+            Ok(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 fn write_repair_running_status(
@@ -145,18 +266,21 @@ pub fn mark_probe_repair_unresolved(
 ) -> Result<(), InstallError> {
     let repair_journal = paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE);
     let current = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
-    if journal_string(&current, "repair_operation_id")? != consumed.repair_operation_id
-        || journal_string(&current, "state")? != "consumed"
-    {
+    if journal_string(&current, "repair_operation_id")? != consumed.repair_operation_id {
         return Err(InstallError::ExistingResidue);
     }
-    atomic_durable_write(
-        &repair_journal,
-        current
-            .replace("state = \"consumed\"", "state = \"unresolved\"")
-            .as_bytes(),
-        0o600,
-    )?;
+    let state = journal_string(&current, "state")?;
+    if state == "consumed" {
+        atomic_durable_write(
+            &repair_journal,
+            current
+                .replace("state = \"consumed\"", "state = \"unresolved\"")
+                .as_bytes(),
+            0o600,
+        )?;
+    } else if !matches!(state, "unresolved" | "completion-pending") {
+        return Err(InstallError::ExistingResidue);
+    }
     write_operation_status(
         paths,
         &UpgradeAttempt {
@@ -176,17 +300,25 @@ pub fn execute_authorized_probe_repair(
     systemd: &mut impl SystemdPort,
     mut cleanup_verified_stage: impl FnMut(&str, u32) -> Result<(), InstallError>,
 ) -> Result<(), InstallError> {
-    let recovered = recover_incomplete_probe_upgrade(paths, systemd)?;
-    if let Some(receipt) = recovered {
-        if receipt.operation_id != consumed.failed_operation_id
-            || receipt.probe_id != consumed.probe_id
-            || receipt.target_bundle_version != consumed.target_bundle_version
-            || !receipt.activated
-        {
-            return Err(InstallError::ExistingResidue);
+    if consumed.state != RepairIntentState::CompletionPending {
+        let recovered = recover_incomplete_probe_upgrade(paths, systemd)?;
+        if let Some(receipt) = recovered {
+            if receipt.operation_id != consumed.failed_operation_id
+                || receipt.probe_id != consumed.probe_id
+                || receipt.target_bundle_version != consumed.target_bundle_version
+                || !receipt.activated
+            {
+                return Err(InstallError::ExistingResidue);
+            }
+            cleanup_verified_stage(&receipt.operation_id, receipt.stage_owner_uid)?;
+            finalize_probe_upgrade_stage_cleanup(paths, &receipt)?;
         }
-        cleanup_verified_stage(&receipt.operation_id, receipt.stage_owner_uid)?;
-        finalize_probe_upgrade_stage_cleanup(paths, &receipt)?;
+        transition_repair_state(
+            paths,
+            consumed,
+            &["consumed", "unresolved"],
+            "completion-pending",
+        )?;
     }
     let repair_attempt = UpgradeAttempt {
         operation_id: consumed.repair_operation_id.clone(),
@@ -200,17 +332,28 @@ pub fn execute_authorized_probe_repair(
         "running",
         None,
     )?;
+    transition_repair_state(paths, consumed, &["completion-pending"], "completed")
+}
+
+fn transition_repair_state(
+    paths: &FixedInstallPaths,
+    consumed: &ConsumedRepairAuthority,
+    expected: &[&str],
+    next: &str,
+) -> Result<(), InstallError> {
     let repair_journal = paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE);
     let current = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
-    if journal_string(&current, "repair_operation_id")? != consumed.repair_operation_id
-        || journal_string(&current, "state")? != "consumed"
-    {
+    if journal_string(&current, "repair_operation_id")? != consumed.repair_operation_id {
+        return Err(InstallError::ExistingResidue);
+    }
+    let state = journal_string(&current, "state")?;
+    if !expected.contains(&state) {
         return Err(InstallError::ExistingResidue);
     }
     atomic_durable_write(
         &repair_journal,
         current
-            .replace("state = \"consumed\"", "state = \"completed\"")
+            .replace(&format!("state = {state:?}"), &format!("state = {next:?}"))
             .as_bytes(),
         0o600,
     )

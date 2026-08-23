@@ -74,13 +74,35 @@ pub fn acquire_probe_repair_authority_once(
         .build()
         .post(&url)
         .set("content-type", "application/json")
-        .send_bytes(request_body)
-        .map_err(|_| AcquisitionFailure::Temporary {
-            retry_after_ms: None,
-        })?;
-    if response.status() != 200 {
-        return Err(AcquisitionFailure::Permanent);
-    }
+        .send_bytes(request_body);
+    let response = match response {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let retry_after_ms = response
+                .header("retry-after")
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|seconds| *seconds <= 300)
+                .map(|seconds| seconds.saturating_mul(1_000));
+            let mut body = Vec::new();
+            response
+                .into_reader()
+                .take(MAX_REPAIR_EXCHANGE_BYTES + 1)
+                .read_to_end(&mut body)
+                .map_err(|_| AcquisitionFailure::Temporary {
+                    retry_after_ms: None,
+                })?;
+            return Err(classify_repair_authorization_error(
+                status,
+                &body,
+                retry_after_ms,
+            ));
+        }
+        Err(ureq::Error::Transport(_)) => {
+            return Err(AcquisitionFailure::Temporary {
+                retry_after_ms: None,
+            });
+        }
+    };
     let mut output = Vec::new();
     response
         .into_reader()
@@ -93,6 +115,35 @@ pub fn acquire_probe_repair_authority_once(
         return Err(AcquisitionFailure::Permanent);
     }
     Ok(output)
+}
+
+fn classify_repair_authorization_error(
+    status: u16,
+    body: &[u8],
+    retry_after_ms: Option<u64>,
+) -> AcquisitionFailure {
+    if body.is_empty() || body.len() as u64 > MAX_REPAIR_EXCHANGE_BYTES {
+        return AcquisitionFailure::Permanent;
+    }
+    if status == 429 {
+        return AcquisitionFailure::Temporary { retry_after_ms };
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "snake_case", deny_unknown_fields)]
+    enum RepairDisposition {
+        ManualReinstallRequired,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ErrorEnvelope {
+        disposition: RepairDisposition,
+    }
+    match serde_json::from_slice::<ErrorEnvelope>(body) {
+        Ok(ErrorEnvelope {
+            disposition: RepairDisposition::ManualReinstallRequired,
+        }) if status == 409 => AcquisitionFailure::ManualReinstallRequired,
+        _ => AcquisitionFailure::Permanent,
+    }
 }
 
 pub const PROBE_UPGRADE_STAGE_ROOT: &str = "/var/lib/enoki-probe/upgrade-stages";
@@ -944,6 +995,7 @@ pub enum AcquisitionFailure {
     RootRefused,
     InvalidOrigin,
     Local,
+    ManualReinstallRequired,
     Permanent,
     Temporary { retry_after_ms: Option<u64> },
 }
@@ -1930,5 +1982,33 @@ mod tests {
             assert!(value < upper_exclusive);
             value
         }
+    }
+
+    #[test]
+    fn repair_authorization_only_propagates_the_strict_manual_disposition() {
+        assert_eq!(
+            classify_repair_authorization_error(
+                409,
+                br#"{"disposition":"manual_reinstall_required"}"#,
+                None,
+            ),
+            AcquisitionFailure::ManualReinstallRequired,
+        );
+        for body in [
+            br#"{"disposition":"manual_reinstall_required","detail":"free text"}"#.as_slice(),
+            br#"{"disposition":"probe_repair"}"#.as_slice(),
+            br#"{"error":"manual_reinstall_required"}"#.as_slice(),
+        ] {
+            assert_eq!(
+                classify_repair_authorization_error(409, body, None),
+                AcquisitionFailure::Permanent,
+            );
+        }
+        assert_eq!(
+            classify_repair_authorization_error(429, br#"{}"#, Some(2_000)),
+            AcquisitionFailure::Temporary {
+                retry_after_ms: Some(2_000)
+            },
+        );
     }
 }

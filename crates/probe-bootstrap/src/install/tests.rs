@@ -1268,6 +1268,14 @@ mod tests {
             .unwrap(),
             consumed,
         );
+        let progressed = fs::read_to_string(&journal_path)
+            .unwrap()
+            .replace("phase = \"repair-required\"", "phase = \"activated\"")
+            .replace("activated_targets = 3", "activated_targets = 20")
+            .replace("finalized_targets = 0", "finalized_targets = 20");
+        fs::write(&journal_path, progressed).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(resume_probe_repair_intent(&paths).unwrap(), Some(consumed.clone()));
         mark_probe_repair_unresolved(&paths, &consumed).unwrap();
         assert!(
             fs::read_to_string(paths.bootstrap_state().join("probe-repair-attempt.toml"))
@@ -1278,6 +1286,32 @@ mod tests {
         assert!(status.contains("operation_id = \"repair-operation-1\""));
         assert!(status.contains("status = \"failed\""));
         assert!(status.contains("error_code = \"lifecycle.repair_unresolved\""));
+        let resumed = resume_probe_repair_intent(&paths).unwrap().unwrap();
+        assert_eq!(resumed.repair_operation_id, consumed.repair_operation_id);
+        assert_eq!(resumed.state, RepairIntentState::Unresolved);
+
+        let status_write = paths
+            .state()
+            .join(".probe-operation-status.toml.enoki-write");
+        fs::create_dir(&status_write).unwrap();
+        fs::write(status_write.join("blocks-replace"), b"fault").unwrap();
+        let mut systemd = Systemd::default();
+        assert_eq!(
+            execute_authorized_probe_repair(&paths, &resumed, &mut systemd, |_, _| {
+                panic!("an activated Upgrade must not reacquire or clean a stage")
+            }),
+            Err(InstallError::Io),
+        );
+        let pending = resume_probe_repair_intent(&paths).unwrap().unwrap();
+        assert_eq!(pending.state, RepairIntentState::CompletionPending);
+        assert!(systemd.calls.is_empty());
+        fs::remove_dir_all(&status_write).unwrap();
+        execute_authorized_probe_repair(&paths, &pending, &mut systemd, |_, _| {
+            panic!("completion resume must not repeat recovery or stage cleanup")
+        })
+        .unwrap();
+        assert!(resume_probe_repair_intent(&paths).unwrap().is_none());
+        assert!(systemd.calls.is_empty());
     }
 
     #[test]
