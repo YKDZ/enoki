@@ -523,7 +523,10 @@ async function runHubRestoreCompatibilityWindowScenario({
       };
       evidence.phase = "failed";
     }
-    finalEvidence = redactSensitiveEvidence(evidence, [ownerPassword]);
+    finalEvidence = redactReleaseE2EEvidence(evidence, {
+      candidateManifest,
+      secrets: [ownerPassword],
+    });
     try {
       await evidenceSink.write(finalEvidence);
     } catch (error) {
@@ -909,7 +912,10 @@ async function runPostReplacementRepairUninstallScenario({
         "Release E2E cleanup did not remove all run-owned state",
       );
     }
-    finalEvidence = redactSensitiveEvidence(evidence, [ownerPassword]);
+    finalEvidence = redactReleaseE2EEvidence(evidence, {
+      candidateManifest,
+      secrets: [ownerPassword],
+    });
     try {
       await evidenceSink.write(finalEvidence);
     } catch (error) {
@@ -1750,7 +1756,9 @@ async function runBaselineUpgradeUninstallScenario({
     }
 
     const candidateHost = await waitForObservation({
-      code: "candidate_probe_reporting_timeout",
+      code: migrationBaseline
+        ? "candidate_probe_configuration_retention_timeout"
+        : "candidate_probe_reporting_timeout",
       label: migrationBaseline
         ? "Candidate Probe retained Configuration after manual reinstall"
         : "Candidate Probe Host Profile after Upgrade",
@@ -1969,7 +1977,10 @@ async function runBaselineUpgradeUninstallScenario({
       };
       evidence.phase = "failed";
     }
-    finalEvidence = redactSensitiveEvidence(evidence, [ownerPassword]);
+    finalEvidence = redactReleaseE2EEvidence(evidence, {
+      candidateManifest,
+      secrets: [ownerPassword],
+    });
     try {
       await evidenceSink.write(finalEvidence);
     } catch (error) {
@@ -2348,7 +2359,10 @@ async function runFreshInstallUninstallScenario({
       };
       evidence.phase = "failed";
     }
-    finalEvidence = redactSensitiveEvidence(evidence, [ownerPassword]);
+    finalEvidence = redactReleaseE2EEvidence(evidence, {
+      candidateManifest,
+      secrets: [ownerPassword],
+    });
     try {
       await evidenceSink.write(finalEvidence);
     } catch (error) {
@@ -6151,19 +6165,46 @@ function serializedError(error) {
   return serialized;
 }
 
-const publicSensitiveEvidenceSummaryFormats = Object.freeze({
-  authorizationSha256: /^[0-9a-f]{64}$/,
-});
+const releaseBaselineAuthorizationEvidencePath = Object.freeze([
+  "releaseBaseline",
+  "authority",
+  "authorizationSha256",
+]);
 
-function isValidatedPublicSensitiveEvidenceSummary(key, value) {
-  const format = publicSensitiveEvidenceSummaryFormats[key];
-  return typeof value === "string" && format?.test(value) === true;
+export function redactReleaseE2EEvidence(
+  value,
+  { candidateManifest, secrets = [] } = {},
+) {
+  assertCandidateManifest(candidateManifest);
+  const baseline = candidateManifest.releaseBaseline;
+  return redactSensitiveEvidence(value, secrets, [], {
+    expectedReleaseBaselineAuthorizationSha256:
+      baseline.authorization?.sha256 ?? null,
+  });
 }
 
-function redactSensitiveEvidence(value, secrets, key = "") {
+function isValidatedReleaseBaselineAuthorizationSummary(path, value, expected) {
+  return (
+    path.length === releaseBaselineAuthorizationEvidencePath.length &&
+    path.every(
+      (segment, index) =>
+        segment === releaseBaselineAuthorizationEvidencePath[index],
+    ) &&
+    typeof expected === "string" &&
+    /^[0-9a-f]{64}$/.test(expected) &&
+    value === expected
+  );
+}
+
+function redactSensitiveEvidence(value, secrets, path, context) {
+  const key = path.at(-1) ?? "";
   if (
     key &&
-    !isValidatedPublicSensitiveEvidenceSummary(key, value) &&
+    !isValidatedReleaseBaselineAuthorizationSummary(
+      path,
+      value,
+      context.expectedReleaseBaselineAuthorizationSha256,
+    ) &&
     /(?:authorization|cookie|enrollment.?token|headers?|owner.?password|private.?key|signing.?secret|install.?command)/i.test(
       key,
     )
@@ -6174,13 +6215,15 @@ function redactSensitiveEvidence(value, secrets, key = "") {
     return redactSensitiveText(value, secrets);
   }
   if (Array.isArray(value)) {
-    return value.map((item) => redactSensitiveEvidence(item, secrets));
+    return value.map((item, index) =>
+      redactSensitiveEvidence(item, secrets, [...path, String(index)], context),
+    );
   }
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([childKey, child]) => [
         childKey,
-        redactSensitiveEvidence(child, secrets, childKey),
+        redactSensitiveEvidence(child, secrets, [...path, childKey], context),
       ]),
     );
   }

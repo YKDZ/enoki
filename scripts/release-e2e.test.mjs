@@ -32,6 +32,7 @@ import {
   createProbeHostHarness,
   hasAdvancingPortableMetrics,
   isCandidateHostReady,
+  redactReleaseE2EEvidence,
   renderReleaseE2EResourceFingerprint,
   releaseE2EScenarioRegistry,
   runReleaseE2EScenario,
@@ -172,6 +173,9 @@ describe("Release E2E business assertions", () => {
       uninstall: { hubSoftDeleted: true, status: "succeeded" },
     });
     const evidence = written.at(-1);
+    expect(evidence.releaseBaseline.authority.authorizationSha256).toBe(
+      candidateManifest.releaseBaseline.authorization.sha256,
+    );
     const gate = createMatrixGateResult({
       artifactName:
         "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
@@ -214,6 +218,25 @@ describe("Release E2E business assertions", () => {
     ).toBe(evidence.probeConfiguration.beforeUpgrade.version);
     expect(gate.evidenceValidationErrors).toEqual([]);
     expect(gate.outcome).toBe("succeeded");
+  });
+
+  it("reports the dedicated migration Configuration retention timeout", async () => {
+    const candidateManifest = candidateManifestWithMigrationBaseline();
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest,
+        environment: migrationBaselineEnvironment([], candidateManifest, {
+          candidateConfigurationNeverRetained: true,
+        }),
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-migration-configuration-timeout",
+        scenario: "baseline-upgrade-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
+      }),
+    ).rejects.toMatchObject({
+      code: "candidate_probe_configuration_retention_timeout",
+    });
   });
 
   it("fails Trust Epoch Hub Restore closed before claiming impossible Candidate Probe compatibility", async () => {
@@ -305,7 +328,49 @@ describe("Release E2E business assertions", () => {
       ownerPassword: "[REDACTED]",
       privateKeyFingerprint: "[REDACTED]",
       privateKeyPem: "[REDACTED]",
-      valid: { authorizationSha256: "b".repeat(64) },
+      valid: { authorizationSha256: "[REDACTED]" },
+    });
+  });
+
+  it("binds the public authorization summary to its exact authority path and expected value", () => {
+    const candidateManifest = candidateManifestWithMigrationBaseline();
+    const expected = candidateManifest.releaseBaseline.authorization.sha256;
+    const other = "c".repeat(64);
+    expect(
+      redactReleaseE2EEvidence(
+        {
+          cleanup: {
+            authorizationSha256: expected,
+          },
+          releaseBaseline: {
+            authority: { authorizationSha256: expected },
+          },
+        },
+        {
+          candidateManifest,
+        },
+      ),
+    ).toEqual({
+      cleanup: { authorizationSha256: "[REDACTED]" },
+      releaseBaseline: {
+        authority: { authorizationSha256: expected },
+      },
+    });
+    expect(
+      redactReleaseE2EEvidence(
+        {
+          releaseBaseline: {
+            authority: { authorizationSha256: other },
+          },
+        },
+        {
+          candidateManifest,
+        },
+      ),
+    ).toEqual({
+      releaseBaseline: {
+        authority: { authorizationSha256: "[REDACTED]" },
+      },
     });
   });
 
@@ -3166,11 +3231,12 @@ describe("Release E2E Orchestrator", () => {
     });
   });
 
-  it("proves the pinned baseline Probe through one Owner-authorized upgrade and uninstall", async () => {
+  it("proves the pinned baseline Probe through Upgrade and retains its reporting timeout", async () => {
     const calls = [];
     let installed = false;
     let activeHub = "baseline";
     let upgraded = false;
+    let candidateReportingReady = true;
     let configurationVersion = "default-v1";
     let metricsEpoch = 0;
     const hub = {
@@ -3191,7 +3257,8 @@ describe("Release E2E Orchestrator", () => {
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
-            probeVersion: upgraded ? "1.2.3" : "1.2.2",
+            probeVersion:
+              upgraded && candidateReportingReady ? "1.2.3" : "1.2.2",
           },
           reportedProbeConfigurationVersion: configurationVersion,
         });
@@ -3450,6 +3517,31 @@ describe("Release E2E Orchestrator", () => {
         }),
       ]),
     });
+
+    activeHub = "baseline";
+    upgraded = false;
+    candidateReportingReady = false;
+    configurationVersion = "default-v1";
+    installed = false;
+    metricsEpoch = 0;
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithBaseline(),
+        environment: {
+          async cleanup() {
+            return { clean: true };
+          },
+          async start() {
+            return { host, hub };
+          },
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-baseline-upgrade-reporting-timeout",
+        scenario: "baseline-upgrade-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
+      }),
+    ).rejects.toMatchObject({ code: "candidate_probe_reporting_timeout" });
   });
 
   it("recovers a terminal insufficient-privilege Upgrade with the Candidate installer", async () => {
@@ -7475,7 +7567,11 @@ function portableMetric(overrides = {}) {
   };
 }
 
-function migrationBaselineEnvironment(calls, candidateManifest) {
+function migrationBaselineEnvironment(
+  calls,
+  candidateManifest,
+  { candidateConfigurationNeverRetained = false } = {},
+) {
   const legacyIdentity = {
     identitySha256: "a".repeat(64),
     probeId: "probe_release_legacy",
@@ -7687,7 +7783,9 @@ function migrationBaselineEnvironment(calls, candidateManifest) {
       if (!replaced) return currentHost();
       candidateHostObservations += 1;
       const reportedVersion =
-        candidateHostObservations === 1 ? "default-v1" : configuration.version;
+        candidateConfigurationNeverRetained || candidateHostObservations === 1
+          ? "default-v1"
+          : configuration.version;
       const configurationError = candidateHostObservations === 2;
       calls.push(
         `hub.getHost:candidate:${reportedVersion}:${configurationError ? "configuration-error" : "clean"}`,
