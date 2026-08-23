@@ -262,6 +262,28 @@ pub struct CpuCounterResourceFact {
     #[prost(uint64, tag = "9")]
     pub steal: u64,
 }
+/// Provider 对一个固定挂载点执行 statvfs 后返回的不可变容量事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FilesystemCapacityResourceFact {
+    #[prost(string, tag = "1")]
+    pub mount_point: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub total_bytes: u64,
+    #[prost(uint64, tag = "3")]
+    pub free_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub available_bytes: u64,
+}
+/// Provider 从一个固定电源设备目录读取的原始事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BatterySupplyResourceFact {
+    #[prost(string, tag = "1")]
+    pub supply_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub capacity: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub status: ::prost::alloc::string::String,
+}
 /// 一次固定 pull 的完整 typed Resource Result。
 /// procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -276,6 +298,32 @@ pub struct SystemStateResourceResult {
     pub proc_uptime: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
     pub host_profile: ::core::option::Option<HostProfileResourceFacts>,
+    #[prost(string, tag = "6")]
+    pub proc_net_dev: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub proc_net_route: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub proc_net_ipv6_route: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub proc_mounts: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub proc_diskstats: ::prost::alloc::string::String,
+    #[prost(int64, tag = "11")]
+    pub disk_counters_collected_at_ms: i64,
+    #[prost(message, repeated, tag = "12")]
+    pub filesystem_capacities: ::prost::alloc::vec::Vec<FilesystemCapacityResourceFact>,
+    #[prost(string, repeated, tag = "13")]
+    pub temperature_inputs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "14")]
+    pub battery_supplies: ::prost::alloc::vec::Vec<BatterySupplyResourceFact>,
+    #[prost(string, tag = "15")]
+    pub network_failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "16")]
+    pub disk_failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "17")]
+    pub temperature_failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "18")]
+    pub battery_failure_code: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuCoreMetric {

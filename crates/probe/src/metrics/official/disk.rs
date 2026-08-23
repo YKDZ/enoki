@@ -1,51 +1,15 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::Path,
 };
 
 use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, FilesystemCapacity,
-    MetricCollector, filesystem_capacity, unix_time_millis,
+    CollectorCadence, CollectorDefinition, CollectorId, FilesystemCapacity, unix_time_millis,
 };
-use crate::protocol::enoki::v1::{DiskUsageMetric, MetricSample};
+use crate::protocol::enoki::v1::DiskUsageMetric;
 
 pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::Disk, CollectorCadence::EveryTick);
-
-#[derive(Default)]
-pub struct DiskMetricCollector {
-    previous: Option<DiskCounterSnapshot>,
-}
-
-impl MetricCollector for DiskMetricCollector {
-    fn definition(&self) -> CollectorDefinition {
-        DEFINITION
-    }
-
-    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let disk_counters = fs::read_to_string("/proc/diskstats")
-            .ok()
-            .and_then(|contents| collect_disk_counters_from_proc_diskstats(&contents));
-        let disks = fs::read_to_string("/proc/mounts")
-            .map(|contents| {
-                collect_disk_metrics_from_mounts(
-                    &contents,
-                    |mount_point| filesystem_capacity(mount_point),
-                    disk_counters.as_ref(),
-                    self.previous.as_ref(),
-                )
-            })
-            .unwrap_or_default();
-        if let Some(snapshot) = disk_counters {
-            self.previous = Some(snapshot);
-        }
-        let produced = !disks.is_empty();
-        sample.disks = disks;
-
-        Ok(produced)
-    }
-}
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "cgroup", "cgroup2", "debugfs", "devtmpfs", "fusectl", "overlay", "proc", "squashfs", "sysfs",
@@ -126,6 +90,13 @@ pub fn collect_disk_metrics_from_mounts(
 }
 
 pub fn collect_disk_counters_from_proc_diskstats(contents: &str) -> Option<DiskCounterSnapshot> {
+    collect_disk_counters_from_proc_diskstats_at(contents, unix_time_millis())
+}
+
+pub fn collect_disk_counters_from_proc_diskstats_at(
+    contents: &str,
+    collected_at_ms: i64,
+) -> Option<DiskCounterSnapshot> {
     let counters_by_name = contents
         .lines()
         .filter_map(parse_diskstats_line)
@@ -133,7 +104,7 @@ pub fn collect_disk_counters_from_proc_diskstats(contents: &str) -> Option<DiskC
         .collect::<BTreeMap<_, _>>();
 
     (!counters_by_name.is_empty()).then_some(DiskCounterSnapshot {
-        collected_at_ms: unix_time_millis(),
+        collected_at_ms,
         counters_by_name,
     })
 }

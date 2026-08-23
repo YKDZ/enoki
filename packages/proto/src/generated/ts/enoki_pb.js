@@ -7996,6 +7996,625 @@ export const enoki = $root.enoki = (() => {
             return CpuCounterResourceFact;
         })();
 
+        v1.FilesystemCapacityResourceFact = (function() {
+
+            /**
+             * Properties of a FilesystemCapacityResourceFact.
+             * @memberof enoki.v1
+             * @interface IFilesystemCapacityResourceFact
+             * @property {string|null} [mountPoint] FilesystemCapacityResourceFact mountPoint
+             * @property {Long|null} [totalBytes] FilesystemCapacityResourceFact totalBytes
+             * @property {Long|null} [freeBytes] FilesystemCapacityResourceFact freeBytes
+             * @property {Long|null} [availableBytes] FilesystemCapacityResourceFact availableBytes
+             */
+
+            /**
+             * Constructs a new FilesystemCapacityResourceFact.
+             * @memberof enoki.v1
+             * @classdesc Represents a FilesystemCapacityResourceFact.
+             * @implements IFilesystemCapacityResourceFact
+             * @constructor
+             * @param {enoki.v1.IFilesystemCapacityResourceFact=} [properties] Properties to set
+             */
+            function FilesystemCapacityResourceFact(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * FilesystemCapacityResourceFact mountPoint.
+             * @member {string} mountPoint
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @instance
+             */
+            FilesystemCapacityResourceFact.prototype.mountPoint = "";
+
+            /**
+             * FilesystemCapacityResourceFact totalBytes.
+             * @member {Long} totalBytes
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @instance
+             */
+            FilesystemCapacityResourceFact.prototype.totalBytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * FilesystemCapacityResourceFact freeBytes.
+             * @member {Long} freeBytes
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @instance
+             */
+            FilesystemCapacityResourceFact.prototype.freeBytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * FilesystemCapacityResourceFact availableBytes.
+             * @member {Long} availableBytes
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @instance
+             */
+            FilesystemCapacityResourceFact.prototype.availableBytes = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * Creates a new FilesystemCapacityResourceFact instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {enoki.v1.IFilesystemCapacityResourceFact=} [properties] Properties to set
+             * @returns {enoki.v1.FilesystemCapacityResourceFact} FilesystemCapacityResourceFact instance
+             */
+            FilesystemCapacityResourceFact.create = function create(properties) {
+                return new FilesystemCapacityResourceFact(properties);
+            };
+
+            /**
+             * Encodes the specified FilesystemCapacityResourceFact message. Does not implicitly {@link enoki.v1.FilesystemCapacityResourceFact.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {enoki.v1.IFilesystemCapacityResourceFact} message FilesystemCapacityResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            FilesystemCapacityResourceFact.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.mountPoint != null && Object.hasOwnProperty.call(message, "mountPoint"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.mountPoint);
+                if (message.totalBytes != null && Object.hasOwnProperty.call(message, "totalBytes"))
+                    writer.uint32(/* id 2, wireType 0 =*/16).uint64(message.totalBytes);
+                if (message.freeBytes != null && Object.hasOwnProperty.call(message, "freeBytes"))
+                    writer.uint32(/* id 3, wireType 0 =*/24).uint64(message.freeBytes);
+                if (message.availableBytes != null && Object.hasOwnProperty.call(message, "availableBytes"))
+                    writer.uint32(/* id 4, wireType 0 =*/32).uint64(message.availableBytes);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified FilesystemCapacityResourceFact message, length delimited. Does not implicitly {@link enoki.v1.FilesystemCapacityResourceFact.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {enoki.v1.IFilesystemCapacityResourceFact} message FilesystemCapacityResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            FilesystemCapacityResourceFact.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a FilesystemCapacityResourceFact message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.FilesystemCapacityResourceFact} FilesystemCapacityResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            FilesystemCapacityResourceFact.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.FilesystemCapacityResourceFact();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.mountPoint = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.totalBytes = reader.uint64();
+                            break;
+                        }
+                    case 3: {
+                            message.freeBytes = reader.uint64();
+                            break;
+                        }
+                    case 4: {
+                            message.availableBytes = reader.uint64();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a FilesystemCapacityResourceFact message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.FilesystemCapacityResourceFact} FilesystemCapacityResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            FilesystemCapacityResourceFact.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a FilesystemCapacityResourceFact message.
+             * @function verify
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            FilesystemCapacityResourceFact.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.mountPoint != null && Object.hasOwnProperty.call(message, "mountPoint"))
+                    if (!$util.isString(message.mountPoint))
+                        return "mountPoint: string expected";
+                if (message.totalBytes != null && Object.hasOwnProperty.call(message, "totalBytes"))
+                    if (!$util.isInteger(message.totalBytes) && !(message.totalBytes && $util.isInteger(message.totalBytes.low) && $util.isInteger(message.totalBytes.high)))
+                        return "totalBytes: integer|Long expected";
+                if (message.freeBytes != null && Object.hasOwnProperty.call(message, "freeBytes"))
+                    if (!$util.isInteger(message.freeBytes) && !(message.freeBytes && $util.isInteger(message.freeBytes.low) && $util.isInteger(message.freeBytes.high)))
+                        return "freeBytes: integer|Long expected";
+                if (message.availableBytes != null && Object.hasOwnProperty.call(message, "availableBytes"))
+                    if (!$util.isInteger(message.availableBytes) && !(message.availableBytes && $util.isInteger(message.availableBytes.low) && $util.isInteger(message.availableBytes.high)))
+                        return "availableBytes: integer|Long expected";
+                return null;
+            };
+
+            /**
+             * Creates a FilesystemCapacityResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.FilesystemCapacityResourceFact} FilesystemCapacityResourceFact
+             */
+            FilesystemCapacityResourceFact.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.FilesystemCapacityResourceFact)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.FilesystemCapacityResourceFact: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.FilesystemCapacityResourceFact();
+                if (object.mountPoint != null)
+                    message.mountPoint = String(object.mountPoint);
+                if (object.totalBytes != null)
+                    if ($util.Long)
+                        message.totalBytes = $util.Long.fromValue(object.totalBytes, true);
+                    else if (typeof object.totalBytes === "string")
+                        message.totalBytes = parseInt(object.totalBytes, 10);
+                    else if (typeof object.totalBytes === "number")
+                        message.totalBytes = object.totalBytes;
+                    else if (typeof object.totalBytes === "object")
+                        message.totalBytes = new $util.LongBits(object.totalBytes.low >>> 0, object.totalBytes.high >>> 0).toNumber(true);
+                if (object.freeBytes != null)
+                    if ($util.Long)
+                        message.freeBytes = $util.Long.fromValue(object.freeBytes, true);
+                    else if (typeof object.freeBytes === "string")
+                        message.freeBytes = parseInt(object.freeBytes, 10);
+                    else if (typeof object.freeBytes === "number")
+                        message.freeBytes = object.freeBytes;
+                    else if (typeof object.freeBytes === "object")
+                        message.freeBytes = new $util.LongBits(object.freeBytes.low >>> 0, object.freeBytes.high >>> 0).toNumber(true);
+                if (object.availableBytes != null)
+                    if ($util.Long)
+                        message.availableBytes = $util.Long.fromValue(object.availableBytes, true);
+                    else if (typeof object.availableBytes === "string")
+                        message.availableBytes = parseInt(object.availableBytes, 10);
+                    else if (typeof object.availableBytes === "number")
+                        message.availableBytes = object.availableBytes;
+                    else if (typeof object.availableBytes === "object")
+                        message.availableBytes = new $util.LongBits(object.availableBytes.low >>> 0, object.availableBytes.high >>> 0).toNumber(true);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a FilesystemCapacityResourceFact message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {enoki.v1.FilesystemCapacityResourceFact} message FilesystemCapacityResourceFact
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            FilesystemCapacityResourceFact.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.mountPoint = "";
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.totalBytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.totalBytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.freeBytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.freeBytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.availableBytes = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.availableBytes = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                }
+                if (message.mountPoint != null && Object.hasOwnProperty.call(message, "mountPoint"))
+                    object.mountPoint = message.mountPoint;
+                if (message.totalBytes != null && Object.hasOwnProperty.call(message, "totalBytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.totalBytes = typeof message.totalBytes === "number" ? BigInt(message.totalBytes) : $util.Long.fromBits(message.totalBytes.low >>> 0, message.totalBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.totalBytes === "number")
+                        object.totalBytes = options.longs === String ? String(message.totalBytes) : message.totalBytes;
+                    else
+                        object.totalBytes = options.longs === String ? $util.Long.prototype.toString.call(message.totalBytes) : options.longs === Number ? new $util.LongBits(message.totalBytes.low >>> 0, message.totalBytes.high >>> 0).toNumber(true) : message.totalBytes;
+                if (message.freeBytes != null && Object.hasOwnProperty.call(message, "freeBytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.freeBytes = typeof message.freeBytes === "number" ? BigInt(message.freeBytes) : $util.Long.fromBits(message.freeBytes.low >>> 0, message.freeBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.freeBytes === "number")
+                        object.freeBytes = options.longs === String ? String(message.freeBytes) : message.freeBytes;
+                    else
+                        object.freeBytes = options.longs === String ? $util.Long.prototype.toString.call(message.freeBytes) : options.longs === Number ? new $util.LongBits(message.freeBytes.low >>> 0, message.freeBytes.high >>> 0).toNumber(true) : message.freeBytes;
+                if (message.availableBytes != null && Object.hasOwnProperty.call(message, "availableBytes"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.availableBytes = typeof message.availableBytes === "number" ? BigInt(message.availableBytes) : $util.Long.fromBits(message.availableBytes.low >>> 0, message.availableBytes.high >>> 0, true).toBigInt();
+                    else if (typeof message.availableBytes === "number")
+                        object.availableBytes = options.longs === String ? String(message.availableBytes) : message.availableBytes;
+                    else
+                        object.availableBytes = options.longs === String ? $util.Long.prototype.toString.call(message.availableBytes) : options.longs === Number ? new $util.LongBits(message.availableBytes.low >>> 0, message.availableBytes.high >>> 0).toNumber(true) : message.availableBytes;
+                return object;
+            };
+
+            /**
+             * Converts this FilesystemCapacityResourceFact to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            FilesystemCapacityResourceFact.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for FilesystemCapacityResourceFact
+             * @function getTypeUrl
+             * @memberof enoki.v1.FilesystemCapacityResourceFact
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            FilesystemCapacityResourceFact.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.FilesystemCapacityResourceFact";
+            };
+
+            return FilesystemCapacityResourceFact;
+        })();
+
+        v1.BatterySupplyResourceFact = (function() {
+
+            /**
+             * Properties of a BatterySupplyResourceFact.
+             * @memberof enoki.v1
+             * @interface IBatterySupplyResourceFact
+             * @property {string|null} [supplyType] BatterySupplyResourceFact supplyType
+             * @property {string|null} [capacity] BatterySupplyResourceFact capacity
+             * @property {string|null} [status] BatterySupplyResourceFact status
+             */
+
+            /**
+             * Constructs a new BatterySupplyResourceFact.
+             * @memberof enoki.v1
+             * @classdesc Represents a BatterySupplyResourceFact.
+             * @implements IBatterySupplyResourceFact
+             * @constructor
+             * @param {enoki.v1.IBatterySupplyResourceFact=} [properties] Properties to set
+             */
+            function BatterySupplyResourceFact(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * BatterySupplyResourceFact supplyType.
+             * @member {string} supplyType
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @instance
+             */
+            BatterySupplyResourceFact.prototype.supplyType = "";
+
+            /**
+             * BatterySupplyResourceFact capacity.
+             * @member {string} capacity
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @instance
+             */
+            BatterySupplyResourceFact.prototype.capacity = "";
+
+            /**
+             * BatterySupplyResourceFact status.
+             * @member {string} status
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @instance
+             */
+            BatterySupplyResourceFact.prototype.status = "";
+
+            /**
+             * Creates a new BatterySupplyResourceFact instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {enoki.v1.IBatterySupplyResourceFact=} [properties] Properties to set
+             * @returns {enoki.v1.BatterySupplyResourceFact} BatterySupplyResourceFact instance
+             */
+            BatterySupplyResourceFact.create = function create(properties) {
+                return new BatterySupplyResourceFact(properties);
+            };
+
+            /**
+             * Encodes the specified BatterySupplyResourceFact message. Does not implicitly {@link enoki.v1.BatterySupplyResourceFact.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {enoki.v1.IBatterySupplyResourceFact} message BatterySupplyResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            BatterySupplyResourceFact.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.supplyType != null && Object.hasOwnProperty.call(message, "supplyType"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.supplyType);
+                if (message.capacity != null && Object.hasOwnProperty.call(message, "capacity"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.capacity);
+                if (message.status != null && Object.hasOwnProperty.call(message, "status"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.status);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified BatterySupplyResourceFact message, length delimited. Does not implicitly {@link enoki.v1.BatterySupplyResourceFact.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {enoki.v1.IBatterySupplyResourceFact} message BatterySupplyResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            BatterySupplyResourceFact.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a BatterySupplyResourceFact message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.BatterySupplyResourceFact} BatterySupplyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            BatterySupplyResourceFact.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.BatterySupplyResourceFact();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.supplyType = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.capacity = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.status = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a BatterySupplyResourceFact message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.BatterySupplyResourceFact} BatterySupplyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            BatterySupplyResourceFact.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a BatterySupplyResourceFact message.
+             * @function verify
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            BatterySupplyResourceFact.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.supplyType != null && Object.hasOwnProperty.call(message, "supplyType"))
+                    if (!$util.isString(message.supplyType))
+                        return "supplyType: string expected";
+                if (message.capacity != null && Object.hasOwnProperty.call(message, "capacity"))
+                    if (!$util.isString(message.capacity))
+                        return "capacity: string expected";
+                if (message.status != null && Object.hasOwnProperty.call(message, "status"))
+                    if (!$util.isString(message.status))
+                        return "status: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a BatterySupplyResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.BatterySupplyResourceFact} BatterySupplyResourceFact
+             */
+            BatterySupplyResourceFact.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.BatterySupplyResourceFact)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.BatterySupplyResourceFact: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.BatterySupplyResourceFact();
+                if (object.supplyType != null)
+                    message.supplyType = String(object.supplyType);
+                if (object.capacity != null)
+                    message.capacity = String(object.capacity);
+                if (object.status != null)
+                    message.status = String(object.status);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a BatterySupplyResourceFact message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {enoki.v1.BatterySupplyResourceFact} message BatterySupplyResourceFact
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            BatterySupplyResourceFact.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.supplyType = "";
+                    object.capacity = "";
+                    object.status = "";
+                }
+                if (message.supplyType != null && Object.hasOwnProperty.call(message, "supplyType"))
+                    object.supplyType = message.supplyType;
+                if (message.capacity != null && Object.hasOwnProperty.call(message, "capacity"))
+                    object.capacity = message.capacity;
+                if (message.status != null && Object.hasOwnProperty.call(message, "status"))
+                    object.status = message.status;
+                return object;
+            };
+
+            /**
+             * Converts this BatterySupplyResourceFact to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            BatterySupplyResourceFact.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for BatterySupplyResourceFact
+             * @function getTypeUrl
+             * @memberof enoki.v1.BatterySupplyResourceFact
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            BatterySupplyResourceFact.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.BatterySupplyResourceFact";
+            };
+
+            return BatterySupplyResourceFact;
+        })();
+
         v1.SystemStateResourceResult = (function() {
 
             /**
@@ -8007,6 +8626,19 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [procMeminfo] SystemStateResourceResult procMeminfo
              * @property {string|null} [procUptime] SystemStateResourceResult procUptime
              * @property {enoki.v1.IHostProfileResourceFacts|null} [hostProfile] SystemStateResourceResult hostProfile
+             * @property {string|null} [procNetDev] SystemStateResourceResult procNetDev
+             * @property {string|null} [procNetRoute] SystemStateResourceResult procNetRoute
+             * @property {string|null} [procNetIpv6Route] SystemStateResourceResult procNetIpv6Route
+             * @property {string|null} [procMounts] SystemStateResourceResult procMounts
+             * @property {string|null} [procDiskstats] SystemStateResourceResult procDiskstats
+             * @property {Long|null} [diskCountersCollectedAtMs] SystemStateResourceResult diskCountersCollectedAtMs
+             * @property {Array.<enoki.v1.IFilesystemCapacityResourceFact>|null} [filesystemCapacities] SystemStateResourceResult filesystemCapacities
+             * @property {Array.<string>|null} [temperatureInputs] SystemStateResourceResult temperatureInputs
+             * @property {Array.<enoki.v1.IBatterySupplyResourceFact>|null} [batterySupplies] SystemStateResourceResult batterySupplies
+             * @property {string|null} [networkFailureCode] SystemStateResourceResult networkFailureCode
+             * @property {string|null} [diskFailureCode] SystemStateResourceResult diskFailureCode
+             * @property {string|null} [temperatureFailureCode] SystemStateResourceResult temperatureFailureCode
+             * @property {string|null} [batteryFailureCode] SystemStateResourceResult batteryFailureCode
              */
 
             /**
@@ -8019,6 +8651,9 @@ export const enoki = $root.enoki = (() => {
              */
             function SystemStateResourceResult(properties) {
                 this.cpuCounters = [];
+                this.filesystemCapacities = [];
+                this.temperatureInputs = [];
+                this.batterySupplies = [];
                 if (properties)
                     for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
                         if (properties[keys[i]] != null && keys[i] !== "__proto__")
@@ -8066,6 +8701,110 @@ export const enoki = $root.enoki = (() => {
             SystemStateResourceResult.prototype.hostProfile = null;
 
             /**
+             * SystemStateResourceResult procNetDev.
+             * @member {string} procNetDev
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procNetDev = "";
+
+            /**
+             * SystemStateResourceResult procNetRoute.
+             * @member {string} procNetRoute
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procNetRoute = "";
+
+            /**
+             * SystemStateResourceResult procNetIpv6Route.
+             * @member {string} procNetIpv6Route
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procNetIpv6Route = "";
+
+            /**
+             * SystemStateResourceResult procMounts.
+             * @member {string} procMounts
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procMounts = "";
+
+            /**
+             * SystemStateResourceResult procDiskstats.
+             * @member {string} procDiskstats
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procDiskstats = "";
+
+            /**
+             * SystemStateResourceResult diskCountersCollectedAtMs.
+             * @member {Long} diskCountersCollectedAtMs
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.diskCountersCollectedAtMs = $util.Long ? $util.Long.fromBits(0,0,false) : 0;
+
+            /**
+             * SystemStateResourceResult filesystemCapacities.
+             * @member {Array.<enoki.v1.IFilesystemCapacityResourceFact>} filesystemCapacities
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.filesystemCapacities = $util.emptyArray;
+
+            /**
+             * SystemStateResourceResult temperatureInputs.
+             * @member {Array.<string>} temperatureInputs
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.temperatureInputs = $util.emptyArray;
+
+            /**
+             * SystemStateResourceResult batterySupplies.
+             * @member {Array.<enoki.v1.IBatterySupplyResourceFact>} batterySupplies
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.batterySupplies = $util.emptyArray;
+
+            /**
+             * SystemStateResourceResult networkFailureCode.
+             * @member {string} networkFailureCode
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.networkFailureCode = "";
+
+            /**
+             * SystemStateResourceResult diskFailureCode.
+             * @member {string} diskFailureCode
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.diskFailureCode = "";
+
+            /**
+             * SystemStateResourceResult temperatureFailureCode.
+             * @member {string} temperatureFailureCode
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.temperatureFailureCode = "";
+
+            /**
+             * SystemStateResourceResult batteryFailureCode.
+             * @member {string} batteryFailureCode
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.batteryFailureCode = "";
+
+            /**
              * Creates a new SystemStateResourceResult instance using the specified properties.
              * @function create
              * @memberof enoki.v1.SystemStateResourceResult
@@ -8104,6 +8843,35 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 4, wireType 2 =*/34).string(message.procUptime);
                 if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile"))
                     $root.enoki.v1.HostProfileResourceFacts.encode(message.hostProfile, writer.uint32(/* id 5, wireType 2 =*/42).fork(), q + 1).ldelim();
+                if (message.procNetDev != null && Object.hasOwnProperty.call(message, "procNetDev"))
+                    writer.uint32(/* id 6, wireType 2 =*/50).string(message.procNetDev);
+                if (message.procNetRoute != null && Object.hasOwnProperty.call(message, "procNetRoute"))
+                    writer.uint32(/* id 7, wireType 2 =*/58).string(message.procNetRoute);
+                if (message.procNetIpv6Route != null && Object.hasOwnProperty.call(message, "procNetIpv6Route"))
+                    writer.uint32(/* id 8, wireType 2 =*/66).string(message.procNetIpv6Route);
+                if (message.procMounts != null && Object.hasOwnProperty.call(message, "procMounts"))
+                    writer.uint32(/* id 9, wireType 2 =*/74).string(message.procMounts);
+                if (message.procDiskstats != null && Object.hasOwnProperty.call(message, "procDiskstats"))
+                    writer.uint32(/* id 10, wireType 2 =*/82).string(message.procDiskstats);
+                if (message.diskCountersCollectedAtMs != null && Object.hasOwnProperty.call(message, "diskCountersCollectedAtMs"))
+                    writer.uint32(/* id 11, wireType 0 =*/88).int64(message.diskCountersCollectedAtMs);
+                if (message.filesystemCapacities != null && message.filesystemCapacities.length)
+                    for (let i = 0; i < message.filesystemCapacities.length; ++i)
+                        $root.enoki.v1.FilesystemCapacityResourceFact.encode(message.filesystemCapacities[i], writer.uint32(/* id 12, wireType 2 =*/98).fork(), q + 1).ldelim();
+                if (message.temperatureInputs != null && message.temperatureInputs.length)
+                    for (let i = 0; i < message.temperatureInputs.length; ++i)
+                        writer.uint32(/* id 13, wireType 2 =*/106).string(message.temperatureInputs[i]);
+                if (message.batterySupplies != null && message.batterySupplies.length)
+                    for (let i = 0; i < message.batterySupplies.length; ++i)
+                        $root.enoki.v1.BatterySupplyResourceFact.encode(message.batterySupplies[i], writer.uint32(/* id 14, wireType 2 =*/114).fork(), q + 1).ldelim();
+                if (message.networkFailureCode != null && Object.hasOwnProperty.call(message, "networkFailureCode"))
+                    writer.uint32(/* id 15, wireType 2 =*/122).string(message.networkFailureCode);
+                if (message.diskFailureCode != null && Object.hasOwnProperty.call(message, "diskFailureCode"))
+                    writer.uint32(/* id 16, wireType 2 =*/130).string(message.diskFailureCode);
+                if (message.temperatureFailureCode != null && Object.hasOwnProperty.call(message, "temperatureFailureCode"))
+                    writer.uint32(/* id 17, wireType 2 =*/138).string(message.temperatureFailureCode);
+                if (message.batteryFailureCode != null && Object.hasOwnProperty.call(message, "batteryFailureCode"))
+                    writer.uint32(/* id 18, wireType 2 =*/146).string(message.batteryFailureCode);
                 return writer;
             };
 
@@ -8164,6 +8932,64 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 5: {
                             message.hostProfile = $root.enoki.v1.HostProfileResourceFacts.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 6: {
+                            message.procNetDev = reader.string();
+                            break;
+                        }
+                    case 7: {
+                            message.procNetRoute = reader.string();
+                            break;
+                        }
+                    case 8: {
+                            message.procNetIpv6Route = reader.string();
+                            break;
+                        }
+                    case 9: {
+                            message.procMounts = reader.string();
+                            break;
+                        }
+                    case 10: {
+                            message.procDiskstats = reader.string();
+                            break;
+                        }
+                    case 11: {
+                            message.diskCountersCollectedAtMs = reader.int64();
+                            break;
+                        }
+                    case 12: {
+                            if (!(message.filesystemCapacities && message.filesystemCapacities.length))
+                                message.filesystemCapacities = [];
+                            message.filesystemCapacities.push($root.enoki.v1.FilesystemCapacityResourceFact.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 13: {
+                            if (!(message.temperatureInputs && message.temperatureInputs.length))
+                                message.temperatureInputs = [];
+                            message.temperatureInputs.push(reader.string());
+                            break;
+                        }
+                    case 14: {
+                            if (!(message.batterySupplies && message.batterySupplies.length))
+                                message.batterySupplies = [];
+                            message.batterySupplies.push($root.enoki.v1.BatterySupplyResourceFact.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 15: {
+                            message.networkFailureCode = reader.string();
+                            break;
+                        }
+                    case 16: {
+                            message.diskFailureCode = reader.string();
+                            break;
+                        }
+                    case 17: {
+                            message.temperatureFailureCode = reader.string();
+                            break;
+                        }
+                    case 18: {
+                            message.batteryFailureCode = reader.string();
                             break;
                         }
                     default:
@@ -8228,6 +9054,61 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "hostProfile." + error;
                 }
+                if (message.procNetDev != null && Object.hasOwnProperty.call(message, "procNetDev"))
+                    if (!$util.isString(message.procNetDev))
+                        return "procNetDev: string expected";
+                if (message.procNetRoute != null && Object.hasOwnProperty.call(message, "procNetRoute"))
+                    if (!$util.isString(message.procNetRoute))
+                        return "procNetRoute: string expected";
+                if (message.procNetIpv6Route != null && Object.hasOwnProperty.call(message, "procNetIpv6Route"))
+                    if (!$util.isString(message.procNetIpv6Route))
+                        return "procNetIpv6Route: string expected";
+                if (message.procMounts != null && Object.hasOwnProperty.call(message, "procMounts"))
+                    if (!$util.isString(message.procMounts))
+                        return "procMounts: string expected";
+                if (message.procDiskstats != null && Object.hasOwnProperty.call(message, "procDiskstats"))
+                    if (!$util.isString(message.procDiskstats))
+                        return "procDiskstats: string expected";
+                if (message.diskCountersCollectedAtMs != null && Object.hasOwnProperty.call(message, "diskCountersCollectedAtMs"))
+                    if (!$util.isInteger(message.diskCountersCollectedAtMs) && !(message.diskCountersCollectedAtMs && $util.isInteger(message.diskCountersCollectedAtMs.low) && $util.isInteger(message.diskCountersCollectedAtMs.high)))
+                        return "diskCountersCollectedAtMs: integer|Long expected";
+                if (message.filesystemCapacities != null && Object.hasOwnProperty.call(message, "filesystemCapacities")) {
+                    if (!Array.isArray(message.filesystemCapacities))
+                        return "filesystemCapacities: array expected";
+                    for (let i = 0; i < message.filesystemCapacities.length; ++i) {
+                        let error = $root.enoki.v1.FilesystemCapacityResourceFact.verify(message.filesystemCapacities[i], long + 1);
+                        if (error)
+                            return "filesystemCapacities." + error;
+                    }
+                }
+                if (message.temperatureInputs != null && Object.hasOwnProperty.call(message, "temperatureInputs")) {
+                    if (!Array.isArray(message.temperatureInputs))
+                        return "temperatureInputs: array expected";
+                    for (let i = 0; i < message.temperatureInputs.length; ++i)
+                        if (!$util.isString(message.temperatureInputs[i]))
+                            return "temperatureInputs: string[] expected";
+                }
+                if (message.batterySupplies != null && Object.hasOwnProperty.call(message, "batterySupplies")) {
+                    if (!Array.isArray(message.batterySupplies))
+                        return "batterySupplies: array expected";
+                    for (let i = 0; i < message.batterySupplies.length; ++i) {
+                        let error = $root.enoki.v1.BatterySupplyResourceFact.verify(message.batterySupplies[i], long + 1);
+                        if (error)
+                            return "batterySupplies." + error;
+                    }
+                }
+                if (message.networkFailureCode != null && Object.hasOwnProperty.call(message, "networkFailureCode"))
+                    if (!$util.isString(message.networkFailureCode))
+                        return "networkFailureCode: string expected";
+                if (message.diskFailureCode != null && Object.hasOwnProperty.call(message, "diskFailureCode"))
+                    if (!$util.isString(message.diskFailureCode))
+                        return "diskFailureCode: string expected";
+                if (message.temperatureFailureCode != null && Object.hasOwnProperty.call(message, "temperatureFailureCode"))
+                    if (!$util.isString(message.temperatureFailureCode))
+                        return "temperatureFailureCode: string expected";
+                if (message.batteryFailureCode != null && Object.hasOwnProperty.call(message, "batteryFailureCode"))
+                    if (!$util.isString(message.batteryFailureCode))
+                        return "batteryFailureCode: string expected";
                 return null;
             };
 
@@ -8270,6 +9151,60 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.SystemStateResourceResult.hostProfile: object expected");
                     message.hostProfile = $root.enoki.v1.HostProfileResourceFacts.fromObject(object.hostProfile, long + 1);
                 }
+                if (object.procNetDev != null)
+                    message.procNetDev = String(object.procNetDev);
+                if (object.procNetRoute != null)
+                    message.procNetRoute = String(object.procNetRoute);
+                if (object.procNetIpv6Route != null)
+                    message.procNetIpv6Route = String(object.procNetIpv6Route);
+                if (object.procMounts != null)
+                    message.procMounts = String(object.procMounts);
+                if (object.procDiskstats != null)
+                    message.procDiskstats = String(object.procDiskstats);
+                if (object.diskCountersCollectedAtMs != null)
+                    if ($util.Long)
+                        message.diskCountersCollectedAtMs = $util.Long.fromValue(object.diskCountersCollectedAtMs, false);
+                    else if (typeof object.diskCountersCollectedAtMs === "string")
+                        message.diskCountersCollectedAtMs = parseInt(object.diskCountersCollectedAtMs, 10);
+                    else if (typeof object.diskCountersCollectedAtMs === "number")
+                        message.diskCountersCollectedAtMs = object.diskCountersCollectedAtMs;
+                    else if (typeof object.diskCountersCollectedAtMs === "object")
+                        message.diskCountersCollectedAtMs = new $util.LongBits(object.diskCountersCollectedAtMs.low >>> 0, object.diskCountersCollectedAtMs.high >>> 0).toNumber();
+                if (object.filesystemCapacities) {
+                    if (!Array.isArray(object.filesystemCapacities))
+                        throw TypeError(".enoki.v1.SystemStateResourceResult.filesystemCapacities: array expected");
+                    message.filesystemCapacities = [];
+                    for (let i = 0; i < object.filesystemCapacities.length; ++i) {
+                        if (!$util.isObject(object.filesystemCapacities[i]))
+                            throw TypeError(".enoki.v1.SystemStateResourceResult.filesystemCapacities: object expected");
+                        message.filesystemCapacities[i] = $root.enoki.v1.FilesystemCapacityResourceFact.fromObject(object.filesystemCapacities[i], long + 1);
+                    }
+                }
+                if (object.temperatureInputs) {
+                    if (!Array.isArray(object.temperatureInputs))
+                        throw TypeError(".enoki.v1.SystemStateResourceResult.temperatureInputs: array expected");
+                    message.temperatureInputs = [];
+                    for (let i = 0; i < object.temperatureInputs.length; ++i)
+                        message.temperatureInputs[i] = String(object.temperatureInputs[i]);
+                }
+                if (object.batterySupplies) {
+                    if (!Array.isArray(object.batterySupplies))
+                        throw TypeError(".enoki.v1.SystemStateResourceResult.batterySupplies: array expected");
+                    message.batterySupplies = [];
+                    for (let i = 0; i < object.batterySupplies.length; ++i) {
+                        if (!$util.isObject(object.batterySupplies[i]))
+                            throw TypeError(".enoki.v1.SystemStateResourceResult.batterySupplies: object expected");
+                        message.batterySupplies[i] = $root.enoki.v1.BatterySupplyResourceFact.fromObject(object.batterySupplies[i], long + 1);
+                    }
+                }
+                if (object.networkFailureCode != null)
+                    message.networkFailureCode = String(object.networkFailureCode);
+                if (object.diskFailureCode != null)
+                    message.diskFailureCode = String(object.diskFailureCode);
+                if (object.temperatureFailureCode != null)
+                    message.temperatureFailureCode = String(object.temperatureFailureCode);
+                if (object.batteryFailureCode != null)
+                    message.batteryFailureCode = String(object.batteryFailureCode);
                 return message;
             };
 
@@ -8290,13 +9225,31 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
-                if (options.arrays || options.defaults)
+                if (options.arrays || options.defaults) {
                     object.cpuCounters = [];
+                    object.filesystemCapacities = [];
+                    object.temperatureInputs = [];
+                    object.batterySupplies = [];
+                }
                 if (options.defaults) {
                     object.procLoadavg = "";
                     object.procMeminfo = "";
                     object.procUptime = "";
                     object.hostProfile = null;
+                    object.procNetDev = "";
+                    object.procNetRoute = "";
+                    object.procNetIpv6Route = "";
+                    object.procMounts = "";
+                    object.procDiskstats = "";
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, false);
+                        object.diskCountersCollectedAtMs = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.diskCountersCollectedAtMs = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    object.networkFailureCode = "";
+                    object.diskFailureCode = "";
+                    object.temperatureFailureCode = "";
+                    object.batteryFailureCode = "";
                 }
                 if (message.cpuCounters && message.cpuCounters.length) {
                     object.cpuCounters = [];
@@ -8311,6 +9264,46 @@ export const enoki = $root.enoki = (() => {
                     object.procUptime = message.procUptime;
                 if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile"))
                     object.hostProfile = $root.enoki.v1.HostProfileResourceFacts.toObject(message.hostProfile, options, q + 1);
+                if (message.procNetDev != null && Object.hasOwnProperty.call(message, "procNetDev"))
+                    object.procNetDev = message.procNetDev;
+                if (message.procNetRoute != null && Object.hasOwnProperty.call(message, "procNetRoute"))
+                    object.procNetRoute = message.procNetRoute;
+                if (message.procNetIpv6Route != null && Object.hasOwnProperty.call(message, "procNetIpv6Route"))
+                    object.procNetIpv6Route = message.procNetIpv6Route;
+                if (message.procMounts != null && Object.hasOwnProperty.call(message, "procMounts"))
+                    object.procMounts = message.procMounts;
+                if (message.procDiskstats != null && Object.hasOwnProperty.call(message, "procDiskstats"))
+                    object.procDiskstats = message.procDiskstats;
+                if (message.diskCountersCollectedAtMs != null && Object.hasOwnProperty.call(message, "diskCountersCollectedAtMs"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.diskCountersCollectedAtMs = typeof message.diskCountersCollectedAtMs === "number" ? BigInt(message.diskCountersCollectedAtMs) : $util.Long.fromBits(message.diskCountersCollectedAtMs.low >>> 0, message.diskCountersCollectedAtMs.high >>> 0, false).toBigInt();
+                    else if (typeof message.diskCountersCollectedAtMs === "number")
+                        object.diskCountersCollectedAtMs = options.longs === String ? String(message.diskCountersCollectedAtMs) : message.diskCountersCollectedAtMs;
+                    else
+                        object.diskCountersCollectedAtMs = options.longs === String ? $util.Long.prototype.toString.call(message.diskCountersCollectedAtMs) : options.longs === Number ? new $util.LongBits(message.diskCountersCollectedAtMs.low >>> 0, message.diskCountersCollectedAtMs.high >>> 0).toNumber() : message.diskCountersCollectedAtMs;
+                if (message.filesystemCapacities && message.filesystemCapacities.length) {
+                    object.filesystemCapacities = [];
+                    for (let j = 0; j < message.filesystemCapacities.length; ++j)
+                        object.filesystemCapacities[j] = $root.enoki.v1.FilesystemCapacityResourceFact.toObject(message.filesystemCapacities[j], options, q + 1);
+                }
+                if (message.temperatureInputs && message.temperatureInputs.length) {
+                    object.temperatureInputs = [];
+                    for (let j = 0; j < message.temperatureInputs.length; ++j)
+                        object.temperatureInputs[j] = message.temperatureInputs[j];
+                }
+                if (message.batterySupplies && message.batterySupplies.length) {
+                    object.batterySupplies = [];
+                    for (let j = 0; j < message.batterySupplies.length; ++j)
+                        object.batterySupplies[j] = $root.enoki.v1.BatterySupplyResourceFact.toObject(message.batterySupplies[j], options, q + 1);
+                }
+                if (message.networkFailureCode != null && Object.hasOwnProperty.call(message, "networkFailureCode"))
+                    object.networkFailureCode = message.networkFailureCode;
+                if (message.diskFailureCode != null && Object.hasOwnProperty.call(message, "diskFailureCode"))
+                    object.diskFailureCode = message.diskFailureCode;
+                if (message.temperatureFailureCode != null && Object.hasOwnProperty.call(message, "temperatureFailureCode"))
+                    object.temperatureFailureCode = message.temperatureFailureCode;
+                if (message.batteryFailureCode != null && Object.hasOwnProperty.call(message, "batteryFailureCode"))
+                    object.batteryFailureCode = message.batteryFailureCode;
                 return object;
             };
 

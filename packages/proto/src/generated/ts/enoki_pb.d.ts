@@ -2706,6 +2706,230 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
+        /** Properties of a FilesystemCapacityResourceFact. */
+        interface IFilesystemCapacityResourceFact {
+
+            /** FilesystemCapacityResourceFact mountPoint */
+            mountPoint?: (string|null);
+
+            /** FilesystemCapacityResourceFact totalBytes */
+            totalBytes?: (number|Long|null);
+
+            /** FilesystemCapacityResourceFact freeBytes */
+            freeBytes?: (number|Long|null);
+
+            /** FilesystemCapacityResourceFact availableBytes */
+            availableBytes?: (number|Long|null);
+        }
+
+        /** Represents a FilesystemCapacityResourceFact. */
+        class FilesystemCapacityResourceFact implements IFilesystemCapacityResourceFact {
+
+            /**
+             * Constructs a new FilesystemCapacityResourceFact.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IFilesystemCapacityResourceFact);
+
+            /** FilesystemCapacityResourceFact mountPoint. */
+            public mountPoint: string;
+
+            /** FilesystemCapacityResourceFact totalBytes. */
+            public totalBytes: (number|Long);
+
+            /** FilesystemCapacityResourceFact freeBytes. */
+            public freeBytes: (number|Long);
+
+            /** FilesystemCapacityResourceFact availableBytes. */
+            public availableBytes: (number|Long);
+
+            /**
+             * Creates a new FilesystemCapacityResourceFact instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns FilesystemCapacityResourceFact instance
+             */
+            public static create(properties?: enoki.v1.IFilesystemCapacityResourceFact): enoki.v1.FilesystemCapacityResourceFact;
+
+            /**
+             * Encodes the specified FilesystemCapacityResourceFact message. Does not implicitly {@link enoki.v1.FilesystemCapacityResourceFact.verify|verify} messages.
+             * @param message FilesystemCapacityResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IFilesystemCapacityResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified FilesystemCapacityResourceFact message, length delimited. Does not implicitly {@link enoki.v1.FilesystemCapacityResourceFact.verify|verify} messages.
+             * @param message FilesystemCapacityResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IFilesystemCapacityResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a FilesystemCapacityResourceFact message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns FilesystemCapacityResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.FilesystemCapacityResourceFact;
+
+            /**
+             * Decodes a FilesystemCapacityResourceFact message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns FilesystemCapacityResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.FilesystemCapacityResourceFact;
+
+            /**
+             * Verifies a FilesystemCapacityResourceFact message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a FilesystemCapacityResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns FilesystemCapacityResourceFact
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.FilesystemCapacityResourceFact;
+
+            /**
+             * Creates a plain object from a FilesystemCapacityResourceFact message. Also converts values to other types if specified.
+             * @param message FilesystemCapacityResourceFact
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.FilesystemCapacityResourceFact, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this FilesystemCapacityResourceFact to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for FilesystemCapacityResourceFact
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a BatterySupplyResourceFact. */
+        interface IBatterySupplyResourceFact {
+
+            /** BatterySupplyResourceFact supplyType */
+            supplyType?: (string|null);
+
+            /** BatterySupplyResourceFact capacity */
+            capacity?: (string|null);
+
+            /** BatterySupplyResourceFact status */
+            status?: (string|null);
+        }
+
+        /** Represents a BatterySupplyResourceFact. */
+        class BatterySupplyResourceFact implements IBatterySupplyResourceFact {
+
+            /**
+             * Constructs a new BatterySupplyResourceFact.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IBatterySupplyResourceFact);
+
+            /** BatterySupplyResourceFact supplyType. */
+            public supplyType: string;
+
+            /** BatterySupplyResourceFact capacity. */
+            public capacity: string;
+
+            /** BatterySupplyResourceFact status. */
+            public status: string;
+
+            /**
+             * Creates a new BatterySupplyResourceFact instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns BatterySupplyResourceFact instance
+             */
+            public static create(properties?: enoki.v1.IBatterySupplyResourceFact): enoki.v1.BatterySupplyResourceFact;
+
+            /**
+             * Encodes the specified BatterySupplyResourceFact message. Does not implicitly {@link enoki.v1.BatterySupplyResourceFact.verify|verify} messages.
+             * @param message BatterySupplyResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IBatterySupplyResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified BatterySupplyResourceFact message, length delimited. Does not implicitly {@link enoki.v1.BatterySupplyResourceFact.verify|verify} messages.
+             * @param message BatterySupplyResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IBatterySupplyResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a BatterySupplyResourceFact message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns BatterySupplyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.BatterySupplyResourceFact;
+
+            /**
+             * Decodes a BatterySupplyResourceFact message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns BatterySupplyResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.BatterySupplyResourceFact;
+
+            /**
+             * Verifies a BatterySupplyResourceFact message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a BatterySupplyResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns BatterySupplyResourceFact
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.BatterySupplyResourceFact;
+
+            /**
+             * Creates a plain object from a BatterySupplyResourceFact message. Also converts values to other types if specified.
+             * @param message BatterySupplyResourceFact
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.BatterySupplyResourceFact, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this BatterySupplyResourceFact to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for BatterySupplyResourceFact
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
         /** Properties of a SystemStateResourceResult. */
         interface ISystemStateResourceResult {
 
@@ -2723,6 +2947,45 @@ export namespace enoki {
 
             /** SystemStateResourceResult hostProfile */
             hostProfile?: (enoki.v1.IHostProfileResourceFacts|null);
+
+            /** SystemStateResourceResult procNetDev */
+            procNetDev?: (string|null);
+
+            /** SystemStateResourceResult procNetRoute */
+            procNetRoute?: (string|null);
+
+            /** SystemStateResourceResult procNetIpv6Route */
+            procNetIpv6Route?: (string|null);
+
+            /** SystemStateResourceResult procMounts */
+            procMounts?: (string|null);
+
+            /** SystemStateResourceResult procDiskstats */
+            procDiskstats?: (string|null);
+
+            /** SystemStateResourceResult diskCountersCollectedAtMs */
+            diskCountersCollectedAtMs?: (number|Long|null);
+
+            /** SystemStateResourceResult filesystemCapacities */
+            filesystemCapacities?: (enoki.v1.IFilesystemCapacityResourceFact[]|null);
+
+            /** SystemStateResourceResult temperatureInputs */
+            temperatureInputs?: (string[]|null);
+
+            /** SystemStateResourceResult batterySupplies */
+            batterySupplies?: (enoki.v1.IBatterySupplyResourceFact[]|null);
+
+            /** SystemStateResourceResult networkFailureCode */
+            networkFailureCode?: (string|null);
+
+            /** SystemStateResourceResult diskFailureCode */
+            diskFailureCode?: (string|null);
+
+            /** SystemStateResourceResult temperatureFailureCode */
+            temperatureFailureCode?: (string|null);
+
+            /** SystemStateResourceResult batteryFailureCode */
+            batteryFailureCode?: (string|null);
         }
 
         /** Represents a SystemStateResourceResult. */
@@ -2748,6 +3011,45 @@ export namespace enoki {
 
             /** SystemStateResourceResult hostProfile. */
             public hostProfile?: (enoki.v1.IHostProfileResourceFacts|null);
+
+            /** SystemStateResourceResult procNetDev. */
+            public procNetDev: string;
+
+            /** SystemStateResourceResult procNetRoute. */
+            public procNetRoute: string;
+
+            /** SystemStateResourceResult procNetIpv6Route. */
+            public procNetIpv6Route: string;
+
+            /** SystemStateResourceResult procMounts. */
+            public procMounts: string;
+
+            /** SystemStateResourceResult procDiskstats. */
+            public procDiskstats: string;
+
+            /** SystemStateResourceResult diskCountersCollectedAtMs. */
+            public diskCountersCollectedAtMs: (number|Long);
+
+            /** SystemStateResourceResult filesystemCapacities. */
+            public filesystemCapacities: enoki.v1.IFilesystemCapacityResourceFact[];
+
+            /** SystemStateResourceResult temperatureInputs. */
+            public temperatureInputs: string[];
+
+            /** SystemStateResourceResult batterySupplies. */
+            public batterySupplies: enoki.v1.IBatterySupplyResourceFact[];
+
+            /** SystemStateResourceResult networkFailureCode. */
+            public networkFailureCode: string;
+
+            /** SystemStateResourceResult diskFailureCode. */
+            public diskFailureCode: string;
+
+            /** SystemStateResourceResult temperatureFailureCode. */
+            public temperatureFailureCode: string;
+
+            /** SystemStateResourceResult batteryFailureCode. */
+            public batteryFailureCode: string;
 
             /**
              * Creates a new SystemStateResourceResult instance using the specified properties.

@@ -1,6 +1,7 @@
 //! 构建期固定、单次有界的 System State 观测 Runtime。
 
 use std::{
+    collections::BTreeMap,
     ffi::CStr,
     io::{self, Read, Write},
     os::fd::{AsRawFd, RawFd},
@@ -13,8 +14,12 @@ use prost::Message;
 
 use crate::{
     metrics::{
-        CpuCounterRecord, CpuCounterSnapshot, LoadMetrics, MemoryMetrics,
+        BatteryMetrics, CpuCounterRecord, CpuCounterSnapshot, DiskCounterSnapshot,
+        FilesystemCapacity, LoadMetrics, MemoryMetrics, NetworkCounterSnapshot,
         collect_cpu_metrics_from_counter_records,
+        collect_default_route_interfaces_from_proc_routes,
+        collect_disk_counters_from_proc_diskstats_at, collect_disk_metrics_from_mounts,
+        collect_network_metrics_from_proc_net_dev,
     },
     protocol::enoki::v1::{
         CollectorFailure, CollectorFailurePhase, CollectorOutcome, CollectorOutcomeState,
@@ -24,7 +29,7 @@ use crate::{
 };
 
 pub const SYSTEM_STATE_RESOURCE: &str = "official.system-state";
-pub const MAX_SYSTEM_STATE_BYTES: usize = 64 * 1024;
+pub const MAX_SYSTEM_STATE_BYTES: usize = 256 * 1024;
 pub const SYSTEM_STATE_PULL: &[u8] = b"enoki.system-state.v1\n";
 pub const OBSERVATION_WINDOW_PULL: &[u8] = b"enoki.observation-window.v2\n";
 pub const OBSERVATION_RUNTIME_SOCKET: &str = "/run/enoki-observation-runtime.sock";
@@ -106,6 +111,19 @@ pub struct SystemStateResourceResult {
     memory: Option<MemoryMetrics>,
     uptime_seconds: Option<u64>,
     host_profile_facts: Option<HostProfileResourceFacts>,
+    proc_net_dev: String,
+    proc_net_route: String,
+    proc_net_ipv6_route: String,
+    proc_mounts: String,
+    proc_diskstats: String,
+    disk_counters_collected_at_ms: i64,
+    filesystem_capacities: BTreeMap<String, FilesystemCapacity>,
+    temperature_inputs: Vec<String>,
+    battery_supplies: Vec<BatteryMetrics>,
+    network_failure_code: Option<String>,
+    disk_failure_code: Option<String>,
+    temperature_failure_code: Option<String>,
+    battery_failure_code: Option<String>,
 }
 
 impl SystemStateResourceResult {
@@ -116,6 +134,19 @@ impl SystemStateResourceResult {
             memory: None,
             uptime_seconds: None,
             host_profile_facts: None,
+            proc_net_dev: String::new(),
+            proc_net_route: String::new(),
+            proc_net_ipv6_route: String::new(),
+            proc_mounts: String::new(),
+            proc_diskstats: String::new(),
+            disk_counters_collected_at_ms: 0,
+            filesystem_capacities: BTreeMap::new(),
+            temperature_inputs: Vec::new(),
+            battery_supplies: Vec::new(),
+            network_failure_code: None,
+            disk_failure_code: None,
+            temperature_failure_code: None,
+            battery_failure_code: None,
         })
     }
 
@@ -215,6 +246,8 @@ pub struct ObservationAttemptResult {
 pub struct ObservationRuntime<P> {
     provider: P,
     previous_cpu_counters: Option<CpuCounterSnapshot>,
+    previous_network_counters: Option<NetworkCounterSnapshot>,
+    previous_disk_counters: Option<DiskCounterSnapshot>,
     host_profile: Option<HostProfileSnapshot>,
 }
 
@@ -226,6 +259,8 @@ where
         Self {
             provider,
             previous_cpu_counters: None,
+            previous_network_counters: None,
+            previous_disk_counters: None,
             host_profile: None,
         }
     }
@@ -310,6 +345,83 @@ where
             } else {
                 calculation_failed(id, code)
             });
+        }
+        let routes = collect_default_route_interfaces_from_proc_routes(
+            Some(&resource.proc_net_route),
+            Some(&resource.proc_net_ipv6_route),
+        );
+        if let Some(code) = resource.network_failure_code.as_deref() {
+            sample
+                .collector_outcomes
+                .push(resource_failed_with_code("official.network", code));
+        } else if let Some(network) = collect_network_metrics_from_proc_net_dev(
+            &resource.proc_net_dev,
+            routes.as_ref(),
+            self.previous_network_counters.as_ref(),
+        ) {
+            self.previous_network_counters = Some(network.snapshot);
+            sample.network_interfaces = network.interfaces;
+            sample.collector_outcomes.push(produced("official.network"));
+        } else {
+            sample.collector_outcomes.push(no_data("official.network"));
+        }
+
+        let disk_counters = collect_disk_counters_from_proc_diskstats_at(
+            &resource.proc_diskstats,
+            resource.disk_counters_collected_at_ms,
+        );
+        if let Some(code) = resource.disk_failure_code.as_deref() {
+            sample
+                .collector_outcomes
+                .push(resource_failed_with_code("official.disk", code));
+        } else {
+            sample.disks = collect_disk_metrics_from_mounts(
+                &resource.proc_mounts,
+                |mount_point| resource.filesystem_capacities.get(mount_point).copied(),
+                disk_counters.as_ref(),
+                self.previous_disk_counters.as_ref(),
+            );
+            if let Some(snapshot) = disk_counters {
+                self.previous_disk_counters = Some(snapshot);
+            }
+            sample.collector_outcomes.push(if sample.disks.is_empty() {
+                no_data("official.disk")
+            } else {
+                produced("official.disk")
+            });
+        }
+
+        sample.temperature_celsius = resource
+            .temperature_inputs
+            .iter()
+            .filter_map(|raw| raw.parse::<f64>().ok())
+            .map(|raw| if raw > 1_000.0 { raw / 1_000.0 } else { raw })
+            .filter(|value| (0.0..200.0).contains(value))
+            .reduce(f64::max);
+        sample.collector_outcomes.push(
+            if let Some(code) = resource.temperature_failure_code.as_deref() {
+                resource_failed_with_code("official.temperature", code)
+            } else if sample.temperature_celsius.is_some() {
+                produced("official.temperature")
+            } else {
+                no_data("official.temperature")
+            },
+        );
+
+        if let Some(code) = resource.battery_failure_code.as_deref() {
+            sample
+                .collector_outcomes
+                .push(resource_failed_with_code("official.battery", code));
+        } else if let Some(battery) = resource
+            .battery_supplies
+            .iter()
+            .max_by_key(|battery| battery.percent)
+        {
+            sample.battery_percent = Some(battery.percent);
+            sample.battery_state = Some(battery.state.clone());
+            sample.collector_outcomes.push(produced("official.battery"));
+        } else {
+            sample.collector_outcomes.push(no_data("official.battery"));
         }
         if collect_host_profile
             && let Some(facts) = resource
@@ -471,12 +583,91 @@ pub fn decode_system_state_resource_result(bytes: &[u8]) -> Option<SystemStateRe
     let load = crate::metrics::collect_load_metrics_from_proc_loadavg(&wire.proc_loadavg);
     let memory = crate::metrics::collect_memory_metrics_from_proc_meminfo(&wire.proc_meminfo);
     let uptime_seconds = crate::metrics::collect_uptime_seconds_from_proc_uptime(&wire.proc_uptime);
+    let disk_contract_malformed = wire.filesystem_capacities.len() > 4096
+        || wire.filesystem_capacities.iter().any(|fact| {
+            fact.mount_point.is_empty()
+                || fact.mount_point.len() > 4096
+                || fact.free_bytes > fact.total_bytes
+                || fact.available_bytes > fact.total_bytes
+        });
+    let temperature_contract_malformed = wire.temperature_inputs.len() > 4096
+        || wire.temperature_inputs.iter().any(|value| value.len() > 64);
+    let battery_contract_malformed = wire.battery_supplies.len() > 256
+        || wire.battery_supplies.iter().any(|fact| {
+            fact.supply_type.len() > 64 || fact.capacity.len() > 64 || fact.status.len() > 64
+        });
     Some(SystemStateResourceResult {
         counters,
         load,
         memory,
         uptime_seconds,
         host_profile_facts: wire.host_profile,
+        proc_net_dev: wire.proc_net_dev,
+        proc_net_route: wire.proc_net_route,
+        proc_net_ipv6_route: wire.proc_net_ipv6_route,
+        proc_mounts: wire.proc_mounts,
+        proc_diskstats: wire.proc_diskstats,
+        disk_counters_collected_at_ms: wire.disk_counters_collected_at_ms,
+        filesystem_capacities: wire
+            .filesystem_capacities
+            .into_iter()
+            .filter(|fact| !fact.mount_point.is_empty() && fact.mount_point.len() <= 4096)
+            .map(|fact| {
+                (
+                    fact.mount_point,
+                    FilesystemCapacity {
+                        total_bytes: fact.total_bytes,
+                        free_bytes: fact.free_bytes,
+                        available_bytes: fact.available_bytes,
+                    },
+                )
+            })
+            .take(4096)
+            .collect(),
+        temperature_inputs: wire
+            .temperature_inputs
+            .into_iter()
+            .filter(|value| value.len() <= 64)
+            .take(4096)
+            .collect(),
+        battery_supplies: wire
+            .battery_supplies
+            .into_iter()
+            .filter_map(|fact| {
+                (fact.supply_type == "Battery")
+                    .then(|| fact.capacity.parse::<u32>().ok())
+                    .flatten()
+                    .filter(|percent| *percent <= 100)
+                    .map(|percent| BatteryMetrics {
+                        percent,
+                        state: if fact.status.is_empty() || fact.status.len() > 64 {
+                            "Unknown".to_owned()
+                        } else {
+                            fact.status
+                        },
+                    })
+            })
+            .take(256)
+            .collect(),
+        network_failure_code: bounded_resource_code(
+            wire.network_failure_code,
+            "official.network.resource-result-malformed",
+        ),
+        disk_failure_code: contract_resource_code(
+            wire.disk_failure_code,
+            disk_contract_malformed,
+            "official.disk.resource-result-malformed",
+        ),
+        temperature_failure_code: contract_resource_code(
+            wire.temperature_failure_code,
+            temperature_contract_malformed,
+            "official.temperature.resource-result-malformed",
+        ),
+        battery_failure_code: contract_resource_code(
+            wire.battery_failure_code,
+            battery_contract_malformed,
+            "official.battery.resource-result-malformed",
+        ),
     })
 }
 
@@ -485,6 +676,50 @@ fn produced(id: &str) -> CollectorOutcome {
         collector_id: id.to_owned(),
         state: CollectorOutcomeState::Produced as i32,
         failure: None,
+    }
+}
+fn no_data(id: &str) -> CollectorOutcome {
+    CollectorOutcome {
+        collector_id: id.to_owned(),
+        state: CollectorOutcomeState::NoData as i32,
+        failure: None,
+    }
+}
+fn resource_failed_with_code(id: &str, code: &str) -> CollectorOutcome {
+    CollectorOutcome {
+        collector_id: id.to_owned(),
+        state: CollectorOutcomeState::Failed as i32,
+        failure: Some(CollectorFailure {
+            phase: CollectorFailurePhase::Resource as i32,
+            legacy_code: 0,
+            code: code.to_owned(),
+        }),
+    }
+}
+
+fn bounded_resource_code(code: String, malformed: &'static str) -> Option<String> {
+    if code.is_empty() {
+        None
+    } else if code.len() <= 128
+        && code.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+    {
+        Some(code)
+    } else {
+        Some(malformed.to_owned())
+    }
+}
+
+fn contract_resource_code(
+    code: String,
+    contract_malformed: bool,
+    malformed: &'static str,
+) -> Option<String> {
+    if contract_malformed {
+        Some(malformed.to_owned())
+    } else {
+        bounded_resource_code(code, malformed)
     }
 }
 fn calculation_failed(id: &str, code: &'static str) -> CollectorOutcome {
@@ -510,6 +745,10 @@ fn resource_failure_sample(
             "official.load",
             "official.memory",
             "official.uptime",
+            "official.network",
+            "official.disk",
+            "official.temperature",
+            "official.battery",
         ]
         .into_iter()
         .map(|id| CollectorOutcome {
@@ -578,6 +817,10 @@ fn resource_failure_code(
             | "official.load"
             | "official.memory"
             | "official.uptime"
+            | "official.network"
+            | "official.disk"
+            | "official.temperature"
+            | "official.battery"
             | "official.host-profile"
     ));
     let suffix = match failure {

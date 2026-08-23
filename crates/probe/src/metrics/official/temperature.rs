@@ -3,33 +3,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
-};
-use crate::protocol::enoki::v1::MetricSample;
+use crate::metrics::{CollectorCadence, CollectorDefinition, CollectorId};
 
 pub const DEFINITION: CollectorDefinition =
     CollectorDefinition::new(CollectorId::Temperature, CollectorCadence::EveryTick);
-
-#[derive(Default)]
-pub struct TemperatureMetricCollector;
-
-impl MetricCollector for TemperatureMetricCollector {
-    fn definition(&self) -> CollectorDefinition {
-        DEFINITION
-    }
-
-    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let Some(temperature_celsius) = collect_temperature_celsius_from_sysfs("/sys/class/hwmon")
-        else {
-            return Ok(false);
-        };
-
-        sample.temperature_celsius = Some(temperature_celsius);
-
-        Ok(true)
-    }
-}
 
 pub fn collect_temperature_celsius_from_sysfs(root: impl AsRef<Path>) -> Option<f64> {
     let mut highest: Option<f64> = None;

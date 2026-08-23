@@ -1163,7 +1163,7 @@ fn collect_observation_batch(
                 let sample = metrics
                     .get_mut(index)
                     .ok_or(ObservationClientError::InvalidResponse)?;
-                merge_cpu_metrics(sample, cpu_sample, &active_configuration.metrics_config);
+                merge_runtime_metrics(sample, cpu_sample, &active_configuration.metrics_config);
             } else if let Some(failure) = attempt.cpu_resource_outcome {
                 outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
                     sequence: attempt.sequence,
@@ -1179,7 +1179,7 @@ fn collect_observation_batch(
     })
 }
 
-fn merge_cpu_metrics(
+fn merge_runtime_metrics(
     sample: &mut crate::protocol::enoki::v1::MetricSample,
     cpu_sample: crate::protocol::enoki::v1::MetricSample,
     config: &MetricsCollectionConfig,
@@ -1219,6 +1219,19 @@ fn merge_cpu_metrics(
     }
     if config.collector_enabled(CollectorId::Uptime) {
         sample.uptime_seconds = cpu_sample.uptime_seconds;
+    }
+    if config.collector_enabled(CollectorId::Network) {
+        sample.network_interfaces = cpu_sample.network_interfaces;
+    }
+    if config.collector_enabled(CollectorId::Disk) {
+        sample.disks = cpu_sample.disks;
+    }
+    if config.collector_enabled(CollectorId::Temperature) {
+        sample.temperature_celsius = cpu_sample.temperature_celsius;
+    }
+    if config.collector_enabled(CollectorId::Battery) {
+        sample.battery_percent = cpu_sample.battery_percent;
+        sample.battery_state = cpu_sample.battery_state;
     }
 }
 

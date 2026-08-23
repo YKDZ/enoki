@@ -2137,8 +2137,8 @@ async function writeProbeArchive(
       },
       {
         path: "enoki-cpu-resource-provider",
-        permissionProfile: "system-state-provider-v1",
-        resourceContract: "system-state-v1",
+        permissionProfile: "system-state-provider-v2",
+        resourceContract: "system-state-v2",
         role: "system-state-provider",
         sha256: sha256(binary),
         size: binary.byteLength,

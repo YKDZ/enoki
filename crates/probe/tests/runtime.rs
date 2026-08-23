@@ -52,11 +52,33 @@ impl ObservationWindowClient for FixedObservationRuntime {
                             swap_total_bytes: Some(1_024),
                             swap_used_bytes: Some(256),
                             uptime_seconds: Some(123),
+                            network_interfaces: vec![enoki_probe::protocol::enoki::v1::NetworkInterfaceMetric {
+                                name: "eth0".to_owned(),
+                                rx_bytes: 100,
+                                tx_bytes: 200,
+                                rx_bytes_delta: 10,
+                                tx_bytes_delta: 20,
+                            }],
+                            disks: vec![enoki_probe::protocol::enoki::v1::DiskUsageMetric {
+                                mount_point: "/".to_owned(),
+                                filesystem_type: "ext4".to_owned(),
+                                total_bytes: 1_000,
+                                used_bytes: 600,
+                                available_bytes: 300,
+                                ..Default::default()
+                            }],
+                            temperature_celsius: Some(42.0),
+                            battery_percent: Some(72),
+                            battery_state: Some("Discharging".to_owned()),
                             collector_outcomes: [
                                 "official.cpu",
                                 "official.load",
                                 "official.memory",
                                 "official.uptime",
+                                "official.network",
+                                "official.disk",
+                                "official.temperature",
+                                "official.battery",
                             ]
                             .into_iter()
                             .map(|collector_id| enoki_probe::protocol::enoki::v1::CollectorOutcome {
@@ -1248,6 +1270,10 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     assert!(reports[1].metrics[0].collected_at_ms > 0);
     assert!(reports[1].metrics[0].cpu_percent.unwrap_or(-1.0) >= 0.0);
     assert!(reports[1].metrics[0].memory_used_bytes.unwrap_or(0) > 0);
+    assert_eq!(reports[1].metrics[0].network_interfaces[0].name, "eth0");
+    assert_eq!(reports[1].metrics[0].disks[0].mount_point, "/");
+    assert_eq!(reports[1].metrics[0].temperature_celsius, Some(42.0));
+    assert_eq!(reports[1].metrics[0].battery_percent, Some(72));
     assert_eq!(reports[2].metrics.len(), 3);
     assert_eq!(reports[2].metrics[0].sequence, 5);
 }

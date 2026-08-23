@@ -17,7 +17,7 @@ pub use cpu::{
 };
 pub use disk::{
     DiskCounterSnapshot, collect_disk_counters_from_proc_diskstats,
-    collect_disk_metrics_from_mounts,
+    collect_disk_counters_from_proc_diskstats_at, collect_disk_metrics_from_mounts,
 };
 pub use load::{LoadMetrics, collect_load_metrics_from_proc_loadavg};
 pub use memory::{MemoryMetrics, collect_memory_metrics_from_proc_meminfo};
@@ -46,7 +46,14 @@ pub fn collectors() -> Vec<Box<dyn MetricCollector>> {
         .filter(|definition| {
             !matches!(
                 definition.id,
-                CollectorId::Cpu | CollectorId::Memory | CollectorId::Load | CollectorId::Uptime
+                CollectorId::Cpu
+                    | CollectorId::Memory
+                    | CollectorId::Disk
+                    | CollectorId::Network
+                    | CollectorId::Load
+                    | CollectorId::Uptime
+                    | CollectorId::Temperature
+                    | CollectorId::Battery
             )
         })
         .map(|definition| collector_for_id(definition.id))
@@ -57,12 +64,14 @@ fn collector_for_id(collector_id: CollectorId) -> Box<dyn MetricCollector> {
     match collector_id {
         CollectorId::Cpu => unreachable!("CPU is owned by the Observation Runtime"),
         CollectorId::Memory => unreachable!("Memory is owned by the Observation Runtime"),
-        CollectorId::Disk => Box::<disk::DiskMetricCollector>::default(),
-        CollectorId::Network => Box::<network::NetworkMetricCollector>::default(),
+        CollectorId::Disk => unreachable!("Disk is owned by the Observation Runtime"),
+        CollectorId::Network => unreachable!("Network is owned by the Observation Runtime"),
         CollectorId::Load => unreachable!("Load is owned by the Observation Runtime"),
         CollectorId::Uptime => unreachable!("Uptime is owned by the Observation Runtime"),
-        CollectorId::Temperature => Box::<temperature::TemperatureMetricCollector>::default(),
-        CollectorId::Battery => Box::<battery::BatteryMetricCollector>::default(),
+        CollectorId::Temperature => {
+            unreachable!("Temperature is owned by the Observation Runtime")
+        }
+        CollectorId::Battery => unreachable!("Battery is owned by the Observation Runtime"),
         CollectorId::DiskHealth => unreachable!("Disk Health is registered outside official core"),
     }
 }

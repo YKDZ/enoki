@@ -17,6 +17,21 @@ message CpuCounterResourceFact {
   uint64 steal = 9;
 }
 
+// Provider 对一个固定挂载点执行 statvfs 后返回的不可变容量事实。
+message FilesystemCapacityResourceFact {
+  string mount_point = 1;
+  uint64 total_bytes = 2;
+  uint64 free_bytes = 3;
+  uint64 available_bytes = 4;
+}
+
+// Provider 从一个固定电源设备目录读取的原始事实。
+message BatterySupplyResourceFact {
+  string supply_type = 1;
+  string capacity = 2;
+  string status = 3;
+}
+
 // 一次固定 pull 的完整 typed Resource Result。
 // procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
 message SystemStateResourceResult {
@@ -25,4 +40,17 @@ message SystemStateResourceResult {
   string proc_meminfo = 3;
   string proc_uptime = 4;
   HostProfileResourceFacts host_profile = 5;
+  string proc_net_dev = 6;
+  string proc_net_route = 7;
+  string proc_net_ipv6_route = 8;
+  string proc_mounts = 9;
+  string proc_diskstats = 10;
+  int64 disk_counters_collected_at_ms = 11;
+  repeated FilesystemCapacityResourceFact filesystem_capacities = 12;
+  repeated string temperature_inputs = 13;
+  repeated BatterySupplyResourceFact battery_supplies = 14;
+  string network_failure_code = 15;
+  string disk_failure_code = 16;
+  string temperature_failure_code = 17;
+  string battery_failure_code = 18;
 }

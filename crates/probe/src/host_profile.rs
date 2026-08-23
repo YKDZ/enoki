@@ -25,7 +25,21 @@ const EXCLUDED_FILESYSTEMS: &[&str] = &[
 pub fn collect_local_host_profile_resource_facts_with_memory_total(
     memory_total_bytes: u64,
 ) -> HostProfileResourceFacts {
-    let context = HostProfileCollectionContext::read_with_memory_total(memory_total_bytes);
+    collect_local_host_profile_resource_facts_with_filesystems(
+        memory_total_bytes,
+        collect_filesystems(),
+    )
+}
+
+/// Provider 可复用同一次 mount-table/capacity Resource facts，避免重复读取。
+pub fn collect_local_host_profile_resource_facts_with_filesystems(
+    memory_total_bytes: u64,
+    filesystems: Vec<FilesystemProfile>,
+) -> HostProfileResourceFacts {
+    let context = HostProfileCollectionContext::read_with_memory_total_and_filesystems(
+        memory_total_bytes,
+        filesystems,
+    );
     HostProfileResourceFacts {
         architecture: std::env::consts::ARCH.to_string(),
         hostname: read_trimmed("/proc/sys/kernel/hostname")
@@ -89,7 +103,10 @@ struct HostProfileCollectionContext {
 }
 
 impl HostProfileCollectionContext {
-    fn read_with_memory_total(memory_total_bytes: u64) -> Self {
+    fn read_with_memory_total_and_filesystems(
+        memory_total_bytes: u64,
+        filesystems: Vec<FilesystemProfile>,
+    ) -> Self {
         let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
         let cpu_count = std::thread::available_parallelism()
             .map(|count| count.get() as u32)
@@ -98,7 +115,7 @@ impl HostProfileCollectionContext {
         Self {
             cpu_count,
             cpuinfo,
-            filesystems: collect_filesystems(),
+            filesystems,
             memory_total_bytes,
             network_interfaces: collect_network_interfaces(),
             process_snapshot: collect_process_snapshot(),

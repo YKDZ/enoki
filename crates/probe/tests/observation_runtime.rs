@@ -4,7 +4,8 @@ use enoki_probe::observation_runtime::{
     static_collector_registry,
 };
 use enoki_probe::protocol::enoki::v1::{
-    CpuCounterResourceFact, SystemStateResourceResult as WireSystemStateResourceResult,
+    BatterySupplyResourceFact, CpuCounterResourceFact, FilesystemCapacityResourceFact,
+    SystemStateResourceResult as WireSystemStateResourceResult,
 };
 use prost::Message;
 use std::time::Duration;
@@ -103,6 +104,7 @@ fn typed_system_state_envelope_round_trips_all_independent_facts() {
                 .into(),
         proc_uptime: "123.50 0.0\n".into(),
         host_profile: None,
+        ..Default::default()
     };
     let decoded = decode_system_state_resource_result(&wire.encode_to_vec()).unwrap();
     let mut runtime = ObservationRuntime::new(OneResultProvider(Some(decoded)));
@@ -120,9 +122,114 @@ fn typed_system_state_envelope_round_trips_all_independent_facts() {
 }
 
 #[test]
+fn one_device_resource_pull_is_shared_and_runtime_owns_device_delta_state() {
+    struct DeviceProvider(std::collections::VecDeque<SystemStateResourceResult>);
+    impl SystemStateProvider for DeviceProvider {
+        fn pull_system_state(
+            &mut self,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            Ok(self.0.pop_front().unwrap())
+        }
+    }
+    fn result(
+        rx: u64,
+        tx: u64,
+        read_sectors: u64,
+        collected_at_ms: i64,
+    ) -> SystemStateResourceResult {
+        let wire = WireSystemStateResourceResult {
+            cpu_counters: vec![CpuCounterResourceFact {
+                name: "cpu".into(),
+                user: 100,
+                idle: 900,
+                ..Default::default()
+            }],
+            proc_net_dev: format!(
+                "Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\neth0: {rx} 1 0 0 0 0 0 0 {tx} 1 0 0 0 0 0 0\n"
+            ),
+            proc_mounts: "/dev/sda1 / ext4 rw 0 0\n".into(),
+            proc_diskstats: format!("8 1 sda1 1 0 {read_sectors} 10 1 0 4 20 0 30 40 0 0 0 0\n"),
+            disk_counters_collected_at_ms: collected_at_ms,
+            filesystem_capacities: vec![FilesystemCapacityResourceFact {
+                mount_point: "/".into(),
+                total_bytes: 1_000,
+                free_bytes: 400,
+                available_bytes: 300,
+            }],
+            temperature_inputs: vec!["42000".into(), "39".into()],
+            battery_supplies: vec![BatterySupplyResourceFact {
+                supply_type: "Battery".into(),
+                capacity: "72".into(),
+                status: "Discharging".into(),
+            }],
+            ..Default::default()
+        };
+        decode_system_state_resource_result(&wire.encode_to_vec()).unwrap()
+    }
+
+    let mut runtime = ObservationRuntime::new(DeviceProvider(
+        [result(100, 200, 2, 1_000), result(160, 280, 6, 2_000)].into(),
+    ));
+    let request = ObservationWindowRequest::new(Duration::from_secs(5)).unwrap();
+    let first = runtime.observe(request).unwrap();
+    let second = runtime.observe(request).unwrap();
+
+    assert_eq!(first.network_interfaces[0].rx_bytes_delta, 0);
+    assert_eq!(second.network_interfaces[0].rx_bytes_delta, 60);
+    assert_eq!(second.network_interfaces[0].tx_bytes_delta, 80);
+    assert_eq!(first.disks[0].used_bytes, 600);
+    assert_eq!(second.disks[0].read_bytes_delta, 2_048);
+    assert_eq!(second.temperature_celsius, Some(42.0));
+    assert_eq!(second.battery_percent, Some(72));
+    assert_eq!(second.battery_state.as_deref(), Some("Discharging"));
+    assert_eq!(runtime.into_provider().0.len(), 0);
+}
+
+#[test]
 fn malformed_typed_envelope_is_rejected() {
     assert!(decode_system_state_resource_result(&[0xff]).is_none());
     assert!(decode_system_state_resource_result(&[0xa0, 0x06, 0x01]).is_none());
+}
+
+#[test]
+fn one_device_fact_failure_does_not_discard_other_collector_results() {
+    let wire = WireSystemStateResourceResult {
+        cpu_counters: vec![CpuCounterResourceFact {
+            name: "cpu".into(),
+            user: 100,
+            idle: 900,
+            ..Default::default()
+        }],
+        network_failure_code: "official.network.resource-unavailable".into(),
+        temperature_inputs: vec!["41000".into()],
+        battery_supplies: vec![BatterySupplyResourceFact {
+            supply_type: "Battery".into(),
+            capacity: "80".into(),
+            status: "Charging".into(),
+        }],
+        ..Default::default()
+    };
+    let decoded = decode_system_state_resource_result(&wire.encode_to_vec()).unwrap();
+    let mut runtime = ObservationRuntime::new(OneResultProvider(Some(decoded)));
+    let sample = runtime
+        .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
+        .unwrap();
+
+    let network = sample
+        .collector_outcomes
+        .iter()
+        .find(|outcome| outcome.collector_id == "official.network")
+        .unwrap();
+    assert_eq!(
+        network.failure.as_ref().unwrap().code,
+        "official.network.resource-unavailable"
+    );
+    assert_eq!(sample.temperature_celsius, Some(41.0));
+    assert_eq!(sample.battery_percent, Some(80));
 }
 
 #[test]
@@ -270,7 +377,11 @@ fn every_due_attempt_has_its_own_immutable_success_or_typed_outcome() {
             "official.cpu",
             "official.load",
             "official.memory",
-            "official.uptime"
+            "official.uptime",
+            "official.network",
+            "official.disk",
+            "official.temperature",
+            "official.battery",
         ]
     );
     assert!(result.attempts[2].sample.is_some());

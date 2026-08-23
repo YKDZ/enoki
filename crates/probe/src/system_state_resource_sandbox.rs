@@ -13,6 +13,23 @@ const ACCESS_FS_READ_FILE: u64 = 1 << 2;
 const ACCESS_FS_READ_DIR: u64 = 1 << 3;
 const CREATE_RULESET_VERSION: u32 = 1;
 const RULE_PATH_BENEATH: u32 = 1;
+const FIXED_READ_FILES: &[&str] = &[
+    "/etc/os-release",
+    "/usr/lib/os-release",
+    "/proc/stat",
+    "/proc/loadavg",
+    "/proc/meminfo",
+    "/proc/uptime",
+    "/proc/cpuinfo",
+    "/proc/self/mounts",
+    "/proc/net/dev",
+    "/proc/net/route",
+    "/proc/net/ipv6_route",
+    "/proc/diskstats",
+    "/proc/sys/kernel/hostname",
+    "/proc/sys/kernel/osrelease",
+];
+const FIXED_DEVICE_CLASSES: &[&str] = &["/sys/class/hwmon", "/sys/class/power_supply"];
 
 #[derive(Debug)]
 pub struct SystemStateResourceSandboxError;
@@ -51,18 +68,7 @@ pub fn enforce_system_state_resource_read_allowlist() -> Result<(), SystemStateR
     // SAFETY: 非负 syscall 结果是当前进程拥有的 descriptor。
     let ruleset = unsafe { OwnedFd::from_raw_fd(ruleset as i32) };
 
-    for path in [
-        "/etc/os-release",
-        "/usr/lib/os-release",
-        "/proc/stat",
-        "/proc/loadavg",
-        "/proc/meminfo",
-        "/proc/uptime",
-        "/proc/cpuinfo",
-        "/proc/self/mounts",
-        "/proc/sys/kernel/hostname",
-        "/proc/sys/kernel/osrelease",
-    ] {
+    for path in FIXED_READ_FILES {
         add_path_rule(&ruleset, path, ACCESS_FS_READ_FILE)?;
     }
     add_path_rule(
@@ -70,6 +76,9 @@ pub fn enforce_system_state_resource_read_allowlist() -> Result<(), SystemStateR
         "/sys/devices/system/cpu",
         ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR,
     )?;
+    for class_root in FIXED_DEVICE_CLASSES {
+        add_class_device_rules(&ruleset, class_root)?;
+    }
     add_path_rule(&ruleset, "/proc", ACCESS_FS_READ_DIR)?;
     for entry in fs::read_dir("/proc")
         .map_err(|_| SystemStateResourceSandboxError)?
@@ -99,6 +108,34 @@ pub fn enforce_system_state_resource_read_allowlist() -> Result<(), SystemStateR
     // SAFETY: ruleset 是有效 descriptor，flags 必须为零。
     if unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0) } != 0 {
         return Err(SystemStateResourceSandboxError);
+    }
+    Ok(())
+}
+
+fn add_class_device_rules(
+    ruleset: &OwnedFd,
+    class_root: &str,
+) -> Result<(), SystemStateResourceSandboxError> {
+    let entries = match fs::read_dir(class_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(SystemStateResourceSandboxError),
+    };
+    add_path_rule(
+        ruleset,
+        class_root,
+        ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR,
+    )?;
+    for path in entries
+        .flatten()
+        .take(256)
+        .filter_map(|entry| entry.path().canonicalize().ok())
+    {
+        add_path_rule(
+            ruleset,
+            path.to_str().ok_or(SystemStateResourceSandboxError)?,
+            ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR,
+        )?;
     }
     Ok(())
 }
@@ -149,4 +186,19 @@ fn add_path_rule(
     (result == 0)
         .then_some(())
         .ok_or(SystemStateResourceSandboxError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FIXED_DEVICE_CLASSES, FIXED_READ_FILES};
+
+    #[test]
+    fn device_fact_allowlist_is_build_fixed() {
+        assert!(FIXED_READ_FILES.contains(&"/proc/net/dev"));
+        assert!(FIXED_READ_FILES.contains(&"/proc/diskstats"));
+        assert_eq!(
+            FIXED_DEVICE_CLASSES,
+            &["/sys/class/hwmon", "/sys/class/power_supply"]
+        );
+    }
 }
