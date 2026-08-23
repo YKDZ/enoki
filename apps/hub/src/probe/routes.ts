@@ -297,24 +297,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("invalid_enrollment_token", 401);
     }
 
-    if (registration.enrollment.targetKind === "manual_reinstall") {
-      services.audit?.record({
-        action: "probe.manual_reinstall_identity_replaced",
-        actor: "system",
-        details: {
-          enrollmentId: registration.enrollment.enrollmentId,
-          newProbeId: probeId,
-          oldProbeId: registration.enrollment.expectedProbeId,
-          targetAssetSetDigest: registration.enrollment.targetAssetSetDigest,
-          targetProbeVersion: registration.enrollment.targetProbeVersion,
-        },
-        occurredAtMs: registeredAtMs,
-        outcome: "success",
-        subjectId: String(registration.host.id),
-        subjectType: "host",
-      });
-    }
-
     const body = RegistrationResponse.encode(
       RegistrationResponse.create({
         initialConfiguration: defaultProbeConfiguration,
@@ -497,6 +479,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           ? services.enrollments.resolveStartupReport({
               enrollmentId: nonemptyString(request.enrollmentId),
               hostId: host.id,
+              probeAssetBundleVersion: reportedBundleVersion,
+              probeVersion: nonemptyString(
+                hostProfileSnapshot?.hostProfile?.probeVersion,
+              ),
+              producedCurrentHostProfile:
+                hasProducedHostProfile(request) &&
+                Boolean(hostProfileSnapshot?.hostProfile),
               reportedAtMs: reportReceivedAtMs,
             })
           : null;

@@ -2,6 +2,7 @@ import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 
 import { validEnrollmentId } from "../enrollment/lifecycle.js";
+import { createAuditRepository } from "./audit.js";
 import type { HostProfilePersistenceValues } from "./host-profiles.js";
 import {
   enrollmentTokens,
@@ -81,8 +82,12 @@ export type EnrollmentRepository = {
   resolveStartupReport: (input: {
     enrollmentId: string | null;
     hostId: number;
+    probeAssetBundleVersion: string | null;
+    probeVersion: string | null;
+    producedCurrentHostProfile: boolean;
     reportedAtMs: number;
   }) =>
+    | { enrollment: EnrollmentTokenRow; status: "verifying" }
     | { enrollment: EnrollmentTokenRow; status: "ready" }
     | { enrollment: EnrollmentTokenRow; status: "rejected" }
     | null;
@@ -296,6 +301,15 @@ export function createEnrollmentRepository(
       }
 
       if (enrollment.status === "verifying") {
+        if (
+          enrollment.targetKind === "manual_reinstall" &&
+          (!input.producedCurrentHostProfile ||
+            !enrollment.targetProbeVersion ||
+            input.probeVersion !== enrollment.targetProbeVersion ||
+            input.probeAssetBundleVersion !== enrollment.targetProbeVersion)
+        ) {
+          return { enrollment, status: "verifying" };
+        }
         const ready =
           database
             .update(enrollmentTokens)
@@ -630,8 +644,7 @@ export function createEnrollmentRepository(
               !pending.targetAssetSetDigest ||
               !pending.targetProbeVersion ||
               existingHost?.probeId !== pending.expectedProbeId ||
-              existingHost.probeVersion !== pending.expectedProbeVersion ||
-              input.host.probeVersion !== pending.targetProbeVersion)
+              existingHost.probeVersion !== pending.expectedProbeVersion)
           ) {
             return null;
           }
@@ -680,6 +693,24 @@ export function createEnrollmentRepository(
             throw new Error(
               "Failed to associate Probe Enrollment with its Host.",
             );
+          }
+
+          if (pending.targetKind === "manual_reinstall") {
+            createAuditRepository(transaction).record({
+              action: "probe.manual_reinstall_identity_replaced",
+              actor: "system",
+              details: {
+                enrollmentId: enrollment.enrollmentId,
+                newProbeId: host.probeId,
+                oldProbeId: pending.expectedProbeId,
+                targetAssetSetDigest: pending.targetAssetSetDigest,
+                targetProbeVersion: pending.targetProbeVersion,
+              },
+              occurredAtMs: input.registeredAtMs,
+              outcome: "success",
+              subjectId: String(host.id),
+              subjectType: "host",
+            });
           }
 
           return { enrollment, host };

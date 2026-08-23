@@ -72,6 +72,7 @@ async function registerProbe(
     probeVersion?: string;
     publicKey?: boolean;
     publicKeyPem?: string;
+    snapshots?: boolean;
   } = {},
 ) {
   const identity = createTestProbeIdentity();
@@ -83,17 +84,20 @@ async function registerProbe(
       RegistrationRequest.create({
         enrollmentToken,
         ...(options.publicKey === false ? {} : { probePublicKeyPem }),
-        snapshots: [
-          {
-            collectorId: "official.host-profile",
-            hostProfile: sampleHostProfile({
-              hostname,
-              ...(options.probeVersion
-                ? { probeVersion: options.probeVersion }
-                : {}),
-            }),
-          },
-        ],
+        snapshots:
+          options.snapshots === false
+            ? []
+            : [
+                {
+                  collectorId: "official.host-profile",
+                  hostProfile: sampleHostProfile({
+                    hostname,
+                    ...(options.probeVersion
+                      ? { probeVersion: options.probeVersion }
+                      : {}),
+                  }),
+                },
+              ],
       }),
     ).finish(),
     headers: {
@@ -260,8 +264,9 @@ function hashStableHostProfile(
 function stableHostProfile<T extends root.enoki.v1.IHostProfileSnapshot>(
   hostProfile: T,
 ): T {
+  const { probeAssetBundleVersion: _bundleVersion, ...stable } = hostProfile;
   return {
-    ...hostProfile,
+    ...stable,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
         compareProtoStrings(left.mountPoint, right.mountPoint) ||
@@ -604,7 +609,7 @@ describe("Probe registration API", () => {
     database.close();
   });
 
-  it("replaces one Probe identity at the authorized target version while preserving its Host history", async () => {
+  it("binds an empty-snapshot replacement registration and becomes ready only after Boot and a current target Host Profile", async () => {
     const database = await createTemporaryDatabase();
     const nowMs = Date.now();
     const app = createHubApp({
@@ -634,10 +639,11 @@ describe("Probe registration API", () => {
       sequence: 2,
     });
     const enrollmentToken = `enk_enroll_${"m".repeat(32)}`;
+    const enrollmentId = `enr_${"m".repeat(24)}`;
     expect(
       database.enrollments.createPending({
         createdAtMs: nowMs,
-        enrollmentId: `enr_${"m".repeat(24)}`,
+        enrollmentId,
         expiresAtMs: nowMs + 3_600_000,
         target: {
           expectedHubOrigin: "https://hub.example",
@@ -652,14 +658,12 @@ describe("Probe registration API", () => {
       }).kind,
     ).toBe("created");
 
-    const wrongVersion = await registerProbe(app, enrollmentToken);
-    expect(wrongVersion.status).toBe(401);
     const replacement = await registerProbe(
       app,
       enrollmentToken,
       "replacement-host",
       {},
-      { probeVersion: "0.2.0" },
+      { snapshots: false },
     );
     expect(replacement.status).toBe(200);
     const replacementIdentity = await decodeRegisteredProbe(replacement);
@@ -675,9 +679,144 @@ describe("Probe registration API", () => {
       {
         id: host.id,
         probeId: replacementIdentity.probeId,
-        probeVersion: "0.2.0",
+        probeVersion: null,
       },
     ]);
+    expect(
+      database.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ status: "verifying", usedAtMs: expect.any(Number) });
+
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const bootBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "replacement-boot",
+        enrollmentId,
+        probeAssetBundleVersion: "0.2.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: replacementIdentity.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+        snapshots: [],
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(
+            replacementIdentity,
+            "/api/probe/report",
+            bootBody,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      database.sqlite
+        .prepare("select status from enrollment_tokens where enrollment_id = ?")
+        .get(enrollmentId),
+    ).toEqual({ status: "verifying" });
+
+    const incompleteHostProfile = sampleHostProfile({
+      hostname: "replacement-host",
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "",
+    });
+    const incompleteObservationBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "replacement-boot",
+        enrollmentId,
+        metrics: [
+          {
+            collectedAtMs: nowMs + 2,
+            collectorOutcomes: [
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeAssetBundleVersion: "0.2.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: replacementIdentity.probeId,
+        sequenceEnd: 2,
+        sequenceStart: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: incompleteHostProfile,
+            snapshotHash: hashStableHostProfile(incompleteHostProfile),
+          },
+        ],
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(
+            replacementIdentity,
+            "/api/probe/report",
+            incompleteObservationBody,
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      database.sqlite
+        .prepare("select status from enrollment_tokens where enrollment_id = ?")
+        .get(enrollmentId),
+    ).toEqual({ status: "verifying" });
+
+    const currentHostProfile = sampleHostProfile({
+      hostname: "replacement-host",
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "0.2.0",
+    });
+    const observationBody = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "replacement-boot",
+        enrollmentId,
+        metrics: [
+          {
+            collectedAtMs: nowMs + 3,
+            collectorOutcomes: [
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 3,
+          },
+        ],
+        probeAssetBundleVersion: "0.2.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: replacementIdentity.probeId,
+        sequenceEnd: 3,
+        sequenceStart: 3,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: currentHostProfile,
+            snapshotHash: hashStableHostProfile(currentHostProfile),
+          },
+        ],
+      }),
+    ).finish();
+    const observationResponse = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        replacementIdentity,
+        "/api/probe/report",
+        observationBody,
+      ),
+    );
+    expect(observationResponse.status).toBe(200);
+    expect(
+      database.sqlite
+        .prepare("select status from enrollment_tokens where enrollment_id = ?")
+        .get(enrollmentId),
+    ).toEqual({ status: "ready" });
     expect(
       database.metrics.findSamplesForHost({
         fromCollectedAtMs: 1_725_000_001_000,
@@ -700,6 +839,86 @@ describe("Probe registration API", () => {
         targetProbeVersion: "0.2.0",
       }),
     );
+
+    database.close();
+  });
+
+  it("rolls back manual token consumption and identity replacement when the replacement audit cannot be persisted", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = Date.now();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const firstRegistration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const firstIdentity = await decodeRegisteredProbe(firstRegistration);
+    const host = database.sqlite
+      .prepare("select id, probe_id as probeId from managed_hosts")
+      .get() as { id: number; probeId: string };
+    const enrollmentToken = `enk_enroll_${"t".repeat(32)}`;
+    const enrollmentId = `enr_${"t".repeat(24)}`;
+    expect(
+      database.enrollments.createPending({
+        createdAtMs: nowMs,
+        enrollmentId,
+        expiresAtMs: nowMs + 3_600_000,
+        target: {
+          expectedHubOrigin: "https://hub.example",
+          expectedProbeId: firstIdentity.probeId,
+          expectedProbeVersion: "0.1.0",
+          hostId: host.id,
+          kind: "manual_reinstall",
+          targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+          targetProbeVersion: "0.2.0",
+        },
+        tokenHash: hashSecret(enrollmentToken),
+      }).kind,
+    ).toBe("created");
+    database.sqlite.exec(`
+      create trigger reject_manual_reinstall_audit
+      before insert on audit_log
+      when new.action = 'probe.manual_reinstall_identity_replaced'
+      begin
+        select raise(abort, 'audit unavailable');
+      end
+    `);
+
+    const response = await registerProbe(
+      app,
+      enrollmentToken,
+      "replacement-host",
+      {},
+      { snapshots: false },
+    );
+
+    expect(response.status).toBe(500);
+    expect(
+      database.sqlite
+        .prepare(
+          "select status, used_at_ms as usedAtMs, managed_host_id as managedHostId from enrollment_tokens where enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ managedHostId: null, status: "pending", usedAtMs: null });
+    expect(
+      database.sqlite
+        .prepare("select probe_id as probeId from managed_hosts where id = ?")
+        .get(host.id),
+    ).toEqual({ probeId: firstIdentity.probeId });
+    expect(
+      database.sqlite
+        .prepare(
+          "select count(*) as count from audit_log where action = 'probe.manual_reinstall_identity_replaced'",
+        )
+        .get(),
+    ).toEqual({ count: 0 });
 
     database.close();
   });
