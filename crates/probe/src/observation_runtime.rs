@@ -7,7 +7,7 @@ use std::{
     os::fd::{AsRawFd, RawFd},
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use prost::Message;
@@ -52,6 +52,14 @@ const MAX_COLLECTION_CADENCE_SECONDS: u16 = 200;
 
 pub trait ObservationRuntimeSleeper {
     fn sleep(&mut self, duration: Duration);
+    fn sleep_with_progress(
+        &mut self,
+        duration: Duration,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
+    ) -> io::Result<()> {
+        self.sleep(duration);
+        progress.notify_progress()
+    }
     fn now_ms(&self) -> i64 {
         unix_time_ms()
     }
@@ -62,6 +70,38 @@ pub struct ThreadObservationRuntimeSleeper;
 impl ObservationRuntimeSleeper for ThreadObservationRuntimeSleeper {
     fn sleep(&mut self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn sleep_with_progress(
+        &mut self,
+        duration: Duration,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
+    ) -> io::Result<()> {
+        let mut remaining = duration;
+        while !remaining.is_zero() {
+            let step = remaining.min(Duration::from_secs(10));
+            std::thread::sleep(step);
+            remaining = remaining.saturating_sub(step);
+            progress.notify_progress()?;
+        }
+        Ok(())
+    }
+}
+
+pub trait ObservationRuntimeProgressNotifier {
+    fn notify_ready(&mut self) -> io::Result<()>;
+    fn notify_progress(&mut self) -> io::Result<()>;
+}
+
+struct InertRuntimeProgressNotifier;
+
+impl ObservationRuntimeProgressNotifier for InertRuntimeProgressNotifier {
+    fn notify_ready(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn notify_progress(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -643,11 +683,21 @@ where
         request: ObservationWindowRequest,
         sleeper: &mut impl ObservationRuntimeSleeper,
     ) -> ObservationWindowResult {
+        self.collect_next_window_with_progress(request, sleeper, &mut InertRuntimeProgressNotifier)
+            .expect("inert Runtime progress notifier cannot fail")
+    }
+
+    pub fn collect_next_window_with_progress(
+        &mut self,
+        request: ObservationWindowRequest,
+        sleeper: &mut impl ObservationRuntimeSleeper,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
+    ) -> io::Result<ObservationWindowResult> {
         self.host_profile = None;
         let mut window_host_profile = None;
         let mut attempts = Vec::with_capacity(CPU_SAMPLES_PER_WINDOW);
         for offset in 0..CPU_SAMPLES_PER_WINDOW {
-            sleeper.sleep(request.cadence());
+            sleeper.sleep_with_progress(request.cadence(), progress)?;
             match self.observe_at(
                 request,
                 request.sequence_start + offset as u64,
@@ -697,11 +747,12 @@ where
                     })
                 }
             }
+            progress.notify_progress()?;
         }
-        ObservationWindowResult {
+        Ok(ObservationWindowResult {
             attempts,
             host_profile: window_host_profile,
-        }
+        })
     }
 
     pub fn into_provider(self) -> P {
@@ -1206,6 +1257,9 @@ fn resource_failure_code(
 
 pub struct ObservationRuntimeServer<P> {
     runtime: ObservationRuntime<P>,
+    last_request_sequence_start: Option<u64>,
+    last_delivered_sequence_end: Option<u64>,
+    next_eligible_at: Option<Instant>,
 }
 
 impl<P> ObservationRuntimeServer<P>
@@ -1215,6 +1269,9 @@ where
     pub fn new(provider: P) -> Self {
         Self {
             runtime: ObservationRuntime::new(provider),
+            last_request_sequence_start: None,
+            last_delivered_sequence_end: None,
+            next_eligible_at: None,
         }
     }
 
@@ -1225,6 +1282,9 @@ where
         Self {
             runtime: ObservationRuntime::new(provider)
                 .with_disk_health_provider(disk_health_provider),
+            last_request_sequence_start: None,
+            last_delivered_sequence_end: None,
+            next_eligible_at: None,
         }
     }
 
@@ -1235,22 +1295,64 @@ where
 
     pub fn serve_connection_with_sleeper(
         &mut self,
+        stream: UnixStream,
+        sleeper: &mut impl ObservationRuntimeSleeper,
+    ) -> io::Result<()> {
+        self.serve_connection_with_sleeper_and_progress(
+            stream,
+            sleeper,
+            &mut InertRuntimeProgressNotifier,
+        )
+    }
+
+    pub fn serve_connection_with_sleeper_and_progress(
+        &mut self,
         mut stream: UnixStream,
         sleeper: &mut impl ObservationRuntimeSleeper,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
     ) -> io::Result<()> {
         configure_deadline(&stream, RUNTIME_REQUEST_DEADLINE)?;
         let Some(request) = read_runtime_request(&mut stream)? else {
             return write_window_failure(&mut stream);
         };
         let RuntimeRequest::Window(request) = request;
+        if !self.claim_window(request, Instant::now()) {
+            return write_window_failure(&mut stream);
+        }
         configure_deadline(
             &stream,
             runtime_window_deadline(request.cadence()).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "bounded Runtime deadline")
             })?,
         )?;
-        let result = self.runtime.collect_next_window(request, sleeper);
-        write_window_success(&mut stream, crate::version::probe_version(), &result)
+        let result = self
+            .runtime
+            .collect_next_window_with_progress(request, sleeper, progress)?;
+        write_window_success(&mut stream, crate::version::probe_version(), &result)?;
+        self.last_delivered_sequence_end = result.attempts.last().map(|attempt| attempt.sequence);
+        Ok(())
+    }
+
+    fn claim_window(&mut self, request: ObservationWindowRequest, now: Instant) -> bool {
+        if self
+            .last_request_sequence_start
+            .is_some_and(|last| request.sequence_start <= last)
+            || self
+                .last_delivered_sequence_end
+                .is_some_and(|last| request.sequence_start <= last)
+            || self.next_eligible_at.is_some_and(|eligible| now < eligible)
+        {
+            return false;
+        }
+        let Some(window_span) = request.cadence().checked_mul(CPU_SAMPLES_PER_WINDOW as u32) else {
+            return false;
+        };
+        let Some(next_eligible_at) = now.checked_add(window_span) else {
+            return false;
+        };
+        self.last_request_sequence_start = Some(request.sequence_start);
+        self.next_eligible_at = Some(next_eligible_at);
+        true
     }
 
     pub fn serve_listener(&mut self, listener: &UnixListener) -> io::Result<()> {
@@ -1287,18 +1389,56 @@ where
     }
 
     pub fn serve_fixed_probe_listener(&mut self, listener: &UnixListener) -> io::Result<()> {
-        for connection in listener.incoming() {
-            let connection = match connection {
-                Ok(connection) => connection,
+        self.serve_fixed_probe_listener_with_progress(listener, &mut InertRuntimeProgressNotifier)
+    }
+
+    pub fn serve_fixed_probe_listener_with_progress(
+        &mut self,
+        listener: &UnixListener,
+        progress: &mut dyn ObservationRuntimeProgressNotifier,
+    ) -> io::Result<()> {
+        progress.notify_ready()?;
+        loop {
+            if !listener_has_connection(listener, Duration::from_secs(10))? {
+                progress.notify_progress()?;
+                continue;
+            }
+            let connection = match listener.accept() {
+                Ok((connection, _)) => connection,
                 Err(error) if recoverable_accept_error(&error) => continue,
                 Err(error) => return Err(error),
             };
             if require_peer_uid(connection.as_raw_fd(), c"enoki-probe").is_err() {
                 continue;
             }
-            let _ = self.serve_connection(connection);
+            let mut sleeper = ThreadObservationRuntimeSleeper;
+            let _ =
+                self.serve_connection_with_sleeper_and_progress(connection, &mut sleeper, progress);
         }
-        Ok(())
+    }
+}
+
+fn listener_has_connection(listener: &UnixListener, timeout: Duration) -> io::Result<bool> {
+    let timeout_ms = i32::try_from(timeout.as_millis())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "listener wait exceeds i32"))?;
+    let mut descriptor = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll 只在调用期间借用一个有效的固定 listener 描述符。
+    let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+    match result {
+        -1 => {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+        0 => Ok(false),
+        _ => Ok(true),
     }
 }
 

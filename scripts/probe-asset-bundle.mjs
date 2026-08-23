@@ -12,7 +12,7 @@ export const probeBundleComponentProfiles = Object.freeze({
   }),
   "observation-runtime": Object.freeze({
     path: "enoki-observation-runtime",
-    permissionProfile: "observation-runtime-v3",
+    permissionProfile: "observation-runtime-v4",
     resourceContract: "official-observation-v2",
   }),
   "system-state-provider": Object.freeze({

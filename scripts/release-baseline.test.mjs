@@ -977,7 +977,7 @@ async function writeProbeArchive(
         },
         {
           path: "enoki-observation-runtime",
-          permissionProfile: "observation-runtime-v3",
+          permissionProfile: "observation-runtime-v4",
           resourceContract: "official-observation-v2",
           role: "observation-runtime",
           sha256: sha256(binary),

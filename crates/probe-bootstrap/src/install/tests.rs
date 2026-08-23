@@ -728,7 +728,7 @@ mod tests {
             role_units.each_ref().map(|(profile, _)| *profile),
             [
                 "probe-v3",
-                "observation-runtime-v3",
+                "observation-runtime-v4",
                 "system-state-provider-v5",
                 "disk-health-provider-v3",
             ],
@@ -773,6 +773,24 @@ mod tests {
         assert!(disk_health.contains("DevicePolicy=closed"));
         assert!(disk_health.contains("DeviceAllow=block-* rw"));
         assert!(!disk_health.contains("PrivateDevices=true"));
+    }
+
+    #[test]
+    fn observation_runtime_has_a_fixed_progress_watchdog_and_crash_budget() {
+        let runtime = observation_runtime_unit();
+
+        for property in [
+            "StartLimitIntervalSec=60s",
+            "StartLimitBurst=3",
+            "Type=notify",
+            "NotifyAccess=main",
+            "WatchdogSec=30s",
+            "KillMode=control-group",
+            "Restart=on-failure",
+            "RestartSec=5s",
+        ] {
+            assert!(runtime.contains(property), "Runtime 缺少 {property}");
+        }
     }
 
     #[test]

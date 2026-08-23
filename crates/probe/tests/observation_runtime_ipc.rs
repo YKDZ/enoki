@@ -1,8 +1,8 @@
 use std::{os::unix::net::UnixListener, thread};
 
 use enoki_probe::observation_runtime::{
-    ObservationRuntimeServer, SystemStateProvider, SystemStatePullRequest,
-    SystemStateResourceResult, UnixObservationRuntimeClient,
+    ObservationRuntimeProgressNotifier, ObservationRuntimeServer, SystemStateProvider,
+    SystemStatePullRequest, SystemStateResourceResult, UnixObservationRuntimeClient,
 };
 
 #[test]
@@ -69,6 +69,44 @@ fn probe_gets_the_runtime_cached_host_profile_snapshot_over_the_same_closed_ipc(
     server.join().expect("Runtime exits cleanly");
     let snapshot = result.host_profile.expect("Runtime-produced Snapshot");
     assert_eq!(snapshot.hostname, "runtime-host");
+}
+
+#[test]
+fn completed_window_reports_progress_during_each_bounded_cadence_and_attempt() {
+    let directory = tempfile::tempdir().expect("temporary socket directory");
+    let socket = directory.path().join("runtime.sock");
+    let listener = UnixListener::bind(&socket).expect("runtime socket binds");
+    let server = thread::spawn(move || {
+        let (connection, _) = listener.accept().expect("Probe connects");
+        let mut sleeper = NoopSleeper;
+        let mut progress = RecordingProgress::default();
+        ObservationRuntimeServer::new(FixedCpuProvider)
+            .serve_connection_with_sleeper_and_progress(connection, &mut sleeper, &mut progress)
+            .expect("Runtime returns one bounded result");
+        progress.notifications
+    });
+
+    UnixObservationRuntimeClient::new(&socket, "dev")
+        .request_finalized_window(std::time::Duration::from_secs(7), 1)
+        .expect("Probe receives Runtime result");
+
+    assert_eq!(server.join().expect("Runtime exits cleanly"), 6);
+}
+
+#[derive(Default)]
+struct RecordingProgress {
+    notifications: usize,
+}
+
+impl ObservationRuntimeProgressNotifier for RecordingProgress {
+    fn notify_ready(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn notify_progress(&mut self) -> std::io::Result<()> {
+        self.notifications += 1;
+        Ok(())
+    }
 }
 
 struct NoopSleeper;
