@@ -2600,6 +2600,71 @@ export function createProbeHostHarness({
     }
   }
 
+  async function runInstallCommand(installCommand, runId, transition) {
+    assertRunId(runId);
+    if (disposableRunId !== runId) {
+      throw new Error(
+        "Release Test Host must pass disposable preflight before installation",
+      );
+    }
+    assertInstallCommand(installCommand);
+    const reinstallation = runOwnsMutation;
+    if (transition === "manual-reinstall") {
+      assertOwnedRun(runId, disposableRunId, runOwnsMutation);
+      if (readyForReinstallation) {
+        throw new Error(
+          "Release Test Host manual reinstall requires the current owned Probe installation",
+        );
+      }
+    } else if (reinstallation && !readyForReinstallation) {
+      throw new Error(
+        "Release Test Host must complete Local Probe Uninstall before reinstallation",
+      );
+    }
+    if (!reinstallation) {
+      const claim = await execute(claimRunScript(runId, ownershipToken), {
+        root: true,
+      });
+      if (claim.code !== 0) {
+        throw new Error(
+          `Could not claim Release Test Host run: ${claim.stderr}`,
+        );
+      }
+      runOwnsMutation = true;
+    }
+    const result = await execute(
+      `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
+      {
+        root: false,
+        sensitive: true,
+      },
+    );
+    const recorded = await execute(
+      reinstallation
+        ? renewRunResourcesScript(runId, ownershipToken)
+        : recordRunResourcesScript(runId, ownershipToken),
+      { root: true },
+    );
+    if (recorded.code !== 0) {
+      const error = new Error(
+        `Could not record run-owned Probe resources: ${recorded.stderr}`,
+      );
+      error.code = "probe_resource_recording_failed";
+      error.installerEvidence = commandEvidence(result);
+      throw error;
+    }
+    if (result.code !== 0) {
+      const error = new Error(
+        `Probe installation failed (${result.code}); redacted installer evidence was retained`,
+      );
+      error.code = "probe_installation_failed";
+      error.installerEvidence = commandEvidence(result);
+      throw error;
+    }
+    readyForReinstallation = false;
+    return { output: commandEvidence(result), runId };
+  }
+
   return {
     async assertReleaseTestHost(expected) {
       if (
@@ -2674,61 +2739,11 @@ export function createProbeHostHarness({
     },
 
     async install(installCommand, runId) {
-      assertRunId(runId);
-      if (disposableRunId !== runId) {
-        throw new Error(
-          "Release Test Host must pass disposable preflight before installation",
-        );
-      }
-      assertInstallCommand(installCommand);
-      const reinstallation = runOwnsMutation;
-      if (reinstallation && !readyForReinstallation) {
-        throw new Error(
-          "Release Test Host must complete Local Probe Uninstall before reinstallation",
-        );
-      }
-      if (!reinstallation) {
-        const claim = await execute(claimRunScript(runId, ownershipToken), {
-          root: true,
-        });
-        if (claim.code !== 0) {
-          throw new Error(
-            `Could not claim Release Test Host run: ${claim.stderr}`,
-          );
-        }
-        runOwnsMutation = true;
-      }
-      const result = await execute(
-        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
-        {
-          root: false,
-          sensitive: true,
-        },
-      );
-      const recorded = await execute(
-        reinstallation
-          ? renewRunResourcesScript(runId, ownershipToken)
-          : recordRunResourcesScript(runId, ownershipToken),
-        { root: true },
-      );
-      if (recorded.code !== 0) {
-        const error = new Error(
-          `Could not record run-owned Probe resources: ${recorded.stderr}`,
-        );
-        error.code = "probe_resource_recording_failed";
-        error.installerEvidence = commandEvidence(result);
-        throw error;
-      }
-      if (result.code !== 0) {
-        const error = new Error(
-          `Probe installation failed (${result.code}); redacted installer evidence was retained`,
-        );
-        error.code = "probe_installation_failed";
-        error.installerEvidence = commandEvidence(result);
-        throw error;
-      }
-      readyForReinstallation = false;
-      return { output: commandEvidence(result), runId };
+      return runInstallCommand(installCommand, runId, "fresh");
+    },
+
+    async manualReinstall(installCommand, runId) {
+      return runInstallCommand(installCommand, runId, "manual-reinstall");
     },
 
     async assertInstalled(runId, expectedProbeVersion) {
