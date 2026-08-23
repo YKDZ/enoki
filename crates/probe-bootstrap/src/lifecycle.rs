@@ -328,6 +328,8 @@ pub enum LifecyclePhase {
     Activating,
     Cleaning,
     Reporting,
+    Committing,
+    Finalizing,
     Complete,
     Failed,
 }
@@ -387,6 +389,16 @@ impl LifecycleExecution {
             | (
                 LifecycleTransition::Uninstall,
                 LifecyclePhase::Reporting,
+                LifecyclePhase::Committing,
+            )
+            | (
+                LifecycleTransition::Uninstall,
+                LifecyclePhase::Committing,
+                LifecyclePhase::Finalizing,
+            )
+            | (
+                LifecycleTransition::Uninstall,
+                LifecyclePhase::Finalizing,
                 LifecyclePhase::Complete,
             ) => true,
             (_, phase, LifecyclePhase::Failed)
@@ -406,6 +418,32 @@ impl LifecycleExecution {
     #[must_use]
     pub const fn phase(self) -> LifecyclePhase {
         self.phase
+    }
+
+    /// 由状态机进入阶段后立即执行对应副作用；任一阶段失败都在返回前封闭为
+    /// `Failed`，后续阶段不会被调用。
+    pub fn run_uninstall<E>(
+        &mut self,
+        mut execute: impl FnMut(LifecyclePhase) -> Result<(), E>,
+    ) -> Result<(), E> {
+        for phase in [
+            LifecyclePhase::Verified,
+            LifecyclePhase::Cleaning,
+            LifecyclePhase::Reporting,
+            LifecyclePhase::Committing,
+            LifecyclePhase::Finalizing,
+        ] {
+            self.advance(phase)
+                .expect("固定卸载阶段序列必须符合封闭状态机");
+            if let Err(error) = execute(phase) {
+                self.advance(LifecyclePhase::Failed)
+                    .expect("非终态卸载可封闭为失败");
+                return Err(error);
+            }
+        }
+        self.advance(LifecyclePhase::Complete)
+            .expect("固定卸载 finalization 后可提交完成");
+        Ok(())
     }
 }
 
@@ -520,6 +558,8 @@ mod tests {
             LifecyclePhase::Verified,
             LifecyclePhase::Cleaning,
             LifecyclePhase::Reporting,
+            LifecyclePhase::Committing,
+            LifecyclePhase::Finalizing,
             LifecyclePhase::Complete,
         ] {
             uninstall.advance(phase).expect("卸载状态合法");
@@ -540,5 +580,28 @@ mod tests {
             uninstall.advance(LifecyclePhase::Staged),
             Err(LifecycleRejection::InvalidState),
         );
+    }
+
+    #[test]
+    fn uninstall_runner_stops_at_the_exact_failed_effect_phase() {
+        for failed in [
+            LifecyclePhase::Verified,
+            LifecyclePhase::Cleaning,
+            LifecyclePhase::Reporting,
+            LifecyclePhase::Committing,
+            LifecyclePhase::Finalizing,
+        ] {
+            let mut execution =
+                LifecycleExecution::begin(LifecycleTransition::Uninstall).expect("卸载已启用");
+            let mut observed = Vec::new();
+            let result = execution.run_uninstall(|phase| {
+                observed.push(phase);
+                (phase != failed).then_some(()).ok_or("stage-failed")
+            });
+
+            assert_eq!(result, Err("stage-failed"));
+            assert_eq!(observed.last(), Some(&failed));
+            assert_eq!(execution.phase(), LifecyclePhase::Failed);
+        }
     }
 }
