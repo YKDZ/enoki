@@ -12,7 +12,7 @@ use crate::registration::{
 use crate::{
     collectors::{HOST_PROFILE_COLLECTOR_ID, is_owner_configurable_collector_id},
     hub_url,
-    metrics::{CollectorCadenceSchedule, CollectorId, MetricsCollectionConfig, MetricsCollector},
+    metrics::{CollectorId, MetricsCollectionConfig},
     observation_runtime::{
         ObservationClientError, ObservationWindowClient, SystemStateResourceAcquisitionFailure,
         UnixObservationRuntimeClient,
@@ -454,7 +454,6 @@ fn run_reporting_loop(
     let mut pending_configuration_error = None;
     let mut sequence = 1;
     let mut reports_sent = 0;
-    let mut metrics_collector = MetricsCollector::default();
     let mut operation_reports = ProbeOperationReportQueue::default();
     let request = startup_report(StartupReportInput {
         boot_id: &boot_id,
@@ -491,13 +490,8 @@ fn run_reporting_loop(
     }
 
     while !report_limit_reached(reports_sent, control) {
-        let collected = collect_observation_batch(
-            sleeper,
-            &active_configuration,
-            &mut sequence,
-            &mut metrics_collector,
-            observation_runtime,
-        );
+        let collected =
+            collect_observation_batch(&active_configuration, &mut sequence, observation_runtime);
         let (
             sequence_start,
             sequence_end,
@@ -1115,68 +1109,61 @@ fn notify_systemd_ready() -> Result<(), std::io::Error> {
 }
 
 fn collect_observation_batch(
-    sleeper: &mut impl ProbeRuntimeSleeper,
     active_configuration: &ActiveProbeConfiguration,
     sequence: &mut u64,
-    metrics_collector: &mut MetricsCollector,
     observation_runtime: &impl ObservationWindowClient,
 ) -> Result<FinalizedObservationBatch, ObservationClientError> {
     let sequence_start = *sequence + 1;
-
-    let schedule = CollectorCadenceSchedule::for_tick_interval(
+    let runtime_window = match observation_runtime.request_finalized_window(
         active_configuration.metrics_collection_interval,
-    );
-    std::thread::scope(|scope| {
-        let runtime_window = scope.spawn(|| {
-            observation_runtime.request_finalized_window(
-                active_configuration.metrics_collection_interval,
-                sequence_start,
-            )
-        });
-        let mut metrics = Vec::new();
-        for _ in 0..REPORTING_WINDOW_TICKS {
-            sleeper.sleep(active_configuration.metrics_collection_interval);
-            *sequence += 1;
-            metrics.push(metrics_collector.collect_after(
-                *sequence,
-                active_configuration.metrics_collection_interval,
-                schedule,
-                &active_configuration.metrics_config,
-            ));
+        sequence_start,
+    ) {
+        Ok(window) => window,
+        Err(error) => {
+            *sequence = sequence.saturating_add(REPORTING_WINDOW_TICKS);
+            return Err(error);
         }
-        let runtime_window = runtime_window
-            .join()
-            .map_err(|_| ObservationClientError::Unavailable)??;
-        if runtime_window.attempts.len() != metrics.len() {
+    };
+    if runtime_window.attempts.len() != REPORTING_WINDOW_TICKS as usize {
+        *sequence = sequence.saturating_add(REPORTING_WINDOW_TICKS);
+        return Err(ObservationClientError::InvalidResponse);
+    }
+
+    let host_profile = runtime_window.host_profile;
+    let mut metrics = Vec::with_capacity(runtime_window.attempts.len());
+    let mut outcomes = Vec::new();
+    for (index, attempt) in runtime_window.attempts.into_iter().enumerate() {
+        let expected_sequence = sequence_start + index as u64;
+        if attempt.sequence != expected_sequence
+            || attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some()
+        {
+            *sequence = sequence_start.saturating_add(REPORTING_WINDOW_TICKS - 1);
             return Err(ObservationClientError::InvalidResponse);
         }
-        let host_profile = runtime_window.host_profile;
-        let mut outcomes = Vec::new();
-        for (index, attempt) in runtime_window.attempts.into_iter().enumerate() {
-            let expected_sequence = sequence_start + index as u64;
-            if attempt.sequence != expected_sequence
-                || attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some()
-            {
-                return Err(ObservationClientError::InvalidResponse);
-            }
-            if let Some(cpu_sample) = attempt.sample {
-                let sample = metrics
-                    .get_mut(index)
-                    .ok_or(ObservationClientError::InvalidResponse)?;
-                merge_runtime_metrics(sample, cpu_sample, &active_configuration.metrics_config);
-            } else if let Some(failure) = attempt.cpu_resource_outcome {
-                outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
-                    sequence: attempt.sequence,
-                    reason: match failure {
-                        SystemStateResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
-                        SystemStateResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
-                        SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
-                    },
-                });
-            }
+        if let Some(runtime_sample) = attempt.sample {
+            let mut sample = crate::protocol::enoki::v1::MetricSample {
+                sequence: attempt.sequence,
+                ..Default::default()
+            };
+            merge_runtime_metrics(
+                &mut sample,
+                runtime_sample,
+                &active_configuration.metrics_config,
+            );
+            metrics.push(sample);
+        } else if let Some(failure) = attempt.cpu_resource_outcome {
+            outcomes.push(crate::protocol::enoki::v1::CpuResourceCollectionOutcome {
+                sequence: attempt.sequence,
+                reason: match failure {
+                    SystemStateResourceAcquisitionFailure::Unavailable => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceUnavailable as i32,
+                    SystemStateResourceAcquisitionFailure::Malformed => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuResourceMalformed as i32,
+                    SystemStateResourceAcquisitionFailure::ActivationBudgetExhausted => crate::protocol::enoki::v1::CpuResourceCollectionOutcomeReason::CpuProviderActivationBudgetExhausted as i32,
+                },
+            });
         }
-        Ok((sequence_start, *sequence, metrics, outcomes, host_profile))
-    })
+    }
+    *sequence = sequence_start.saturating_add(REPORTING_WINDOW_TICKS - 1);
+    Ok((sequence_start, *sequence, metrics, outcomes, host_profile))
 }
 
 fn merge_runtime_metrics(
@@ -1684,23 +1671,10 @@ mod tests {
             },
         };
         let mut sequence = 0;
-        let mut sleeper = NoopSleeper;
-        let mut collector =
-            MetricsCollector::from_registry(crate::metrics::CollectorRegistry::from_collectors(
-                vec![Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::EveryTick,
-                    metric_field: FakeMetricField::Memory,
-                })],
-            ));
 
-        let (_, _, samples, outcome, _) = collect_observation_batch(
-            &mut sleeper,
-            &active_configuration,
-            &mut sequence,
-            &mut collector,
-            &client,
-        )
-        .expect("Observation Batch");
+        let (_, _, samples, outcome, _) =
+            collect_observation_batch(&active_configuration, &mut sequence, &client)
+                .expect("Observation Batch");
 
         assert_eq!(
             *client.cadences.lock().expect("cadences"),
@@ -1783,31 +1757,11 @@ mod tests {
             },
         };
         let mut sequence = 0;
-        let mut sleeper = NoopSleeper;
-        let mut collector =
-            MetricsCollector::from_registry(crate::metrics::CollectorRegistry::from_collectors(
-                vec![Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::EveryTick,
-                    metric_field: FakeMetricField::Memory,
-                })],
-            ));
+        let (_, _, samples, outcome, _) =
+            collect_observation_batch(&active_configuration, &mut sequence, &client)
+                .expect("partial Observation Batch");
 
-        let (_, _, samples, outcome, _) = collect_observation_batch(
-            &mut sleeper,
-            &active_configuration,
-            &mut sequence,
-            &mut collector,
-            &client,
-        )
-        .expect("partial Observation Batch");
-
-        assert_eq!(samples.len(), 3);
-        assert!(
-            samples
-                .iter()
-                .all(|sample| sample.memory_used_bytes == Some(42))
-        );
-        assert!(samples.iter().all(|sample| sample.cpu_percent.is_none()));
+        assert!(samples.is_empty());
         assert_eq!(
             outcome.iter().map(|outcome| outcome.reason).collect::<Vec<_>>(),
             vec![
@@ -1833,25 +1787,9 @@ mod tests {
             version: "default-v1".to_string(),
         };
         let mut sequence = 1;
-        let mut sleeper = NoopSleeper;
-        let mut metrics_collector = MetricsCollector::from_registry(
-            crate::metrics::CollectorRegistry::from_collectors(vec![
-                Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::EveryTick,
-                    metric_field: FakeMetricField::Memory,
-                }),
-                Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::Every12Ticks,
-                    metric_field: FakeMetricField::Load,
-                }),
-            ]),
-        );
-
         let (_, _, metrics, _, _) = collect_observation_batch(
-            &mut sleeper,
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
             &RuntimeMetricsWindowClient,
         )
         .expect("non-CPU Observation Batch succeeds");
@@ -1880,44 +1818,27 @@ mod tests {
             version: "default-v1".to_string(),
         };
         let mut sequence = 0;
-        let mut sleeper = NoopSleeper;
-        let mut metrics_collector =
-            MetricsCollector::from_registry(crate::metrics::CollectorRegistry::from_collectors(
-                vec![Box::new(FakeMetricCollector {
-                    cadence: crate::metrics::CollectorCadence::Every12Ticks,
-                    metric_field: FakeMetricField::Load,
-                })],
-            ));
-
         let (_, _, first_metrics, _, _) = collect_observation_batch(
-            &mut sleeper,
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
             &RuntimeMetricsWindowClient,
         )
         .expect("first non-CPU Observation Batch succeeds");
         let (_, _, second_metrics, _, _) = collect_observation_batch(
-            &mut sleeper,
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
             &RuntimeMetricsWindowClient,
         )
         .expect("second non-CPU Observation Batch succeeds");
         let (_, _, third_metrics, _, _) = collect_observation_batch(
-            &mut sleeper,
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
             &RuntimeMetricsWindowClient,
         )
         .expect("third non-CPU Observation Batch succeeds");
         let (_, _, fourth_metrics, _, _) = collect_observation_batch(
-            &mut sleeper,
             &active_configuration,
             &mut sequence,
-            &mut metrics_collector,
             &RuntimeMetricsWindowClient,
         )
         .expect("fourth non-CPU Observation Batch succeeds");
@@ -1945,43 +1866,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1.0; 12],
         );
-    }
-
-    enum FakeMetricField {
-        Load,
-        Memory,
-    }
-
-    struct FakeMetricCollector {
-        cadence: crate::metrics::CollectorCadence,
-        metric_field: FakeMetricField,
-    }
-
-    impl crate::metrics::MetricCollector for FakeMetricCollector {
-        fn definition(&self) -> crate::metrics::CollectorDefinition {
-            crate::metrics::CollectorDefinition::new(self.metric_field.collector_id(), self.cadence)
-        }
-
-        fn collect(
-            &mut self,
-            sample: &mut crate::protocol::enoki::v1::MetricSample,
-        ) -> Result<bool, crate::metrics::CollectorError> {
-            match self.metric_field {
-                FakeMetricField::Load => sample.load_1 = Some(1.0),
-                FakeMetricField::Memory => sample.memory_used_bytes = Some(42),
-            }
-
-            Ok(true)
-        }
-    }
-
-    impl FakeMetricField {
-        fn collector_id(&self) -> crate::metrics::CollectorId {
-            match self {
-                FakeMetricField::Load => crate::metrics::CollectorId::Load,
-                FakeMetricField::Memory => crate::metrics::CollectorId::Memory,
-            }
-        }
     }
 
     #[derive(Default)]

@@ -1002,15 +1002,7 @@ fn probe_run_retries_a_snapshot_replay_without_recollecting_or_advancing_its_seq
         (2, 4)
     );
     assert_eq!(snapshot_replay.metrics.len(), 3);
-    assert_eq!(
-        sleeper.observed_sleeps,
-        vec![
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-            Duration::from_secs(3),
-        ]
-    );
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(3)]);
 }
 
 #[test]
@@ -1060,7 +1052,7 @@ fn probe_run_rejects_zero_stale_or_ahead_acknowledgements_for_a_snapshot_replay(
             (2, 4)
         );
         assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
-        assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1); 3]);
+        assert!(sleeper.observed_sleeps.is_empty());
     }
 }
 
@@ -1231,7 +1223,7 @@ fn probe_run_loop_reports_metrics_batches_on_the_configured_cadence() {
     )
     .expect("run loop reports deterministically");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 6]);
+    assert!(sleeper.observed_sleeps.is_empty());
     assert!(
         transport
             .observed_calls
@@ -1391,14 +1383,7 @@ fn probe_run_loop_batches_metrics_at_the_configured_collection_interval() {
     )
     .expect("run loop batches metrics deterministically");
 
-    assert_eq!(
-        sleeper.observed_sleeps,
-        vec![
-            Duration::from_secs(2),
-            Duration::from_secs(2),
-            Duration::from_secs(2),
-        ],
-    );
+    assert!(sleeper.observed_sleeps.is_empty());
     let report = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
         .expect("report decodes");
     assert_eq!(report.sequence_start, 2);
@@ -1446,7 +1431,7 @@ fn probe_run_loop_uses_a_derived_three_sample_reporting_window_at_one_second_col
     )
     .expect("run loop allows one-second intervals");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
     let report = ProbeReportRequest::decode(transport.observed_report_bodies[1].as_slice())
         .expect("report decodes");
     assert_eq!(report.sequence_start, 2);
@@ -1497,7 +1482,7 @@ fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
     )
     .expect("run loop reports deterministically");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(5); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
     let reports = transport
         .observed_report_bodies
         .iter()
@@ -1612,7 +1597,7 @@ fn probe_run_fetches_and_applies_new_configuration_after_ack_version_changes() {
             .expect("configuration request decodes");
     assert_eq!(config_request.probe_id, "probe_01");
     assert_eq!(config_request.current_version, "default-v1");
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(10); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
 
     let reports = transport
         .observed_report_bodies
@@ -1775,7 +1760,7 @@ fn probe_run_keeps_last_valid_configuration_and_reports_error_when_apply_fails()
     )
     .expect("run loop keeps reporting after rejected Probe Configuration");
 
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
     let reports = transport
         .observed_report_bodies
         .iter()
@@ -1942,7 +1927,7 @@ fn probe_run_keeps_reporting_when_configuration_fetch_fails() {
             "https://hub.example/api/probe/report",
         ],
     );
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(7); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
     let reports = transport
         .observed_report_bodies
         .iter()
@@ -2071,15 +2056,7 @@ fn probe_run_retries_regular_report_after_transient_report_failure() {
     )
     .expect("run loop retries regular report after transient failure");
 
-    assert_eq!(
-        sleeper.observed_sleeps,
-        vec![
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-            Duration::from_secs(1),
-            Duration::from_secs(3),
-        ],
-    );
+    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(3)],);
     assert_eq!(transport.observed_report_bodies.len(), 3);
     let reports = transport
         .observed_report_bodies
@@ -2142,7 +2119,7 @@ fn probe_run_rejects_zero_stale_or_ahead_acknowledgements_for_an_observation_bat
             (2, 4)
         );
         assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
-        assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1); 3]);
+        assert!(sleeper.observed_sleeps.is_empty());
     }
 }
 
@@ -2201,7 +2178,7 @@ fn probe_run_rejects_a_bad_acknowledgement_for_an_operation_bearing_report() {
         "operation-01"
     );
     assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
 }
 
 #[test]
@@ -2246,7 +2223,7 @@ fn later_permanent_authorization_rejection_stops_the_probe_with_systemd_terminal
 
     assert_eq!(transport.observed_report_bodies.len(), 2);
     assert_eq!(probe_run_exit_status(&error), PERMANENT_REPORT_EXIT_STATUS);
-    assert_eq!(sleeper.observed_sleeps, vec![Duration::from_secs(1); 3]);
+    assert!(sleeper.observed_sleeps.is_empty());
 }
 
 #[test]
