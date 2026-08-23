@@ -422,10 +422,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       const storedBootBundleVersion = nonemptyString(
         transactionalHost.probeAssetBundleVersion,
       );
+      const currentBootBundleVersion =
+        bootBundleVersion ?? storedBootBundleVersion;
       if (
         hostProfileSnapshot?.hostProfile &&
-        storedBootBundleVersion &&
-        reportedBundleVersion !== storedBootBundleVersion
+        currentBootBundleVersion &&
+        reportedBundleVersion !== currentBootBundleVersion
       ) {
         throw new ReportBusinessRejection("probe_asset_bundle_incoherent", 409);
       }
@@ -617,8 +619,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             }
           : null,
         probeVersion: reportedHostProfile?.probeVersion || undefined,
-        probeAssetBundleVersion:
-          bootBundleVersion ?? reportedBundleVersion ?? undefined,
+        probeAssetBundleVersion: bootBundleVersion ?? undefined,
+        probeAssetBundleBootId: bootBundleVersion ? request.bootId : undefined,
+        probeAssetBundleProbeId: bootBundleVersion
+          ? request.probeId
+          : undefined,
       });
       if (
         snapshotReplayToFulfill &&
@@ -825,21 +830,21 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           snapshotHash: reportedSnapshotHash,
         });
       }
-      const storedReportedHostProfile =
-        !reportedHostProfile &&
-        hostProfileSnapshot &&
-        services.snapshotCollectors?.hostProfile.hasSnapshot(
-          host.id,
-          reportedSnapshotHash,
-        )
-          ? services.snapshotCollectors.hostProfile.read(host.id)
-          : null;
       markProbeUpgradeSucceededFromHostProfile({
-        bootProbeAssetBundleVersion:
-          bootBundleVersion ?? storedBootBundleVersion,
+        authenticatedProbeId: request.probeId,
+        bootEvidenceBootId:
+          bootBundleVersion !== null
+            ? request.bootId
+            : transactionalHost.probeAssetBundleBootId,
+        bootEvidenceProbeId:
+          bootBundleVersion !== null
+            ? request.probeId
+            : transactionalHost.probeAssetBundleProbeId,
+        bootProbeAssetBundleVersion: currentBootBundleVersion,
         hostId: host.id,
-        hostProfile: reportedHostProfile ?? storedReportedHostProfile,
+        hostProfile: reportedHostProfile,
         nowMs: reportReceivedAtMs,
+        profileReportBootId: request.bootId,
         services,
       });
 
@@ -1784,6 +1789,9 @@ function completeProbeUninstallIfSucceeded(input: {
 }
 
 function markProbeUpgradeSucceededFromHostProfile(input: {
+  authenticatedProbeId: string;
+  bootEvidenceBootId: string | null;
+  bootEvidenceProbeId: string | null;
   bootProbeAssetBundleVersion: string | null;
   hostId: number;
   hostProfile: {
@@ -1791,6 +1799,7 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
     probeVersion?: string | null;
   } | null;
   nowMs: number;
+  profileReportBootId: string;
   services: ProbeRouteServices;
 }) {
   if (!input.hostProfile?.probeVersion) {
@@ -1805,10 +1814,14 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
   }
 
   const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+    authenticatedProbeId: input.authenticatedProbeId,
+    bootEvidenceBootId: input.bootEvidenceBootId,
+    bootEvidenceProbeId: input.bootEvidenceProbeId,
     bootProbeAssetBundleVersion: input.bootProbeAssetBundleVersion,
     hostProfile: input.hostProfile,
     nowMs: input.nowMs,
     operation: active,
+    profileReportBootId: input.profileReportBootId,
   });
 
   if (succeeded) {

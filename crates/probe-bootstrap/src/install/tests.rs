@@ -738,6 +738,7 @@ mod tests {
             &UpgradeAttempt {
                 operation_id: "41".to_owned(),
                 stage_owner_uid: unsafe { libc::geteuid() },
+                authority_sha256: None,
             },
             &paths,
             &mut systemd,
@@ -817,6 +818,7 @@ mod tests {
             &UpgradeAttempt {
                 operation_id: "42".to_owned(),
                 stage_owner_uid: unsafe { libc::geteuid() },
+                authority_sha256: None,
             },
             &paths,
             &mut systemd,
@@ -924,6 +926,7 @@ mod tests {
         let attempt = UpgradeAttempt {
             operation_id: "consume-1".to_owned(),
             stage_owner_uid: unsafe { libc::geteuid() },
+            authority_sha256: None,
         };
 
         let [mut invalid_probe, mut invalid_runtime, mut invalid_system_state, mut invalid_disk_health, mut invalid_lifecycle, mut invalid_acquirer, mut invalid_activator] =
@@ -1009,6 +1012,57 @@ mod tests {
         assert!(upgrade_destinations(&paths).iter().all(|destination| {
             fs::metadata(destination).unwrap().nlink() == 1
         }));
+    }
+
+    #[test]
+    fn outer_stage_and_generation_failures_cannot_replay_the_consumed_authority() {
+        for failed_outer_step in ["stage-open", "generation-persist"] {
+            let temporary = tempdir().unwrap();
+            let paths = FixedInstallPaths::under(temporary.path());
+            fs::create_dir_all(paths.bootstrap_state()).unwrap();
+            let authority = UpgradeAuthorityConsumption {
+                operation_id: format!("outer-{failed_outer_step}"),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                hub_origin: "https://hub.example".to_owned(),
+                probe_id: "probe_01".to_owned(),
+                source_bundle_version: "1.2.3".to_owned(),
+                source_install_state_sha256: "a".repeat(64),
+                source_manifest_sha256: "b".repeat(64),
+                target_bundle_version: "1.2.4".to_owned(),
+                target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+                target_manifest_sha256: "d".repeat(64),
+                verified_stage_sha256: "e".repeat(64),
+            };
+
+            let error = consume_before_upgrade_outer_checks(
+                &paths,
+                &authority,
+                |_| -> Result<(), &'static str> {
+                    let journal = fs::read_to_string(
+                        paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+                    )
+                    .unwrap();
+                    assert!(journal.contains("phase = \"consumed\""));
+                    Err(failed_outer_step)
+                },
+            )
+            .unwrap_err();
+            let ConsumeBeforeOuterError::Outer { consumed, error } = error else {
+                panic!("authority must be consumed before outer checks")
+            };
+            assert_eq!(error, failed_outer_step);
+            assert_eq!(
+                consume_probe_upgrade_authority(&paths, &authority),
+                Err(InstallError::ExistingResidue),
+                "{failed_outer_step} failure must not permit replay"
+            );
+            abort_consumed_probe_upgrade_authority(&paths, &consumed).unwrap();
+
+            let mut replacement = authority.clone();
+            replacement.operation_id.push_str("-replacement");
+            consume_probe_upgrade_authority(&paths, &replacement)
+                .expect("a new Owner operation may replace a terminal aborted authority");
+        }
     }
 
     #[test]

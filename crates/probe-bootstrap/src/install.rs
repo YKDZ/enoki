@@ -1567,9 +1567,12 @@ use account::create_static_service_identity_with_commands;
 use filesystem::*;
 pub use systemd::SystemSystemd;
 pub use upgrade::{
-    InstalledUpgradeBinding, UpgradeAttempt, UpgradeRecoveryReceipt, VerifiedUpgradeComponents,
-    finalize_probe_upgrade_stage_cleanup, inspect_installed_probe_for_upgrade,
-    recover_incomplete_probe_upgrade, upgrade_current_probe, upgrade_current_probe_for_operation,
+    ConsumeBeforeOuterError, InstalledUpgradeBinding, UpgradeAttempt, UpgradeAuthorityConsumption,
+    UpgradeRecoveryReceipt, VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
+    consume_before_upgrade_outer_checks, consume_probe_upgrade_authority,
+    consume_signed_before_upgrade_outer_checks, finalize_probe_upgrade_stage_cleanup,
+    inspect_installed_probe_for_upgrade, recover_incomplete_probe_upgrade, upgrade_current_probe,
+    upgrade_current_probe_for_operation,
 };
 
 include!("install/tests.rs");

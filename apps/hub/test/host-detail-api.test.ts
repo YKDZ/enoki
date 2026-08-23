@@ -1738,7 +1738,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("marks an active Probe Upgrade Request succeeded when Host detail already has the target Probe version", async () => {
+  it("does not synthesize Upgrade success from a Host Profile without same-boot bundle evidence", async () => {
     const database = await createTemporaryDatabase();
     const assetRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-assets-"));
     tempRoots.push(assetRoot);
@@ -1822,31 +1822,16 @@ describe("Host detail API", () => {
     });
 
     expect(detailResponse.status).toBe(200);
-    await expect(detailResponse.json()).resolves.toEqual({
-      host: expect.objectContaining({
-        probeUpgradeStatus: null,
-      }),
-    });
+    await detailResponse.json();
     expect(
       database.probeOperations.findById(created.probeUpgradeRequest.id),
     ).toEqual(
       expect.objectContaining({
-        completedAtMs: 1_725_000_001_000,
+        completedAtMs: null,
         failureCode: null,
-        state: "succeeded",
+        state: "running",
       }),
     );
-    const overviewResponse = await app.request("/api/web/hosts", {
-      headers: { cookie: ownerSession },
-    });
-    await expect(overviewResponse.json()).resolves.toEqual({
-      hosts: [
-        expect.objectContaining({
-          id: hostId,
-          probeUpgradeProblem: null,
-        }),
-      ],
-    });
 
     database.close();
   });

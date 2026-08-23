@@ -416,6 +416,9 @@ export function succeedReportedProbeOperation(input: {
 }
 
 export function succeedProbeUpgradeRequestFromHostProfile(input: {
+  authenticatedProbeId: string;
+  bootEvidenceBootId: string | null | undefined;
+  bootEvidenceProbeId: string | null | undefined;
   bootProbeAssetBundleVersion: string | null | undefined;
   hostProfile:
     | {
@@ -426,11 +429,15 @@ export function succeedProbeUpgradeRequestFromHostProfile(input: {
     | undefined;
   nowMs: number;
   operation: ProbeUpgradeRequest;
+  profileReportBootId: string;
 }): ProbeUpgradeRequest | null {
   if (
     input.operation.kind !== "probe_upgrade" ||
     hasUnavailableProbeUpgradeTarget(input.operation) ||
     !isActiveProbeOperation(input.operation) ||
+    !input.profileReportBootId ||
+    input.bootEvidenceBootId !== input.profileReportBootId ||
+    input.bootEvidenceProbeId !== input.authenticatedProbeId ||
     normalizeProbeVersion(input.bootProbeAssetBundleVersion) !==
       normalizeProbeVersion(input.operation.targetProbeVersion) ||
     normalizeProbeVersion(input.hostProfile?.probeAssetBundleVersion) !==

@@ -178,6 +178,8 @@ export type HostRepository = {
       } | null;
       probeVersion?: string | null;
       probeAssetBundleVersion?: string | null;
+      probeAssetBundleBootId?: string | null;
+      probeAssetBundleProbeId?: string | null;
     },
   ) => HostRow;
   softDelete: (id: number, deletedAtMs: number) => HostRow | null;
@@ -394,6 +396,8 @@ export function createHostRepository(database: HostDatabase): HostRepository {
             : input.probeConfigurationError?.reportedAtMs,
         probeVersion: input.probeVersion,
         probeAssetBundleVersion: input.probeAssetBundleVersion,
+        probeAssetBundleBootId: input.probeAssetBundleBootId,
+        probeAssetBundleProbeId: input.probeAssetBundleProbeId,
       };
       const row = database
         .update(hosts)

@@ -1,5 +1,8 @@
 use super::*;
-use crate::lifecycle::{UpgradeCompletion, UpgradeLifecycleEffects, execute_upgrade_lifecycle};
+use crate::lifecycle::{
+    UpgradeCompletion, UpgradeLifecycleEffects, execute_upgrade_lifecycle,
+    verify_lifecycle_upgrade_authority_signature,
+};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -11,6 +14,94 @@ const OPERATION_STATUS_FILE: &str = "probe-operation-status.toml";
 pub struct UpgradeAttempt {
     pub operation_id: String,
     pub stage_owner_uid: u32,
+    pub authority_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeAuthorityConsumption {
+    pub operation_id: String,
+    pub stage_owner_uid: u32,
+    pub hub_origin: String,
+    pub probe_id: String,
+    pub source_bundle_version: String,
+    pub source_install_state_sha256: String,
+    pub source_manifest_sha256: String,
+    pub target_bundle_version: String,
+    pub target_asset_set_digest: String,
+    pub target_manifest_sha256: String,
+    pub verified_stage_sha256: String,
+}
+
+#[derive(Debug)]
+pub enum ConsumeBeforeOuterError<E> {
+    Consume(InstallError),
+    Outer { consumed: UpgradeAttempt, error: E },
+}
+
+pub fn consume_before_upgrade_outer_checks<T, E>(
+    paths: &FixedInstallPaths,
+    authority: &UpgradeAuthorityConsumption,
+    outer_checks: impl FnOnce(&UpgradeAttempt) -> Result<T, E>,
+) -> Result<(UpgradeAttempt, T), ConsumeBeforeOuterError<E>> {
+    let consumed = consume_probe_upgrade_authority(paths, authority)
+        .map_err(ConsumeBeforeOuterError::Consume)?;
+    match outer_checks(&consumed) {
+        Ok(output) => Ok((consumed, output)),
+        Err(error) => Err(ConsumeBeforeOuterError::Outer { consumed, error }),
+    }
+}
+
+pub fn consume_signed_before_upgrade_outer_checks<T, E>(
+    paths: &FixedInstallPaths,
+    authority: &UpgradeAuthorityConsumption,
+    canonical_authority: &[u8],
+    signature_hex: &str,
+    outer_checks: impl FnOnce(&UpgradeAttempt) -> Result<T, E>,
+) -> Result<(UpgradeAttempt, T), ConsumeBeforeOuterError<E>> {
+    let consumed = consume_signed_probe_upgrade_authority(
+        paths,
+        authority,
+        canonical_authority,
+        signature_hex,
+    )
+    .map_err(ConsumeBeforeOuterError::Consume)?;
+    match outer_checks(&consumed) {
+        Ok(output) => Ok((consumed, output)),
+        Err(error) => Err(ConsumeBeforeOuterError::Outer { consumed, error }),
+    }
+}
+
+fn consume_signed_probe_upgrade_authority(
+    paths: &FixedInstallPaths,
+    authority: &UpgradeAuthorityConsumption,
+    canonical_authority: &[u8],
+    signature_hex: &str,
+) -> Result<UpgradeAttempt, InstallError> {
+    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
+    let key_hex = metadata_string(&metadata, "lifecycle_authority_install_key")
+        .ok_or(InstallError::ExistingResidue)?;
+    let install_key = decode_lower_sha256(&key_hex).ok_or(InstallError::ExistingResidue)?;
+    if !verify_lifecycle_upgrade_authority_signature(
+        &install_key,
+        canonical_authority,
+        signature_hex,
+    ) {
+        return Err(InstallError::ExistingResidue);
+    }
+    consume_probe_upgrade_authority(paths, authority)
+}
+
+fn decode_lower_sha256(value: &str) -> Option<[u8; 32]> {
+    if !valid_sha256(value) {
+        return None;
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)?;
+        let low = (pair[1] as char).to_digit(16)?;
+        bytes[index] = ((high << 4) | low) as u8;
+    }
+    Some(bytes)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -690,6 +781,15 @@ fn begin_upgrade_attempt(
     source: &InstalledUpgradeBinding,
     bundle: &VerifiedBundle,
 ) -> Result<(), InstallError> {
+    if let Some(authority_sha256) = attempt.authority_sha256.as_deref() {
+        return confirm_consumed_upgrade_authority(
+            paths,
+            attempt,
+            authority_sha256,
+            source,
+            bundle,
+        );
+    }
     let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
     if let Ok(contents) = fs::read_to_string(&journal) {
         let prior_operation = journal_string(&contents, "operation_id")?;
@@ -702,7 +802,7 @@ fn begin_upgrade_attempt(
         {
             return Err(InstallError::ExistingResidue);
         }
-        if !matches!(phase, "admitted" | "prepared" | "activated" | "aborted") {
+        if !matches!(phase, "activated" | "aborted") {
             return Err(InstallError::ExistingResidue);
         }
         cleanup_pre_activation_residue(paths)?;
@@ -710,6 +810,142 @@ fn begin_upgrade_attempt(
         return Err(InstallError::ExistingResidue);
     }
     write_upgrade_attempt(paths, attempt, source, bundle, "admitted", 0, 0)
+}
+
+pub fn consume_probe_upgrade_authority(
+    paths: &FixedInstallPaths,
+    authority: &UpgradeAuthorityConsumption,
+) -> Result<UpgradeAttempt, InstallError> {
+    if !valid_upgrade_identifier(&authority.operation_id)
+        || !valid_upgrade_identifier(&authority.probe_id)
+        || authority.hub_origin.is_empty()
+        || !valid_upgrade_version(&authority.source_bundle_version)
+        || !valid_upgrade_version(&authority.target_bundle_version)
+        || !valid_sha256(&authority.source_install_state_sha256)
+        || !valid_sha256(&authority.source_manifest_sha256)
+        || !valid_sha256(&authority.target_manifest_sha256)
+        || authority
+            .target_asset_set_digest
+            .strip_prefix("sha256:")
+            .is_none_or(|digest| !valid_sha256(digest))
+        || !valid_sha256(&authority.verified_stage_sha256)
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    if journal.exists() {
+        let contents = trusted_text(&journal, paths.expected_root_uid(), 0o600)?;
+        let prior_operation = journal_string(&contents, "operation_id")?;
+        let phase = journal_string(&contents, "phase")?;
+        if prior_operation == authority.operation_id || !matches!(phase, "aborted" | "activated") {
+            return Err(InstallError::ExistingResidue);
+        }
+        cleanup_pre_activation_residue(paths)?;
+    }
+    let authority_sha256 = consumed_authority_sha256(authority);
+    let contents = format!(
+        "schema_version = 2\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"consumed\"\nactivated_targets = 0\nfinalized_targets = 0\n",
+        authority.operation_id,
+        authority.stage_owner_uid,
+        authority_sha256,
+        authority.probe_id,
+        authority.source_bundle_version,
+        authority.source_install_state_sha256,
+        authority.source_manifest_sha256,
+        authority.target_bundle_version,
+        authority.target_asset_set_digest,
+        authority.target_manifest_sha256,
+        authority.verified_stage_sha256,
+    );
+    atomic_durable_write(&journal, contents.as_bytes(), 0o600)?;
+    Ok(UpgradeAttempt {
+        operation_id: authority.operation_id.clone(),
+        stage_owner_uid: authority.stage_owner_uid,
+        authority_sha256: Some(authority_sha256),
+    })
+}
+
+pub fn abort_consumed_probe_upgrade_authority(
+    paths: &FixedInstallPaths,
+    consumed: &UpgradeAttempt,
+) -> Result<(), InstallError> {
+    let contents = trusted_text(
+        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    if journal_string(&contents, "operation_id")? != consumed.operation_id
+        || journal_string(&contents, "phase")? != "consumed"
+        || Some(journal_string(&contents, "authority_sha256")?)
+            != consumed.authority_sha256.as_deref()
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    mark_upgrade_attempt_phase(paths, "aborted")
+}
+
+fn confirm_consumed_upgrade_authority(
+    paths: &FixedInstallPaths,
+    attempt: &UpgradeAttempt,
+    authority_sha256: &str,
+    source: &InstalledUpgradeBinding,
+    bundle: &VerifiedBundle,
+) -> Result<(), InstallError> {
+    let contents = trusted_text(
+        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    if journal_string(&contents, "operation_id")? != attempt.operation_id
+        || journal_usize(&contents, "stage_owner_uid")? != attempt.stage_owner_uid as usize
+        || journal_string(&contents, "authority_sha256")? != authority_sha256
+        || journal_string(&contents, "phase")? != "consumed"
+        || journal_string(&contents, "source_probe_id")? != source.probe_id
+        || journal_string(&contents, "source_bundle_version")? != source.source_bundle_version
+        || journal_string(&contents, "source_install_state_sha256")?
+            != source.source_install_state_sha256
+        || journal_string(&contents, "source_manifest_sha256")? != source.source_manifest_sha256
+        || journal_string(&contents, "target_bundle_version")? != bundle.version
+        || journal_string(&contents, "target_manifest_sha256")? != bundle.manifest_sha256
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    write_upgrade_attempt(paths, attempt, source, bundle, "admitted", 0, 0)
+}
+
+fn valid_upgrade_identifier(value: &str) -> bool {
+    (1..=96).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_upgrade_version(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_whitespace)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn consumed_authority_sha256(authority: &UpgradeAuthorityConsumption) -> String {
+    let canonical = format!(
+        "enoki/lifecycle-upgrade-consumption/v2\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        authority.operation_id,
+        authority.hub_origin,
+        authority.probe_id,
+        authority.source_bundle_version,
+        authority.source_install_state_sha256,
+        authority.source_manifest_sha256,
+        authority.target_bundle_version,
+        authority.target_asset_set_digest,
+        authority.target_manifest_sha256,
+        authority.verified_stage_sha256,
+    );
+    format!("{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
 fn journal_string<'a>(contents: &'a str, key: &str) -> Result<&'a str, InstallError> {
@@ -727,6 +963,7 @@ fn journal_string<'a>(contents: &'a str, key: &str) -> Result<&'a str, InstallEr
 
 fn cleanup_pre_activation_residue(paths: &FixedInstallPaths) -> Result<(), InstallError> {
     let destinations = upgrade_destinations(paths);
+    let mut changed = Vec::new();
     for destination in &destinations {
         let name = destination
             .file_name()
@@ -737,13 +974,13 @@ fn cleanup_pre_activation_residue(paths: &FixedInstallPaths) -> Result<(), Insta
             destination.with_file_name(format!(".{name}.enoki-upgrade-old")),
         ] {
             match fs::remove_file(&residue) {
-                Ok(()) => {}
+                Ok(()) => changed.push(destination.clone()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return Err(InstallError::Io),
             }
         }
     }
-    sync_destination_directories(&destinations)
+    sync_destination_directories(&changed)
 }
 
 fn journal_usize(contents: &str, key: &str) -> Result<usize, InstallError> {
@@ -771,7 +1008,10 @@ pub fn recover_incomplete_probe_upgrade(
         return Ok(None);
     }
     let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
-    if metadata_scalar(&contents, "schema_version").as_deref() != Some("1") {
+    if !matches!(
+        metadata_scalar(&contents, "schema_version").as_deref(),
+        Some("1" | "2")
+    ) {
         return Err(InstallError::ExistingResidue);
     }
     let operation_id = journal_string(&contents, "operation_id")?.to_owned();
@@ -794,16 +1034,17 @@ pub fn recover_incomplete_probe_upgrade(
         stage_owner_uid,
         source_bundle_version,
         target_bundle_version: target_bundle_version.clone(),
-        activated: !matches!(phase, "admitted" | "prepared" | "aborted"),
+        activated: !matches!(phase, "consumed" | "admitted" | "prepared" | "aborted"),
     };
     let attempt = UpgradeAttempt {
         operation_id,
         stage_owner_uid,
+        authority_sha256: Some(journal_string(&contents, "authority_sha256")?.to_owned()),
     };
 
     let recovered = (|| {
         match phase {
-            "admitted" | "prepared" => {
+            "consumed" | "admitted" | "prepared" => {
                 cleanup_pre_activation_residue(paths)?;
                 mark_upgrade_attempt_phase(paths, "aborted")?;
                 write_operation_status(
@@ -924,6 +1165,7 @@ pub fn finalize_probe_upgrade_stage_cleanup(
             &UpgradeAttempt {
                 operation_id: receipt.operation_id.clone(),
                 stage_owner_uid: receipt.stage_owner_uid,
+                authority_sha256: None,
             },
             &receipt.target_bundle_version,
             "running",
@@ -938,6 +1180,7 @@ pub fn finalize_probe_upgrade_stage_cleanup(
             &UpgradeAttempt {
                 operation_id: receipt.operation_id.clone(),
                 stage_owner_uid: receipt.stage_owner_uid,
+                authority_sha256: None,
             },
             &receipt.target_bundle_version,
             "failed",
@@ -989,7 +1232,10 @@ fn write_upgrade_attempt(
     activated_targets: usize,
     finalized_targets: usize,
 ) -> Result<(), InstallError> {
-    let authority_sha256 = upgrade_authority_sha256(attempt, source, bundle);
+    let authority_sha256 = attempt
+        .authority_sha256
+        .clone()
+        .unwrap_or_else(|| upgrade_authority_sha256(attempt, source, bundle));
     let contents = format!(
         "schema_version = 1\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_install_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nphase = {:?}\nactivated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\n",
         attempt.operation_id,

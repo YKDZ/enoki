@@ -2346,12 +2346,14 @@ describe("Probe report API", () => {
     });
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const changedHostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.2.0",
       probeVersion: "v0.2.0",
     });
     const changedHash = hashStableHostProfile(changedHostProfile);
     const body = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-upgrade-host-profile",
+        probeAssetBundleVersion: "0.2.0",
         probeConfigurationVersion: "default-v1",
         probeId: registration.probeId,
         sequenceEnd: 1,
@@ -3156,7 +3158,9 @@ describe("Probe report API", () => {
 
   it("admits one verified upgrade stage and signs an offline root authority", async () => {
     const database = await createTemporaryDatabase();
-    const assetDir = await mkdtemp(path.join(os.tmpdir(), "enoki-upgrade-assets-"));
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-upgrade-assets-"),
+    );
     tempRoots.push(assetDir);
     const release = await writeSignedProbeAssetSet(assetDir, {
       sourceVersion: "1.3.0",
@@ -3214,19 +3218,16 @@ describe("Probe report API", () => {
       verifiedStageSha256: "c".repeat(64),
     });
 
-    const response = await app.request(
-      requestPath,
-      {
+    const response = await app.request(requestPath, {
+      body: requestBody,
+      headers: signedJsonProbeHeaders({
         body: requestBody,
-        headers: signedJsonProbeHeaders({
-          body: requestBody,
-          pathAndQuery: `https://hub.example${requestPath}`,
-          privateKeyPem: registration.privateKeyPem,
-          probeId: registration.probeId,
-        }),
-        method: "POST",
-      },
-    );
+        pathAndQuery: `https://hub.example${requestPath}`,
+        privateKeyPem: registration.privateKeyPem,
+        probeId: registration.probeId,
+      }),
+      method: "POST",
+    });
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -3523,6 +3524,11 @@ describe("Probe report API", () => {
       probeVersion: "0.2.0",
     });
     const upgradedHostProfileHash = hashStableHostProfile(upgradedHostProfile);
+    const crossBootHostProfile = sampleHostProfileSnapshot({
+      hostname: "cross-boot-host",
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "0.2.0",
+    });
 
     const running = await app.request(
       "/api/probe/report",
@@ -3560,6 +3566,34 @@ describe("Probe report API", () => {
       expect.objectContaining({
         state: "running",
       }),
+    );
+
+    const crossBootProfile = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "different-boot",
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+            snapshots: [
+              {
+                collectorId: "official.host-profile",
+                hostProfile: crossBootHostProfile,
+                snapshotHash: hashStableHostProfile(crossBootHostProfile),
+              },
+            ],
+          }),
+        ).finish(),
+      ),
+    );
+    expect(crossBootProfile.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toEqual(
+      expect.objectContaining({ state: "running" }),
     );
 
     const compactObservation = await app.request(

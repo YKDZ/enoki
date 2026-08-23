@@ -353,9 +353,13 @@ describe("Probe Upgrade Request lifecycle", () => {
     };
 
     const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+      authenticatedProbeId: "probe_01",
+      bootEvidenceBootId: "boot_01",
+      bootEvidenceProbeId: "probe_01",
       bootProbeAssetBundleVersion: "0.2.0",
       nowMs: 1_725_000_030_000,
       operation: running,
+      profileReportBootId: "boot_01",
       hostProfile: {
         probeAssetBundleVersion: "0.2.0",
         probeVersion: "0.2.0",
@@ -377,9 +381,13 @@ describe("Probe Upgrade Request lifecycle", () => {
     ).toEqual({ error: null, operation: succeeded });
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        authenticatedProbeId: "probe_01",
+        bootEvidenceBootId: "boot_01",
+        bootEvidenceProbeId: "probe_01",
         bootProbeAssetBundleVersion: "0.2.0",
         nowMs: 1_725_000_030_000,
         operation: running,
+        profileReportBootId: "boot_01",
         hostProfile: {
           probeAssetBundleVersion: "0.2.0",
           probeVersion: "0.1.0",
@@ -388,9 +396,13 @@ describe("Probe Upgrade Request lifecycle", () => {
     ).toBeNull();
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        authenticatedProbeId: "probe_01",
+        bootEvidenceBootId: "boot_01",
+        bootEvidenceProbeId: "probe_01",
         bootProbeAssetBundleVersion: "0.2.0",
         nowMs: 1_725_000_030_000,
         operation: running,
+        profileReportBootId: "boot_01",
         hostProfile: {
           probeAssetBundleVersion: "0.2.0",
           probeVersion: "0.2.0",
@@ -415,9 +427,13 @@ describe("Probe Upgrade Request lifecycle", () => {
     ]) {
       expect(
         succeedProbeUpgradeRequestFromHostProfile({
+          authenticatedProbeId: "probe_01",
+          bootEvidenceBootId: "boot_01",
+          bootEvidenceProbeId: "probe_01",
           ...input,
           nowMs: 1_725_000_030_000,
           operation: running,
+          profileReportBootId: "boot_01",
         }),
       ).toBeNull();
     }
@@ -442,9 +458,13 @@ describe("Probe Upgrade Request lifecycle", () => {
 
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        authenticatedProbeId: "probe_01",
+        bootEvidenceBootId: "boot_01",
+        bootEvidenceProbeId: "probe_01",
         bootProbeAssetBundleVersion: "v0.2.0",
         nowMs: 1_725_000_030_000,
         operation: running,
+        profileReportBootId: "boot_01",
         hostProfile: {
           probeAssetBundleVersion: "v0.2.0",
           probeVersion: "v0.2.0",
@@ -522,6 +542,9 @@ describe("Probe Upgrade Request lifecycle", () => {
     });
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
+        authenticatedProbeId: "probe_01",
+        bootEvidenceBootId: "boot_01",
+        bootEvidenceProbeId: "probe_01",
         bootProbeAssetBundleVersion: "0.2.0",
         hostProfile: {
           probeAssetBundleVersion: "0.2.0",
@@ -529,6 +552,7 @@ describe("Probe Upgrade Request lifecycle", () => {
         },
         nowMs: 1_725_000_010_000,
         operation,
+        profileReportBootId: "boot_01",
       }),
     ).toBeNull();
   });

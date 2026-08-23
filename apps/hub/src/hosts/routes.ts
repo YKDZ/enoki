@@ -33,7 +33,6 @@ import {
   createProbeUpgradeRequest,
   isActiveProbeOperation,
   type ProbeUpgradeRequest,
-  succeedProbeUpgradeRequestFromHostProfile,
 } from "../probe/operation.js";
 import {
   readProbeReleaseContextFromDirectory,
@@ -223,25 +222,16 @@ export function createHostRoutes(services: HostRouteServices) {
     const hostProfileObservation =
       services.snapshotCollectors?.hostProfile.readObservation(hostId) ?? null;
     const hostProfile = hostProfileObservation?.view ?? null;
-    const succeededOperation = succeedActiveProbeUpgradeRequestFromHostProfile({
+    const timedOutOperation = failTimedOutActiveProbeUpgradeRequest({
       hostId,
-      hostProfile,
       nowMs: now(),
+      probeOperationTimeouts,
       services,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
-    const timedOutOperation = succeededOperation
-      ? null
-      : failTimedOutActiveProbeUpgradeRequest({
-          hostId,
-          nowMs: now(),
-          probeOperationTimeouts,
-          services,
-          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
-        });
 
     const currentOperation = currentProbeUpgradeProblem({
       operation:
-        succeededOperation ??
         timedOutOperation ??
         services.probeOperations?.findLatestForHost(hostId) ??
         null,
@@ -864,39 +854,6 @@ function readProbeUpgradeReleaseContext(services: HostRouteServices) {
         trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
       })
     : Promise.resolve(unavailableProbeReleaseContext());
-}
-
-function succeedActiveProbeUpgradeRequestFromHostProfile(input: {
-  hostId: number;
-  hostProfile: {
-    probeAssetBundleVersion?: string | null;
-    probeVersion?: string | null;
-  } | null;
-  nowMs: number;
-  services: HostRouteServices;
-}) {
-  const activeOperation =
-    input.services.probeOperations?.findActiveForHost(input.hostId) ?? null;
-  if (!activeOperation) {
-    return null;
-  }
-
-  const succeeded = succeedProbeUpgradeRequestFromHostProfile({
-    bootProbeAssetBundleVersion:
-      input.services.hosts.findActiveById(input.hostId)
-        ?.probeAssetBundleVersion ?? null,
-    hostProfile: input.hostProfile,
-    nowMs: input.nowMs,
-    operation: activeOperation,
-  });
-  if (!succeeded) {
-    return null;
-  }
-
-  return (
-    input.services.probeOperations?.updateProbeUpgradeRequest(succeeded) ??
-    succeeded
-  );
 }
 
 function probeUpgradeStatus(operation: ProbeUpgradeRequest): ProbeUpgradeStatus;

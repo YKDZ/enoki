@@ -100,7 +100,7 @@ Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl`
 
 把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和全部运行组件的精确摘要与大小，再在同一个 fresh transaction 中发布 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`lifecycle-companion`、`bootstrap-acquirer` 与 `bootstrap-activator` 七个固定角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
-Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机特权操作；卸载、显式兼容升级与升级修复交由独立的固定角色完成。升级候选由非特权探针一次下载并完整验证，root 角色只复验固定暂存收据且不联网；root 在任何安装检查前 durable consume 本次授权，激活前失败保留旧安装且同一授权不可重放，激活后未完成则进入 recovery-pending，只能由显式 Repair 按 journal 恢复，不会自动重试或降级。
+Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机特权操作；卸载、显式兼容升级与升级修复交由独立的固定角色完成。升级候选由非特权探针一次下载并完整验证，root 角色只复验固定暂存收据且不联网；root 在打开暂存目录、持久化 generation 或检查当前安装之前就 durable consume 本次授权，任何外层失败后同一授权也不可重放。Hub 只有在同一 Probe Identity、同一 bootId 的 Startup bundle 与 Host Profile 同时证明目标版本时才把升级标为成功。激活前失败保留旧安装，激活后未完成则进入 recovery-pending，只能由显式 Repair 按 journal 恢复，不会自动重试或降级。
 
 `ENOKI_PROBE_API_ORIGIN` 只能是 `scheme://host[:port]`，不支持路径前缀。若既有探针依赖未文档化的前缀，请调整网络路由后在 Hub 中使用“手动重新安装探针”；没有旧前缀兼容层。
 

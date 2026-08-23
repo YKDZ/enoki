@@ -109,6 +109,8 @@ export const hosts = sqliteTable(
     memoryTotalBytes: integer(),
     probeVersion: text(),
     probeAssetBundleVersion: text(),
+    probeAssetBundleBootId: text(),
+    probeAssetBundleProbeId: text(),
     connectAddress: text().notNull(),
     connectAddressEdited: integer({
       mode: "boolean",

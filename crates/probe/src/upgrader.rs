@@ -17,14 +17,16 @@ use enoki_probe_bootstrap::{
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
     install::{
-        FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd, UpgradeAttempt,
-        UpgradeRecoveryReceipt, VerifiedUpgradeComponents, finalize_probe_upgrade_stage_cleanup,
+        ConsumeBeforeOuterError, FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd,
+        UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeRecoveryReceipt,
+        VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
+        consume_signed_before_upgrade_outer_checks, finalize_probe_upgrade_stage_cleanup,
         recover_incomplete_probe_upgrade, upgrade_current_probe_for_operation,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
         LifecycleTransition, UninstallCommitPolicy, UninstallLifecycleEffects, UpgradeCompletion,
-        execute_uninstall_lifecycle, verify_lifecycle_upgrade_authority_signature,
+        execute_uninstall_lifecycle,
     },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
@@ -1730,6 +1732,9 @@ pub fn run_lifecycle_companion_from_peer(
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
+    if request.transition() == LifecycleTransition::Upgrade {
+        return run_probe_compatible_upgrade(request, peer_uid);
+    }
     let metadata = match read_trusted_probe_install_metadata(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         None,
@@ -1746,9 +1751,6 @@ pub fn run_lifecycle_companion_from_peer(
     };
     if request.transition() == LifecycleTransition::ReplacementMigration {
         return run_probe_replacement_migration(request, &metadata, &identity);
-    }
-    if request.transition() == LifecycleTransition::Upgrade {
-        return run_probe_compatible_upgrade(request, &metadata, &identity, peer_uid);
     }
     if request.transition() != LifecycleTransition::Uninstall {
         return LifecycleResponse::not_enabled();
@@ -1803,8 +1805,6 @@ pub fn run_lifecycle_companion_from_peer(
 
 fn run_probe_compatible_upgrade(
     request: &LifecycleRequest,
-    metadata: &TrustedProbeInstallMetadata,
-    identity: &TrustedProbeInstallPreflight,
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::HubUpgrade {
@@ -1825,28 +1825,34 @@ fn run_probe_compatible_upgrade(
     else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
-    if hub_origin != &metadata.hub_url
-        || verify_lifecycle_upgrade_authority(
-            request,
-            metadata,
-            *expires_at_ms,
-            authority_signature,
-        )
-        .is_err()
-    {
-        return LifecycleResponse::failed("lifecycle.invalid_authority");
-    }
     let Some(peer_uid) = peer_uid else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
-    if metadata.schema_version != 5
-        || identity.probe_id != *probe_id
-        || metadata.install_state_sha256.as_deref() != Some(source_install_state_sha256)
-        || metadata.target_manifest_sha256.as_deref() != Some(source_manifest_sha256)
-        || metadata.bundle_version.as_deref() != Some(source_bundle_version)
-    {
-        return LifecycleResponse::failed("lifecycle.authority_mismatch");
+    let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis(),
+        Err(_) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
+    };
+    if now_ms > u128::from(*expires_at_ms) {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
     }
+    let canonical_authority = match request.canonical_upgrade_authority_bytes() {
+        Ok(canonical) => canonical,
+        Err(_) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
+    };
+    let paths = FixedInstallPaths::production();
+    let authority = UpgradeAuthorityConsumption {
+        operation_id: operation_id.clone(),
+        stage_owner_uid: peer_uid,
+        hub_origin: hub_origin.clone(),
+        probe_id: probe_id.clone(),
+        source_bundle_version: source_bundle_version.clone(),
+        source_install_state_sha256: source_install_state_sha256.clone(),
+        source_manifest_sha256: source_manifest_sha256.clone(),
+        target_bundle_version: target_bundle_version.clone(),
+        target_asset_set_digest: target_asset_set_digest.clone(),
+        target_manifest_sha256: target_manifest_sha256.clone(),
+        verified_stage_sha256: verified_stage_sha256.clone(),
+    };
     let receipt = VerifiedUpgradeStageReceipt {
         operation_id: operation_id.clone(),
         target_asset_set_digest: target_asset_set_digest.clone(),
@@ -1854,21 +1860,63 @@ fn run_probe_compatible_upgrade(
         target_version: target_bundle_version.clone(),
         verified_stage_sha256: verified_stage_sha256.clone(),
     };
-    let mut stage = match open_verified_probe_upgrade_stage(&receipt, peer_uid) {
-        Ok(stage) => stage,
-        Err(_) => return LifecycleResponse::failed("lifecycle.upgrade_stage_invalid"),
+    let outer = consume_signed_before_upgrade_outer_checks(
+        &paths,
+        &authority,
+        &canonical_authority,
+        authority_signature,
+        |_| {
+            let metadata = read_trusted_probe_install_metadata(
+                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+                None,
+            )
+            .map_err(|_| "lifecycle.install_state_invalid")?;
+            let identity = read_trusted_probe_install_preflight(
+                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+                None,
+            )
+            .map_err(|_| "lifecycle.identity_invalid")?;
+            if hub_origin != &metadata.hub_url
+                || metadata.schema_version != 5
+                || identity.probe_id != *probe_id
+                || metadata.install_state_sha256.as_deref() != Some(source_install_state_sha256)
+                || metadata.target_manifest_sha256.as_deref() != Some(source_manifest_sha256)
+                || metadata.bundle_version.as_deref() != Some(source_bundle_version)
+            {
+                return Err("lifecycle.authority_mismatch");
+            }
+            let mut stage = open_verified_probe_upgrade_stage(&receipt, peer_uid)
+                .map_err(|_| "lifecycle.upgrade_stage_invalid")?;
+            stage
+                .persist_generation_before_activation()
+                .map_err(|_| "lifecycle.upgrade_stage_invalid")?;
+            Ok((
+                stage,
+                InstalledUpgradeBinding {
+                    hub_origin: metadata.hub_url.clone(),
+                    probe_id: probe_id.clone(),
+                    source_bundle_version: source_bundle_version.clone(),
+                    source_install_state_sha256: source_install_state_sha256.clone(),
+                    source_manifest_sha256: source_manifest_sha256.clone(),
+                },
+            ))
+        },
+    );
+    let (consumed, (mut stage, expected_source)) = match outer {
+        Ok(ready) => ready,
+        Err(ConsumeBeforeOuterError::Consume(_)) => {
+            return LifecycleResponse::failed("lifecycle.upgrade_authority_consumed");
+        }
+        Err(ConsumeBeforeOuterError::Outer { consumed, error }) => {
+            return fail_consumed_upgrade_before_activation(
+                &paths,
+                &consumed,
+                operation_id,
+                peer_uid,
+                error,
+            );
+        }
     };
-    let expected_source = InstalledUpgradeBinding {
-        hub_origin: metadata.hub_url.clone(),
-        probe_id: probe_id.clone(),
-        source_bundle_version: source_bundle_version.clone(),
-        source_install_state_sha256: source_install_state_sha256.clone(),
-        source_manifest_sha256: source_manifest_sha256.clone(),
-    };
-    if stage.persist_generation_before_activation().is_err() {
-        let _ = remove_verified_probe_upgrade_stage(operation_id, peer_uid);
-        return LifecycleResponse::failed("lifecycle.upgrade_stage_invalid");
-    }
     let mut systemd = SystemSystemd::for_live_upgrade();
     let result = upgrade_current_probe_for_operation(
         VerifiedUpgradeComponents {
@@ -1882,11 +1930,8 @@ fn run_probe_compatible_upgrade(
         },
         &stage.bundle,
         &expected_source,
-        &UpgradeAttempt {
-            operation_id: operation_id.clone(),
-            stage_owner_uid: peer_uid,
-        },
-        &FixedInstallPaths::production(),
+        &consumed,
+        &paths,
         &mut systemd,
     );
     match result {
@@ -1931,6 +1976,23 @@ fn run_probe_compatible_upgrade(
     }
 }
 
+fn fail_consumed_upgrade_before_activation(
+    paths: &FixedInstallPaths,
+    consumed: &UpgradeAttempt,
+    operation_id: &str,
+    stage_owner_uid: u32,
+    failure_code: &'static str,
+) -> LifecycleResponse {
+    if remove_verified_probe_upgrade_stage(operation_id, stage_owner_uid).is_ok()
+        && abort_consumed_probe_upgrade_authority(paths, consumed).is_ok()
+    {
+        LifecycleResponse::failed(failure_code)
+    } else {
+        LifecycleResponse::failed("lifecycle.upgrade_repair_required")
+    }
+}
+
+#[cfg(test)]
 fn verify_lifecycle_upgrade_authority(
     request: &LifecycleRequest,
     metadata: &TrustedProbeInstallMetadata,
@@ -1958,7 +2020,11 @@ fn verify_lifecycle_upgrade_authority(
     let canonical = request.canonical_upgrade_authority_bytes().map_err(|_| {
         ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority is invalid")
     })?;
-    if verify_lifecycle_upgrade_authority_signature(&install_key, &canonical, signature_hex) {
+    if enoki_probe_bootstrap::lifecycle::verify_lifecycle_upgrade_authority_signature(
+        &install_key,
+        &canonical,
+        signature_hex,
+    ) {
         Ok(())
     } else {
         Err(ProbeUpgraderRunError::InvalidInstallMetadata(
