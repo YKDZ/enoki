@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
+import { createReleaseCandidateManifest } from "./release-candidate-lib.mjs";
 import {
   createCiHostExecutor,
   createCiReleaseInfrastructureAdapter,
@@ -39,6 +41,92 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe("Release E2E business assertions", () => {
+  it("accepts only the verified Trust Epoch migration baseline union member", async () => {
+    const manifest = candidateManifestWithMigrationBaseline();
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: manifest,
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => {
+            throw new Error("typed migration baseline accepted");
+          },
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-migration-contract",
+        scenario: "baseline-upgrade-uninstall",
+      }),
+    ).rejects.toThrow(/typed migration baseline accepted/);
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: {
+          ...manifest,
+          releaseBaseline: { ...manifest.releaseBaseline, kind: "legacy" },
+        },
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host: {}, hub: {} }),
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-generic-legacy-contract",
+        scenario: "baseline-upgrade-uninstall",
+      }),
+    ).rejects.toThrow(/manifest fields must be exactly/i);
+  });
+
+  it("dispatches all baseline lifecycle scenarios through production manual reinstall and Uninstall", async () => {
+    const source = await readFile(
+      fileURLToPath(new URL("./release-e2e-lib.mjs", import.meta.url)),
+      "utf8",
+    );
+    for (const [start, end] of [
+      [
+        "async function runHubRestoreCompatibilityWindowScenario",
+        "async function runPostReplacementRepairUninstallScenario",
+      ],
+      [
+        "async function runPostReplacementRepairUninstallScenario",
+        "function createRepairBoundaryEvidence",
+      ],
+      [
+        "async function runBaselineUpgradeUninstallScenario",
+        "async function runFreshInstallUninstallScenario",
+      ],
+    ]) {
+      const body = source.slice(source.indexOf(start), source.indexOf(end));
+      expect(body).toContain("isTrustEpochMigrationBaseline(baseline)");
+      expect(body).toContain("hub.createManualReinstallEnrollment(hostId)");
+      expect(body).toContain("host.manualReinstall(");
+      expect(body).toContain("identitySha256");
+      expect(body).toContain("value?.id === hostId");
+      expect(body).toContain("hub.getHostMetrics(hostId)");
+      expect(body).toContain("requestProbeUninstall(hostId)");
+      expect(body).toContain("verifyUninstallCompletion(runId)");
+    }
+    expect(source).toContain(
+      "`/api/web/enrollments/manual-reinstall/${hostId}`",
+    );
+  });
+
+  it("derives baseline kind from the validated Candidate Manifest in workflow", async () => {
+    const workflow = await readFile(
+      fileURLToPath(
+        new URL(
+          "../.github/workflows/reusable-build-release-candidate.yml",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    );
+    expect(workflow).toContain(
+      "--candidate-manifest candidate/candidate-manifest.json",
+    );
+    expect(workflow).not.toMatch(/--baseline-kind|baseline_kind:/);
+  });
+
   it("constructs the real Docker Hub controller with default options", () => {
     expect(createDockerHubController()).toBeDefined();
   });
@@ -1842,6 +1930,46 @@ describe("Hub Lifecycle Client", () => {
         cookie: "enoki_owner_session=session-1",
       }),
     ]);
+  });
+
+  it("creates Trust Epoch manual reinstall Enrollment through the production Owner API", async () => {
+    const requests = [];
+    const client = createHubLifecycleClient({
+      baseUrl: "https://hub.example",
+      fetch: async (url, init = {}) => {
+        const pathname = new URL(url).pathname;
+        requests.push({ method: init.method ?? "GET", pathname });
+        if (pathname === "/api/web/auth/login") {
+          return jsonResponse({ authenticated: true }, 200, {
+            "set-cookie": "enoki_owner_session=session-1; Path=/; HttpOnly",
+          });
+        }
+        if (pathname === "/api/web/enrollments/manual-reinstall/7") {
+          return jsonResponse(
+            {
+              enrollmentId: "enr_manual_reinstall_0001",
+              enrollmentToken: "enk_enroll_secret",
+              installCommand: officialInstallCommand,
+              target: { hostId: 7, kind: "manual_reinstall" },
+            },
+            201,
+          );
+        }
+        throw new Error(`unexpected request ${pathname}`);
+      },
+    });
+
+    await client.authenticate("owner-password");
+    await expect(client.createManualReinstallEnrollment(7)).resolves.toEqual(
+      expect.objectContaining({
+        installCommand: officialInstallCommand,
+        target: { hostId: 7, kind: "manual_reinstall" },
+      }),
+    );
+    expect(requests).toContainEqual({
+      method: "POST",
+      pathname: "/api/web/enrollments/manual-reinstall/7",
+    });
   });
 
   it("keeps the DELETE response in evidence when the first poll fails", async () => {
@@ -5016,7 +5144,10 @@ describe("Release E2E command", () => {
       );
       await expect(
         adapter.release({ prepared, runId: "run-adapter" }),
-      ).resolves.toEqual({ clean: true });
+      ).resolves.toEqual({
+        clean: true,
+        recipe: { clean: true, skipped: "recipe_not_staged" },
+      });
     }
 
     expect(commandResults.map((call) => call.command)).toEqual([
@@ -5031,17 +5162,16 @@ describe("Release E2E command", () => {
     expect(commandResults[3].arguments_).toEqual(["-n", "sh", "-s"]);
   });
 
-  it("binds the non-root Bootstrap staging archive to the validated Candidate target and installs only its two fixed roles", async () => {
+  it("binds the non-root Bootstrap recipe staging to the validated Candidate recipe", async () => {
     const candidateDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-bootstrap-candidate-"),
     );
-    const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
-    const file = "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz";
-    const archive = Buffer.from("verified candidate bootstrap archive");
-    const sha256 = createHash("sha256").update(archive).digest("hex");
-    const extractedRoles = fakeExtractedBootstrapRoles(bootstrapDir);
-    await mkdir(bootstrapDir);
-    await writeFile(path.join(bootstrapDir, file), archive);
+    const recipeDir = path.join(candidateDir, "recipe");
+    const file = "enoki-probe-bootstrap.py";
+    const recipe = Buffer.from("verified candidate bootstrap recipe");
+    const sha256 = createHash("sha256").update(recipe).digest("hex");
+    await mkdir(recipeDir);
+    await writeFile(path.join(recipeDir, file), recipe);
     const commands = [];
     const transfers = [];
     try {
@@ -5061,33 +5191,26 @@ describe("Release E2E command", () => {
           candidateDir,
           manifest: {
             ...candidateManifest(),
-            bootstrap: {
-              ...candidateManifest().bootstrap,
-              files: [
-                {
-                  file,
-                  sha256,
-                  size: archive.byteLength,
-                  target: "x86_64-unknown-linux-gnu",
-                },
-              ],
+            bootstrapRecipe: {
+              ...candidateManifest().bootstrapRecipe,
+              file,
+              sha256,
+              size: recipe.byteLength,
             },
           },
         }),
         transferFile: async (transfer) => transfers.push(transfer),
-        withExtractedBootstrapArtifact: async (_input, callback) =>
-          callback({ extractedRoles }),
         runProcess: async (command, arguments_, options) => {
           commands.push({ command, arguments_, options });
           return successfulCommandText(
             command === "sh" &&
               options.input.includes(
-                "# enoki-release-e2e:candidate-bootstrap-stage",
+                "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
               )
-              ? "/tmp/enoki-release-e2e-bootstrap.abcdef\n"
+              ? "/tmp/enoki-release-e2e-recipe.abcdef\n"
               : command === "sh"
                 ? "verified\n"
-                : "installed\n",
+                : "removed\n",
           );
         },
       });
@@ -5097,52 +5220,37 @@ describe("Release E2E command", () => {
       });
       await expect(
         prepared.provisionBootstrap({ runId: "run-bootstrap" }),
-      ).resolves.toEqual({ file, sha256, target: "x86_64-unknown-linux-gnu" });
+      ).resolves.toEqual({
+        evidence: { file, sha256, version: "v1" },
+        workingDirectory: "/tmp/enoki-release-e2e-recipe.abcdef",
+      });
 
       const staging = commands.find(({ command }) => command === "sh");
       expect(staging.options.input).toContain(
-        "# enoki-release-e2e:candidate-bootstrap-stage",
+        "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
       );
       expect(staging.options.input).toContain('[ "$(id -u)" != 0 ]');
-      expect(staging.options.input).not.toContain(archive.toString("base64"));
+      expect(staging.options.input).not.toContain(recipe.toString("base64"));
       expect(staging.options.input).not.toMatch(/curl|wget|http/);
       expect(transfers).toEqual([
         {
           destination:
-            "/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-acquire",
-          source: extractedRoles.acquirer.binaryPath,
-        },
-        {
-          destination:
-            "/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-activate",
-          source: extractedRoles.activator.binaryPath,
+            "/tmp/enoki-release-e2e-recipe.abcdef/enoki-probe-bootstrap.py",
+          source: path.join(recipeDir, file),
         },
       ]);
       const verification = commands.find(
         ({ command, options }) =>
           command === "sh" &&
           options.input.includes(
-            "# enoki-release-e2e:candidate-bootstrap-verify",
+            "# enoki-release-e2e:candidate-bootstrap-recipe-verify",
           ),
       );
       expect(verification.options.input).toContain(
-        `printf '%s  %s\\n' '${extractedRoles.acquirer.sha256}' "$stage_dir/enoki-probe-bootstrap-acquire"`,
+        `printf '%s  %s\\n' '${sha256}' "$recipe"`,
       );
       expect(verification.options.input).toContain('[ "$(id -u)" != 0 ]');
-      const installation = commands.find(({ command }) => command === "sudo");
-      expect(installation.arguments_).toEqual(["-n", "sh", "-s"]);
-      expect(installation.options.input).toContain(
-        "# enoki-release-e2e:candidate-bootstrap-install",
-      );
-      expect(installation.options.input).toContain(
-        "install -o root -g root -m 0755",
-      );
-      expect(installation.options.input).toContain("mv -T --");
-      expect(installation.options.input).not.toMatch(/\btar\b|base64|archive/);
-      expect(installation.options.input).not.toMatch(/curl|wget|http/);
-      expect(installation.options.input).toContain(
-        "rm -f -- '/usr/local/bin/enoki-probe-bootstrap-acquire' '/usr/local/bin/enoki-probe-bootstrap-activate'",
-      );
+      expect(commands.some(({ command }) => command === "sudo")).toBe(false);
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
     }
@@ -5159,17 +5267,16 @@ describe("Release E2E command", () => {
     expect(result.stderr).toMatch(/terminated by SIGKILL|timed out/i);
   });
 
-  it("transfers the validated Bootstrap archive over SSH with fixed scp arguments", async () => {
+  it("transfers the validated Bootstrap recipe over SSH with fixed scp arguments", async () => {
     const candidateDir = await mkdtemp(
       path.join(os.tmpdir(), "enoki-e2e-bootstrap-ssh-candidate-"),
     );
-    const bootstrapDir = path.join(candidateDir, "probe-bootstrap");
-    const file = "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz";
-    const archive = Buffer.from("verified candidate bootstrap archive");
-    const digest = createHash("sha256").update(archive).digest("hex");
-    const extractedRoles = fakeExtractedBootstrapRoles(bootstrapDir);
-    await mkdir(bootstrapDir);
-    await writeFile(path.join(bootstrapDir, file), archive);
+    const recipeDir = path.join(candidateDir, "recipe");
+    const file = "enoki-probe-bootstrap.py";
+    const recipe = Buffer.from("verified candidate bootstrap recipe");
+    const digest = createHash("sha256").update(recipe).digest("hex");
+    await mkdir(recipeDir);
+    await writeFile(path.join(recipeDir, file), recipe);
     const commands = [];
     try {
       const adapter = createSshReleaseInfrastructureAdapter({
@@ -5183,36 +5290,29 @@ describe("Release E2E command", () => {
           candidateDir,
           manifest: {
             ...candidateManifest(),
-            bootstrap: {
-              ...candidateManifest().bootstrap,
-              files: [
-                {
-                  file,
-                  sha256: digest,
-                  size: archive.byteLength,
-                  target: "x86_64-unknown-linux-gnu",
-                },
-              ],
+            bootstrapRecipe: {
+              ...candidateManifest().bootstrapRecipe,
+              file,
+              sha256: digest,
+              size: recipe.byteLength,
             },
           },
         }),
         transferFile: undefined,
-        withExtractedBootstrapArtifact: async (_input, callback) =>
-          callback({ extractedRoles }),
         runProcess: async (command, arguments_, options) => {
           commands.push({ arguments_, command, options });
           if (command === "scp") return successfulCommandText("");
           if (
             options.input.includes(
-              "# enoki-release-e2e:candidate-bootstrap-stage",
+              "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
             )
           ) {
             return successfulCommandText(
-              "/tmp/enoki-release-e2e-bootstrap.abcdef\n",
+              "/tmp/enoki-release-e2e-recipe.abcdef\n",
             );
           }
           return successfulCommandText(
-            options.input.includes("candidate-bootstrap-verify")
+            options.input.includes("candidate-bootstrap-recipe-verify")
               ? "verified\n"
               : "installed\n",
           );
@@ -5233,13 +5333,11 @@ describe("Release E2E command", () => {
           "StrictHostKeyChecking=accept-new",
           "UserKnownHostsFile=/tmp/release-e2e-known-hosts",
           "--",
-          extractedRoles.acquirer.binaryPath,
-          "release@192.0.2.10:/tmp/enoki-release-e2e-bootstrap.abcdef/enoki-probe-bootstrap-acquire",
+          path.join(recipeDir, file),
+          "release@192.0.2.10:/tmp/enoki-release-e2e-recipe.abcdef/enoki-probe-bootstrap.py",
         ]),
       );
-      expect(JSON.stringify(transfer)).not.toContain(
-        archive.toString("base64"),
-      );
+      expect(JSON.stringify(transfer)).not.toContain(recipe.toString("base64"));
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
     }
@@ -6465,20 +6563,26 @@ const officialInstallCommand =
   "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate";
 
 function candidateManifest() {
-  return {
-    bootstrap: {
-      directory: "probe-bootstrap",
+  return createReleaseCandidateManifest({
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
       distribution: "enoki",
-      files: [
-        {
-          file: "enoki-probe-bootstrap-x86_64-unknown-linux-gnu.tar.gz",
-          sha256: "c".repeat(64),
-          size: 123,
-          target: "x86_64-unknown-linux-gnu",
-        },
+      file: "enoki-probe-bootstrap.py",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recordFile: "enoki-probe-bootstrap-recipe.json",
+      recordSha256: "c".repeat(64),
+      recordSize: 456,
+      rootFingerprint: "d".repeat(64),
+      schemaVersion: 1,
+      sha256: "e".repeat(64),
+      size: 123,
+      targets: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
       ],
-      rootKeyId: "d".repeat(64),
-      version: "1.2.3",
+      version: "v1",
     },
     candidate: {
       commit: "0123456789abcdef0123456789abcdef01234567",
@@ -6486,23 +6590,23 @@ function candidateManifest() {
     },
     hub: {
       archive: "hub/enoki-hub-v1.2.3.oci.tar",
+      archiveSha256: "f".repeat(64),
       digest: `sha256:${"a".repeat(64)}`,
       embeddedProbeVersion: "1.2.3",
+      size: 789,
     },
-    kind: "enoki-release-candidate",
-    probeAssetSet: { version: "1.2.3" },
-    releaseBaseline: {
-      hub: {
-        archive: "hub/enoki-hub-v1.2.2.oci.tar",
-        digest: `sha256:${"b".repeat(64)}`,
-        imageDigest: `sha256:${"b".repeat(64)}`,
+    probeAssetSet: {
+      directory: "probe-assets",
+      files: [{ file: "manifest.json", sha256: "1".repeat(64), size: 12 }],
+      signingIdentity: {
+        algorithm: "rsa-sha256",
+        publicKeyFile: "signing-key.pem",
+        publicKeySha256: "2".repeat(64),
       },
-      kind: "enoki-release-baseline",
-      probeAssetSet: { version: "1.2.2" },
-      tag: "v1.2.2",
+      version: "1.2.3",
     },
-    schemaVersion: 3,
-  };
+    releaseBaseline: ordinaryReleaseBaseline(),
+  });
 }
 
 function candidateManifestWithBaseline({
@@ -6516,15 +6620,126 @@ function candidateManifestWithBaseline({
       digest: candidateHubDigest,
     },
     releaseBaseline: {
+      ...ordinaryReleaseBaseline(),
       hub: {
-        archive: "hub/enoki-hub-v1.2.2.oci.tar",
+        ...ordinaryReleaseBaseline().hub,
         digest: baselineHubDigest,
         imageDigest: baselineHubDigest,
+        sourceManifestSha256: baselineHubDigest.slice("sha256:".length),
       },
-      kind: "enoki-release-baseline",
-      probeAssetSet: { version: "1.2.2" },
-      tag: "v1.2.2",
     },
+  };
+}
+
+function candidateManifestWithMigrationBaseline() {
+  return createReleaseCandidateManifest({
+    ...candidateManifest(),
+    releaseBaseline: migrationReleaseBaseline(),
+  });
+}
+
+function migrationReleaseBaseline() {
+  return {
+    authorization: {
+      file: "trust-epoch-migration-authorization.json",
+      legacyReleaseSha256: "a".repeat(64),
+      sha256: "b".repeat(64),
+      signatureFile: "trust-epoch-migration-authorization.json.sig",
+      signatureSha256: "c".repeat(64),
+    },
+    catalogSnapshot: createReleaseCatalogSnapshot([
+      {
+        assets: [],
+        draft: false,
+        id: 74,
+        prerelease: false,
+        tagName: "v0.1.74",
+        targetCommitish: "main",
+      },
+    ]),
+    githubRelease: {
+      id: 74,
+      peeledCommitSha: "d".repeat(40),
+      repository: "YKDZ/enoki",
+      tagRefSha: "e".repeat(40),
+      targetCommitish: "main",
+    },
+    hub: {
+      archive: "hub/enoki-hub-v0.1.74.oci.tar",
+      archiveSha256: "f".repeat(64),
+      digest: `sha256:${"3".repeat(64)}`,
+      image: "ghcr.io/ykdz/enoki-hub",
+      imageDigest: `sha256:${"2".repeat(64)}`,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      platform: { architecture: "amd64", os: "linux" },
+      size: 123,
+      sourceManifest: "hub-source-manifest.json",
+      sourceManifestSha256: "3".repeat(64),
+      sourceManifestSize: 456,
+    },
+    kind: "enoki-trust-epoch-migration-baseline",
+    legacyProbeAssets: {
+      directory: "probe-assets",
+      files: [
+        {
+          name: "enoki-probe-v0.1.74-x86_64-linux.tar.gz",
+          sha256: "4".repeat(64),
+          size: 789,
+        },
+      ],
+    },
+    schemaVersion: 1,
+    tag: "v0.1.74",
+    transition: "replacement-required",
+  };
+}
+
+function ordinaryReleaseBaseline() {
+  return {
+    catalogSnapshot: createReleaseCatalogSnapshot([
+      {
+        assets: [],
+        draft: false,
+        id: 122,
+        prerelease: false,
+        tagName: "v1.2.2",
+        targetCommitish: "main",
+      },
+    ]),
+    githubRelease: {
+      id: 122,
+      peeledCommitSha: "3".repeat(40),
+      repository: "YKDZ/enoki",
+      tagRefSha: "4".repeat(40),
+      targetCommitish: "main",
+    },
+    hub: {
+      archive: "hub/enoki-hub-v1.2.2.oci.tar",
+      archiveSha256: "5".repeat(64),
+      digest: `sha256:${"6".repeat(64)}`,
+      image: "ghcr.io/ykdz/enoki-hub",
+      imageDigest: `sha256:${"b".repeat(64)}`,
+      mediaType: "application/vnd.oci.image.manifest.v1+json",
+      platform: { architecture: "amd64", os: "linux" },
+      size: 234,
+      sourceManifest: "hub-source-manifest.json",
+      sourceManifestSha256: "6".repeat(64),
+      sourceManifestSize: 345,
+    },
+    kind: "enoki-release-baseline",
+    probeAssetSet: {
+      directory: "probe-assets",
+      files: [{ file: "manifest.json", sha256: "7".repeat(64), size: 12 }],
+      signingIdentity: {
+        algorithm: "rsa-sha256",
+        publicKeyFile: "signing-key.pem",
+        publicKeySha256: "8".repeat(64),
+      },
+      trustRoot: { publicKeySha256: "9".repeat(64) },
+      version: "1.2.2",
+    },
+    schemaVersion: 2,
+    tag: "v1.2.2",
   };
 }
 

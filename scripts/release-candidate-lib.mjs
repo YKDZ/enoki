@@ -59,6 +59,24 @@ export const probeTargets = Object.freeze([
   "x86_64-unknown-linux-musl",
 ]);
 
+export function createReleaseCandidateManifest({
+  bootstrapRecipe,
+  candidate,
+  hub,
+  probeAssetSet,
+  releaseBaseline,
+}) {
+  return {
+    bootstrapRecipe,
+    candidate,
+    hub,
+    kind: "enoki-release-candidate",
+    probeAssetSet,
+    releaseBaseline,
+    schemaVersion: 4,
+  };
+}
+
 export async function createProbeBootstrapPublication({
   bundleVersion,
   sourceDir,
@@ -1004,11 +1022,10 @@ export async function assembleReleaseCandidate({
     targets: record.targets,
     version: "v1",
   };
-  const manifest = {
+  const manifest = createReleaseCandidateManifest({
     bootstrapRecipe,
     candidate: identity,
     hub: hubArchive,
-    kind: "enoki-release-candidate",
     probeAssetSet: {
       directory: "probe-assets",
       files: probeAssetSet.files,
@@ -1016,8 +1033,7 @@ export async function assembleReleaseCandidate({
       version: probeAssetSet.version,
     },
     releaseBaseline,
-    schemaVersion: 4,
-  };
+  });
   const stagingDir = `${outputDir}.tmp-${randomUUID()}`;
 
   try {

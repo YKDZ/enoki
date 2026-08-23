@@ -74,10 +74,10 @@ describe("Release E2E matrix", () => {
         scenarioId: "baseline-upgrade-uninstall",
       }),
     ]);
-    expect(createGitHubActionsMatrix(matrix).include).toHaveLength(6);
+    expect(createGitHubActionsMatrix(matrix).include).toHaveLength(7);
   });
 
-  it("runs post-replacement Repair once where automatic baseline Upgrade is supported", async () => {
+  it("runs post-replacement Repair as equal isolated gates on every declared Ubuntu Host", async () => {
     const matrix = JSON.parse(
       await readFile(new URL("./release-e2e-matrix.json", import.meta.url)),
     );
@@ -88,6 +88,13 @@ describe("Release E2E matrix", () => {
       }),
     ).toEqual([
       expect.objectContaining({
+        cellId: "ubuntu-22.04-x86_64--post-replacement-repair-uninstall",
+        environmentId: "ubuntu-22.04-x86_64",
+        hostAdapter: "ci",
+        runner: "ubuntu-22.04",
+        scenarioId: "post-replacement-repair-uninstall",
+      }),
+      expect.objectContaining({
         cellId: "ubuntu-24.04-x86_64--post-replacement-repair-uninstall",
         environmentId: "ubuntu-24.04-x86_64",
         hostAdapter: "ci",
@@ -95,7 +102,7 @@ describe("Release E2E matrix", () => {
         scenarioId: "post-replacement-repair-uninstall",
       }),
     ]);
-    expect(createGitHubActionsMatrix(matrix).include).toHaveLength(6);
+    expect(createGitHubActionsMatrix(matrix).include).toHaveLength(7);
   });
 
   it("runs Hub Restore exactly once on its explicitly designated stable environment", async () => {
@@ -115,7 +122,7 @@ describe("Release E2E matrix", () => {
         scenarioId: "hub-restore-compatibility-window",
       }),
     ]);
-    expect(createGitHubActionsMatrix(matrix).include).toHaveLength(6);
+    expect(createGitHubActionsMatrix(matrix).include).toHaveLength(7);
   });
 
   it("rejects a designated scenario whose stable environment is not declared", () => {
@@ -315,7 +322,26 @@ describe("Release E2E matrix", () => {
     ]);
 
     const cells = JSON.parse(stdout).include;
-    expect(cells).toHaveLength(6);
+    expect(cells).toHaveLength(7);
+    expect(
+      cells
+        .filter(
+          (cell) => cell.scenarioId !== "hub-restore-compatibility-window",
+        )
+        .map((cell) => `${cell.environmentId}:${cell.scenarioId}`)
+        .sort(),
+    ).toEqual(
+      [
+        "baseline-upgrade-uninstall",
+        "fresh-install-uninstall",
+        "post-replacement-repair-uninstall",
+      ]
+        .flatMap((scenarioId) => [
+          `ubuntu-22.04-x86_64:${scenarioId}`,
+          `ubuntu-24.04-x86_64:${scenarioId}`,
+        ])
+        .sort(),
+    );
     expect(
       cells.filter(
         (cell) => cell.scenarioId === "hub-restore-compatibility-window",

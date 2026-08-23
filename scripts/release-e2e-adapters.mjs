@@ -15,7 +15,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { withVerifiedProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import { validateReleaseCandidate } from "./release-candidate-lib.mjs";
 import {
   createHubLifecycleClient,
@@ -176,7 +175,6 @@ export function createSshReleaseInfrastructureAdapter({
   runProcess = runSpawnedProcess,
   transferFile,
   trustedRootPublicKeyPem,
-  withExtractedBootstrapArtifact = withVerifiedProbeBootstrapArtifact,
 }) {
   const execute = createSshExecutor({
     host,
@@ -203,7 +201,6 @@ export function createSshReleaseInfrastructureAdapter({
         runProcess,
       }),
     trustedRootPublicKeyPem,
-    withExtractedBootstrapArtifact,
   });
 }
 
@@ -215,7 +212,6 @@ export function createCiReleaseInfrastructureAdapter({
   timeoutMs = 5 * 60 * 1000,
   transferFile = copyCandidateArchive,
   trustedRootPublicKeyPem,
-  withExtractedBootstrapArtifact = withVerifiedProbeBootstrapArtifact,
 }) {
   if (
     environment.GITHUB_ACTIONS !== "true" ||
@@ -239,7 +235,6 @@ export function createCiReleaseInfrastructureAdapter({
     provisioning: "github-hosted-runner",
     transferFile,
     trustedRootPublicKeyPem,
-    withExtractedBootstrapArtifact,
   });
 }
 
@@ -271,9 +266,9 @@ function createReleaseInfrastructureAdapter({
   provisioning,
   transferFile,
   trustedRootPublicKeyPem,
-  withExtractedBootstrapArtifact,
 }) {
   let preparedRunId = null;
+  let bootstrapProvisioner = null;
   return {
     kind,
     async prepare({ matrixCell, runId }) {
@@ -290,12 +285,11 @@ function createReleaseInfrastructureAdapter({
       const candidate = await loadCandidate(candidateManifestPath, {
         trustedRootPublicKeyPem,
       });
-      const provisionBootstrap = createCandidateBootstrapProvisioner({
+      bootstrapProvisioner = createCandidateBootstrapProvisioner({
         candidateDir: candidate.candidateDir,
         execute,
         manifest: candidate.manifest,
         transferFile,
-        withExtractedBootstrapArtifact,
       });
       preparedRunId = runId;
       return {
@@ -309,15 +303,19 @@ function createReleaseInfrastructureAdapter({
           provisioning,
         },
         manifest: candidate.manifest,
-        provisionBootstrap,
+        provisionBootstrap: bootstrapProvisioner.provision,
       };
     },
     async release({ runId }) {
       if (preparedRunId !== runId) {
         throw new Error("Release E2E infrastructure run ID does not match");
       }
+      const recipe = bootstrapProvisioner
+        ? await bootstrapProvisioner.cleanup({ runId })
+        : { clean: true, skipped: "bootstrap_not_prepared" };
       preparedRunId = null;
-      return { clean: true };
+      bootstrapProvisioner = null;
+      return { clean: true, recipe };
     },
   };
 }
@@ -327,161 +325,121 @@ function createCandidateBootstrapProvisioner({
   execute,
   manifest,
   transferFile,
-  withExtractedBootstrapArtifact,
 }) {
-  const bootstrap = selectCandidateBootstrap(
-    manifest,
-    "x86_64-unknown-linux-gnu",
-  );
-  const archivePath = path.join(
-    candidateDir,
-    manifest.bootstrap.directory,
-    bootstrap.file,
-  );
+  const recipe = selectCandidateBootstrapRecipe(manifest);
+  const recipePath = path.join(candidateDir, "recipe", recipe.file);
   let provisioned = false;
-  return async ({ runId }) => {
-    if (provisioned)
-      throw new Error("Candidate Probe Bootstrap is already provisioned");
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
-      throw new Error("Release E2E infrastructure run ID is invalid");
-    }
-    await withExtractedBootstrapArtifact(
-      {
-        archivePath,
-        distribution: manifest.bootstrap.distribution,
-        expectedArchive: { sha256: bootstrap.sha256, size: bootstrap.size },
-        rootKeyId: manifest.bootstrap.rootKeyId,
-        target: bootstrap.target,
-        version: manifest.candidate.version,
-      },
-      async ({ extractedRoles }) => {
-        const staged = await execute(stageCandidateBootstrapScript(), {
-          sensitive: true,
+  let provisionedRunId = null;
+  let stageDir = null;
+  return {
+    async provision({ runId }) {
+      if (provisioned) {
+        throw new Error(
+          "Candidate Probe Bootstrap recipe is already provisioned",
+        );
+      }
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
+        throw new Error("Release E2E infrastructure run ID is invalid");
+      }
+      const staged = await execute(stageCandidateBootstrapRecipeScript(), {
+        sensitive: true,
+      });
+      if (
+        staged.code !== 0 ||
+        !/^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/.test(
+          staged.stdout.trim(),
+        )
+      ) {
+        throw new Error(
+          `Could not stage Candidate Probe Bootstrap recipe as the non-root Host user: ${staged.stderr}`,
+        );
+      }
+      stageDir = staged.stdout.trim();
+      try {
+        await transferFile({
+          destination: path.join(stageDir, recipe.file),
+          source: recipePath,
         });
-        if (
-          staged.code !== 0 ||
-          !/^\/tmp\/enoki-release-e2e-bootstrap\.[A-Za-z0-9]+$/.test(
-            staged.stdout.trim(),
-          )
-        ) {
+        const verified = await execute(
+          verifyCandidateBootstrapRecipeScript({ recipe, stageDir }),
+          { sensitive: true },
+        );
+        if (verified.code !== 0 || verified.stdout.trim() !== "verified") {
           throw new Error(
-            `Could not stage Candidate Probe Bootstrap as the non-root Host user: ${staged.stderr}`,
+            `Could not verify Candidate Probe Bootstrap recipe staging: ${verified.stderr}`,
           );
         }
-        const stageDir = staged.stdout.trim();
-        try {
-          for (const role of bootstrapRoles()) {
-            await transferFile({
-              destination: path.join(stageDir, role.name),
-              source: extractedRoles[role.key].binaryPath,
-            });
-          }
-          const verified = await execute(
-            verifyCandidateBootstrapStagingScript({ extractedRoles, stageDir }),
-            { sensitive: true },
-          );
-          if (verified.code !== 0 || verified.stdout.trim() !== "verified") {
-            throw new Error(
-              `Could not verify Candidate Probe Bootstrap staging: ${verified.stderr}`,
-            );
-          }
-          const installed = await execute(
-            installCandidateBootstrapScript({ extractedRoles, stageDir }),
-            { root: true },
-          );
-          if (installed.code !== 0 || installed.stdout.trim() !== "installed") {
-            throw new Error(
-              `Could not install Candidate Probe Bootstrap roles: ${installed.stderr}`,
-            );
-          }
-        } catch (error) {
-          await execute(removeCandidateBootstrapStagingScript(stageDir), {
-            sensitive: true,
-          }).catch(() => {});
-          throw error;
-        }
-      },
-    );
-    provisioned = true;
-    return {
-      file: bootstrap.file,
-      sha256: bootstrap.sha256,
-      target: bootstrap.target,
-    };
+      } catch (error) {
+        await execute(removeCandidateBootstrapRecipeScript(stageDir), {
+          sensitive: true,
+        }).catch(() => {});
+        stageDir = null;
+        throw error;
+      }
+      provisioned = true;
+      provisionedRunId = runId;
+      return {
+        evidence: {
+          file: recipe.file,
+          sha256: recipe.sha256,
+          version: recipe.version,
+        },
+        workingDirectory: stageDir,
+      };
+    },
+    async cleanup({ runId }) {
+      if (!stageDir) return { clean: true, skipped: "recipe_not_staged" };
+      if (runId !== provisionedRunId) {
+        throw new Error(
+          "Candidate Probe Bootstrap recipe run ID does not match",
+        );
+      }
+      const removed = await execute(
+        removeCandidateBootstrapRecipeScript(stageDir),
+        { sensitive: true },
+      );
+      if (removed.code !== 0 || removed.stdout.trim() !== "removed") {
+        throw new Error(
+          `Could not remove Candidate Probe Bootstrap recipe: ${removed.stderr}`,
+        );
+      }
+      stageDir = null;
+      provisioned = false;
+      provisionedRunId = null;
+      return { clean: true };
+    },
   };
 }
 
-function selectCandidateBootstrap(manifest, target) {
-  const bootstrap = manifest?.bootstrap;
-  const matching =
-    bootstrap?.files?.filter((file) => file?.target === target) ?? [];
+function selectCandidateBootstrapRecipe(manifest) {
+  const recipe = manifest?.bootstrapRecipe;
   if (
-    bootstrap?.directory !== "probe-bootstrap" ||
-    !/^[0-9a-f]{64}$/.test(bootstrap?.rootKeyId ?? "") ||
-    matching.length !== 1 ||
-    matching[0]?.file !== `enoki-probe-bootstrap-${target}.tar.gz` ||
-    !/^[0-9a-f]{64}$/.test(matching[0]?.sha256 ?? "") ||
-    !Number.isSafeInteger(matching[0]?.size) ||
-    matching[0].size <= 0
+    recipe?.file !== "enoki-probe-bootstrap.py" ||
+    recipe?.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(recipe?.sha256 ?? "") ||
+    !Number.isSafeInteger(recipe?.size) ||
+    recipe.size <= 0
   ) {
-    throw new Error(
-      "Validated Candidate has no exact Host Probe Bootstrap archive",
-    );
+    throw new Error("Validated Candidate has no exact Probe Bootstrap recipe");
   }
-  return matching[0];
+  return recipe;
 }
 
-function stageCandidateBootstrapScript() {
-  return `# enoki-release-e2e:candidate-bootstrap-stage\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=$(mktemp -d /tmp/enoki-release-e2e-bootstrap.XXXXXX)\nchmod 0700 "$stage_dir"\nprintf '%s\\n' "$stage_dir"\n`;
+function stageCandidateBootstrapRecipeScript() {
+  return `# enoki-release-e2e:candidate-bootstrap-recipe-stage\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=$(mktemp -d /tmp/enoki-release-e2e-recipe.XXXXXX)\nchmod 0700 "$stage_dir"\nprintf '%s\\n' "$stage_dir"\n`;
 }
 
-function verifyCandidateBootstrapStagingScript({ extractedRoles, stageDir }) {
-  const checks = bootstrapRoles()
-    .map(({ key, name }) => {
-      const expected = extractedRoles[key];
-      return `[ -f "$stage_dir/${name}" ] && [ ! -L "$stage_dir/${name}" ]\n[ "$(stat -c %a "$stage_dir/${name}")" = 755 ]\n[ "$(wc -c < "$stage_dir/${name}" | tr -d ' ')" = ${shellSingleQuote(String(expected.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(expected.sha256)} "$stage_dir/${name}" | sha256sum -c -`;
-    })
-    .join("\n");
-  return `# enoki-release-e2e:candidate-bootstrap-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n${checks}\nprintf 'verified\\n'\n`;
+function verifyCandidateBootstrapRecipeScript({ recipe, stageDir }) {
+  return `# enoki-release-e2e:candidate-bootstrap-recipe-verify\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\nrecipe="$stage_dir/${recipe.file}"\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n[ -f "$recipe" ] && [ ! -L "$recipe" ]\n[ "$(wc -c < "$recipe" | tr -d ' ')" = ${shellSingleQuote(String(recipe.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(recipe.sha256)} "$recipe" | sha256sum -c -\nchmod 0500 "$recipe"\nprintf 'verified\\n'\n`;
 }
 
-function removeCandidateBootstrapStagingScript(stageDir) {
-  return `set -eu\n[ "$(id -u)" != 0 ]\nrm -rf -- ${shellSingleQuote(stageDir)}\n`;
+function removeCandidateBootstrapRecipeScript(stageDir) {
+  return `# enoki-release-e2e:candidate-bootstrap-recipe-remove\nset -eu\n[ "$(id -u)" != 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\ncase "$stage_dir" in /tmp/enoki-release-e2e-recipe.*) ;; *) exit 1 ;; esac\nrm -f -- "$stage_dir/enoki-probe-bootstrap.py"\nrmdir -- "$stage_dir"\nprintf 'removed\\n'\n`;
 }
 
 async function copyCandidateArchive({ source, destination }) {
   await copyFile(source, destination);
   await chmod(destination, 0o600);
-}
-
-function installCandidateBootstrapScript({ extractedRoles, stageDir }) {
-  const roles = bootstrapRoles();
-  const preflight = roles
-    .map(
-      ({ name }) =>
-        `[ ! -e "/usr/local/bin/${name}" ] && [ ! -L "/usr/local/bin/${name}" ]`,
-    )
-    .join("\n");
-  const takeOwnership = roles
-    .map(({ key, name }) => {
-      const expected = extractedRoles[key];
-      return `source="$stage_dir/${name}"\ntarget="$temporary/${name}"\n[ -f "$source" ] && [ ! -L "$source" ]\ninstall -o root -g root -m 0755 -- "$source" "$target"\n[ -f "$target" ] && [ ! -L "$target" ]\n[ "$(stat -c %u:%g:%a "$target")" = 0:0:755 ]\n[ "$(wc -c < "$target" | tr -d ' ')" = ${shellSingleQuote(String(expected.size))} ]\nprintf '%s  %s\\n' ${shellSingleQuote(expected.sha256)} "$target" | sha256sum -c -\nrm -f -- "$source"`;
-    })
-    .join("\n");
-  const activate = roles
-    .map(({ key, name }) => {
-      const expected = extractedRoles[key];
-      return `mv -T -- "$temporary/${name}" "/usr/local/bin/${name}"\n[ -f "/usr/local/bin/${name}" ] && [ ! -L "/usr/local/bin/${name}" ]\n[ "$(stat -c %u:%g:%a "/usr/local/bin/${name}")" = 0:0:755 ]\nprintf '%s  %s\\n' ${shellSingleQuote(expected.sha256)} "/usr/local/bin/${name}" | sha256sum -c -`;
-    })
-    .join("\n");
-  return `# enoki-release-e2e:candidate-bootstrap-install\nset -eu\n[ "$(id -u)" = 0 ]\nstage_dir=${shellSingleQuote(stageDir)}\n[ -d "$stage_dir" ] && [ ! -L "$stage_dir" ] && [ "$(stat -c %a "$stage_dir")" = 700 ]\n${preflight}\ntemporary=$(mktemp -d /tmp/enoki-release-e2e-bootstrap-root.XXXXXX)\nchmod 0700 "$temporary"\ncleanup() { rm -rf -- "$temporary"; rm -f -- ${roles.map(({ name }) => shellSingleQuote(`/usr/local/bin/${name}`)).join(" ")}; rmdir -- "$stage_dir" 2>/dev/null || true; }\ntrap cleanup EXIT HUP INT TERM\n${takeOwnership}\n${activate}\ntrap - EXIT HUP INT TERM\nrmdir -- "$stage_dir"\nrm -rf -- "$temporary"\nprintf 'installed\\n'\n`;
-}
-
-function bootstrapRoles() {
-  return [
-    { key: "acquirer", name: "enoki-probe-bootstrap-acquire" },
-    { key: "activator", name: "enoki-probe-bootstrap-activate" },
-  ];
 }
 
 function sha256(value) {
@@ -802,15 +760,19 @@ export function createReleaseEnvironment({
         useHubStateSnapshot: scenario === "hub-restore-compatibility-window",
       });
       const lifecycle = createHubLifecycleClient({ baseUrl: hubOwnerUrl });
-      const host = createProbeHostHarness({ execute, ownershipToken });
-      const releaseTestHost = matrixCell
-        ? await host.assertReleaseTestHost(matrixCell)
-        : null;
       const bootstrap = bootstrapProvisioner
         ? await bootstrapProvisioner({ candidateManifest, runId })
         : null;
+      const host = createProbeHostHarness({
+        execute,
+        installWorkingDirectory: bootstrap?.workingDirectory,
+        ownershipToken,
+      });
+      const releaseTestHost = matrixCell
+        ? await host.assertReleaseTestHost(matrixCell)
+        : null;
       return {
-        bootstrap,
+        bootstrap: bootstrap?.evidence ?? null,
         docker: dockerResources,
         host,
         hub: {
@@ -847,7 +809,7 @@ export function createReleaseEnvironment({
         },
         infrastructure:
           infrastructure && bootstrap
-            ? { ...infrastructure, bootstrap }
+            ? { ...infrastructure, bootstrap: bootstrap.evidence }
             : (infrastructure ?? null),
         releaseTestHost,
       };
@@ -936,7 +898,10 @@ export function createDockerHubController({
       if (hubMode === "baseline") {
         const descriptor = candidateManifest.releaseBaseline;
         if (
-          descriptor?.kind !== "enoki-release-baseline" ||
+          !new Set([
+            "enoki-release-baseline",
+            "enoki-trust-epoch-migration-baseline",
+          ]).has(descriptor?.kind) ||
           typeof descriptor.hub?.archive !== "string" ||
           !descriptor.hub.archive ||
           !/^sha256:[0-9a-f]{64}$/.test(descriptor.hub.imageDigest ?? "")
