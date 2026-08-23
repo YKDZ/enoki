@@ -746,6 +746,7 @@ fn activate_current_probe_with_observation_files(
         trust,
         journal.staging_directory(),
         install_observation,
+        journal.transaction_id(),
     ) {
         Ok(staged) => staged,
         Err(error) => {
@@ -1166,6 +1167,7 @@ fn stage_complete_layout(
     trust: &BuildTrust,
     staging: &Path,
     install_observation: bool,
+    transaction_id: &str,
 ) -> Result<StagedLayout, InstallError> {
     let binary = staging.join("enoki-probe");
     component
@@ -1186,7 +1188,13 @@ fn stage_complete_layout(
         (&identity, bootstrap_config(enrollment, bundle, trust)),
         (
             &metadata,
-            install_metadata(enrollment, bundle, trust, install_observation),
+            install_metadata(
+                enrollment,
+                bundle,
+                trust,
+                install_observation,
+                transaction_id,
+            ),
         ),
         (&unit, service_unit().to_owned()),
     ] {
@@ -1252,6 +1260,7 @@ fn install_metadata(
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
     install_observation: bool,
+    transaction_id: &str,
 ) -> String {
     if !install_observation {
         return format!(
@@ -1272,7 +1281,7 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 4\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 4\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1280,6 +1289,8 @@ fn install_metadata(
         CPU_PROVIDER_BINARY,
         DISK_HEALTH_PROVIDER_BINARY,
         LIFECYCLE_COMPANION_BINARY,
+        PROBE_IPC_GROUP,
+        account::group_account_marker(transaction_id),
         OBSERVATION_IPC_GROUP,
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,

@@ -926,6 +926,7 @@ mod tests {
             &bundle(),
             &trust(),
             true,
+            "test-transaction",
         );
         assert!(!metadata.contains("operation_sudoers_path"));
     }
@@ -1018,6 +1019,10 @@ mod tests {
             temporary.path().join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
         )
         .unwrap();
+        let metadata = fs::read_to_string(temporary.path().join("etc/enoki/probe-install.toml"))
+            .unwrap();
+        assert!(metadata.contains("probe_ipc_group = \"enoki-probe-ipc\""));
+        assert!(metadata.contains("probe_ipc_group_ownership = \"!enoki-bootstrap-"));
         assert!(!config.contains("upgrader_launch"));
         assert!(!config.contains("operation_sudoers_path"));
         assert!(!temporary

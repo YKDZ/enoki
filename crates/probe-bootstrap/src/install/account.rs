@@ -210,7 +210,7 @@ fn account_marker(transaction_id: &str) -> String {
     format!("enoki-bootstrap-{transaction_id}")
 }
 
-fn group_account_marker(transaction_id: &str) -> String {
+pub(super) fn group_account_marker(transaction_id: &str) -> String {
     format!("!{}", account_marker(transaction_id))
 }
 

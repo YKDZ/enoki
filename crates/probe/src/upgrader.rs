@@ -58,6 +58,7 @@ const LIFECYCLE_COMPANION_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-probe-lifecycle-companion@.service";
 const LIFECYCLE_COMPANION_SOCKET_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-probe-lifecycle-companion.socket";
+const PROBE_IPC_GROUP: &str = "enoki-probe-ipc";
 const OBSERVATION_SERVICES_SCHEMA_THREE: [&str; 4] = [
     "enoki-observation-runtime.service",
     "enoki-observation-runtime.socket",
@@ -601,6 +602,15 @@ pub trait ProbeUpgraderSystemdRunner {
         service_user: &str,
         service_group: &str,
     ) -> Result<(), ProbeUpgraderRunError>;
+
+    fn remove_owned_ipc_group(
+        &mut self,
+        group: &str,
+        ownership_marker: &str,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        let _ = ownership_marker;
+        self.remove_service_identity(group, group)
+    }
 }
 
 pub struct SystemProbeUpgraderSystemdRunner;
@@ -739,6 +749,14 @@ impl ProbeUpgraderSystemdRunner for SystemProbeUpgraderSystemdRunner {
         service_group: &str,
     ) -> Result<(), ProbeUpgraderRunError> {
         remove_service_identity_with(service_user, service_group, &mut run_cleanup_command)
+    }
+
+    fn remove_owned_ipc_group(
+        &mut self,
+        group: &str,
+        ownership_marker: &str,
+    ) -> Result<(), ProbeUpgraderRunError> {
+        remove_owned_ipc_group_with(group, ownership_marker, &mut run_cleanup_command)
     }
 }
 
@@ -890,6 +908,51 @@ fn remove_service_identity_with(
         "probe_uninstall_service_group_residue",
         "removing the service group",
         "verifying the service group is absent",
+        run,
+    )
+}
+
+fn remove_owned_ipc_group_with(
+    group: &str,
+    ownership_marker: &str,
+    run: &mut impl FnMut(&str, &[&str]) -> Result<CleanupCommandOutput, std::io::Error>,
+) -> Result<(), ProbeUpgraderRunError> {
+    let action = "verifying the lifecycle IPC group ownership";
+    let output = run("getent", &["gshadow", group]).map_err(|error| {
+        uninstall_cleanup_failure(
+            "probe_uninstall_service_group_verification_failed",
+            action,
+            error.to_string(),
+        )
+    })?;
+    match output.code {
+        Some(2) => return Ok(()),
+        Some(0) if output.successful => {}
+        _ => {
+            return Err(uninstall_cleanup_failure(
+                "probe_uninstall_service_group_verification_failed",
+                action,
+                cleanup_command_failure_message(&output, "getent"),
+            ));
+        }
+    }
+    let fields = output.stdout.trim_end().split(':').collect::<Vec<_>>();
+    if fields.len() != 4 || fields[0] != group || fields[1] != ownership_marker {
+        return Err(uninstall_cleanup_failure(
+            "probe_uninstall_service_group_residue",
+            action,
+            "lifecycle IPC group ownership receipt does not match".to_owned(),
+        ));
+    }
+    remove_identity_entry_with(
+        "group",
+        group,
+        "groupdel",
+        "probe_uninstall_service_group_remove_failed",
+        "probe_uninstall_service_group_verification_failed",
+        "probe_uninstall_service_group_residue",
+        "removing the lifecycle IPC group",
+        "verifying the lifecycle IPC group is absent",
         run,
     )
 }
@@ -2133,6 +2196,21 @@ fn execute_probe_uninstall_cleanup(
                 )
             })?;
     }
+    if let Some((ipc_group, ownership)) = install_metadata
+        .probe_ipc_group
+        .as_deref()
+        .zip(install_metadata.probe_ipc_group_ownership.as_deref())
+    {
+        systemd
+            .remove_owned_ipc_group(ipc_group, ownership)
+            .map_err(|error| {
+                probe_uninstall_cleanup_error(
+                    "probe_uninstall_service_group_remove_failed",
+                    "removing the lifecycle IPC group",
+                    error,
+                )
+            })?;
+    }
 
     if install_metadata.schema_version == 4 {
         // 自删除是最后一个角色清理阶段；当前进程持有已打开的可执行文件，
@@ -2642,6 +2720,8 @@ struct TrustedProbeInstallMetadata {
     disk_health_provider_path: Option<PathBuf>,
     lifecycle_companion_path: Option<PathBuf>,
     observation_unit_paths: Vec<PathBuf>,
+    probe_ipc_group: Option<String>,
+    probe_ipc_group_ownership: Option<String>,
     observation_ipc_group: Option<String>,
     install_state_sha256: Option<String>,
     target_manifest_sha256: Option<String>,
@@ -3106,22 +3186,39 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         (None, None, None, Vec::new(), None, None)
     };
 
-    let (install_state_sha256, target_manifest_sha256, bundle_version) = if schema_version == 4 {
+    let (
+        install_state_sha256,
+        target_manifest_sha256,
+        bundle_version,
+        probe_ipc_group,
+        probe_ipc_group_ownership,
+    ) = if schema_version == 4 {
         let install_state = required_install_metadata_string(&value, "install_state_sha256")?;
         let manifest = required_install_metadata_string(&value, "target_manifest_sha256")?;
         let version = required_install_metadata_string(&value, "bundle_version")?;
+        let ipc_group = required_install_metadata_string(&value, "probe_ipc_group")?;
+        let ipc_group_ownership =
+            required_install_metadata_string(&value, "probe_ipc_group_ownership")?;
         if !is_sha256_hex(&install_state)
             || !is_sha256_hex(&manifest)
             || version.is_empty()
             || version.len() > 64
+            || ipc_group != PROBE_IPC_GROUP
+            || !valid_probe_ipc_group_ownership(&ipc_group_ownership)
         {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "schema 4 lifecycle receipt is invalid",
             ));
         }
-        (Some(install_state), Some(manifest), Some(version))
+        (
+            Some(install_state),
+            Some(manifest),
+            Some(version),
+            Some(ipc_group),
+            Some(ipc_group_ownership),
+        )
     } else {
-        (None, None, None)
+        (None, None, None, None, None)
     };
 
     if service_name != "enoki-probe" {
@@ -3176,11 +3273,24 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         disk_health_provider_path,
         lifecycle_companion_path,
         observation_unit_paths,
+        probe_ipc_group,
+        probe_ipc_group_ownership,
         observation_ipc_group,
         install_state_sha256,
         target_manifest_sha256,
         bundle_version,
     })
+}
+
+fn valid_probe_ipc_group_ownership(value: &str) -> bool {
+    value
+        .strip_prefix("!enoki-bootstrap-")
+        .is_some_and(|transaction| {
+            transaction.len() == 32
+                && transaction
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 fn required_fixed_install_metadata_path(
@@ -5859,6 +5969,8 @@ mod tests {
             disk_health_provider_path: None,
             lifecycle_companion_path: None,
             observation_unit_paths: Vec::new(),
+            probe_ipc_group: None,
+            probe_ipc_group_ownership: None,
             observation_ipc_group: None,
             install_state_sha256: None,
             target_manifest_sha256: None,
@@ -5981,6 +6093,8 @@ mod tests {
             disk_health_provider_path: None,
             lifecycle_companion_path: None,
             observation_unit_paths: observation_units.to_vec(),
+            probe_ipc_group: None,
+            probe_ipc_group_ownership: None,
             observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_string()),
             install_state_sha256: None,
             target_manifest_sha256: None,
@@ -6106,6 +6220,8 @@ mod tests {
             disk_health_provider_path: Some(binaries[3].clone()),
             lifecycle_companion_path: Some(binaries[4].clone()),
             observation_unit_paths: units[1..].to_vec(),
+            probe_ipc_group: Some(PROBE_IPC_GROUP.to_owned()),
+            probe_ipc_group_ownership: Some(format!("!enoki-bootstrap-{}", "d".repeat(32))),
             observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_owned()),
             install_state_sha256: Some("b".repeat(64)),
             target_manifest_sha256: Some("c".repeat(64)),
@@ -6148,6 +6264,9 @@ mod tests {
             .position(|call| call == "stop enoki-probe-lifecycle-companion.socket")
             .expect("companion socket cleanup");
         assert!(identity_removed < companion_stopped);
+        assert!(systemd.calls.contains(&format!(
+            "remove-service-identity {PROBE_IPC_GROUP}:{PROBE_IPC_GROUP}"
+        )));
         assert!(
             systemd
                 .calls
@@ -6198,6 +6317,8 @@ mod tests {
             disk_health_provider_path: None,
             lifecycle_companion_path: None,
             observation_unit_paths: Vec::new(),
+            probe_ipc_group: None,
+            probe_ipc_group_ownership: None,
             observation_ipc_group: None,
             install_state_sha256: None,
             target_manifest_sha256: None,
@@ -6537,6 +6658,59 @@ mod tests {
             "verifying the service unit is absent",
         )
         .expect("not-found is idempotent success");
+    }
+
+    #[test]
+    fn lifecycle_ipc_group_cleanup_requires_and_consumes_the_install_receipt() {
+        let marker = format!("!enoki-bootstrap-{}", "d".repeat(32));
+        let mut calls = Vec::new();
+        remove_owned_ipc_group_with(PROBE_IPC_GROUP, &marker, &mut |program, arguments| {
+            calls.push(format!("{program} {}", arguments.join(" ")));
+            Ok(match (program, arguments) {
+                ("getent", ["gshadow", PROBE_IPC_GROUP]) => {
+                    CleanupCommandOutput::success(&format!("{PROBE_IPC_GROUP}:{marker}::\n"))
+                }
+                ("getent", ["group", PROBE_IPC_GROUP]) if calls.len() == 2 => {
+                    CleanupCommandOutput::success("enoki-probe-ipc:x:998:\n")
+                }
+                ("groupdel", [PROBE_IPC_GROUP]) => CleanupCommandOutput::success(""),
+                ("getent", ["group", PROBE_IPC_GROUP]) => {
+                    CleanupCommandOutput::failure(Some(2), "", "")
+                }
+                _ => panic!("unexpected cleanup command"),
+            })
+        })
+        .expect("owned lifecycle IPC group is removed");
+
+        assert_eq!(
+            calls,
+            [
+                "getent gshadow enoki-probe-ipc",
+                "getent group enoki-probe-ipc",
+                "groupdel enoki-probe-ipc",
+                "getent group enoki-probe-ipc",
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_ipc_group_cleanup_keeps_a_group_without_the_install_receipt() {
+        let marker = format!("!enoki-bootstrap-{}", "d".repeat(32));
+        let mut calls = Vec::new();
+        let error =
+            remove_owned_ipc_group_with(PROBE_IPC_GROUP, &marker, &mut |program, arguments| {
+                calls.push(format!("{program} {}", arguments.join(" ")));
+                Ok(CleanupCommandOutput::success(
+                    "enoki-probe-ipc:!enoki-bootstrap-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee::\n",
+                ))
+            })
+            .expect_err("unowned lifecycle IPC group remains untouched");
+
+        assert_eq!(
+            probe_upgrader_error_code(&error),
+            "probe_uninstall_service_group_residue"
+        );
+        assert_eq!(calls, ["getent gshadow enoki-probe-ipc"]);
     }
 
     #[test]
@@ -7103,6 +7277,11 @@ mod tests {
             format!("cpu_provider_path = \"{CPU_PROVIDER_BINARY_PATH}\""),
             format!("disk_health_provider_path = \"{DISK_HEALTH_PROVIDER_BINARY_PATH}\""),
             format!("lifecycle_companion_path = \"{LIFECYCLE_COMPANION_BINARY_PATH}\""),
+            format!("probe_ipc_group = \"{PROBE_IPC_GROUP}\""),
+            format!(
+                "probe_ipc_group_ownership = \"!enoki-bootstrap-{}\"",
+                "d".repeat(32)
+            ),
             format!("observation_ipc_group = \"{OBSERVATION_IPC_GROUP}\""),
             "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"".to_owned(),
             "state_dir = \"/var/lib/enoki-probe\"".to_owned(),
@@ -7139,6 +7318,7 @@ mod tests {
         );
         assert_eq!(metadata.observation_unit_paths.len(), 8);
         assert_eq!(metadata.install_state_sha256, Some("b".repeat(64)));
+        assert_eq!(metadata.probe_ipc_group.as_deref(), Some(PROBE_IPC_GROUP));
     }
 
     #[test]
@@ -9285,6 +9465,8 @@ printf '%s\n' '{}'
             disk_health_provider_path: None,
             lifecycle_companion_path: None,
             observation_unit_paths: Vec::new(),
+            probe_ipc_group: None,
+            probe_ipc_group_ownership: None,
             observation_ipc_group: None,
             install_state_sha256: None,
             target_manifest_sha256: None,
