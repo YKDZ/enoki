@@ -2636,7 +2636,7 @@ describe("Probe report API", () => {
           hostId: String(host.id),
           operationToken: expect.any(String),
           targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-          targetManifestSha256: "a".repeat(64),
+          targetManifestSha256: "",
           targetProbeVersion: "0.2.0",
         }),
       );

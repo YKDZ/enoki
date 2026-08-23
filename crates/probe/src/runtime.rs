@@ -677,7 +677,6 @@ struct ProbeUpgradeRunnerOperationMetadata<'a> {
     host_id: &'a str,
     operation_id: &'a str,
     target_asset_set_digest: &'a str,
-    target_manifest_sha256: &'a str,
     target_probe_version: &'a str,
 }
 
@@ -711,7 +710,6 @@ struct ProbeUpgradeAcquisitionInput<'a> {
     operation_id: &'a str,
     operation_token: &'a str,
     target_asset_set_digest: &'a str,
-    target_manifest_sha256: &'a str,
     target_probe_version: &'a str,
 }
 
@@ -792,7 +790,6 @@ impl ProbeUpgradeAcquisitionPort for HttpProbeUpgradeAcquisition {
                 hub_origin: self.hub_origin.clone(),
                 operation_id: input.operation_id.to_owned(),
                 target_asset_set_digest: input.target_asset_set_digest.to_owned(),
-                target_manifest_sha256: input.target_manifest_sha256.to_owned(),
                 target_version: input.target_probe_version.to_owned(),
             },
         )
@@ -886,7 +883,6 @@ impl ProbeOperationRunner for LifecycleCompanionOperationRunner {
                 operation_id: input.operation.operation_id,
                 operation_token: input.stdin,
                 target_asset_set_digest: input.operation.target_asset_set_digest,
-                target_manifest_sha256: input.operation.target_manifest_sha256,
                 target_probe_version: input.operation.target_probe_version,
             }) {
             Ok(stage) => stage,
@@ -1041,7 +1037,6 @@ impl ProbeOperationReportQueue {
                         host_id: &probe_upgrade.host_id,
                         operation_id: &operation.id,
                         target_asset_set_digest: &probe_upgrade.target_asset_set_digest,
-                        target_manifest_sha256: &probe_upgrade.target_manifest_sha256,
                         target_probe_version: &probe_upgrade.target_probe_version,
                     },
                 })
@@ -1096,7 +1091,7 @@ mod operation_report_tests {
                 enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt {
                     operation_id: input.operation_id.to_owned(),
                     target_asset_set_digest: input.target_asset_set_digest.to_owned(),
-                    target_manifest_sha256: input.target_manifest_sha256.to_owned(),
+                    target_manifest_sha256: "d".repeat(64),
                     target_version: input.target_probe_version.to_owned(),
                     verified_stage_sha256: "e".repeat(64),
                 },
@@ -1216,7 +1211,6 @@ mod operation_report_tests {
                 host_id: "7",
                 operation_id: "operation_01",
                 target_asset_set_digest: &format!("sha256:{}", "c".repeat(64)),
-                target_manifest_sha256: &"d".repeat(64),
                 target_probe_version: "1.2.3",
             },
         });

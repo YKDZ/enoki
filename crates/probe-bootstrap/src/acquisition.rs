@@ -42,7 +42,6 @@ pub struct ProbeUpgradeAcquisition {
     pub hub_origin: String,
     pub operation_id: String,
     pub target_asset_set_digest: String,
-    pub target_manifest_sha256: String,
     pub target_version: String,
 }
 
@@ -563,7 +562,6 @@ pub fn acquire_probe_upgrade_once(
     if acquired.bundle.version != request.target_version
         || request.target_asset_set_digest.strip_prefix("sha256:")
             != Some(acquired.bundle.asset_set_manifest_sha256.as_str())
-        || acquired.bundle.manifest_sha256 != request.target_manifest_sha256
     {
         return Err(AcquisitionFailure::Permanent);
     }
@@ -572,7 +570,7 @@ pub fn acquire_probe_upgrade_once(
     Ok(VerifiedUpgradeStageReceipt {
         operation_id: request.operation_id,
         target_asset_set_digest: request.target_asset_set_digest,
-        target_manifest_sha256: request.target_manifest_sha256,
+        target_manifest_sha256: acquired.bundle.manifest_sha256,
         target_version: request.target_version,
         verified_stage_sha256,
     })

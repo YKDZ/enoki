@@ -1284,8 +1284,7 @@ function probeUpgradeOperationMessage(
         secret: tokenInput.secret,
       }),
       targetAssetSetDigest: operation.targetAssetSetDigest ?? "",
-      targetManifestSha256:
-        operation.targetAssetSetDigest?.replace(/^sha256:/, "") ?? "",
+      targetManifestSha256: "",
       targetProbeVersion: operation.targetProbeVersion,
     },
   };
