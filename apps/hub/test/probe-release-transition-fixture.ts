@@ -26,6 +26,7 @@ export async function writeSignedProbeAssetSet(
     trustEpoch?: boolean;
   },
 ) {
+  const sourceProbeComponents = sourceProbeComponentFixture();
   const authority = input.authority ?? testKeyPair();
   const release = testKeyPair();
   const delegation = createProbeTrustDelegation({
@@ -65,6 +66,7 @@ export async function writeSignedProbeAssetSet(
         delegation,
         manifest,
         targetVersion: input.targetVersion,
+        sourceProbeComponents,
       })
     : null;
   const contract =
@@ -74,6 +76,7 @@ export async function writeSignedProbeAssetSet(
       manifest,
       sourceVersion: input.sourceVersion,
       transition: input.transition,
+      sourceProbeComponents,
     });
 
   await Promise.all([
@@ -115,6 +118,7 @@ export async function writeSignedProbeAssetSet(
     authority,
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
+    sourceProbeSha256: sourceProbeComponents.map(({ sha256 }) => sha256),
   };
 }
 
@@ -123,11 +127,13 @@ function createTrustEpochMigrationFixture({
   delegation,
   manifest,
   targetVersion,
+  sourceProbeComponents,
 }: {
   authority: TestProbeReleaseAuthority;
   delegation: ReturnType<typeof createProbeTrustDelegation>;
   manifest: Buffer;
   targetVersion: string;
+  sourceProbeComponents: ReturnType<typeof sourceProbeComponentFixture>;
 }) {
   const legacyRelease = {
     assets: [
@@ -168,6 +174,7 @@ function createTrustEpochMigrationFixture({
       rootPublicKeyPem: authority.publicKey,
       targetManifestBytes: manifest,
       targetVersion,
+      sourceProbeComponents,
     }),
   };
 }
@@ -177,11 +184,13 @@ function createGenericReleaseTransitionContract({
   manifest,
   sourceVersion,
   transition,
+  sourceProbeComponents,
 }: {
   authority: TestProbeReleaseAuthority;
   manifest: Buffer;
   sourceVersion: string;
   transition: "compatible" | "replacement-required";
+  sourceProbeComponents: ReturnType<typeof sourceProbeComponentFixture>;
 }) {
   const value = JSON.parse(manifest.toString("utf8")) as {
     assets: unknown;
@@ -203,7 +212,10 @@ function createGenericReleaseTransitionContract({
       kind: "enoki-release-transition-contract",
       rootKeyId: sha256(rootPublicKey),
       schemaVersion: 1,
-      source: { version: sourceVersion },
+      source: {
+        probeComponents: sourceProbeComponents,
+        version: sourceVersion,
+      },
       target: {
         assetClosure: value.assets,
         assetSetManifestSha256: sha256(manifest),
@@ -225,6 +237,20 @@ function createGenericReleaseTransitionContract({
       authority.privateKey,
     ),
   };
+}
+
+function sourceProbeComponentFixture() {
+  return [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+  ].map((target, index) => ({
+    file: "enoki-probe",
+    role: "probe",
+    sha256: String(index + 5).repeat(64),
+    target,
+  }));
 }
 
 function sha256(value: Buffer) {

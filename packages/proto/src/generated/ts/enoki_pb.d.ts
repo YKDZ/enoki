@@ -246,6 +246,9 @@ export namespace enoki {
 
             /** ProbeInstallationInspectionResponse targetAssetSetDigest */
             targetAssetSetDigest?: (string|null);
+
+            /** ProbeInstallationInspectionResponse sourceProbeSha256 */
+            sourceProbeSha256?: (string[]|null);
         }
 
         /** Represents a ProbeInstallationInspectionResponse. */
@@ -274,6 +277,9 @@ export namespace enoki {
 
             /** ProbeInstallationInspectionResponse targetAssetSetDigest. */
             public targetAssetSetDigest: string;
+
+            /** ProbeInstallationInspectionResponse sourceProbeSha256. */
+            public sourceProbeSha256: string[];
 
             /**
              * Creates a new ProbeInstallationInspectionResponse instance using the specified properties.

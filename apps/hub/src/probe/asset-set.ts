@@ -19,6 +19,7 @@ export type ProbeUpgradeEligibility = {
   isUpgradeable: boolean;
   manualReinstall?: {
     sourceProbeVersion: string;
+    sourceProbeSha256: string[];
     targetAssetSetDigest: string;
     targetProbeVersion: string;
   };
@@ -38,6 +39,7 @@ export type ProbeAssetSetVersionResult = {
 export type VerifiedReleaseTransition = {
   classification: "compatible" | "replacement-required";
   sourceProbeVersion: string;
+  sourceProbeSha256: string[];
   targetAssetSetDigest: string;
   targetProbeVersion: string;
 };
@@ -195,12 +197,20 @@ export function evaluateProbeUpgradeEligibility(input: {
       });
     }
     if (input.releaseTransition.classification === "replacement-required") {
+      if (input.releaseTransition.sourceProbeSha256.length === 0) {
+        return notUpgradeable({
+          currentProbeAssetSetVersion: assetSetVersion,
+          currentProbeVersion: probeVersion,
+          reason: "probe_release_transition_mismatch",
+        });
+      }
       return {
         currentProbeAssetSetVersion: assetSetVersion,
         currentProbeVersion: probeVersion,
         isUpgradeable: false,
         manualReinstall: {
           sourceProbeVersion: input.releaseTransition.sourceProbeVersion,
+          sourceProbeSha256: input.releaseTransition.sourceProbeSha256,
           targetAssetSetDigest: input.releaseTransition.targetAssetSetDigest,
           targetProbeVersion: input.releaseTransition.targetProbeVersion,
         },

@@ -137,6 +137,7 @@ fn manual_reinstall_inspection_returns_the_bounded_hub_authority() {
                 expected_hub_origin: "https://hub.example".to_string(),
                 expected_probe_id: "probe_old_01".to_string(),
                 source_probe_version: "1.2.2".to_string(),
+                source_probe_sha256: vec!["b".repeat(64)],
                 target_probe_version: "1.2.3".to_string(),
                 target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
             },
@@ -166,6 +167,7 @@ fn manual_reinstall_inspection_returns_the_bounded_hub_authority() {
                 expected_hub_origin: "https://hub.example".to_string(),
                 expected_probe_id: "probe_old_01".to_string(),
                 source_probe_version: "1.2.2".to_string(),
+                source_probe_sha256: vec!["b".repeat(64)],
                 target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
                 target_probe_version: "1.2.3".to_string(),
             }

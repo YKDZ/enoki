@@ -63,6 +63,7 @@ pub struct ProbeReplacementAuthorization {
     pub expected_hub_origin: String,
     pub expected_probe_id: String,
     pub source_probe_version: String,
+    pub source_probe_sha256: Vec<String>,
     pub target_asset_set_digest: String,
     pub target_probe_version: String,
 }
@@ -226,6 +227,7 @@ pub fn inspect_probe_installation(
                     expected_hub_origin: inspection.expected_hub_origin,
                     expected_probe_id: inspection.expected_probe_id,
                     source_probe_version: inspection.source_probe_version,
+                    source_probe_sha256: inspection.source_probe_sha256,
                     target_asset_set_digest: inspection.target_asset_set_digest,
                     target_probe_version: inspection.target_probe_version,
                 },
@@ -248,6 +250,13 @@ fn valid_replacement_inspection(
         == hub_url::normalized_base(requested_hub_url).ok()
         && bounded_identifier(&inspection.expected_probe_id)
         && valid_semver(&inspection.source_probe_version)
+        && (1..=4).contains(&inspection.source_probe_sha256.len())
+        && inspection.source_probe_sha256.iter().all(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        })
         && valid_semver(&inspection.target_probe_version)
         && inspection
             .target_asset_set_digest

@@ -651,12 +651,38 @@ describe("Probe registration API", () => {
           expectedProbeVersion: "0.1.0",
           hostId: host.id,
           kind: "manual_reinstall",
+          sourceProbeSha256: ["c".repeat(64)],
           targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "0.2.0",
         },
         tokenHash: hashSecret(enrollmentToken),
       }).kind,
     ).toBe("created");
+
+    const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
+    const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
+    const inspectionResponse = await app.request("/api/probe/register", {
+      body: RegistrationRequest.encode(
+        RegistrationRequest.create({
+          enrollmentToken,
+          installationInspection: {},
+        }),
+      ).finish(),
+      headers: { "content-type": "application/x-protobuf" },
+      method: "POST",
+    });
+    expect(inspectionResponse.status).toBe(200);
+    expect(
+      RegistrationResponse.decode(
+        new Uint8Array(await inspectionResponse.arrayBuffer()),
+      ).installationInspection,
+    ).toEqual(
+      expect.objectContaining({
+        sourceProbeSha256: ["c".repeat(64)],
+        sourceProbeVersion: "0.1.0",
+        targetKind: root.enoki.v1.ProbeEnrollmentTargetKind.MANUAL_REINSTALL,
+      }),
+    );
 
     const replacement = await registerProbe(
       app,
@@ -876,6 +902,7 @@ describe("Probe registration API", () => {
           expectedProbeVersion: "0.1.0",
           hostId: host.id,
           kind: "manual_reinstall",
+          sourceProbeSha256: ["c".repeat(64)],
           targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
           targetProbeVersion: "0.2.0",
         },
@@ -1354,9 +1381,11 @@ describe("Probe registration API", () => {
       new Uint8Array(await response.arrayBuffer()),
     );
     expect(inspected.probeId).toBe("");
-    expect(inspected.installationInspection).toEqual({
-      targetKind: root.enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST,
-    });
+    expect(inspected.installationInspection).toEqual(
+      expect.objectContaining({
+        targetKind: root.enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST,
+      }),
+    );
     expect(
       database.sqlite
         .prepare(
@@ -1426,9 +1455,11 @@ describe("Probe registration API", () => {
     expect(
       RegistrationResponse.decode(new Uint8Array(await inspected.arrayBuffer()))
         .installationInspection,
-    ).toEqual({
-      targetKind: root.enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST,
-    });
+    ).toEqual(
+      expect.objectContaining({
+        targetKind: root.enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST,
+      }),
+    );
     expect(
       database.sqlite
         .prepare("select id, probe_id as probeId from managed_hosts")

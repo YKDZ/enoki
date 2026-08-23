@@ -654,6 +654,8 @@ pub struct ProbeInstallationInspectionResponse {
     pub target_probe_version: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub target_asset_set_digest: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "7")]
+    pub source_probe_sha256: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationRejection {

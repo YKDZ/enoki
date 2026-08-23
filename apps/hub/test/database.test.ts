@@ -46,6 +46,83 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("closes an active legacy manual reinstall authority when its signed source receipt is absent", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const currentMigration = "20260823112609_silent_serpent_society";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    const options = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    createHost(legacy, { id: 71, probeId: "probe-legacy-manual" });
+    legacy.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+           enrollment_id, token_hash, created_at_ms, expires_at_ms,
+           target_kind, target_host_id, expected_hub_origin,
+           expected_probe_id, expected_probe_version,
+           target_asset_set_digest, target_probe_version, status
+         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `enr_${"l".repeat(24)}`,
+        "legacy-manual-token-hash",
+        1_725_000_000_000,
+        1_725_003_600_000,
+        "manual_reinstall",
+        71,
+        "https://hub.example",
+        "probe-legacy-manual",
+        "0.1.74",
+        `sha256:${"a".repeat(64)}`,
+        "1.2.3",
+        "pending",
+      );
+    legacy.close();
+    await cp(
+      path.resolve("drizzle", currentMigration),
+      path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select status, rejection_code as rejectionCode, source_probe_sha256_json as sourceProbeSha256Json from enrollment_tokens where target_host_id = 71",
+        )
+        .get(),
+    ).toEqual({
+      rejectionCode: "manual_reinstall_authority_invalid",
+      sourceProbeSha256Json: "[]",
+      status: "rejected",
+    });
+    migrated.close();
+  });
+
   it("applies ordered Migration Layers with independent history tables", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);

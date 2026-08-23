@@ -43,6 +43,7 @@ const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-
 const CPU_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const LIFECYCLE_COMPANION_BINARY_PATH: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
+const MAX_INSTALLED_PROBE_BYTES: u64 = 256 * 1024 * 1024;
 const OBSERVATION_RUNTIME_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-observation-runtime.service";
 const OBSERVATION_RUNTIME_SOCKET_UNIT_PATH: &str =
@@ -1751,6 +1752,10 @@ fn run_probe_replacement_migration(
     else {
         return LifecycleResponse::failed("lifecycle.authority_rejected");
     };
+    let installed_probe_sha256 = match fixed_installed_probe_sha256(&metadata.install_path) {
+        Ok(digest) => digest,
+        Err(_) => return LifecycleResponse::failed("lifecycle.authority_invalid"),
+    };
     let authority_match = replacement_authority_matches(
         hub_origin,
         target_asset_set_digest,
@@ -1758,6 +1763,7 @@ fn run_probe_replacement_migration(
         &authority,
         metadata,
         identity,
+        &installed_probe_sha256,
     );
     if authority_match != ReplacementAuthorityMatch::Matches {
         return LifecycleResponse::failed(match authority_match {
@@ -1775,6 +1781,27 @@ fn run_probe_replacement_migration(
     }
 }
 
+fn fixed_installed_probe_sha256(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    if length == 0 || length > MAX_INSTALLED_PROBE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "installed Probe size is outside the fixed bound",
+        ));
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ReplacementAuthorityMatch {
     Matches,
@@ -1789,15 +1816,29 @@ fn replacement_authority_matches(
     authority: &crate::registration::ProbeReplacementAuthorization,
     metadata: &TrustedProbeInstallMetadata,
     identity: &TrustedProbeInstallPreflight,
+    installed_probe_sha256: &str,
 ) -> ReplacementAuthorityMatch {
-    let Some(installed_version) = metadata.bundle_version.as_deref() else {
+    if authority.source_probe_sha256.is_empty() {
         return ReplacementAuthorityMatch::UnprovableSource;
-    };
+    }
+    if !authority
+        .source_probe_sha256
+        .iter()
+        .any(|expected| expected == installed_probe_sha256)
+    {
+        return ReplacementAuthorityMatch::Mismatch;
+    }
+    if metadata
+        .bundle_version
+        .as_deref()
+        .is_some_and(|installed| installed != authority.source_probe_version)
+    {
+        return ReplacementAuthorityMatch::Mismatch;
+    }
     if authority.expected_hub_origin == hub_origin
         && identity.hub_url == hub_origin
         && metadata.hub_url == hub_origin
         && authority.expected_probe_id == identity.probe_id
-        && installed_version == authority.source_probe_version
         && authority.target_asset_set_digest == target_asset_set_digest
         && authority.target_probe_version == bundle_version
     {
@@ -5640,6 +5681,7 @@ mod tests {
             expected_hub_origin: "https://hub.example".to_string(),
             expected_probe_id: "probe_old_01".to_string(),
             source_probe_version: "1.2.2".to_string(),
+            source_probe_sha256: vec!["c".repeat(64)],
             target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
             target_probe_version: "1.2.3".to_string(),
         };
@@ -5652,6 +5694,7 @@ mod tests {
                 &authority,
                 &metadata,
                 &identity,
+                &"c".repeat(64),
             ),
             ReplacementAuthorityMatch::Matches
         );
@@ -5664,6 +5707,7 @@ mod tests {
                 &authority,
                 &metadata,
                 &identity,
+                &"c".repeat(64),
             ),
             ReplacementAuthorityMatch::Mismatch
         );
@@ -5677,8 +5721,65 @@ mod tests {
                 &authority,
                 &metadata,
                 &identity,
+                &"c".repeat(64),
+            ),
+            ReplacementAuthorityMatch::Matches
+        );
+        let mut unprovable = authority.clone();
+        unprovable.source_probe_sha256.clear();
+        assert_eq!(
+            replacement_authority_matches(
+                "https://hub.example",
+                &format!("sha256:{}", "b".repeat(64)),
+                "1.2.3",
+                &unprovable,
+                &metadata,
+                &identity,
+                &"c".repeat(64),
             ),
             ReplacementAuthorityMatch::UnprovableSource
+        );
+    }
+
+    #[test]
+    fn signed_source_component_digest_proves_a_legacy_install_without_executing_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let installed_probe = temporary.path().join("enoki-probe");
+        fs::write(&installed_probe, b"legacy probe component").unwrap();
+        let installed_digest = fixed_installed_probe_sha256(&installed_probe).unwrap();
+        let status = temporary.path().join("probe-operation-status.toml");
+        let mut metadata = trusted_install_metadata_for_hub(
+            "https://hub.example",
+            &installed_probe,
+            &status,
+            "a".repeat(64),
+        );
+        metadata.schema_version = 3;
+        metadata.bundle_version = None;
+        let identity = TrustedProbeInstallPreflight {
+            hub_url: "https://hub.example".to_string(),
+            probe_id: "probe_old_01".to_string(),
+        };
+        let authority = crate::registration::ProbeReplacementAuthorization {
+            expected_hub_origin: "https://hub.example".to_string(),
+            expected_probe_id: "probe_old_01".to_string(),
+            source_probe_version: "1.2.2".to_string(),
+            source_probe_sha256: vec![installed_digest.clone()],
+            target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
+            target_probe_version: "1.2.3".to_string(),
+        };
+
+        assert_eq!(
+            replacement_authority_matches(
+                "https://hub.example",
+                &format!("sha256:{}", "b".repeat(64)),
+                "1.2.3",
+                &authority,
+                &metadata,
+                &identity,
+                &installed_digest,
+            ),
+            ReplacementAuthorityMatch::Matches
         );
     }
 

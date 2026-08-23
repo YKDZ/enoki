@@ -5,6 +5,7 @@ import type { ProbeUpgradeRequest } from "../src/probe/operation.js";
 
 const manualTarget = {
   sourceProbeVersion: "1.2.2",
+  sourceProbeSha256: ["c".repeat(64)],
   targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
   targetProbeVersion: "1.2.3",
 };
@@ -46,6 +47,7 @@ function policyInput() {
     latestOperation: failedOperation(),
     nowMs: 100_000,
     offlineAfterMs: 90_000,
+    sourceProbeSha256: manualTarget.sourceProbeSha256,
     targetAssetSetDigest: manualTarget.targetAssetSetDigest,
     targetProbeVersion: "1.2.3",
   };

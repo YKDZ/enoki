@@ -108,7 +108,9 @@ assert recipe.verify_bundle_and_extract_acquirer(archive_path, asset) == payload
       sourceDir: process.cwd(),
       trustedRootPublicKeyPem: testDistributionRoot.publicKey,
     });
-    const directory = await mkdtemp(path.join(tmpdir(), "enoki-recipe-sealed-fd-"));
+    const directory = await mkdtemp(
+      path.join(tmpdir(), "enoki-recipe-sealed-fd-"),
+    );
     const recipePath = path.join(directory, "recipe.py");
     await writeFile(recipePath, publication.recipeBytes);
     const program = String.raw`
@@ -1032,6 +1034,17 @@ with open(os.devnull, "rb") as input_stream:
         legacyRelease,
         rootPrivateKeyPem: fixture.root.privateKey,
         rootPublicKeyPem: fixture.root.publicKey,
+        sourceProbeComponents: [
+          "aarch64-unknown-linux-gnu",
+          "aarch64-unknown-linux-musl",
+          "x86_64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+        ].map((target, index) => ({
+          file: "enoki-probe",
+          role: "probe",
+          sha256: String(index + 5).repeat(64),
+          target,
+        })),
         targetManifestBytes,
         targetVersion: "1.2.3",
       });

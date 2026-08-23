@@ -262,6 +262,7 @@ export function createHostRoutes(services: HostRouteServices) {
       latestOperation: currentOperation,
       nowMs: now(),
       offlineAfterMs: services.hostStatus?.offlineAfterMs ?? 90_000,
+      sourceProbeSha256: releaseTransition?.sourceProbeSha256 ?? [],
       targetAssetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
       targetProbeVersion: currentProbeAssetSetVersion.version,
     });

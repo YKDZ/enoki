@@ -95,6 +95,8 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
         services.probeOperations?.findLatestForHost(hostId) ?? null,
       nowMs: now(),
       offlineAfterMs: services.hostStatus?.offlineAfterMs ?? 90_000,
+      sourceProbeSha256:
+        releaseContext.releaseTransition?.sourceProbeSha256 ?? [],
       targetAssetSetDigest: releaseContext.assetSet.targetAssetSetDigest,
       targetProbeVersion: releaseContext.assetSet.version,
     });
@@ -111,6 +113,7 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       expectedProbeVersion: policy.sourceProbeVersion,
       hostId,
       kind: "manual_reinstall",
+      sourceProbeSha256: policy.sourceProbeSha256,
       targetAssetSetDigest: policy.targetAssetSetDigest,
       targetProbeVersion: policy.targetProbeVersion,
     });

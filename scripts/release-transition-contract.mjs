@@ -75,6 +75,9 @@ export function createReleaseTransitionContract(input) {
       hubImage: authorization.legacyRelease.hub.image,
       legacySigningKeySha256:
         authorization.legacyRelease.legacySigningKeySha256,
+      probeComponents: validateSourceProbeComponents(
+        input.sourceProbeComponents,
+      ),
       releaseId: authorization.legacyRelease.githubRelease.id,
       repository: authorization.legacyRelease.githubRelease.repository,
       tag: authorization.legacyRelease.githubRelease.tag,
@@ -281,6 +284,7 @@ function validateContract(value) {
     "hubDigest",
     "hubImage",
     "legacySigningKeySha256",
+    "probeComponents",
     "releaseId",
     "repository",
     "tag",
@@ -308,6 +312,7 @@ function validateContract(value) {
     !/^[0-9a-f]{40}$/.test(value.source.commit ?? "") ||
     !/^sha256:[0-9a-f]{64}$/.test(value.source.hubDigest ?? "") ||
     !Array.isArray(value.source.assets) ||
+    !Array.isArray(value.source.probeComponents) ||
     !semverPattern.test(value.target.version ?? "") ||
     !digestPattern.test(value.target.assetSetManifestSha256 ?? "") ||
     !Number.isSafeInteger(value.target.delegationGeneration) ||
@@ -318,7 +323,37 @@ function validateContract(value) {
     throw new Error("Release Transition Contract fields are invalid");
   }
   validateAssetClosure(value.target.assetClosure);
+  validateSourceProbeComponents(value.source.probeComponents);
   return JSON.parse(JSON.stringify(value));
+}
+
+function validateSourceProbeComponents(value) {
+  if (!Array.isArray(value) || value.length !== probeTargets.length) {
+    throw new Error(
+      "Release Transition Contract source Probe closure is invalid",
+    );
+  }
+  return value.map((component, index) => {
+    const target = probeTargets[index];
+    assertPlainObject(component, "Release Transition Contract source Probe");
+    assertExactKeys(component, ["file", "role", "sha256", "target"]);
+    if (
+      component.file !== "enoki-probe" ||
+      component.role !== "probe" ||
+      !digestPattern.test(component.sha256 ?? "") ||
+      component.target !== target
+    ) {
+      throw new Error(
+        "Release Transition Contract source Probe closure is invalid",
+      );
+    }
+    return {
+      file: "enoki-probe",
+      role: "probe",
+      sha256: component.sha256,
+      target,
+    };
+  });
 }
 
 function parseTargetManifest(bytes) {

@@ -12,6 +12,16 @@ import {
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 describe("Trust Epoch release transition", () => {
+  it("requires one signed source Probe component digest for every fixed target", () => {
+    const fixture = transitionFixture();
+    expect(() =>
+      createReleaseTransitionContract({
+        ...fixture.createInput,
+        sourceProbeComponents: undefined,
+      }),
+    ).toThrow("source Probe closure is invalid");
+  });
+
   it("binds the authorized legacy baseline to one replacement-required candidate", () => {
     const fixture = transitionFixture();
     const signed = createReleaseTransitionContract(fixture.createInput);
@@ -243,6 +253,17 @@ function transitionFixture() {
       legacyRelease,
       rootPrivateKeyPem: root.privateKey,
       rootPublicKeyPem: root.publicKey,
+      sourceProbeComponents: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+      ].map((target, index) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: String(index + 5).repeat(64),
+        target,
+      })),
       targetManifestBytes,
       targetVersion: "1.2.3",
     },

@@ -178,6 +178,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
               enrollment.targetKind === "manual_reinstall"
                 ? enrollment.sourceProbeVersion
                 : "",
+            sourceProbeSha256:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.sourceProbeSha256
+                : [],
             targetAssetSetDigest:
               enrollment.targetKind === "manual_reinstall"
                 ? enrollment.targetAssetSetDigest

@@ -46,6 +46,7 @@ export const enrollmentTokens = sqliteTable(
     expectedHubOrigin: text("expected_hub_origin"),
     expectedProbeId: text("expected_probe_id"),
     expectedProbeVersion: text("expected_probe_version"),
+    sourceProbeSha256Json: text("source_probe_sha256_json"),
     targetAssetSetDigest: text("target_asset_set_digest"),
     targetProbeVersion: text("target_probe_version"),
     status: text({ enum: enrollmentStatusValues }).notNull().default("expired"),
@@ -75,7 +76,7 @@ export const enrollmentTokens = sqliteTable(
     ),
     check(
       "enrollment_tokens_target_check",
-      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0 and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null) or (${table.targetKind} = 'manual_reinstall' and ${table.targetHostId} > 0 and length(${table.expectedHubOrigin}) > 0 and length(${table.expectedProbeId}) > 0 and length(${table.expectedProbeVersion}) > 0 and length(${table.targetAssetSetDigest}) = 71 and length(${table.targetProbeVersion}) > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
+      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.sourceProbeSha256Json} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0 and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.sourceProbeSha256Json} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null) or (${table.targetKind} = 'manual_reinstall' and ${table.targetHostId} > 0 and length(${table.expectedHubOrigin}) > 0 and length(${table.expectedProbeId}) > 0 and length(${table.expectedProbeVersion}) > 0 and length(${table.sourceProbeSha256Json}) > 0 and length(${table.targetAssetSetDigest}) = 71 and length(${table.targetProbeVersion}) > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
     ),
     check(
       "enrollment_tokens_rejection_check",

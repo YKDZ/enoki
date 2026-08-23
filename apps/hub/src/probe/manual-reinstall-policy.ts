@@ -15,6 +15,7 @@ export function manualProbeReinstallPolicy(input: {
   latestOperation: ProbeUpgradeRequest | null;
   nowMs: number;
   offlineAfterMs: number;
+  sourceProbeSha256: string[];
   targetAssetSetDigest: string | null;
   targetProbeVersion: string | null;
 }): ManualProbeReinstallPolicy | null {
@@ -38,6 +39,7 @@ export function manualProbeReinstallPolicy(input: {
     probeUpgradeRecoveryDisposition(operation.failureCode) !==
       "manual_reinstall_required" ||
     !input.hostProbeVersion ||
+    input.sourceProbeSha256.length === 0 ||
     operation.currentProbeVersion !== input.hostProbeVersion ||
     !input.targetProbeVersion ||
     operation.targetProbeVersion !== input.targetProbeVersion ||
@@ -50,6 +52,7 @@ export function manualProbeReinstallPolicy(input: {
   return {
     reason: "closed_recovery",
     sourceProbeVersion: input.hostProbeVersion,
+    sourceProbeSha256: input.sourceProbeSha256,
     targetAssetSetDigest: input.targetAssetSetDigest,
     targetProbeVersion: input.targetProbeVersion,
   };

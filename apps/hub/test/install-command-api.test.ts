@@ -10,6 +10,7 @@ import {
   renderInstallCommand,
   resolveProbeBootstrapRecipeRecord,
 } from "../src/enrollment/install-command";
+import { hashSecret } from "../src/enrollment/routes";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 
 const tempRoots: string[] = [];
@@ -286,6 +287,18 @@ describe("Owner add-host install command", () => {
     expect(body.installCommand).toContain(body.enrollmentToken);
     expect(body.installCommand).not.toContain("&&");
     expect(body.installCommand).not.toContain(" uninstall");
+    expect(
+      database.enrollments.inspectPending({
+        nowMs: Date.now(),
+        tokenHash: hashSecret(body.enrollmentToken),
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        sourceProbeSha256: release.sourceProbeSha256,
+        sourceProbeVersion: "1.2.2",
+        targetKind: "manual_reinstall",
+      }),
+    );
     expect(
       database.sqlite
         .prepare(

@@ -105,6 +105,7 @@ export function verifiedReleaseTransitionFromMetadata(input: {
     valueAt(contract, "target", "assetClosure"),
   );
   const sourceVersion = stringAt(contract, "source", "version");
+  const sourceProbeSha256 = sourceProbeComponentDigests(contract);
   const targetVersion = stringAt(contract, "target", "version");
   const transition = stringAt(contract, "transition");
   const targetAssetSetDigest = `sha256:${sha256(files.manifest)}`;
@@ -162,7 +163,10 @@ export function verifiedReleaseTransitionFromMetadata(input: {
       "target",
       "transition",
     ]) ||
-    !hasExactKeys(valueAt(contract, "source"), ["version"]) ||
+    !hasExactKeys(valueAt(contract, "source"), [
+      "probeComponents",
+      "version",
+    ]) ||
     !hasExactKeys(valueAt(contract, "target"), [
       "assetClosure",
       "assetSetManifestSha256",
@@ -195,6 +199,7 @@ export function verifiedReleaseTransitionFromMetadata(input: {
     stringAt(contract, "distribution") !== "enoki" ||
     stringAt(contract, "rootKeyId") !== rootKeyId ||
     !semverPattern.test(sourceVersion ?? "") ||
+    !sourceProbeSha256 ||
     !semverPattern.test(targetVersion ?? "") ||
     !["compatible", "replacement-required"].includes(transition ?? "") ||
     stringAt(manifest, "kind") !== "enoki-probe-assets" ||
@@ -220,6 +225,7 @@ export function verifiedReleaseTransitionFromMetadata(input: {
   return {
     classification: transition as VerifiedReleaseTransition["classification"],
     sourceProbeVersion: sourceVersion!,
+    sourceProbeSha256,
     targetAssetSetDigest,
     targetProbeVersion: targetVersion!,
   };
@@ -349,6 +355,7 @@ function verifiedTrustEpochMigrationTransition(input: {
   if (!hasAuthorization) return null;
   if (!input.authorization || !input.authorizationSignature) return null;
   const authorization = parseCanonicalObject(input.authorization);
+  const sourceProbeSha256 = sourceProbeComponentDigests(input.contract);
   if (
     !authorization ||
     !verifySigned(
@@ -399,6 +406,7 @@ function verifiedTrustEpochMigrationTransition(input: {
     authorization.candidateVersion !==
       `v${stringAt(input.contract, "target", "version")}` ||
     !exactTrustEpochLegacyReleaseMatches(authorization, input.contract) ||
+    !sourceProbeSha256 ||
     !exactTrustEpochTargetMatches(
       input.contract,
       input.manifest,
@@ -412,9 +420,44 @@ function verifiedTrustEpochMigrationTransition(input: {
   return {
     classification: "replacement-required",
     sourceProbeVersion: "0.1.74",
+    sourceProbeSha256,
     targetAssetSetDigest: input.targetAssetSetDigest,
     targetProbeVersion: stringAt(input.contract, "target", "version")!,
   };
+}
+
+function sourceProbeComponentDigests(contract: Record<string, unknown>) {
+  const components = valueAt(contract, "source", "probeComponents");
+  if (!Array.isArray(components) || components.length !== probeTargets.length) {
+    return null;
+  }
+  const digests = components.map((component, index) => {
+    if (
+      !component ||
+      typeof component !== "object" ||
+      Array.isArray(component) ||
+      !hasExactKeys(component as Record<string, unknown>, [
+        "file",
+        "role",
+        "sha256",
+        "target",
+      ]) ||
+      stringAt(component as Record<string, unknown>, "role") !== "probe" ||
+      stringAt(component as Record<string, unknown>, "file") !==
+        "enoki-probe" ||
+      stringAt(component as Record<string, unknown>, "target") !==
+        probeTargets[index] ||
+      !/^[0-9a-f]{64}$/.test(
+        stringAt(component as Record<string, unknown>, "sha256") ?? "",
+      )
+    ) {
+      return null;
+    }
+    return stringAt(component as Record<string, unknown>, "sha256")!;
+  });
+  return digests.every((digest): digest is string => digest !== null)
+    ? digests
+    : null;
 }
 
 function exactTrustEpochLegacyReleaseMatches(
@@ -429,6 +472,7 @@ function exactTrustEpochLegacyReleaseMatches(
       "hubDigest",
       "hubImage",
       "legacySigningKeySha256",
+      "probeComponents",
       "releaseId",
       "repository",
       "tag",

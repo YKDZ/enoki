@@ -25,6 +25,7 @@ export type EnrollmentTarget =
       expectedProbeVersion: string;
       hostId: number;
       kind: "manual_reinstall";
+      sourceProbeSha256: string[];
       targetAssetSetDigest: string;
       targetProbeVersion: string;
     };
@@ -49,6 +50,7 @@ export type PendingEnrollmentInspection =
       expectedHubOrigin: string;
       expectedProbeId: string;
       sourceProbeVersion: string;
+      sourceProbeSha256: string[];
       targetAssetSetDigest: string;
       targetKind: "manual_reinstall";
       targetProbeVersion: string;
@@ -115,6 +117,7 @@ export function createEnrollmentRepository(
           expectedHubOrigin: enrollmentTokens.expectedHubOrigin,
           expectedProbeId: enrollmentTokens.expectedProbeId,
           expectedProbeVersion: enrollmentTokens.expectedProbeVersion,
+          sourceProbeSha256Json: enrollmentTokens.sourceProbeSha256Json,
           targetAssetSetDigest: enrollmentTokens.targetAssetSetDigest,
           targetHostId: enrollmentTokens.targetHostId,
           targetKind: enrollmentTokens.targetKind,
@@ -142,6 +145,7 @@ export function createEnrollmentRepository(
           !pending.expectedHubOrigin ||
           !pending.expectedProbeId ||
           !pending.expectedProbeVersion ||
+          !pending.sourceProbeSha256Json ||
           !pending.targetAssetSetDigest ||
           !pending.targetProbeVersion
         ) {
@@ -165,10 +169,17 @@ export function createEnrollmentRepository(
         ) {
           return null;
         }
+        const sourceProbeSha256 = parseSourceProbeSha256(
+          pending.sourceProbeSha256Json,
+        );
+        if (!sourceProbeSha256) {
+          return null;
+        }
         return {
           expectedHubOrigin: pending.expectedHubOrigin,
           expectedProbeId: pending.expectedProbeId,
           sourceProbeVersion: pending.expectedProbeVersion,
+          sourceProbeSha256,
           targetAssetSetDigest: pending.targetAssetSetDigest,
           targetKind: "manual_reinstall",
           targetProbeVersion: pending.targetProbeVersion,
@@ -475,6 +486,9 @@ export function createEnrollmentRepository(
         }
 
         if (input.target.kind === "manual_reinstall") {
+          if (!validSourceProbeSha256(input.target.sourceProbeSha256)) {
+            return { kind: "existing_host_unavailable" };
+          }
           const target = transaction
             .select({
               id: hosts.id,
@@ -553,6 +567,10 @@ export function createEnrollmentRepository(
             expectedProbeVersion:
               input.target.kind === "manual_reinstall"
                 ? input.target.expectedProbeVersion
+                : null,
+            sourceProbeSha256Json:
+              input.target.kind === "manual_reinstall"
+                ? JSON.stringify(input.target.sourceProbeSha256)
                 : null,
             targetAssetSetDigest:
               input.target.kind === "manual_reinstall"
@@ -703,6 +721,9 @@ export function createEnrollmentRepository(
                 enrollmentId: enrollment.enrollmentId,
                 newProbeId: host.probeId,
                 oldProbeId: pending.expectedProbeId,
+                sourceProbeSha256: parseSourceProbeSha256(
+                  pending.sourceProbeSha256Json ?? "",
+                ),
                 targetAssetSetDigest: pending.targetAssetSetDigest,
                 targetProbeVersion: pending.targetProbeVersion,
               },
@@ -771,6 +792,27 @@ export function createEnrollmentRepository(
       });
     },
   };
+}
+
+function parseSourceProbeSha256(value: string) {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return validSourceProbeSha256(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function validSourceProbeSha256(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length >= 1 &&
+    value.length <= 4 &&
+    new Set(value).size === value.length &&
+    value.every(
+      (digest) => typeof digest === "string" && /^[0-9a-f]{64}$/.test(digest),
+    )
+  );
 }
 
 function createNewHostForEnrollment(

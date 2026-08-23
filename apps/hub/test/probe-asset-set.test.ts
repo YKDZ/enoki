@@ -58,6 +58,7 @@ describe("Probe Asset Set upgrade eligibility", () => {
         releaseTransition: {
           classification: "compatible",
           sourceProbeVersion: "1.3.9",
+          sourceProbeSha256: ["c".repeat(64)],
           targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "1.4.0",
         },
@@ -85,6 +86,7 @@ describe("Probe Asset Set upgrade eligibility", () => {
         releaseTransition: {
           classification: "compatible",
           sourceProbeVersion: "1.3.8",
+          sourceProbeSha256: ["c".repeat(64)],
           targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "1.4.0",
         },
@@ -98,6 +100,7 @@ describe("Probe Asset Set upgrade eligibility", () => {
         releaseTransition: {
           classification: "replacement-required",
           sourceProbeVersion: "1.3.9",
+          sourceProbeSha256: ["c".repeat(64)],
           targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
           targetProbeVersion: "1.4.0",
         },
@@ -107,6 +110,7 @@ describe("Probe Asset Set upgrade eligibility", () => {
       currentProbeVersion: "1.3.9",
       isUpgradeable: false,
       manualReinstall: {
+        sourceProbeSha256: ["c".repeat(64)],
         sourceProbeVersion: "1.3.9",
         targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
         targetProbeVersion: "1.4.0",

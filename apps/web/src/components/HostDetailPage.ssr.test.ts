@@ -359,6 +359,7 @@ describe("Host detail page", () => {
               ? {
                   manualReinstall: {
                     sourceProbeVersion: "0.1.14",
+                    sourceProbeSha256: ["a".repeat(64)],
                     targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
                     targetProbeVersion: "0.1.15",
                   },
