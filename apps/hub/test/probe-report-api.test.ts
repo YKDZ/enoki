@@ -10,6 +10,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import {
+  canonicalLifecycleUpgradeAuthority,
+  deriveLifecycleAuthorityKey,
+  type LifecycleUpgradeAuthority,
+} from "../src/probe/lifecycle-authority";
+import {
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
 } from "../src/probe/operation";
@@ -18,10 +23,9 @@ import {
   validateProbeOperationToken,
 } from "../src/probe/operation-token";
 import {
-  canonicalLifecycleUpgradeAuthority,
-  deriveLifecycleAuthorityKey,
-  type LifecycleUpgradeAuthority,
-} from "../src/probe/lifecycle-authority";
+  canonicalProbeRepairEvidence,
+  signProbeRepairEvidence,
+} from "../src/probe/repair-authority";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import {
   createTestProbeIdentity,
@@ -3265,6 +3269,176 @@ describe("Probe report API", () => {
       state: "running",
     });
 
+    database.close();
+  });
+
+  it("creates one typed Repair operation only from signed postactivation evidence for the exact failed Upgrade", async () => {
+    const database = await createTemporaryDatabase();
+    let repairNowMs = 1_725_000_010_000;
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-repair-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => repairNowMs,
+      probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const failedUpgrade = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "1.3.0",
+        hostId: host.id,
+        nowMs: 1_725_000_000_000,
+        target: {
+          assetSetDigest: release.targetAssetSetDigest,
+          version: "1.4.0",
+        },
+      }).operation,
+    );
+    const failed = database.probeOperations.updateProbeUpgradeRequest({
+      ...failedUpgrade,
+      acceptedAtMs: 1_725_000_000_100,
+      completedAtMs: 1_725_000_001_000,
+      failureCode: "lifecycle.upgrade_repair_required",
+      failureMessage: "private diagnostic",
+      runningAtMs: 1_725_000_000_200,
+      state: "failed",
+      targetManifestSha256: "3".repeat(64),
+      updatedAtMs: 1_725_000_001_000,
+      upgradeAuthoritySha256: "a".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+    });
+    const evidence = {
+      schemaVersion: 1 as const,
+      hubOrigin: "https://hub.example",
+      hostId: String(host.id),
+      probeId: registration.probeId,
+      failedOperationId: String(failed.id),
+      failedAuthoritySha256: "a".repeat(64),
+      journalSha256: "b".repeat(64),
+      journalPhase: "repair-required" as const,
+      activatedTargets: 3,
+      finalizedTargets: 0,
+      issuedAtMs: 1_725_000_010_000,
+      expiresAtMs: 1_725_000_070_000,
+      requestNonce: "request_nonce_01",
+      targetBundleVersion: "1.4.0",
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetManifestSha256: "3".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+    };
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const requestPath = `/api/probe/operations/${failed.id}/repair-authorize`;
+    const requestBody = JSON.stringify({
+      evidence,
+      evidenceSignature: signProbeRepairEvidence(
+        canonicalProbeRepairEvidence(evidence),
+        installKey,
+      ),
+    });
+    const request = () =>
+      app.request(requestPath, {
+        body: requestBody,
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+
+    const response = await request();
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      authority: { repairOperationId: string; repairNonce: string };
+      signature: string;
+    };
+    expect(body.authority).toEqual(
+      expect.objectContaining({
+        failedOperationId: String(failed.id),
+        hostId: String(host.id),
+        probeId: registration.probeId,
+        repairEvidenceSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        repairNonce: expect.stringMatching(/^[0-9a-f]{32}$/),
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetBundleVersion: "1.4.0",
+        targetManifestSha256: "3".repeat(64),
+      }),
+    );
+    expect(body.signature).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      database.probeOperations.findById(
+        Number(body.authority.repairOperationId),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        kind: "probe_repair",
+        repairNonce: body.authority.repairNonce,
+        state: "accepted",
+      }),
+    );
+
+    const replay = await request();
+    expect(replay.status).toBe(200);
+    await expect(replay.json()).resolves.toEqual(body);
+    repairNowMs = 1_725_000_080_000;
+    const renewedEvidence = {
+      ...evidence,
+      issuedAtMs: repairNowMs,
+      expiresAtMs: repairNowMs + 60_000,
+      requestNonce: "request_nonce_02",
+    };
+    const renewedRequestBody = JSON.stringify({
+      evidence: renewedEvidence,
+      evidenceSignature: signProbeRepairEvidence(
+        canonicalProbeRepairEvidence(renewedEvidence),
+        installKey,
+      ),
+    });
+    const renewed = await app.request(requestPath, {
+      body: renewedRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(renewed.status).toBe(200);
+    const renewedBody = (await renewed.json()) as {
+      authority: { repairOperationId: string };
+    };
+    expect(renewedBody.authority.repairOperationId).not.toBe(
+      body.authority.repairOperationId,
+    );
+    expect(
+      database.probeOperations.findById(
+        Number(body.authority.repairOperationId),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        failureCode: "repair_authority_expired",
+        state: "failed",
+      }),
+    );
+    expect(database.probeOperations.findById(failed.id!)).toEqual(failed);
     database.close();
   });
 

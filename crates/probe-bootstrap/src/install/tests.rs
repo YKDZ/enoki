@@ -11,6 +11,8 @@ mod tests {
     use crate::handoff::Enrollment;
     use crate::lifecycle::UpgradeCompletion;
     use crate::trust::BootstrapRole;
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
     #[test]
@@ -1024,6 +1026,7 @@ mod tests {
                 operation_id: format!("outer-{failed_outer_step}"),
                 stage_owner_uid: unsafe { libc::geteuid() },
                 hub_origin: "https://hub.example".to_owned(),
+                host_id: "host_01".to_owned(),
                 probe_id: "probe_01".to_owned(),
                 source_bundle_version: "1.2.3".to_owned(),
                 source_install_state_sha256: "a".repeat(64),
@@ -1066,6 +1069,218 @@ mod tests {
     }
 
     #[test]
+    fn signed_upgrade_consumption_persists_the_hub_canonical_authority_digest() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        let key = [0x11_u8; 32];
+        fs::write(
+            paths.metadata(),
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+        )
+        .unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        let canonical = br#"{"schemaVersion":1,"hubOrigin":"https://hub.example"}"#;
+        let mut signer = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        signer.update(b"enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0");
+        signer.update(canonical);
+        let signature: String = signer
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let authority = UpgradeAuthorityConsumption {
+            operation_id: "operation-1".to_owned(),
+            stage_owner_uid: unsafe { libc::geteuid() },
+            hub_origin: "https://hub.example".to_owned(),
+            host_id: "host-1".to_owned(),
+            probe_id: "probe-1".to_owned(),
+            source_bundle_version: "1.2.3".to_owned(),
+            source_install_state_sha256: "a".repeat(64),
+            source_manifest_sha256: "b".repeat(64),
+            target_bundle_version: "1.2.4".to_owned(),
+            target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+            verified_stage_sha256: "e".repeat(64),
+        };
+
+        consume_signed_before_upgrade_outer_checks(
+            &paths,
+            &authority,
+            canonical,
+            &signature,
+            |_| Ok::<_, ()>(()),
+        )
+        .unwrap();
+
+        let journal = fs::read_to_string(
+            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains(&format!(
+            "authority_sha256 = {:?}",
+            format!("{:x}", Sha256::digest(canonical))
+        )));
+    }
+
+    #[test]
+    fn repair_evidence_is_fresh_and_closes_over_root_owned_postactivation_journal() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(
+            paths.metadata(),
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+        )
+        .unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        let journal = concat!(
+            "schema_version = 2\n",
+            "operation_id = \"failed-upgrade-1\"\n",
+            "stage_owner_uid = 1000\n",
+            "authority_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+            "hub_origin = \"https://hub.example\"\n",
+            "host_id = \"host-1\"\n",
+            "source_probe_id = \"probe-1\"\n",
+            "source_bundle_version = \"1.2.3\"\n",
+            "source_install_state_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n",
+            "source_manifest_sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"\n",
+            "target_bundle_version = \"1.2.4\"\n",
+            "target_asset_set_digest = \"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n",
+            "target_manifest_sha256 = \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n",
+            "verified_stage_sha256 = \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n",
+            "phase = \"repair-required\"\n",
+            "activated_targets = 3\n",
+            "finalized_targets = 0\n",
+        );
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        fs::write(&journal_path, journal).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let signed = issue_probe_repair_evidence(
+            &paths,
+            1_725_000_000_000,
+            1_725_000_060_000,
+            "request-nonce-1",
+        )
+        .unwrap();
+
+        assert_eq!(signed.evidence.host_id, "host-1");
+        assert_eq!(signed.evidence.failed_operation_id, "failed-upgrade-1");
+        assert_eq!(signed.evidence.journal_phase, "repair-required");
+        assert_eq!(signed.evidence.issued_at_ms, 1_725_000_000_000);
+        assert_eq!(signed.evidence.expires_at_ms, 1_725_000_060_000);
+        assert_eq!(signed.evidence.request_nonce, "request-nonce-1");
+        assert_eq!(signed.signature.len(), 64);
+        assert_eq!(
+            signed.evidence.journal_sha256,
+            format!("{:x}", Sha256::digest(journal.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn repair_authority_is_offline_verified_and_consumed_once_in_an_independent_journal() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        let key = [0x11_u8; 32];
+        fs::write(
+            paths.metadata(),
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+        )
+        .unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        let journal = format!(
+            "schema_version = 2\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"repair-required\"\nactivated_targets = 3\nfinalized_targets = 0\n",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            format!("sha256:{}", "d".repeat(64)),
+            "e".repeat(64),
+            "f".repeat(64),
+        );
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        fs::write(&journal_path, journal).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let signed = issue_probe_repair_evidence(
+            &paths,
+            1_725_000_000_000,
+            1_725_000_060_000,
+            "request-nonce-1",
+        )
+        .unwrap();
+        let authority = crate::lifecycle::RepairAuthorityV1 {
+            schema_version: 1,
+            hub_origin: signed.evidence.hub_origin.clone(),
+            host_id: signed.evidence.host_id.clone(),
+            probe_id: signed.evidence.probe_id.clone(),
+            failed_operation_id: signed.evidence.failed_operation_id.clone(),
+            repair_operation_id: "repair-operation-1".to_owned(),
+            repair_nonce: "repair-nonce-1".to_owned(),
+            repair_evidence_sha256: signed.evidence.sha256(),
+            target_bundle_version: signed.evidence.target_bundle_version.clone(),
+            target_asset_set_digest: signed.evidence.target_asset_set_digest.clone(),
+            target_manifest_sha256: signed.evidence.target_manifest_sha256.clone(),
+            verified_stage_sha256: signed.evidence.verified_stage_sha256.clone(),
+            expires_at_ms: 1_725_000_060_000,
+        };
+        let mut signer = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        signer.update(b"enoki/lifecycle-repair-authority/hmac-sha256/v1\0");
+        signer.update(&authority.canonical_bytes());
+        let authority_signature: String = signer
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let consumed = consume_probe_repair_authority(
+            &paths,
+            &signed.evidence,
+            &signed.signature,
+            &authority,
+            &authority_signature,
+            1_725_000_001_000,
+        )
+        .unwrap();
+        assert_eq!(consumed.repair_operation_id, "repair-operation-1");
+        let repair_journal = fs::read_to_string(
+            paths.bootstrap_state().join("probe-repair-attempt.toml"),
+        )
+        .unwrap();
+        assert!(repair_journal.contains("state = \"consumed\""));
+        assert!(repair_journal.contains("repair_evidence_sha256 = "));
+        assert_eq!(
+            consume_probe_repair_authority(
+                &paths,
+                &signed.evidence,
+                &signed.signature,
+                &authority,
+                &authority_signature,
+                1_725_000_001_001,
+            )
+            .unwrap(),
+            consumed,
+        );
+        mark_probe_repair_unresolved(&paths, &consumed).unwrap();
+        assert!(
+            fs::read_to_string(paths.bootstrap_state().join("probe-repair-attempt.toml"))
+                .unwrap()
+                .contains("state = \"unresolved\"")
+        );
+        let status = fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap();
+        assert!(status.contains("operation_id = \"repair-operation-1\""));
+        assert!(status.contains("status = \"failed\""));
+        assert!(status.contains("error_code = \"lifecycle.repair_unresolved\""));
+    }
+
+    #[test]
     fn consumed_recovery_persistence_failures_stay_preactivation_until_explicit_retry() {
         #[derive(Clone, Copy)]
         enum Failure {
@@ -1085,6 +1300,7 @@ mod tests {
                     operation_id: "consumed-recovery".to_owned(),
                     stage_owner_uid: unsafe { libc::geteuid() },
                     hub_origin: "https://hub.example".to_owned(),
+                    host_id: "host_01".to_owned(),
                     probe_id: "probe_01".to_owned(),
                     source_bundle_version: "1.2.3".to_owned(),
                     source_install_state_sha256: "a".repeat(64),

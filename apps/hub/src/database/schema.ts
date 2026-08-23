@@ -236,9 +236,16 @@ export const probeOperations = sqliteTable(
     state: text().notNull(),
     currentProbeVersion: text(),
     targetAssetSetDigest: text("target_asset_set_digest"),
+    targetManifestSha256: text("target_manifest_sha256"),
     targetProbeVersion: text().notNull(),
     failureCode: text(),
     failureMessage: text(),
+    repairAuthorityExpiresAtMs: integer("repair_authority_expires_at_ms"),
+    repairEvidenceSha256: text("repair_evidence_sha256"),
+    repairFailedOperationId: integer("repair_failed_operation_id"),
+    repairNonce: text("repair_nonce"),
+    upgradeAuthoritySha256: text("upgrade_authority_sha256"),
+    verifiedStageSha256: text("verified_stage_sha256"),
     createdAtMs: integer().notNull(),
     updatedAtMs: integer().notNull(),
     acceptedAtMs: integer(),
@@ -259,6 +266,9 @@ export const probeOperations = sqliteTable(
       table.updatedAtMs,
       table.id,
     ),
+    uniqueIndex("probe_operations_repair_evidence_idx")
+      .on(table.repairEvidenceSha256)
+      .where(sql`repair_evidence_sha256 is not null`),
   ],
 );
 

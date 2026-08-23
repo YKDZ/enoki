@@ -374,6 +374,43 @@ describe("Probe Upgrade Request lifecycle", () => {
       updatedAtMs: 1_725_000_030_000,
     });
     expect(
+      succeedProbeUpgradeRequestFromHostProfile({
+        authenticatedProbeId: "probe_01",
+        bootEvidenceBootId: "boot_01",
+        bootEvidenceProbeId: "probe_01",
+        bootProbeAssetBundleVersion: "0.2.0",
+        hostProfile: {
+          probeAssetBundleVersion: "0.2.0",
+          probeVersion: "0.2.0",
+        },
+        nowMs: 1_725_000_030_000,
+        operation: { ...running, kind: "probe_repair" },
+        profileReportBootId: "boot_01",
+      }),
+    ).toEqual(
+      expect.objectContaining({ kind: "probe_repair", state: "succeeded" }),
+    );
+    expect(
+      succeedProbeUpgradeRequestFromHostProfile({
+        authenticatedProbeId: "probe_01",
+        bootEvidenceBootId: "boot_01",
+        bootEvidenceProbeId: "probe_01",
+        bootProbeAssetBundleVersion: "0.2.0",
+        hostProfile: {
+          probeAssetBundleVersion: "0.2.0",
+          probeVersion: "0.2.0",
+        },
+        nowMs: 1_725_000_030_000,
+        operation: {
+          ...running,
+          kind: "probe_repair",
+          runningAtMs: null,
+          state: "accepted",
+        },
+        profileReportBootId: "boot_01",
+      }),
+    ).toBeNull();
+    expect(
       startProbeUpgradeRequest({
         nowMs: 1_725_000_040_000,
         operation: succeeded!,

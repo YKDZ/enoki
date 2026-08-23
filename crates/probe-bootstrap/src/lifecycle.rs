@@ -9,6 +9,10 @@ const LIFECYCLE_INSTALL_KEY_INFO_DOMAIN: &[u8] =
     b"enoki/lifecycle-authority/hub-origin/hkdf-sha256/v1\0";
 const LIFECYCLE_AUTHORITY_SIGNING_DOMAIN: &[u8] =
     b"enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0";
+const LIFECYCLE_REPAIR_EVIDENCE_SIGNING_DOMAIN: &[u8] =
+    b"enoki/lifecycle-repair-evidence/hmac-sha256/v1\0";
+const LIFECYCLE_REPAIR_AUTHORITY_SIGNING_DOMAIN: &[u8] =
+    b"enoki/lifecycle-repair-authority/hmac-sha256/v1\0";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -59,6 +63,117 @@ fn decode_lower_hex_32(value: &str) -> Option<[u8; 32]> {
         output[index] = ((high << 4) | low) as u8;
     }
     Some(output)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairEvidenceV1 {
+    pub schema_version: u16,
+    pub hub_origin: String,
+    pub host_id: String,
+    pub probe_id: String,
+    pub failed_operation_id: String,
+    pub failed_authority_sha256: String,
+    pub journal_sha256: String,
+    pub journal_phase: String,
+    pub activated_targets: usize,
+    pub finalized_targets: usize,
+    pub target_bundle_version: String,
+    pub target_asset_set_digest: String,
+    pub target_manifest_sha256: String,
+    pub verified_stage_sha256: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub request_nonce: String,
+}
+
+impl RepairEvidenceV1 {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("fixed Repair Evidence serializes")
+    }
+
+    pub fn sha256(&self) -> String {
+        format!("{:x}", Sha256::digest(self.canonical_bytes()))
+    }
+
+    pub fn sign(&self, install_key: &[u8; 32]) -> String {
+        sign_lifecycle_repair_facts(
+            install_key,
+            LIFECYCLE_REPAIR_EVIDENCE_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+        )
+    }
+
+    pub fn verify(&self, install_key: &[u8; 32], signature_hex: &str) -> bool {
+        verify_lifecycle_repair_facts(
+            install_key,
+            LIFECYCLE_REPAIR_EVIDENCE_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+            signature_hex,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairAuthorityV1 {
+    pub schema_version: u16,
+    pub hub_origin: String,
+    pub host_id: String,
+    pub probe_id: String,
+    pub failed_operation_id: String,
+    pub repair_operation_id: String,
+    pub repair_nonce: String,
+    pub repair_evidence_sha256: String,
+    pub target_bundle_version: String,
+    pub target_asset_set_digest: String,
+    pub target_manifest_sha256: String,
+    pub verified_stage_sha256: String,
+    pub expires_at_ms: u64,
+}
+
+impl RepairAuthorityV1 {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("fixed Repair Authority serializes")
+    }
+
+    pub fn verify(&self, install_key: &[u8; 32], signature_hex: &str) -> bool {
+        verify_lifecycle_repair_facts(
+            install_key,
+            LIFECYCLE_REPAIR_AUTHORITY_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+            signature_hex,
+        )
+    }
+}
+
+fn sign_lifecycle_repair_facts(install_key: &[u8; 32], domain: &[u8], canonical: &[u8]) -> String {
+    let mut signer = HmacSha256::new_from_slice(install_key)
+        .expect("HMAC accepts the fixed-size lifecycle install key");
+    signer.update(domain);
+    signer.update(canonical);
+    signer
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn verify_lifecycle_repair_facts(
+    install_key: &[u8; 32],
+    domain: &[u8],
+    canonical: &[u8],
+    signature_hex: &str,
+) -> bool {
+    let Some(signature) = decode_lower_hex_32(signature_hex) else {
+        return false;
+    };
+    let mut verifier = HmacSha256::new_from_slice(install_key)
+        .expect("HMAC accepts the fixed-size lifecycle install key");
+    verifier.update(domain);
+    verifier.update(canonical);
+    verifier.verify_slice(&signature).is_ok()
 }
 
 pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 8 * 1024;
@@ -113,6 +228,14 @@ pub enum LifecycleRequestAuthority {
         install_state_sha256: String,
         target_manifest_sha256: String,
         bundle_version: String,
+    },
+    LocalRepair {
+        probe_id: String,
+        install_state_sha256: String,
+        target_manifest_sha256: String,
+        bundle_version: String,
+        invoking_uid: u32,
+        invoking_gid: u32,
     },
     ReplacementEnrollment {
         enrollment_token: String,
@@ -356,6 +479,30 @@ impl LifecycleRequest {
         Ok(request)
     }
 
+    pub fn local_repair(
+        probe_id: &str,
+        install_state_sha256: &str,
+        target_manifest_sha256: &str,
+        bundle_version: &str,
+        invoking_uid: u32,
+        invoking_gid: u32,
+    ) -> Result<Self, LifecycleRejection> {
+        let request = Self {
+            schema_version: 1,
+            transition: LifecycleTransition::Repair,
+            authority: LifecycleRequestAuthority::LocalRepair {
+                probe_id: probe_id.to_owned(),
+                install_state_sha256: install_state_sha256.to_owned(),
+                target_manifest_sha256: target_manifest_sha256.to_owned(),
+                bundle_version: bundle_version.to_owned(),
+                invoking_uid,
+                invoking_gid,
+            },
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
     pub fn replacement_migration(
         enrollment_token: &str,
         hub_origin: &str,
@@ -477,6 +624,27 @@ impl LifecycleRequest {
                 target_manifest_sha256,
                 bundle_version,
             ),
+            LifecycleRequestAuthority::LocalRepair {
+                probe_id,
+                install_state_sha256,
+                target_manifest_sha256,
+                bundle_version,
+                invoking_uid,
+                invoking_gid,
+            } => {
+                if self.transition != LifecycleTransition::Repair
+                    || *invoking_uid == 0
+                    || *invoking_gid == 0
+                {
+                    return Err(LifecycleRejection::InvalidAuthority);
+                }
+                (
+                    probe_id,
+                    install_state_sha256,
+                    target_manifest_sha256,
+                    bundle_version,
+                )
+            }
             LifecycleRequestAuthority::ReplacementEnrollment {
                 enrollment_token,
                 hub_origin,
@@ -779,6 +947,62 @@ mod tests {
                 .expect("Repair is explicitly enabled")
                 .transition(),
             LifecycleTransition::Repair,
+        );
+    }
+
+    #[test]
+    fn local_repair_authority_binds_installed_receipt_and_nonroot_invoking_admin() {
+        let request = LifecycleRequest::local_repair(
+            "probe_01",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+            1000,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(request.transition(), LifecycleTransition::Repair);
+        assert_eq!(
+            LifecycleRequest::decode(&request.encode().unwrap()),
+            Ok(request)
+        );
+        assert_eq!(
+            LifecycleRequest::local_repair(
+                "probe_01",
+                &"a".repeat(64),
+                &"b".repeat(64),
+                "1.2.3",
+                0,
+                1000,
+            ),
+            Err(LifecycleRejection::InvalidAuthority)
+        );
+    }
+
+    #[test]
+    fn repair_evidence_matches_the_hub_known_vector() {
+        let evidence = RepairEvidenceV1 {
+            schema_version: 1,
+            hub_origin: "https://hub.example".to_owned(),
+            host_id: "7".to_owned(),
+            probe_id: "probe_01".to_owned(),
+            failed_operation_id: "41".to_owned(),
+            failed_authority_sha256: "b".repeat(64),
+            journal_sha256: "c".repeat(64),
+            journal_phase: "repair-required".to_owned(),
+            activated_targets: 3,
+            finalized_targets: 0,
+            target_bundle_version: "1.2.4".to_owned(),
+            target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+            verified_stage_sha256: "e".repeat(64),
+            issued_at_ms: 1_725_000_001_000,
+            expires_at_ms: 1_725_000_061_000,
+            request_nonce: "request_nonce_01".to_owned(),
+        };
+        assert_eq!(
+            evidence.sign(&[0x11; 32]),
+            "2010c4ef8f227628ce5c3ba568e3ddbe33d9e582bed425d46f7095d2d0147d82"
         );
     }
 

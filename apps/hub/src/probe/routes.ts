@@ -44,12 +44,19 @@ import {
 import { deriveObservedIp, type TrustedProxyCidr } from "../network.js";
 import { defaultProbeConfiguration } from "./configuration.js";
 import {
+  canonicalLifecycleUpgradeAuthority,
+  deriveLifecycleAuthorityKey,
+  signLifecycleUpgradeAuthority,
+  type LifecycleUpgradeAuthority,
+} from "./lifecycle-authority.js";
+import {
   defaultProbeOperationTokenTtlMs,
   issueProbeOperationToken,
   validateProbeOperationToken,
 } from "./operation-token.js";
 import {
   acknowledgeProbeUpgradeRequest,
+  createProbeRepairRequest,
   failReportedProbeUpgradeRequest,
   hasUnavailableProbeUpgradeTarget,
   succeedReportedProbeOperation,
@@ -57,13 +64,12 @@ import {
   succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
 } from "./operation.js";
-import {
-  canonicalLifecycleUpgradeAuthority,
-  deriveLifecycleAuthorityKey,
-  signLifecycleUpgradeAuthority,
-  type LifecycleUpgradeAuthority,
-} from "./lifecycle-authority.js";
 import { readProbeReleaseContextFromDirectory } from "./release-context.js";
+import {
+  authorizeProbeRepair,
+  verifyProbeRepairEvidence,
+  type ProbeRepairEvidence,
+} from "./repair-authority.js";
 
 const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
 const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
@@ -79,6 +85,7 @@ const maxProbeOperationPayloadBytes = 16 * 1024;
 const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
 const enrollmentVerificationTtlMs = 60 * 1000;
+const probeRepairAuthorityTtlMs = 60 * 1000;
 const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
 
 type ProtoMessage = Record<string, any>;
@@ -1011,103 +1018,260 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     });
   });
 
-  routes.post("/operations/:operationId/upgrade-stage/admit", async (context) => {
+  routes.post(
+    "/operations/:operationId/upgrade-stage/admit",
+    async (context) => {
+      const requestBody = await readCappedRequestBody(
+        context.req.raw,
+        maxProbeOperationPayloadBytes,
+      );
+      if (!requestBody) return probeJsonError("probe_report_too_large", 413);
+      const host = authenticateProbe(
+        services.hosts,
+        context.req.raw,
+        requestBody,
+        services.probeApiOrigin,
+      );
+      if (!host) return probeJsonError("probe_identity_required", 401);
+      const operationId = parseProbeOperationId(
+        context.req.param("operationId"),
+      );
+      const body = readUpgradeStageAdmissionBody(requestBody);
+      const operation =
+        operationId === null
+          ? null
+          : (services.probeOperations?.findById(operationId) ?? null);
+      if (!operation || operation.hostId !== host.id) {
+        return probeJsonError("probe_operation_not_found", 404);
+      }
+      if (!body || operation.kind !== "probe_upgrade") {
+        return probeJsonError("malformed_probe_upgrade_stage_admission", 400);
+      }
+      const operationNowMs = now();
+      const token = validateProbeOperationToken({
+        nowMs: operationNowMs,
+        operation,
+        probeId: host.probeId,
+        secret: probeOperationTokenSecret(services),
+        targetAssetSetDigest: body.targetAssetSetDigest,
+        targetProbeVersion: body.targetBundleVersion,
+        token: body.token,
+      });
+      if (token.error) return probeJsonError(token.error, 403);
+      if (
+        !services.probeAssetDir ||
+        !services.probeDistributionRootPublicKeyPem
+      ) {
+        return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      }
+      const release = await readProbeReleaseContextFromDirectory({
+        assetDir: services.probeAssetDir,
+        trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+      });
+      const transition = release.releaseTransition;
+      if (
+        transition?.classification !== "compatible" ||
+        transition.sourceProbeVersion !== body.sourceBundleVersion ||
+        transition.targetProbeVersion !== body.targetBundleVersion ||
+        transition.targetAssetSetDigest !== body.targetAssetSetDigest ||
+        !transition.targetBundles?.some(
+          (bundle) => bundle.bundleManifestSha256 === body.targetManifestSha256,
+        )
+      ) {
+        return probeJsonError("probe_upgrade_authority_rejected", 409);
+      }
+      const authority: LifecycleUpgradeAuthority = {
+        schemaVersion: 1,
+        hubOrigin: services.probeApiOrigin ?? "",
+        hostId: String(host.id),
+        probeId: host.probeId,
+        operationId: String(operation.id),
+        sourceBundleVersion: body.sourceBundleVersion,
+        sourceInstallStateSha256: body.sourceInstallStateSha256,
+        sourceManifestSha256: body.sourceManifestSha256,
+        targetBundleVersion: body.targetBundleVersion,
+        targetAssetSetDigest: body.targetAssetSetDigest,
+        targetManifestSha256: body.targetManifestSha256,
+        verifiedStageSha256: body.verifiedStageSha256,
+        expiresAtMs: operationNowMs + defaultProbeOperationTokenTtlMs,
+      };
+      const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
+        host.id,
+      );
+      const hubOrigin = services.probeApiOrigin ?? "";
+      if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+        return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      }
+      const key = deriveLifecycleAuthorityKey(
+        Buffer.from(tokenHash, "hex"),
+        hubOrigin,
+      );
+      const canonicalAuthority = canonicalLifecycleUpgradeAuthority(authority);
+      const admitted =
+        services.probeOperations?.admitPendingProbeUpgradeRequest(
+          operationId!,
+          operationNowMs,
+          body.targetManifestSha256,
+          createHash("sha256").update(canonicalAuthority).digest("hex"),
+          body.verifiedStageSha256,
+        );
+      if (!admitted) {
+        return probeJsonError("probe_operation_status_invalid", 409);
+      }
+      return context.json(
+        {
+          authority,
+          signature: signLifecycleUpgradeAuthority(canonicalAuthority, key),
+        },
+        200,
+        { "cache-control": "no-store" },
+      );
+    },
+  );
+
+  routes.post("/operations/:operationId/repair-authorize", async (context) => {
     const requestBody = await readCappedRequestBody(
       context.req.raw,
       maxProbeOperationPayloadBytes,
     );
     if (!requestBody) return probeJsonError("probe_report_too_large", 413);
-    const host = authenticateProbe(
-      services.hosts,
-      context.req.raw,
-      requestBody,
-      services.probeApiOrigin,
+    const failedOperationId = parseProbeOperationId(
+      context.req.param("operationId"),
     );
-    if (!host) return probeJsonError("probe_identity_required", 401);
-    const operationId = parseProbeOperationId(context.req.param("operationId"));
-    const body = readUpgradeStageAdmissionBody(requestBody);
-    const operation =
-      operationId === null
+    const failedUpgrade =
+      failedOperationId === null
         ? null
-        : (services.probeOperations?.findById(operationId) ?? null);
-    if (!operation || operation.hostId !== host.id) {
-      return probeJsonError("probe_operation_not_found", 404);
-    }
-    if (!body || operation.kind !== "probe_upgrade") {
-      return probeJsonError("malformed_probe_upgrade_stage_admission", 400);
-    }
-    const operationNowMs = now();
-    const token = validateProbeOperationToken({
-      nowMs: operationNowMs,
-      operation,
-      probeId: host.probeId,
-      secret: probeOperationTokenSecret(services),
-      targetAssetSetDigest: body.targetAssetSetDigest,
-      targetProbeVersion: body.targetBundleVersion,
-      token: body.token,
-    });
-    if (token.error) return probeJsonError(token.error, 403);
-    if (!services.probeAssetDir || !services.probeDistributionRootPublicKeyPem) {
-      return probeJsonError("probe_upgrade_authority_unavailable", 503);
-    }
-    const release = await readProbeReleaseContextFromDirectory({
-      assetDir: services.probeAssetDir,
-      trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
-    });
-    const transition = release.releaseTransition;
+        : (services.probeOperations?.findById(failedOperationId) ?? null);
+    const body = readRepairAuthorizationBody(requestBody);
+    const host = body
+      ? services.hosts.findByProbeId(body.evidence.probeId)
+      : null;
     if (
-      transition?.classification !== "compatible" ||
-      transition.sourceProbeVersion !== body.sourceBundleVersion ||
-      transition.targetProbeVersion !== body.targetBundleVersion ||
-      transition.targetAssetSetDigest !== body.targetAssetSetDigest ||
-      !transition.targetBundles?.some(
-        (bundle) =>
-          bundle.bundleManifestSha256 === body.targetManifestSha256,
-      )
+      !host ||
+      String(host.id) !== body?.evidence.hostId ||
+      !failedUpgrade ||
+      failedUpgrade.hostId !== host.id ||
+      failedUpgrade.kind !== "probe_upgrade" ||
+      failedUpgrade.state !== "failed" ||
+      !failedUpgrade.targetManifestSha256 ||
+      !failedUpgrade.verifiedStageSha256 ||
+      !failedUpgrade.upgradeAuthoritySha256 ||
+      !body
     ) {
-      return probeJsonError("probe_upgrade_authority_rejected", 409);
+      return context.json({ disposition: "manual_reinstall_required" }, 409, {
+        "cache-control": "no-store",
+      });
     }
-    const admitted = services.probeOperations?.admitPendingProbeUpgradeRequest(
-      operationId!,
-      operationNowMs,
-    );
-    if (!admitted) {
-      return probeJsonError("probe_operation_status_invalid", 409);
-    }
-    const authority: LifecycleUpgradeAuthority = {
-      schemaVersion: 1,
-      hubOrigin: services.probeApiOrigin ?? "",
-      hostId: String(host.id),
-      probeId: host.probeId,
-      operationId: String(admitted.id),
-      sourceBundleVersion: body.sourceBundleVersion,
-      sourceInstallStateSha256: body.sourceInstallStateSha256,
-      sourceManifestSha256: body.sourceManifestSha256,
-      targetBundleVersion: body.targetBundleVersion,
-      targetAssetSetDigest: body.targetAssetSetDigest,
-      targetManifestSha256: body.targetManifestSha256,
-      verifiedStageSha256: body.verifiedStageSha256,
-      expiresAtMs: operationNowMs + defaultProbeOperationTokenTtlMs,
-    };
     const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
       host.id,
     );
     const hubOrigin = services.probeApiOrigin ?? "";
     if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
-      return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      return context.json({ disposition: "manual_reinstall_required" }, 409, {
+        "cache-control": "no-store",
+      });
     }
-    const key = deriveLifecycleAuthorityKey(
+    const installKey = deriveLifecycleAuthorityKey(
       Buffer.from(tokenHash, "hex"),
       hubOrigin,
     );
+    const operationNowMs = now();
+    const verified = verifyProbeRepairEvidence({
+      evidence: body.evidence,
+      evidenceSignature: body.evidenceSignature,
+      expectedHubOrigin: hubOrigin,
+      expectedProbeId: host.probeId,
+      failedUpgrade,
+      installKey,
+      nowMs: operationNowMs,
+      targetManifestSha256: failedUpgrade.targetManifestSha256,
+    });
+    if (!verified) {
+      return context.json({ disposition: "manual_reinstall_required" }, 409, {
+        "cache-control": "no-store",
+      });
+    }
+
+    let repair = services.probeOperations?.findByRepairEvidenceSha256(
+      verified.repairEvidenceSha256,
+    );
+    if (!repair) {
+      const active = services.probeOperations?.findActiveForHost(host.id);
+      if (active) {
+        if (
+          active.kind !== "probe_repair" ||
+          active.state !== "accepted" ||
+          active.repairFailedOperationId !== failedUpgrade.id ||
+          !active.repairAuthorityExpiresAtMs ||
+          active.repairAuthorityExpiresAtMs > operationNowMs
+        ) {
+          return probeJsonError("probe_operation_status_invalid", 409);
+        }
+        services.probeOperations?.updateProbeUpgradeRequest({
+          ...active,
+          completedAtMs: operationNowMs,
+          failureCode: "repair_authority_expired",
+          failureMessage: null,
+          state: "failed",
+          updatedAtMs: operationNowMs,
+        });
+      }
+      const candidate = createProbeRepairRequest({
+        authorityExpiresAtMs: operationNowMs + probeRepairAuthorityTtlMs,
+        evidenceSha256: verified.repairEvidenceSha256,
+        failedOperation: failedUpgrade,
+        nonce: randomBytes(16).toString("hex"),
+        nowMs: operationNowMs,
+        targetManifestSha256: failedUpgrade.targetManifestSha256,
+        verifiedStageSha256: failedUpgrade.verifiedStageSha256,
+      });
+      if (!candidate) {
+        return context.json({ disposition: "manual_reinstall_required" }, 409, {
+          "cache-control": "no-store",
+        });
+      }
+      try {
+        repair = services.probeOperations?.createProbeUpgradeRequest(candidate);
+      } catch {
+        repair = services.probeOperations?.findByRepairEvidenceSha256(
+          verified.repairEvidenceSha256,
+        );
+      }
+    }
+    if (
+      !repair ||
+      repair.kind !== "probe_repair" ||
+      repair.hostId !== host.id ||
+      repair.repairFailedOperationId !== failedUpgrade.id ||
+      repair.repairEvidenceSha256 !== verified.repairEvidenceSha256 ||
+      !repair.repairNonce ||
+      !repair.repairAuthorityExpiresAtMs ||
+      repair.repairAuthorityExpiresAtMs <= operationNowMs ||
+      !repair.targetManifestSha256 ||
+      !repair.verifiedStageSha256
+    ) {
+      return context.json({ disposition: "manual_reinstall_required" }, 409, {
+        "cache-control": "no-store",
+      });
+    }
+    const decision = authorizeProbeRepair({
+      authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,
+      evidence: body.evidence,
+      evidenceSignature: body.evidenceSignature,
+      expectedHubOrigin: hubOrigin,
+      expectedProbeId: host.probeId,
+      failedUpgrade,
+      installKey,
+      nowMs: operationNowMs,
+      repairNonce: repair.repairNonce,
+      repairOperationId: String(repair.id),
+      targetManifestSha256: repair.targetManifestSha256,
+    });
+    if (decision.disposition !== "probe_repair") {
+      return context.json(decision, 409, { "cache-control": "no-store" });
+    }
     return context.json(
-      {
-        authority,
-        signature: signLifecycleUpgradeAuthority(
-          canonicalLifecycleUpgradeAuthority(authority),
-          key,
-        ),
-      },
+      { authority: decision.authority, signature: decision.signature },
       200,
       { "cache-control": "no-store" },
     );
@@ -1496,6 +1660,69 @@ function readUpgradeStageAdmissionBody(requestBody: Uint8Array) {
       targetManifestSha256: string;
       token: string;
       verifiedStageSha256: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readRepairAuthorizationBody(requestBody: Uint8Array): {
+  evidence: ProbeRepairEvidence;
+  evidenceSignature: string;
+} | null {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
+      string,
+      unknown
+    >;
+    if (
+      Object.keys(body).sort().join("\0") !==
+        ["evidence", "evidenceSignature"].sort().join("\0") ||
+      typeof body.evidence !== "object" ||
+      body.evidence === null ||
+      typeof body.evidenceSignature !== "string" ||
+      !/^[0-9a-f]{64}$/.test(body.evidenceSignature)
+    ) {
+      return null;
+    }
+    const evidence = body.evidence as Record<string, unknown>;
+    const stringKeys = [
+      "failedAuthoritySha256",
+      "failedOperationId",
+      "hostId",
+      "hubOrigin",
+      "journalPhase",
+      "journalSha256",
+      "probeId",
+      "requestNonce",
+      "targetAssetSetDigest",
+      "targetBundleVersion",
+      "targetManifestSha256",
+      "verifiedStageSha256",
+    ];
+    const evidenceKeys = [
+      "activatedTargets",
+      "finalizedTargets",
+      "issuedAtMs",
+      "expiresAtMs",
+      ...stringKeys,
+      "schemaVersion",
+    ];
+    if (
+      Object.keys(evidence).sort().join("\0") !==
+        evidenceKeys.sort().join("\0") ||
+      evidence.schemaVersion !== 1 ||
+      stringKeys.some((key) => typeof evidence[key] !== "string") ||
+      !Number.isSafeInteger(evidence.activatedTargets) ||
+      !Number.isSafeInteger(evidence.finalizedTargets) ||
+      !Number.isSafeInteger(evidence.issuedAtMs) ||
+      !Number.isSafeInteger(evidence.expiresAtMs)
+    ) {
+      return null;
+    }
+    return {
+      evidence: evidence as ProbeRepairEvidence,
+      evidenceSignature: body.evidenceSignature,
     };
   } catch {
     return null;

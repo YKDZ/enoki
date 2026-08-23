@@ -1426,8 +1426,8 @@ describe("Host detail API", () => {
     for (const [failureCode, recoveryDisposition] of [
       ["accepted_timeout", "retry_probe_upgrade"],
       ["lifecycle.upgrade_failed_before_activation", "retry_probe_upgrade"],
-      ["lifecycle.upgrade_repair_required", "probe_repair"],
-      ["post_replacement_restart_failure", "probe_repair"],
+      ["lifecycle.upgrade_repair_required", "manual_reinstall_required"],
+      ["post_replacement_restart_failure", "manual_reinstall_required"],
       ["unrecognized_failure", null],
     ] as const) {
       const failureMessage = `private diagnostic for ${failureCode}`;

@@ -24,12 +24,13 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        ProbeCommand::Repair => {
-            eprintln!(
-                "Probe repair is unavailable in this version: code=unsupported_installation."
-            );
-            std::process::exit(2);
-        }
+        ProbeCommand::Repair => match enoki_probe::runtime::request_local_probe_repair() {
+            Ok(()) => println!("Probe repair completed."),
+            Err(code) => {
+                eprintln!("Probe repair failed: code={code}.");
+                std::process::exit(1);
+            }
+        },
         ProbeCommand::Rejected { code } => {
             eprintln!("Probe command rejected: code={code}");
             std::process::exit(2);

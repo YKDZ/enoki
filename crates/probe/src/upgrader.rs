@@ -3,6 +3,7 @@ use std::{
     fmt, fs,
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::process::CommandExt,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -20,13 +21,15 @@ use enoki_probe_bootstrap::{
         ConsumeBeforeOuterError, FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd,
         UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeRecoveryReceipt,
         VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
-        consume_signed_before_upgrade_outer_checks, finalize_probe_upgrade_stage_cleanup,
+        consume_probe_repair_authority, consume_signed_before_upgrade_outer_checks,
+        execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
+        issue_probe_repair_evidence, mark_probe_repair_unresolved,
         recover_incomplete_probe_upgrade, upgrade_current_probe_for_operation,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
-        LifecycleTransition, UninstallCommitPolicy, UninstallLifecycleEffects, UpgradeCompletion,
-        execute_uninstall_lifecycle,
+        LifecycleTransition, RepairAuthorityV1, UninstallCommitPolicy, UninstallLifecycleEffects,
+        UpgradeCompletion, execute_uninstall_lifecycle,
     },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
@@ -1174,6 +1177,7 @@ pub fn run_probe_upgrader(
     run_probe_upgrader_with_systemd_runner(input, stdin, transport, &mut systemd)
 }
 
+#[cfg(test)]
 pub fn run_probe_repair(
     transport: &mut impl ProbeUpgraderValidationTransport,
 ) -> Result<ProbeRepairResult, ProbeRepairRunError> {
@@ -1228,6 +1232,112 @@ pub fn run_probe_repair(
     )
 }
 
+fn run_authorized_probe_repair_for_invoking_admin(
+    invoking_uid: u32,
+    invoking_gid: u32,
+) -> Result<ProbeRepairResult, ProbeRepairRunError> {
+    if unsafe { libc::geteuid() } != 0 || invoking_uid == 0 || invoking_gid == 0 {
+        return Err(ProbeRepairRunError::RootRequired);
+    }
+    let mut nonce = [0_u8; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut nonce))
+        .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
+    let request_nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let now_ms: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
+    let paths = FixedInstallPaths::production();
+    let signed = issue_probe_repair_evidence(
+        &paths,
+        now_ms,
+        now_ms.saturating_add(60_000),
+        &request_nonce,
+    )
+    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RepairAuthorizationRequest<'a> {
+        evidence: &'a enoki_probe_bootstrap::lifecycle::RepairEvidenceV1,
+        evidence_signature: &'a str,
+    }
+    let request = serde_json::to_vec(&RepairAuthorizationRequest {
+        evidence: &signed.evidence,
+        evidence_signature: &signed.signature,
+    })
+    .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
+    let mut child = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH)
+        .arg("--repair-authorize")
+        .uid(invoking_uid)
+        .gid(invoking_gid)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
+        .write_all(&request)
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
+        return Err(repair_contract_failure(
+            "probe_repair_authority_acquire_failed",
+        ));
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct RepairAuthorizationResponse {
+        authority: RepairAuthorityV1,
+        signature: String,
+    }
+    let response: RepairAuthorizationResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
+    let consumed = consume_probe_repair_authority(
+        &paths,
+        &signed.evidence,
+        &signed.signature,
+        &response.authority,
+        &response.signature,
+        now_ms,
+    )
+    .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
+    let mut systemd = SystemSystemd::for_live_upgrade();
+    let repaired = execute_authorized_probe_repair(
+        &paths,
+        &consumed,
+        &mut systemd,
+        |operation_id, owner_uid| {
+            remove_verified_probe_upgrade_stage(operation_id, owner_uid)
+                .map_err(|_| enoki_probe_bootstrap::install::InstallError::Io)
+        },
+    );
+    if repaired.is_err() {
+        let _ = mark_probe_repair_unresolved(&paths, &consumed);
+        return Err(repair_contract_failure("probe_repair_recovery_pending"));
+    }
+    Ok(ProbeRepairResult {
+        probe_id: consumed.probe_id,
+        repaired_version: consumed.target_bundle_version,
+    })
+}
+
+fn repair_contract_failure(code: &'static str) -> ProbeRepairRunError {
+    ProbeRepairRunError::ServiceReconstruction {
+        code,
+        message: "explicit Probe Repair remains unresolved".to_owned(),
+    }
+}
+
+#[cfg(test)]
 fn read_installed_probe_version(install_path: &Path) -> Result<String, ProbeRepairRunError> {
     const VERSION_MARKER: &[u8] = b"ENOKI_PROBE_VERSION=";
     let binary =
@@ -1256,6 +1366,7 @@ fn read_installed_probe_version(install_path: &Path) -> Result<String, ProbeRepa
         .ok_or(ProbeRepairRunError::InstalledVersionInvalid)
 }
 
+#[cfg(test)]
 fn run_probe_repair_with_current_version_and_systemd_runner(
     install_metadata: &TrustedProbeInstallMetadata,
     transport: &mut impl ProbeUpgraderValidationTransport,
@@ -1395,6 +1506,7 @@ fn run_probe_repair_with_current_version_and_systemd_runner(
     })
 }
 
+#[cfg(test)]
 fn probe_repair_reconstruction_error(
     code: &'static str,
     error: ProbeUpgraderRunError,
@@ -1405,11 +1517,13 @@ fn probe_repair_reconstruction_error(
     }
 }
 
+#[cfg(test)]
 fn probe_identity_validation_url(hub_url: &str) -> Result<String, ProbeUpgraderRunError> {
     hub_url::endpoint(hub_url, "/api/probe/config")
         .map_err(|()| ProbeUpgraderRunError::InvalidConfig("invalid Hub URL"))
 }
 
+#[cfg(test)]
 fn write_probe_systemd_service(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -1453,10 +1567,12 @@ fn write_probe_systemd_service(
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct FailedProbeUpgradeMarker {
     target_probe_version: String,
 }
 
+#[cfg(test)]
 fn read_probe_repair_failure_marker_with_owner(
     install_metadata: &TrustedProbeInstallMetadata,
     trusted_owner_uid: u32,
@@ -1492,6 +1608,7 @@ fn read_probe_repair_failure_marker_with_file_metadata(
     )
 }
 
+#[cfg(test)]
 fn read_probe_repair_failure_marker_with_file_metadata_and_owner(
     install_metadata: &TrustedProbeInstallMetadata,
     file_metadata: TrustedFileMetadata,
@@ -1509,6 +1626,7 @@ fn read_probe_repair_failure_marker_with_file_metadata_and_owner(
     parse_probe_repair_failure_marker(&contents)
 }
 
+#[cfg(test)]
 fn parse_probe_repair_failure_marker(
     contents: &str,
 ) -> Result<FailedProbeUpgradeMarker, ProbeRepairRunError> {
@@ -1549,6 +1667,7 @@ fn parse_probe_repair_failure_marker(
     })
 }
 
+#[cfg(test)]
 fn validate_repair_candidate_is_installed(
     marker: &FailedProbeUpgradeMarker,
     current_probe_version: &str,
@@ -1563,6 +1682,7 @@ fn validate_repair_candidate_is_installed(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_probe_repair_target(
     hub_target_version: &str,
     current_probe_version: &str,
@@ -1749,6 +1869,31 @@ pub fn run_lifecycle_companion_from_peer(
         Ok(identity) => identity,
         Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
     };
+    if request.transition() == LifecycleTransition::Repair {
+        let LifecycleRequestAuthority::LocalRepair {
+            probe_id,
+            install_state_sha256,
+            target_manifest_sha256,
+            bundle_version,
+            invoking_uid,
+            invoking_gid,
+        } = request.authority()
+        else {
+            return LifecycleResponse::failed("lifecycle.invalid_authority");
+        };
+        if peer_uid != Some(0)
+            || identity.probe_id != *probe_id
+            || metadata.install_state_sha256.as_deref() != Some(install_state_sha256)
+            || metadata.target_manifest_sha256.as_deref() != Some(target_manifest_sha256)
+            || metadata.bundle_version.as_deref() != Some(bundle_version)
+        {
+            return LifecycleResponse::failed("lifecycle.authority_mismatch");
+        }
+        return match run_authorized_probe_repair_for_invoking_admin(*invoking_uid, *invoking_gid) {
+            Ok(_) => LifecycleResponse::succeeded(),
+            Err(_) => LifecycleResponse::failed("lifecycle.repair_unresolved"),
+        };
+    }
     if request.transition() == LifecycleTransition::ReplacementMigration {
         return run_probe_replacement_migration(request, &metadata, &identity);
     }
@@ -1778,6 +1923,7 @@ pub fn run_lifecycle_companion_from_peer(
             bundle_version,
         ),
         LifecycleRequestAuthority::HubUpgrade { .. }
+        | LifecycleRequestAuthority::LocalRepair { .. }
         | LifecycleRequestAuthority::ReplacementEnrollment { .. } => {
             return LifecycleResponse::not_enabled();
         }
@@ -1809,7 +1955,7 @@ fn run_probe_compatible_upgrade(
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::HubUpgrade {
         hub_origin,
-        host_id: _,
+        host_id,
         probe_id,
         operation_id,
         source_bundle_version,
@@ -1844,6 +1990,7 @@ fn run_probe_compatible_upgrade(
         operation_id: operation_id.clone(),
         stage_owner_uid: peer_uid,
         hub_origin: hub_origin.clone(),
+        host_id: host_id.clone(),
         probe_id: probe_id.clone(),
         source_bundle_version: source_bundle_version.clone(),
         source_install_state_sha256: source_install_state_sha256.clone(),
@@ -2298,7 +2445,8 @@ fn execute_lifecycle_uninstall(
             ..
         } => Some((operation_id.as_str(), operation_token.as_str())),
         LifecycleRequestAuthority::HubUpgrade { .. }
-        | LifecycleRequestAuthority::LocalRoot { .. } => None,
+        | LifecycleRequestAuthority::LocalRoot { .. }
+        | LifecycleRequestAuthority::LocalRepair { .. } => None,
         LifecycleRequestAuthority::ReplacementEnrollment { .. } => None,
     };
     let terminal_was_acknowledged = matches!(
@@ -2358,7 +2506,8 @@ where
                 ..
             } => Some((operation_id, operation_token)),
             LifecycleRequestAuthority::HubUpgrade { .. }
-            | LifecycleRequestAuthority::LocalRoot { .. } => None,
+            | LifecycleRequestAuthority::LocalRoot { .. }
+            | LifecycleRequestAuthority::LocalRepair { .. } => None,
             LifecycleRequestAuthority::ReplacementEnrollment { .. } => None,
         }
     }
@@ -5971,6 +6120,7 @@ fn capsule_receipt_matches_request(
             ..
         } => (install_state_sha256, target_manifest_sha256, bundle_version),
         LifecycleRequestAuthority::HubUpgrade { .. }
+        | LifecycleRequestAuthority::LocalRepair { .. }
         | LifecycleRequestAuthority::ReplacementEnrollment { .. } => return false,
     };
     matches!(metadata.schema_version, 4 | 5)

@@ -35,6 +35,66 @@ use crate::{
     },
 };
 
+const MAX_REPAIR_EXCHANGE_BYTES: u64 = 8 * 1024;
+
+/// Exchanges a fresh root-signed Repair Evidence bearer for one short-lived
+/// Repair Authority. The unprivileged acquirer never receives installation
+/// keys or the long-lived Probe identity credential.
+pub fn acquire_probe_repair_authority_once(
+    request_body: &[u8],
+) -> Result<Vec<u8>, AcquisitionFailure> {
+    if unsafe { libc::geteuid() } == 0 || request_body.is_empty() || request_body.len() > 8 * 1024 {
+        return Err(AcquisitionFailure::RootRefused);
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Envelope {
+        evidence: crate::lifecycle::RepairEvidenceV1,
+        evidence_signature: String,
+    }
+    let envelope: Envelope =
+        serde_json::from_slice(request_body).map_err(|_| AcquisitionFailure::Permanent)?;
+    if envelope.evidence_signature.len() != 64
+        || !valid_stage_identifier(&envelope.evidence.failed_operation_id)
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let origin =
+        exact_origin(&envelope.evidence.hub_origin).ok_or(AcquisitionFailure::InvalidOrigin)?;
+    let url = format!(
+        "{origin}/api/probe/operations/{}/repair-authorize",
+        envelope.evidence.failed_operation_id
+    );
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(10))
+        .timeout_write(Duration::from_secs(10))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .post(&url)
+        .set("content-type", "application/json")
+        .send_bytes(request_body)
+        .map_err(|_| AcquisitionFailure::Temporary {
+            retry_after_ms: None,
+        })?;
+    if response.status() != 200 {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let mut output = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_REPAIR_EXCHANGE_BYTES + 1)
+        .read_to_end(&mut output)
+        .map_err(|_| AcquisitionFailure::Temporary {
+            retry_after_ms: None,
+        })?;
+    if output.is_empty() || output.len() as u64 > MAX_REPAIR_EXCHANGE_BYTES {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    Ok(output)
+}
+
 pub const PROBE_UPGRADE_STAGE_ROOT: &str = "/var/lib/enoki-probe/upgrade-stages";
 
 #[derive(Clone, Debug, Eq, PartialEq)]

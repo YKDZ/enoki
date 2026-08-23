@@ -7,7 +7,10 @@ export type ProbeOperationState =
   | "superseded"
   | "canceled";
 
-export type ProbeOperationKind = "probe_upgrade" | "probe_uninstall";
+export type ProbeOperationKind =
+  | "probe_upgrade"
+  | "probe_repair"
+  | "probe_uninstall";
 
 export type ProbeUpgradeRequest = {
   acceptedAtMs: number | null;
@@ -20,12 +23,19 @@ export type ProbeUpgradeRequest = {
   hostId: number;
   id: number | null;
   kind: ProbeOperationKind;
+  repairAuthorityExpiresAtMs?: number | null;
+  repairEvidenceSha256?: string | null;
+  repairFailedOperationId?: number | null;
+  repairNonce?: string | null;
   runningAtMs: number | null;
   state: ProbeOperationState;
   supersededAtMs: number | null;
   targetAssetSetDigest?: string | null;
+  targetManifestSha256?: string | null;
   targetProbeVersion: string;
   updatedAtMs: number;
+  upgradeAuthoritySha256?: string | null;
+  verifiedStageSha256?: string | null;
 };
 
 export type ProbeUpgradeTarget = {
@@ -61,6 +71,49 @@ export type CreateProbeUninstallRequestResult =
       events: [];
       operation: null;
     };
+
+export function createProbeRepairRequest(input: {
+  authorityExpiresAtMs: number;
+  evidenceSha256: string;
+  failedOperation: ProbeUpgradeRequest;
+  nonce: string;
+  nowMs: number;
+  targetManifestSha256: string;
+  verifiedStageSha256: string;
+}): ProbeUpgradeRequest | null {
+  if (
+    input.failedOperation.kind !== "probe_upgrade" ||
+    input.failedOperation.state !== "failed" ||
+    input.failedOperation.id === null ||
+    !input.failedOperation.targetAssetSetDigest
+  ) {
+    return null;
+  }
+  return {
+    acceptedAtMs: input.nowMs,
+    canceledAtMs: null,
+    completedAtMs: null,
+    createdAtMs: input.nowMs,
+    currentProbeVersion: input.failedOperation.targetProbeVersion,
+    failureCode: null,
+    failureMessage: null,
+    hostId: input.failedOperation.hostId,
+    id: null,
+    kind: "probe_repair",
+    repairAuthorityExpiresAtMs: input.authorityExpiresAtMs,
+    repairEvidenceSha256: input.evidenceSha256,
+    repairFailedOperationId: input.failedOperation.id,
+    repairNonce: input.nonce,
+    runningAtMs: null,
+    state: "accepted",
+    supersededAtMs: null,
+    targetAssetSetDigest: input.failedOperation.targetAssetSetDigest,
+    targetManifestSha256: input.targetManifestSha256,
+    targetProbeVersion: input.failedOperation.targetProbeVersion,
+    updatedAtMs: input.nowMs,
+    verifiedStageSha256: input.verifiedStageSha256,
+  };
+}
 
 export function createProbeUpgradeRequest(input: {
   activeOperation: null;
@@ -432,7 +485,9 @@ export function succeedProbeUpgradeRequestFromHostProfile(input: {
   profileReportBootId: string;
 }): ProbeUpgradeRequest | null {
   if (
-    input.operation.kind !== "probe_upgrade" ||
+    !["probe_upgrade", "probe_repair"].includes(input.operation.kind) ||
+    (input.operation.kind === "probe_repair" &&
+      input.operation.state !== "running") ||
     hasUnavailableProbeUpgradeTarget(input.operation) ||
     !isActiveProbeOperation(input.operation) ||
     !input.profileReportBootId ||

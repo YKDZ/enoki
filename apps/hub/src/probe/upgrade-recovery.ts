@@ -5,15 +5,12 @@ import type { ProbeUpgradeRequest } from "./operation.js";
 const manualReinstallFailureCodes = new Set([
   "insufficient_privilege",
   "manual_probe_reinstall_required",
-  "probe_manual_reinstall_required",
-  "unsupported_installation",
-]);
-
-const probeRepairFailureCodes = new Set([
   "lifecycle.upgrade_repair_required",
   "post_replacement_restart_failure",
   "post_replacement_status_write_failure",
   "running_timeout",
+  "probe_manual_reinstall_required",
+  "unsupported_installation",
 ]);
 
 const retryProbeUpgradeFailureCodes = new Set([
@@ -37,10 +34,6 @@ export function probeUpgradeRecoveryDisposition(
 ): ProbeUpgradeRecoveryDisposition | null {
   if (manualReinstallFailureCodes.has(failureCode)) {
     return "manual_reinstall_required";
-  }
-
-  if (probeRepairFailureCodes.has(failureCode)) {
-    return "probe_repair";
   }
 
   if (retryProbeUpgradeFailureCodes.has(failureCode)) {

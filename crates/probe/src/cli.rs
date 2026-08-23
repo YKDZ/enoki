@@ -117,6 +117,7 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "  enoki-probe --help\n",
             "  enoki-probe --version\n",
             "  sudo enoki-probe uninstall\n",
+            "  sudo enoki-probe repair\n",
             "  enoki-probe register --hub-url <url> ",
             "--enrollment-token <token> --config <path>\n",
             "  enoki-probe run --config <path>\n",
@@ -125,7 +126,10 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         ProbeCommand::Uninstall => {
             "Probe uninstall is coordinated by the installed lifecycle service.\n".to_string()
         }
-        ProbeCommand::Repair => "Probe repair is unsupported in this version.\n".to_string(),
+        ProbeCommand::Repair => {
+            "Probe repair requires an explicit local administrator and Hub authorization.\n"
+                .to_string()
+        }
         ProbeCommand::Rejected { code } => format!("Probe command rejected: code={code}\n"),
         ProbeCommand::Register { .. } => {
             "Probe registration performs network I/O and cannot be rendered.\n".to_string()

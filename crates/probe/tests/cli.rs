@@ -21,9 +21,10 @@ fn renders_help_without_remote_administration_language() {
 }
 
 #[test]
-fn unavailable_repair_does_not_claim_a_replacement_migration() {
+fn repair_output_describes_explicit_local_and_hub_authorization() {
     let output = render_probe_output(ProbeCommand::Repair);
-    assert!(output.contains("unsupported"));
+    assert!(output.contains("explicit local administrator"));
+    assert!(output.contains("Hub authorization"));
     for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
         assert!(!output.contains(unsupported_guidance));
     }

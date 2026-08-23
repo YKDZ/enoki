@@ -59,11 +59,12 @@ fn run(mode: CompanionMode) -> ExitCode {
     if !caller_is_authorized(request.authority(), peer_uid, process_uid) {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
     }
-    write_lifecycle_response(run_lifecycle_companion_from_peer(
-        &request,
-        &mut transport,
-        peer_uid,
-    ))
+    let response = run_lifecycle_companion_from_peer(&request, &mut transport, peer_uid);
+    if request.transition() == enoki_probe_bootstrap::lifecycle::LifecycleTransition::Repair {
+        write_response(response)
+    } else {
+        write_lifecycle_response(response)
+    }
 }
 
 fn mode_accepts(
@@ -113,7 +114,8 @@ fn caller_is_authorized(
     match authority {
         LifecycleRequestAuthority::HubUpgrade { .. }
         | LifecycleRequestAuthority::HubOperation { .. } => peer_uid.is_some(),
-        LifecycleRequestAuthority::LocalRoot { .. } => {
+        LifecycleRequestAuthority::LocalRoot { .. }
+        | LifecycleRequestAuthority::LocalRepair { .. } => {
             peer_uid.map_or(process_uid == 0, |uid| uid == 0)
         }
         LifecycleRequestAuthority::ReplacementEnrollment { .. } => {
@@ -181,6 +183,10 @@ mod tests {
         assert!(mode_accepts(
             CompanionMode::General,
             LifecycleTransition::Uninstall
+        ));
+        assert!(mode_accepts(
+            CompanionMode::General,
+            LifecycleTransition::Repair
         ));
     }
 

@@ -17,12 +17,16 @@ export type ProbeOperationRepository = {
   admitPendingProbeUpgradeRequest: (
     id: number,
     nowMs: number,
+    targetManifestSha256: string,
+    upgradeAuthoritySha256: string,
+    verifiedStageSha256: string,
   ) => ProbeUpgradeRequest | null;
   createProbeUpgradeRequest: (
     operation: ProbeUpgradeRequest,
   ) => ProbeUpgradeRequest;
   findActiveForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findById: (id: number) => ProbeUpgradeRequest | null;
+  findByRepairEvidenceSha256: (sha256: string) => ProbeUpgradeRequest | null;
   findLatestForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findLatestForHosts: (hostIds: number[]) => Map<number, ProbeUpgradeRequest>;
   updateProbeUpgradeRequest: (
@@ -34,14 +38,23 @@ export function createProbeOperationRepository(
   database: ProbeOperationDatabase,
 ): ProbeOperationRepository {
   return {
-    admitPendingProbeUpgradeRequest(id, nowMs) {
+    admitPendingProbeUpgradeRequest(
+      id,
+      nowMs,
+      targetManifestSha256,
+      upgradeAuthoritySha256,
+      verifiedStageSha256,
+    ) {
       const row = database
         .update(probeOperations)
         .set({
           acceptedAtMs: nowMs,
           runningAtMs: nowMs,
           state: "running",
+          targetManifestSha256,
+          upgradeAuthoritySha256,
           updatedAtMs: nowMs,
+          verifiedStageSha256,
         })
         .where(
           and(eq(probeOperations.id, id), eq(probeOperations.state, "pending")),
@@ -87,6 +100,15 @@ export function createProbeOperationRepository(
           .where(eq(probeOperations.id, id))
           .get() ?? null;
 
+      return row ? rowToProbeUpgradeRequest(row) : null;
+    },
+    findByRepairEvidenceSha256(sha256) {
+      const row =
+        database
+          .select()
+          .from(probeOperations)
+          .where(eq(probeOperations.repairEvidenceSha256, sha256))
+          .get() ?? null;
       return row ? rowToProbeUpgradeRequest(row) : null;
     },
     findLatestForHost(hostId) {
@@ -181,12 +203,19 @@ function probeUpgradeRequestToRow(
     id: operation.id ?? undefined,
     kind: operation.kind,
     managedHostId: operation.hostId,
+    repairAuthorityExpiresAtMs: operation.repairAuthorityExpiresAtMs,
+    repairEvidenceSha256: operation.repairEvidenceSha256,
+    repairFailedOperationId: operation.repairFailedOperationId,
+    repairNonce: operation.repairNonce,
     runningAtMs: operation.runningAtMs,
     state: operation.state,
     supersededAtMs: operation.supersededAtMs,
     targetAssetSetDigest: operation.targetAssetSetDigest,
+    targetManifestSha256: operation.targetManifestSha256,
     targetProbeVersion: operation.targetProbeVersion,
     updatedAtMs: operation.updatedAtMs,
+    upgradeAuthoritySha256: operation.upgradeAuthoritySha256,
+    verifiedStageSha256: operation.verifiedStageSha256,
   };
 }
 
@@ -202,11 +231,18 @@ function rowToProbeUpgradeRequest(row: ProbeOperationRow): ProbeUpgradeRequest {
     hostId: row.managedHostId,
     id: row.id,
     kind: row.kind as ProbeUpgradeRequest["kind"],
+    repairAuthorityExpiresAtMs: row.repairAuthorityExpiresAtMs,
+    repairEvidenceSha256: row.repairEvidenceSha256,
+    repairFailedOperationId: row.repairFailedOperationId,
+    repairNonce: row.repairNonce,
     runningAtMs: row.runningAtMs,
     state: row.state as ProbeUpgradeRequest["state"],
     supersededAtMs: row.supersededAtMs,
     targetAssetSetDigest: row.targetAssetSetDigest,
+    targetManifestSha256: row.targetManifestSha256,
     targetProbeVersion: row.targetProbeVersion,
     updatedAtMs: row.updatedAtMs,
+    upgradeAuthoritySha256: row.upgradeAuthoritySha256,
+    verifiedStageSha256: row.verifiedStageSha256,
   };
 }

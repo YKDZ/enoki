@@ -1066,6 +1066,56 @@ pub fn request_local_probe_uninstall() -> Result<(), &'static str> {
     }
 }
 
+pub fn request_local_probe_repair() -> Result<(), &'static str> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err("lifecycle.root_required");
+    }
+    let invoking_uid = invoking_admin_id("SUDO_UID")?;
+    let invoking_gid = invoking_admin_id("SUDO_GID")?;
+    let config = read_bootstrap_config(&PathBuf::from(
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ))
+    .map_err(|_| "lifecycle.identity_invalid")?;
+    let Some((probe_id, install_state, manifest, version)) = config
+        .probe_id
+        .as_deref()
+        .zip(config.install_state_sha256.as_deref())
+        .zip(config.target_manifest_sha256.as_deref())
+        .zip(config.bundle_version.as_deref())
+        .map(|(((probe_id, install_state), manifest), version)| {
+            (probe_id, install_state, manifest, version)
+        })
+    else {
+        return Err("lifecycle.install_receipt_missing");
+    };
+    let request = LifecycleRequest::local_repair(
+        probe_id,
+        install_state,
+        manifest,
+        version,
+        invoking_uid,
+        invoking_gid,
+    )
+    .map_err(|_| "lifecycle.invalid_authority")?;
+    let response =
+        request_lifecycle_companion_at(std::path::Path::new(LIFECYCLE_COMPANION_SOCKET), &request)
+            .map_err(|_| "lifecycle.companion_unavailable")?;
+    match response.status() {
+        LifecycleResultStatus::Succeeded => Ok(()),
+        LifecycleResultStatus::Failed | LifecycleResultStatus::NotEnabled => {
+            Err("lifecycle.repair_unresolved")
+        }
+    }
+}
+
+fn invoking_admin_id(name: &str) -> Result<u32, &'static str> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| *value != 0)
+        .ok_or("lifecycle.local_authorization_required")
+}
+
 fn lifecycle_companion_failure(code: &str) -> ProbeUpgradeRunnerOutcome {
     ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
         error_code: code.to_owned(),
