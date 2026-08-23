@@ -71,11 +71,33 @@ export async function createProbeBootstrapPublication({
     path.join(sourceDir, "scripts/probe-bootstrap-recipe.py"),
     "utf8",
   );
+  const recipeRoles = {
+    components: Object.fromEntries(
+      Object.entries(probeBundleComponentProfiles).map(([role, profile]) => [
+        role,
+        {
+          path: profile.path,
+          permissionProfile: profile.permissionProfile,
+          resourceContract: profile.resourceContract,
+        },
+      ]),
+    ),
+    bootstrapAssets: Object.fromEntries(
+      probeBundledBootstrapAssets.map((asset) => [
+        asset.role,
+        {
+          path: asset.archivePath,
+          permissionProfile: asset.permissionProfile,
+        },
+      ]),
+    ),
+  };
   const recipeBytes = Buffer.from(
     recipeTemplate
       .replaceAll("__ENOKI_DISTRIBUTION__", "enoki")
       .replaceAll("__ENOKI_ROOT_FINGERPRINT__", rootFingerprint)
-      .replaceAll("__ENOKI_BUNDLE_VERSION__", bundleVersion),
+      .replaceAll("__ENOKI_BUNDLE_VERSION__", bundleVersion)
+      .replaceAll("__ENOKI_BUNDLE_ROLES__", JSON.stringify(recipeRoles)),
   );
   if (recipeBytes.includes("__ENOKI_")) {
     throw new Error("Probe Bootstrap recipe record is incomplete");

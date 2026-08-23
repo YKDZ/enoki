@@ -37,11 +37,7 @@ TARGETS = (
     "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl",
     "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
 )
-EXPECTED_ROLES = {
-    "probe": ("enoki-probe", "probe-v4"),
-    "bootstrap-acquirer": ("bootstrap/enoki-probe-bootstrap-acquire", "bootstrap-acquirer-v1"),
-    "bootstrap-activator": ("bootstrap/enoki-probe-bootstrap-activate", "bootstrap-activator-v1"),
-}
+EXPECTED_ROLES = __ENOKI_BUNDLE_ROLES__
 
 
 def fail(message):
@@ -204,25 +200,39 @@ def verify_bundle_and_extract_acquirer(archive_path, asset):
             if digest(manifest_raw) != asset["bundleManifestSha256"]:
                 fail("Probe Asset Bundle manifest digest mismatch")
             manifest = exact_json(manifest_raw, ("bootstrapAssets", "components", "kind", "target", "version"), "Probe Asset Bundle manifest")
-            entries = manifest.get("components", []) + manifest.get("bootstrapAssets", [])
-            if manifest.get("kind") != "enoki-probe-bundle" or manifest.get("target") != asset["target"] or manifest.get("version") != BUNDLE_VERSION or len(entries) != 3:
+            components = manifest.get("components")
+            bootstrap_assets = manifest.get("bootstrapAssets")
+            if (manifest.get("kind") != "enoki-probe-bundle" or manifest.get("target") != asset["target"]
+                    or manifest.get("version") != BUNDLE_VERSION or not isinstance(components, list)
+                    or not isinstance(bootstrap_assets, list)
+                    or len(components) != len(EXPECTED_ROLES["components"])
+                    or len(bootstrap_assets) != len(EXPECTED_ROLES["bootstrapAssets"])):
                 fail("Probe Asset Bundle manifest is incoherent")
             expected_paths = {"bundle-manifest.json"}
             acquirer = None
-            for entry in entries:
-                if not isinstance(entry, dict) or set(entry) != {"path", "permissionProfile", "role", "sha256", "size", "version"}:
-                    fail("Probe Asset Bundle role is invalid")
-                expected = EXPECTED_ROLES.get(entry.get("role"))
-                if expected != (entry.get("path"), entry.get("permissionProfile")) or entry.get("version") != BUNDLE_VERSION or entry.get("path") not in by_name:
-                    fail("Probe Asset Bundle role is incoherent")
-                member = by_name[entry["path"]]
-                stream = archive.extractfile(member)
-                data = stream.read(entry["size"] + 1) if stream else b""
-                if len(data) != entry.get("size") or member.size != entry.get("size") or digest(data) != entry.get("sha256"):
-                    fail("Probe Asset Bundle role receipt mismatch")
-                expected_paths.add(entry["path"])
-                if entry["role"] == "bootstrap-acquirer":
-                    acquirer = data
+            for collection, entries, fields in (
+                ("components", components, {"path", "permissionProfile", "resourceContract", "role", "sha256", "size", "version"}),
+                ("bootstrapAssets", bootstrap_assets, {"path", "permissionProfile", "role", "sha256", "size", "version"}),
+            ):
+                seen = set()
+                for entry in entries:
+                    if not isinstance(entry, dict) or set(entry) != fields or entry.get("role") in seen:
+                        fail("Probe Asset Bundle role is invalid")
+                    seen.add(entry["role"])
+                    expected = EXPECTED_ROLES[collection].get(entry.get("role"))
+                    actual = {key: entry.get(key) for key in expected} if expected else None
+                    if expected != actual or entry.get("version") != BUNDLE_VERSION or entry.get("path") not in by_name:
+                        fail("Probe Asset Bundle role is incoherent")
+                    member = by_name[entry["path"]]
+                    stream = archive.extractfile(member)
+                    data = stream.read(entry["size"] + 1) if stream else b""
+                    if len(data) != entry.get("size") or member.size != entry.get("size") or digest(data) != entry.get("sha256"):
+                        fail("Probe Asset Bundle role receipt mismatch")
+                    expected_paths.add(entry["path"])
+                    if entry["role"] == "bootstrap-acquirer":
+                        acquirer = data
+                if seen != set(EXPECTED_ROLES[collection]):
+                    fail("Probe Asset Bundle role closure is invalid")
             if set(by_name) != expected_paths or acquirer is None:
                 fail("Probe Asset Bundle has an unexpected or missing role")
             return acquirer

@@ -29,6 +29,7 @@ import { describe, expect, it } from "vitest";
 import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
 import {
+  createProbeBootstrapPublication,
   createProbeTrustDelegation,
   inspectProbeAssetSet,
   validateDelegatedProbeSigningIdentity,
@@ -57,10 +58,62 @@ const testDistributionRoot = generateKeyPairSync("rsa", {
 });
 
 describe("Enoki Release Candidate", { timeout: 15_000 }, () => {
-  it("executes verified recipe acquirer bytes only through one sealed descriptor", async () => {
+  it("generates the bootstrap recipe from the canonical seven-role bundle closure", async () => {
+    const publication = await createProbeBootstrapPublication({
+      bundleVersion: "1.2.3",
+      sourceDir: process.cwd(),
+      trustedRootPublicKeyPem: testDistributionRoot.publicKey,
+    });
+    const directory = await mkdtemp(path.join(tmpdir(), "enoki-recipe-roles-"));
+    const recipePath = path.join(directory, "recipe.py");
+    await writeFile(recipePath, publication.recipeBytes);
     const program = String.raw`
-import importlib.util, os, pathlib
-path = pathlib.Path("scripts/probe-bootstrap-recipe.py")
+import hashlib, importlib.util, io, json, pathlib, sys, tarfile, tempfile
+spec = importlib.util.spec_from_file_location("enoki_recipe", sys.argv[1])
+recipe = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(recipe)
+assert set(recipe.EXPECTED_ROLES) == {"components", "bootstrapAssets"}
+assert len(recipe.EXPECTED_ROLES["components"]) == 5
+assert len(recipe.EXPECTED_ROLES["bootstrapAssets"]) == 2
+assert recipe.EXPECTED_ROLES["components"]["lifecycle-companion"]["resourceContract"] == "local-lifecycle-v1"
+payloads = {}
+manifest = {"bootstrapAssets": [], "components": [], "kind": "enoki-probe-bundle", "target": "x86_64-unknown-linux-gnu", "version": "1.2.3"}
+for collection in ("components", "bootstrapAssets"):
+    for role, contract in recipe.EXPECTED_ROLES[collection].items():
+        data = ("verified-" + role).encode()
+        payloads[contract["path"]] = data
+        entry = {**contract, "role": role, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "version": "1.2.3"}
+        manifest[collection].append(entry)
+manifest_raw = json.dumps(manifest, separators=(",", ":")).encode()
+archive_path = pathlib.Path(tempfile.mkdtemp()) / "bundle.tar.gz"
+with tarfile.open(archive_path, "w:gz") as archive:
+    for name, data in {"bundle-manifest.json": manifest_raw, **payloads}.items():
+        member = tarfile.TarInfo(name)
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+asset = {"bundleManifestSha256": hashlib.sha256(manifest_raw).hexdigest(), "target": "x86_64-unknown-linux-gnu"}
+assert recipe.verify_bundle_and_extract_acquirer(archive_path, asset) == payloads["bootstrap/enoki-probe-bootstrap-acquire"]
+`;
+    await expect(
+      execFileAsync("python3", ["-c", program, recipePath], {
+        env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
+      }),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    await rm(directory, { force: true, recursive: true });
+  });
+
+  it("executes verified recipe acquirer bytes only through one sealed descriptor", async () => {
+    const publication = await createProbeBootstrapPublication({
+      bundleVersion: "1.2.3",
+      sourceDir: process.cwd(),
+      trustedRootPublicKeyPem: testDistributionRoot.publicKey,
+    });
+    const directory = await mkdtemp(path.join(tmpdir(), "enoki-recipe-sealed-fd-"));
+    const recipePath = path.join(directory, "recipe.py");
+    await writeFile(recipePath, publication.recipeBytes);
+    const program = String.raw`
+import importlib.util, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
 spec = importlib.util.spec_from_file_location("enoki_recipe", path)
 recipe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(recipe)
@@ -69,10 +122,11 @@ with open(os.devnull, "rb") as input_stream:
     assert recipe.execute_verified_acquirer(verified, {"ENOKI_RECIPE_FD": "sealed"}, input_stream) == 0
 `;
     await expect(
-      execFileAsync("python3", ["-c", program], {
+      execFileAsync("python3", ["-c", program, recipePath], {
         env: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" },
       }),
     ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    await rm(directory, { force: true, recursive: true });
   });
 
   it("requires exactly one root private-key representation for trust delegations", () => {
