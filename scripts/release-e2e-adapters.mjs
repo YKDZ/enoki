@@ -471,6 +471,133 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+export function verifyActiveHubBootstrapRecipeProvenance({
+  activeHub,
+  activeManifestDigest,
+  candidateManifest,
+  enrollmentRecipe,
+  recipeBytes,
+}) {
+  const expectedHubDigest =
+    activeHub === "candidate"
+      ? candidateManifest?.hub?.digest
+      : activeHub === "baseline"
+        ? candidateManifest?.releaseBaseline?.hub?.imageDigest
+        : null;
+  const expectedBundleVersion =
+    activeHub === "candidate"
+      ? candidateManifest?.probeAssetSet?.version
+      : candidateManifest?.releaseBaseline?.kind === "enoki-release-baseline"
+        ? candidateManifest.releaseBaseline.probeAssetSet?.version
+        : null;
+  if (
+    !expectedHubDigest ||
+    activeManifestDigest !== expectedHubDigest ||
+    !expectedBundleVersion
+  ) {
+    throw new Error(
+      "Active Hub identity is not bound to the verified Candidate or Release Baseline",
+    );
+  }
+  const expectedRecordKeys = [
+    "bundleVersion",
+    "distribution",
+    "kind",
+    "recipe",
+    "rootFingerprint",
+    "schemaVersion",
+    "targets",
+  ];
+  const expectedRecipeKeys = ["file", "sha256", "size", "version"];
+  if (
+    !hasExactKeys(enrollmentRecipe, expectedRecordKeys) ||
+    !hasExactKeys(enrollmentRecipe.recipe, expectedRecipeKeys) ||
+    enrollmentRecipe.bundleVersion !== expectedBundleVersion ||
+    enrollmentRecipe.distribution !== "enoki" ||
+    enrollmentRecipe.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    enrollmentRecipe.schemaVersion !== 1 ||
+    enrollmentRecipe.recipe.file !== "enoki-probe-bootstrap.py" ||
+    enrollmentRecipe.recipe.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(enrollmentRecipe.rootFingerprint ?? "") ||
+    !/^[0-9a-f]{64}$/.test(enrollmentRecipe.recipe.sha256 ?? "") ||
+    !Number.isSafeInteger(enrollmentRecipe.recipe.size) ||
+    enrollmentRecipe.recipe.size < 1 ||
+    !Array.isArray(enrollmentRecipe.targets) ||
+    enrollmentRecipe.targets.length !== 4 ||
+    !Buffer.isBuffer(recipeBytes) ||
+    recipeBytes.byteLength !== enrollmentRecipe.recipe.size ||
+    sha256(recipeBytes) !== enrollmentRecipe.recipe.sha256
+  ) {
+    throw new Error(
+      "Active Hub Enrollment recipe record or exported bytes are invalid",
+    );
+  }
+
+  const normalizedRecord = {
+    bundleVersion: enrollmentRecipe.bundleVersion,
+    distribution: enrollmentRecipe.distribution,
+    kind: enrollmentRecipe.kind,
+    recipe: {
+      file: enrollmentRecipe.recipe.file,
+      sha256: enrollmentRecipe.recipe.sha256,
+      size: enrollmentRecipe.recipe.size,
+      version: enrollmentRecipe.recipe.version,
+    },
+    rootFingerprint: enrollmentRecipe.rootFingerprint,
+    schemaVersion: enrollmentRecipe.schemaVersion,
+    targets: enrollmentRecipe.targets,
+  };
+  const recordBytes = Buffer.from(
+    `${JSON.stringify(normalizedRecord, null, 2)}\n`,
+  );
+  const recordSha256 = sha256(recordBytes);
+  const recordSize = recordBytes.byteLength;
+  if (activeHub === "candidate") {
+    const candidateRecipe = candidateManifest?.bootstrapRecipe;
+    if (
+      candidateRecipe?.recordFile !== "enoki-probe-bootstrap-recipe.json" ||
+      candidateRecipe?.recordSha256 !== recordSha256 ||
+      candidateRecipe?.recordSize !== recordSize ||
+      candidateRecipe?.bundleVersion !== normalizedRecord.bundleVersion ||
+      candidateRecipe?.distribution !== normalizedRecord.distribution ||
+      candidateRecipe?.kind !== normalizedRecord.kind ||
+      candidateRecipe?.rootFingerprint !== normalizedRecord.rootFingerprint ||
+      candidateRecipe?.schemaVersion !== normalizedRecord.schemaVersion ||
+      JSON.stringify(candidateRecipe?.targets) !==
+        JSON.stringify(normalizedRecord.targets) ||
+      candidateRecipe?.file !== normalizedRecord.recipe.file ||
+      candidateRecipe?.sha256 !== normalizedRecord.recipe.sha256 ||
+      candidateRecipe?.size !== normalizedRecord.recipe.size ||
+      candidateRecipe?.version !== normalizedRecord.recipe.version
+    ) {
+      throw new Error(
+        "Active Candidate Hub Enrollment recipe does not match Candidate Manifest provenance",
+      );
+    }
+  }
+
+  return {
+    activeHub,
+    hubDigest: activeManifestDigest,
+    kind: "enoki-release-e2e-bootstrap-recipe-provenance",
+    record: normalizedRecord,
+    recordFile: "enoki-probe-bootstrap-recipe.json",
+    recordSha256,
+    recordSize,
+    schemaVersion: 1,
+  };
+}
+
+function hasExactKeys(value, keys) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) ===
+      JSON.stringify([...keys].sort())
+  );
+}
+
 function shellSingleQuote(value) {
   return `'${String(value).replaceAll("'", "'\\\"'\\\"'")}'`;
 }
@@ -808,15 +935,17 @@ export function createReleaseEnvironment({
             );
           }
           const exported = await docker.exportActiveBootstrapRecipe({
-            recipe: enrollment.bootstrapRecipe.recipe,
+            candidateManifest,
+            recipeRecord: enrollment.bootstrapRecipe,
             resources: dockerResources,
             runId,
           });
-          return bootstrapProvisioner({
+          const staged = await bootstrapProvisioner({
             recipe: enrollment.bootstrapRecipe.recipe,
             runId,
             sourcePath: exported.sourcePath,
           });
+          return { ...staged, evidence: exported.provenance };
         },
       });
       const releaseTestHost = matrixCell
@@ -1064,8 +1193,14 @@ export function createDockerHubController({
       return currentResources;
     },
 
-    async exportActiveBootstrapRecipe({ recipe, resources, runId }) {
+    async exportActiveBootstrapRecipe({
+      candidateManifest,
+      recipeRecord,
+      resources,
+      runId,
+    }) {
       const owned = resources ?? currentResources;
+      const recipe = recipeRecord?.recipe;
       if (
         !owned ||
         owned !== currentResources ||
@@ -1090,6 +1225,7 @@ export function createDockerHubController({
         path.join(tmpdir(), "enoki-release-e2e-active-recipe."),
       );
       const sourcePath = path.join(exportDir, recipe.file);
+      let provenance;
       try {
         await successfulExec(exec, containerEngine, [
           "cp",
@@ -1102,12 +1238,22 @@ export function createDockerHubController({
             "Active Hub Probe Bootstrap recipe does not match its verified Enrollment record",
           );
         }
+        provenance = verifyActiveHubBootstrapRecipeProvenance({
+          activeHub: owned.activeHub,
+          activeManifestDigest: owned.manifestDigest,
+          candidateManifest,
+          enrollmentRecipe: recipeRecord,
+          recipeBytes: bytes,
+        });
       } catch (error) {
         await rm(exportDir, { force: true, recursive: true });
         throw error;
       }
       owned.exportedRecipeDirs.push(exportDir);
-      return { sourcePath };
+      return {
+        provenance,
+        sourcePath,
+      };
     },
 
     async captureBaselineStateSnapshot({

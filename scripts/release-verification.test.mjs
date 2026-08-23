@@ -7,14 +7,24 @@ import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import { createProbeHostHarness } from "./release-e2e-lib.mjs";
 import {
-  createMatrixGateResult,
+  createMatrixGateResult as createMatrixGateResultFromManifest,
   createReleaseVerificationSummary,
   createUiGateResult,
   renderReleaseVerificationEvidenceMarkdown,
 } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
+
+function createMatrixGateResult({ candidate, candidateManifest, ...options }) {
+  const manifest = candidateManifest ?? releaseCandidateManifest();
+  expect(candidate ?? manifest.candidate).toEqual(manifest.candidate);
+  return createMatrixGateResultFromManifest({
+    ...options,
+    candidateManifest: manifest,
+  });
+}
 
 describe("verify-only release workflow", () => {
   it("qualifies the captured protected main revision without receiving a publication mode", async () => {
@@ -667,6 +677,55 @@ describe("verify-only release workflow", () => {
     ).toBe("failed");
   });
 
+  it("accepts the current schema 2 Host boundary produced by the real Host Harness", async () => {
+    const manifest = releaseCandidateManifest();
+    const candidate = manifest.candidate;
+    const evidence = successfulHostEvidence(
+      "baseline-upgrade-uninstall",
+      candidate,
+    );
+    evidence.hostBoundary = await currentInstalledHostBoundaryFromHarness();
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(evidence.hostBoundary.sudoers).toBe("");
+    expect(evidence.hostBoundary.inventory.files).not.toContain(
+      "/etc/sudoers.d/enoki-probe-operations",
+    );
+    expect(gate.evidenceValidationErrors).not.toContain(
+      "Host installation boundary is invalid",
+    );
+    expect(gate.outcome).toBe("succeeded");
+
+    const legacyBoundary = structuredClone(evidence);
+    legacyBoundary.hostBoundary.inventory.files.push(
+      "/etc/sudoers.d/enoki-probe-operations",
+    );
+    legacyBoundary.hostBoundary.sudoers =
+      "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller\n";
+    const rejected = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      evidence: legacyBoundary,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+    expect(rejected.evidenceValidationErrors).toContain(
+      "Host installation boundary is invalid",
+    );
+    expect(rejected.outcome).toBe("failed");
+  });
+
   it.each([
     ["releaseTestHost", "missing Release Test Host platform evidence"],
     ["infrastructure", "missing Release E2E infrastructure evidence"],
@@ -973,7 +1032,8 @@ describe("verify-only release workflow", () => {
   });
 
   it("accepts typed Trust Epoch manual reinstall evidence and rejects identity continuity", () => {
-    const candidate = releaseCandidateManifest().candidate;
+    const candidateManifest = trustEpochMigrationCandidateManifest();
+    const candidate = candidateManifest.candidate;
     const evidence = successfulHostEvidence(
       "baseline-upgrade-uninstall",
       candidate,
@@ -983,28 +1043,46 @@ describe("verify-only release workflow", () => {
       identitySha256: "e".repeat(64),
       probeId: "probe_release_replacement",
     };
+    const candidateHost = evidenceHost("1.2.3");
     const hostProjection = {
-      ...evidenceHost("1.2.2"),
+      hostMetadata: candidateHost.hostMetadata,
+      hostProfile: candidateHost.hostProfile,
+      id: candidateHost.id,
       reportedProbeConfigurationVersion: "host-7-1",
     };
-    evidence.releaseBaseline.kind = "enoki-trust-epoch-migration-baseline";
+    evidence.candidateHost = candidateHost;
+    evidence.releaseBaseline = releaseBaselineEvidenceFixture(
+      candidateManifest.releaseBaseline,
+    );
+    evidence.compatibility.host = evidenceHost("0.1.74");
+    evidence.baselineInstall = installerEvidence({
+      activeHub: "baseline",
+      legacy: true,
+      manifest: candidateManifest,
+      runId: evidence.runId,
+    });
     evidence.upgradeOperationTimeline = [];
     evidence.manualRecovery = {
       enrollmentId: "enr_manual_reinstall_0001",
       hostId: 7,
       kind: "trust_epoch_manual_reinstall",
-      result: { status: "succeeded" },
+      result: installerEvidence({
+        activeHub: "candidate",
+        manifest: candidateManifest,
+        runId: evidence.runId,
+      }),
     };
     evidence.identityContinuity = { after, before, hostId: 7 };
     evidence.migrationRetention = {
-      configuration: {
-        configuration: probeConfigurationValues("host-7-1"),
-        mode: "override",
-      },
+      configuration: structuredClone(evidence.probeConfiguration.beforeUpgrade),
       hostAfter: hostProjection,
       hostBefore: hostProjection,
-      metricHistoryAnchors: evidenceMetrics(1),
+      metricHistory: metricsHistoryEvidence(evidenceMetrics(1)),
     };
+    evidence.metrics.afterUpgrade = [
+      ...evidenceMetrics(1),
+      ...evidenceMetrics(3),
+    ];
     evidence.auditLog = [
       ...lifecycleAuditLog(),
       {
@@ -1028,7 +1106,7 @@ describe("verify-only release workflow", () => {
       createMatrixGateResult({
         artifactName:
           "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
-        candidate,
+        candidateManifest,
         cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
         evidence: value,
         scenarioOutcome: "success",
@@ -1041,19 +1119,101 @@ describe("verify-only release workflow", () => {
     expect(gateFor(unchanged).evidenceValidationErrors).toContain(
       "Probe Identity replacement is invalid",
     );
+    const badManualResult = structuredClone(evidence);
+    badManualResult.manualRecovery.result.runId = "run-foreign";
+    expect(gateFor(badManualResult).evidenceValidationErrors).toContain(
+      "Trust Epoch manual reinstall production result is invalid",
+    );
+    const badHistoryHash = structuredClone(evidence);
+    badHistoryHash.migrationRetention.metricHistory.sha256 = "0".repeat(64);
+    expect(gateFor(badHistoryHash).evidenceValidationErrors).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const foreignHost = structuredClone(evidence);
+    foreignHost.migrationRetention.hostAfter.id = 8;
+    expect(gateFor(foreignHost).evidenceValidationErrors).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const widenedProjection = structuredClone(evidence);
+    widenedProjection.migrationRetention.hostAfter.status = "online";
+    expect(gateFor(widenedProjection).evidenceValidationErrors).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+    const missingPostReplacementAnchor = structuredClone(evidence);
+    missingPostReplacementAnchor.metrics.afterUpgrade = evidenceMetrics(3);
+    expect(
+      gateFor(missingPostReplacementAnchor).evidenceValidationErrors,
+    ).toContain(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+  });
+
+  it("rejects foreign baseline identity and mutated Candidate recipe provenance at the finalizer", () => {
+    const candidateManifest = releaseCandidateManifest();
+    const candidate = candidateManifest.candidate;
+    const gateFor = (evidence) =>
+      createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+        candidateManifest,
+        cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+        evidence,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+    const foreignBaseline = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    foreignBaseline.releaseBaseline.descriptorSha256 = "0".repeat(64);
+    expect(gateFor(foreignBaseline).evidenceValidationErrors).toContain(
+      "Release Baseline evidence is not bound to the Candidate",
+    );
+
+    const wrongRecord = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    wrongRecord.initialInstall.bootstrapRecipeProvenance.recordSha256 =
+      "0".repeat(64);
+    expect(gateFor(wrongRecord).evidenceValidationErrors).toContain(
+      "Active candidate Hub Bootstrap recipe provenance is invalid",
+    );
+
+    const foreignBaselineRecipe = successfulHostEvidence(
+      "baseline-upgrade-uninstall",
+      candidate,
+    );
+    foreignBaselineRecipe.baselineInstall.bootstrapRecipeProvenance.hubDigest = `sha256:${"f".repeat(64)}`;
+    const baselineGate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+      candidateManifest,
+      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      evidence: foreignBaselineRecipe,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+    expect(baselineGate.evidenceValidationErrors).toContain(
+      "Active baseline Hub Bootstrap recipe provenance is invalid",
+    );
   });
 
   it("rejects successful migration Repair evidence without production eligibility", () => {
-    const candidate = releaseCandidateManifest().candidate;
+    const candidateManifest = trustEpochMigrationCandidateManifest();
+    const candidate = candidateManifest.candidate;
     const evidence = successfulHostEvidence(
       "post-replacement-repair-uninstall",
       candidate,
     );
-    evidence.releaseBaseline.kind = "enoki-trust-epoch-migration-baseline";
+    evidence.releaseBaseline = releaseBaselineEvidenceFixture(
+      candidateManifest.releaseBaseline,
+    );
     const gate = createMatrixGateResult({
       artifactName:
         "release-e2e-ubuntu-22.04-x86_64--post-replacement-repair-uninstall-1",
-      candidate,
+      candidateManifest,
       cellId: "ubuntu-22.04-x86_64--post-replacement-repair-uninstall",
       evidence,
       scenarioOutcome: "success",
@@ -1065,8 +1225,9 @@ describe("verify-only release workflow", () => {
     expect(gate.outcome).toBe("failed");
   });
 
-  it("accepts typed Trust Epoch Hub Restore replacement evidence and fails closed without continued reporting", () => {
-    const candidate = releaseCandidateManifest().candidate;
+  it("rejects pseudo-success Trust Epoch Hub Restore evidence without a legal Candidate Probe identity sequence", () => {
+    const candidateManifest = trustEpochMigrationCandidateManifest();
+    const candidate = candidateManifest.candidate;
     const evidence = successfulHostEvidence(
       "hub-restore-compatibility-window",
       candidate,
@@ -1077,11 +1238,9 @@ describe("verify-only release workflow", () => {
       probeId: "probe_release_replacement",
     };
     const hostProjection = evidenceHost("0.1.74");
-    evidence.releaseBaseline = {
-      ...evidence.releaseBaseline,
-      kind: "enoki-trust-epoch-migration-baseline",
-      probeVersion: "0.1.74",
-    };
+    evidence.releaseBaseline = releaseBaselineEvidenceFixture(
+      candidateManifest.releaseBaseline,
+    );
     evidence.migration.operationTimeline = [
       {
         enrollmentId: "enr_manual_reinstall_restore",
@@ -1136,19 +1295,17 @@ describe("verify-only release workflow", () => {
       createMatrixGateResult({
         artifactName:
           "release-e2e-ubuntu-22.04-x86_64--hub-restore-compatibility-window-1",
-        candidate,
+        candidateManifest,
         cellId: "ubuntu-22.04-x86_64--hub-restore-compatibility-window",
         evidence: value,
         scenarioOutcome: "success",
         verifyCleanOutcome: "success",
       });
 
-    expect(gateFor(evidence).evidenceValidationErrors).toEqual([]);
-    const missingReporting = structuredClone(evidence);
-    missingReporting.reporting.postReplacementCandidateHub = null;
-    expect(gateFor(missingReporting).evidenceValidationErrors).toContain(
-      "post-replacement Candidate reporting is invalid",
+    expect(gateFor(evidence).evidenceValidationErrors).toContain(
+      "Trust Epoch migration Hub Restore has no production-compatible Candidate Probe identity sequence",
     );
+    expect(gateFor(evidence).outcome).toBe("failed");
   });
 
   it("fails closed when recorded Host platform or CI infrastructure does not belong to the matrix cell", () => {
@@ -1441,26 +1598,27 @@ describe("verify-only release workflow", () => {
 });
 
 function releaseCandidateManifest() {
+  const bootstrapRecord = bootstrapRecipeRecord("1.2.3");
+  const bootstrapRecordBytes = Buffer.from(
+    `${JSON.stringify(bootstrapRecord, null, 2)}\n`,
+  );
   return {
     bootstrapRecipe: {
-      bundleVersion: "1.2.3",
-      distribution: "enoki",
-      file: "enoki-probe-bootstrap.py",
-      kind: "enoki-probe-bootstrap-recipe-record",
+      bundleVersion: bootstrapRecord.bundleVersion,
+      distribution: bootstrapRecord.distribution,
+      file: bootstrapRecord.recipe.file,
+      kind: bootstrapRecord.kind,
       recordFile: "enoki-probe-bootstrap-recipe.json",
-      recordSha256: "9".repeat(64),
-      recordSize: 321,
-      rootFingerprint: "e".repeat(64),
-      schemaVersion: 1,
-      sha256: "f".repeat(64),
-      size: 123,
-      targets: [
-        "aarch64-unknown-linux-gnu",
-        "aarch64-unknown-linux-musl",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-      ],
-      version: "v1",
+      recordSha256: createHash("sha256")
+        .update(bootstrapRecordBytes)
+        .digest("hex"),
+      recordSize: bootstrapRecordBytes.byteLength,
+      rootFingerprint: bootstrapRecord.rootFingerprint,
+      schemaVersion: bootstrapRecord.schemaVersion,
+      sha256: bootstrapRecord.recipe.sha256,
+      size: bootstrapRecord.recipe.size,
+      targets: bootstrapRecord.targets,
+      version: bootstrapRecord.recipe.version,
     },
     candidate: {
       commit: "0123456789abcdef0123456789abcdef01234567",
@@ -1498,10 +1656,57 @@ function releaseCandidateManifest() {
       },
       hub: { imageDigest: `sha256:${"2".repeat(64)}` },
       kind: "enoki-release-baseline",
-      probeAssetSet: { version: "1.2.2" },
+      probeAssetSet: {
+        signingIdentity: { publicKeySha256: "3".repeat(64) },
+        trustRoot: { publicKeySha256: "4".repeat(64) },
+        version: "1.2.2",
+      },
       tag: "v1.2.2",
     },
     schemaVersion: 4,
+  };
+}
+
+function bootstrapRecipeRecord(bundleVersion) {
+  return {
+    bundleVersion,
+    distribution: "enoki",
+    kind: "enoki-probe-bootstrap-recipe-record",
+    recipe: {
+      file: "enoki-probe-bootstrap.py",
+      sha256: "f".repeat(64),
+      size: 123,
+      version: "v1",
+    },
+    rootFingerprint: "e".repeat(64),
+    schemaVersion: 1,
+    targets: [
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+    ],
+  };
+}
+
+function trustEpochMigrationCandidateManifest() {
+  const manifest = releaseCandidateManifest();
+  return {
+    ...manifest,
+    releaseBaseline: {
+      authorization: {
+        legacyReleaseSha256: "5".repeat(64),
+        sha256: "6".repeat(64),
+      },
+      githubRelease: {
+        id: 74,
+        peeledCommitSha: "7".repeat(40),
+        tagRefSha: "8".repeat(40),
+      },
+      hub: { imageDigest: `sha256:${"9".repeat(64)}` },
+      kind: "enoki-trust-epoch-migration-baseline",
+      tag: "v0.1.74",
+    },
   };
 }
 
@@ -1553,6 +1758,7 @@ function successfulHostEvidence(
   { infrastructureKind = "ci", operatingSystemVersion = "22.04" } = {},
 ) {
   const matrixCellId = `ubuntu-${operatingSystemVersion}-x86_64--${scenario}`;
+  const runId = `run-${scenario}`;
   const infrastructure =
     infrastructureKind === "ssh"
       ? {
@@ -1570,6 +1776,11 @@ function successfulHostEvidence(
           provisioning: "github-hosted-runner",
         };
   const common = {
+    baselineInstall: installerEvidence({
+      activeHub: "baseline",
+      manifest: releaseCandidateManifest(),
+      runId,
+    }),
     candidate,
     cleanup: {
       environment: { clean: true },
@@ -1577,7 +1788,9 @@ function successfulHostEvidence(
     },
     infrastructure,
     phase: "succeeded",
-    releaseBaseline: { kind: "enoki-release-baseline" },
+    releaseBaseline: releaseBaselineEvidenceFixture(
+      releaseCandidateManifest().releaseBaseline,
+    ),
     releaseTestHost: {
       architecture: "x86_64",
       deviceView: true,
@@ -1591,6 +1804,7 @@ function successfulHostEvidence(
       virtualization: "kvm",
     },
     result: { status: "succeeded" },
+    runId,
     scenario,
     schemaVersion: 2,
     uninstall: {
@@ -1647,7 +1861,11 @@ function successfulHostEvidence(
           },
         },
       },
-      initialInstall: installerEvidence(),
+      initialInstall: installerEvidence({
+        activeHub: "candidate",
+        manifest: releaseCandidateManifest(),
+        runId,
+      }),
       localUninstall: {
         activeHost: evidenceHost("1.2.3"),
         completion: common.uninstall.hostCompletion,
@@ -1666,7 +1884,11 @@ function successfulHostEvidence(
         hostBoundary: installedHostBoundary("1.2.3"),
         hostId: 7,
         identity: { after: reEnrolledIdentity, before: initialIdentity },
-        installer: installerEvidence(),
+        installer: installerEvidence({
+          activeHub: "candidate",
+          manifest: releaseCandidateManifest(),
+          runId,
+        }),
         metrics: evidenceMetrics(3),
         metricsHistory: metricsHistoryEvidence(
           [...evidenceMetrics(1), ...evidenceMetrics(3)],
@@ -1722,10 +1944,6 @@ function successfulHostEvidence(
         afterUpgrade: probeConfigurationEvidence("host-7-2"),
         beforeUpgrade: probeConfigurationEvidence("host-7-1"),
       },
-      releaseBaseline: {
-        kind: "enoki-release-baseline",
-        probeVersion: "1.2.2",
-      },
       upgradeOperationTimeline: evidenceOperationTimeline({
         id: 81,
         kind: "probe_upgrade",
@@ -1763,7 +1981,6 @@ function successfulHostEvidence(
       },
       repairHostBoundary: installedHostBoundary("1.2.3"),
       repairedHost: evidenceHost("1.2.3"),
-      releaseBaseline: { kind: "enoki-release-baseline" },
     };
   }
   return {
@@ -1804,10 +2021,6 @@ function successfulHostEvidence(
       baselineProbeToCandidateHub: "succeeded",
       candidateProbeToBaselineHub: "succeeded",
     },
-    releaseBaseline: {
-      hubDigest: `sha256:${"2".repeat(64)}`,
-      kind: "enoki-release-baseline",
-    },
     reporting: {
       candidateHub: {
         host: evidenceHost("1.2.3"),
@@ -1835,6 +2048,36 @@ function successfulHostEvidence(
       tool: "enoki-hub-state",
       version: "v1",
     },
+  };
+}
+
+function releaseBaselineEvidenceFixture(baseline) {
+  const migration = baseline.kind === "enoki-trust-epoch-migration-baseline";
+  return {
+    authority: migration
+      ? {
+          authorizationSha256: baseline.authorization.sha256,
+          githubReleaseId: baseline.githubRelease.id,
+          legacyReleaseSha256: baseline.authorization.legacyReleaseSha256,
+          peeledCommitSha: baseline.githubRelease.peeledCommitSha,
+        }
+      : {
+          githubReleaseId: baseline.githubRelease.id,
+          peeledCommitSha: baseline.githubRelease.peeledCommitSha,
+          signingPublicKeySha256:
+            baseline.probeAssetSet.signingIdentity.publicKeySha256,
+          trustRootPublicKeySha256:
+            baseline.probeAssetSet.trustRoot.publicKeySha256,
+        },
+    descriptorSha256: createHash("sha256")
+      .update(JSON.stringify(baseline))
+      .digest("hex"),
+    hubDigest: baseline.hub.imageDigest,
+    kind: baseline.kind,
+    probeVersion: migration
+      ? baseline.tag.slice(1)
+      : baseline.probeAssetSet.version,
+    tag: baseline.tag,
   };
 }
 
@@ -2012,24 +2255,121 @@ function freshLifecycleAuditLog() {
 
 function installedHostBoundary(version) {
   return {
+    delegationGeneration: 1,
     inventory: {
       accounts: { group: true, user: true },
       files: [
         "/usr/local/bin/enoki-probe",
         "/etc/systemd/system/enoki-probe.service",
-        "/etc/sudoers.d/enoki-probe-operations",
       ],
       units: ["enoki-probe.service"],
     },
     probeVersion: version,
     service: {
       ActiveState: "active",
+      FragmentPath: "/etc/systemd/system/enoki-probe.service",
       Group: "enoki-probe",
       LoadState: "loaded",
+      SubState: "running",
       User: "enoki-probe",
     },
-    sudoers: "enoki-probe-uninstaller internal-uninstaller",
+    sudoers: "",
   };
+}
+
+async function currentInstalledHostBoundaryFromHarness() {
+  let inventoryCount = 0;
+  const harness = createProbeHostHarness({
+    execute: async (command) => {
+      if (command.includes("# enoki-release-e2e:inventory")) {
+        inventoryCount += 1;
+        return successfulCommand(
+          inventoryCount === 1
+            ? {
+                accounts: { group: false, user: false },
+                files: [],
+                units: [],
+              }
+            : {
+                accounts: { group: true, user: true },
+                files: [
+                  "/usr/local/bin/enoki-probe",
+                  "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+                  "/var/lib/enoki-probe-bootstrap",
+                  "/etc/enoki/probe-install.toml",
+                  "/etc/systemd/system/enoki-probe.service",
+                  "/var/lib/enoki-probe",
+                ],
+                units: ["enoki-probe.service"],
+              },
+        );
+      }
+      if (command.includes("# enoki-release-e2e:dependencies")) {
+        return successfulCommand({ curl: "/usr/bin/curl" });
+      }
+      if (command.includes("# enoki-release-e2e:service-boundary")) {
+        return successfulCommandText(
+          [
+            "LoadState=loaded",
+            "ActiveState=active",
+            "SubState=running",
+            "User=enoki-probe",
+            "Group=enoki-probe",
+            "FragmentPath=/etc/systemd/system/enoki-probe.service",
+          ].join("\n"),
+        );
+      }
+      if (command.includes("# enoki-release-e2e:sudoers-boundary")) {
+        return successfulCommandText("");
+      }
+      if (command.includes("# enoki-release-e2e:binary-version")) {
+        return successfulCommandText("enoki-probe v1.2.3\n");
+      }
+      if (command.includes("# enoki-release-e2e:bootstrap-generation")) {
+        return successfulCommandText("1\n");
+      }
+      return successfulCommandText(
+        "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n",
+      );
+    },
+  });
+  const enrollment = {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recipe: {
+        file: "enoki-probe-bootstrap.py",
+        sha256: "e".repeat(64),
+        size: 123,
+        version: "v1",
+      },
+      rootFingerprint: "d".repeat(64),
+      schemaVersion: 1,
+      targets: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+      ],
+    },
+    enrollmentToken: "enk_enroll_current_boundary",
+    hubUrl: "https://hub.example",
+    installCommand:
+      "printf '%s\\n' 'enk_enroll_current_boundary' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'",
+  };
+
+  await harness.assertDisposable("run-current-boundary");
+  await harness.install(enrollment, "run-current-boundary");
+  return harness.assertInstalled("run-current-boundary", "1.2.3");
+}
+
+function successfulCommand(value) {
+  return successfulCommandText(JSON.stringify(value));
+}
+
+function successfulCommandText(stdout) {
+  return { code: 0, stderr: "", stdout };
 }
 
 function probeConfigurationEvidence(version) {
@@ -2070,14 +2410,38 @@ function installedStateEvidence(identity) {
   };
 }
 
-function installerEvidence() {
+function installerEvidence({ activeHub, legacy = false, manifest, runId }) {
+  const version =
+    activeHub === "candidate"
+      ? manifest.probeAssetSet.version
+      : manifest.releaseBaseline.kind === "enoki-release-baseline"
+        ? manifest.releaseBaseline.probeAssetSet.version
+        : manifest.releaseBaseline.tag.slice(1);
+  const record = bootstrapRecipeRecord(version);
+  const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
   return {
+    bootstrapRecipeProvenance: legacy
+      ? null
+      : {
+          activeHub,
+          hubDigest:
+            activeHub === "candidate"
+              ? manifest.hub.digest
+              : manifest.releaseBaseline.hub.imageDigest,
+          kind: "enoki-release-e2e-bootstrap-recipe-provenance",
+          record,
+          recordFile: "enoki-probe-bootstrap-recipe.json",
+          recordSha256: createHash("sha256").update(recordBytes).digest("hex"),
+          recordSize: recordBytes.byteLength,
+          schemaVersion: 1,
+        },
     output: {
       code: 0,
       stderr: "",
       stdout:
         "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n",
     },
+    runId,
   };
 }
 

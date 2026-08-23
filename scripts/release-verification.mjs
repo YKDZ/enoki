@@ -97,7 +97,7 @@ async function recordMatrixGate(options) {
   const evidence = await readJson(options["--evidence"], "lifecycle evidence");
   const result = createMatrixGateResult({
     artifactName: options["--artifact-name"],
-    candidate: manifest.candidate,
+    candidateManifest: manifest,
     cellId: options["--cell-id"],
     evidence,
     scenarioOutcome: options["--scenario-outcome"],

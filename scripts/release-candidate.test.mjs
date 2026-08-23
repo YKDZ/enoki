@@ -36,7 +36,11 @@ import {
   validateProbeSigningIdentity,
   verifyProbeTrustDelegation,
 } from "./release-candidate-lib.mjs";
-import { loadValidatedCandidate } from "./release-e2e-adapters.mjs";
+import {
+  loadValidatedCandidate,
+  verifyActiveHubBootstrapRecipeProvenance,
+} from "./release-e2e-adapters.mjs";
+import { createProbeHostHarness } from "./release-e2e-lib.mjs";
 import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
 import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
@@ -1639,6 +1643,101 @@ with open(os.devnull, "rb") as input_stream:
         schemaVersion: 1,
         targets: probeTargets,
       });
+      const publicRecipeBytes = await readFile(
+        path.join(candidateDir, "recipe", manifest.bootstrapRecipe.file),
+      );
+      const recipeProvenance = verifyActiveHubBootstrapRecipeProvenance({
+        activeHub: "candidate",
+        activeManifestDigest: manifest.hub.digest,
+        candidateManifest: manifest,
+        enrollmentRecipe: publicRecipeRecord,
+        recipeBytes: publicRecipeBytes,
+      });
+      expect(recipeProvenance).toMatchObject({
+        activeHub: "candidate",
+        hubDigest: manifest.hub.digest,
+        recordFile: manifest.bootstrapRecipe.recordFile,
+        recordSha256: manifest.bootstrapRecipe.recordSha256,
+        recordSize: manifest.bootstrapRecipe.recordSize,
+      });
+      const host = createProbeHostHarness({
+        execute: async (command) => {
+          if (command.includes("# enoki-release-e2e:inventory")) {
+            return {
+              code: 0,
+              stderr: "",
+              stdout: JSON.stringify({
+                accounts: { group: false, user: false },
+                files: [],
+                units: [],
+              }),
+            };
+          }
+          return {
+            code: 0,
+            stderr: "",
+            stdout: command.includes("# enoki-release-e2e:bootstrap-acquire")
+              ? "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n"
+              : "owned\n",
+          };
+        },
+        prepareInstall: async ({ enrollment }) => {
+          expect(enrollment.bootstrapRecipe).toEqual(publicRecipeRecord);
+          return {
+            evidence: verifyActiveHubBootstrapRecipeProvenance({
+              activeHub: "candidate",
+              activeManifestDigest: manifest.hub.digest,
+              candidateManifest: manifest,
+              enrollmentRecipe: enrollment.bootstrapRecipe,
+              recipeBytes: publicRecipeBytes,
+            }),
+            workingDirectory: "/tmp/enoki-release-e2e-recipe.assembler",
+          };
+        },
+      });
+      await host.assertDisposable("assembler-consumer");
+      await expect(
+        host.install(
+          {
+            bootstrapRecipe: publicRecipeRecord,
+            enrollmentToken: "enk_enroll_assembler_consumer",
+            hubUrl: "https://hub.example",
+            installCommand:
+              "printf '%s\\n' 'enk_enroll_assembler_consumer' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'",
+          },
+          "assembler-consumer",
+        ),
+      ).resolves.toMatchObject({
+        bootstrapRecipeProvenance: recipeProvenance,
+        runId: "assembler-consumer",
+      });
+      expect(() =>
+        verifyActiveHubBootstrapRecipeProvenance({
+          activeHub: "candidate",
+          activeManifestDigest: manifest.hub.digest,
+          candidateManifest: {
+            ...manifest,
+            bootstrapRecipe: {
+              ...manifest.bootstrapRecipe,
+              recordSha256: "0".repeat(64),
+            },
+          },
+          enrollmentRecipe: publicRecipeRecord,
+          recipeBytes: publicRecipeBytes,
+        }),
+      ).toThrow(/does not match Candidate Manifest provenance/);
+      expect(() =>
+        verifyActiveHubBootstrapRecipeProvenance({
+          activeHub: "candidate",
+          activeManifestDigest: manifest.hub.digest,
+          candidateManifest: manifest,
+          enrollmentRecipe: {
+            ...publicRecipeRecord,
+            rootFingerprint: "0".repeat(64),
+          },
+          recipeBytes: publicRecipeBytes,
+        }),
+      ).toThrow(/does not match Candidate Manifest provenance/);
       expect(manifest.probeAssetSet.files.map(({ file }) => file)).toEqual(
         (await readdir(probeAssetSetDir)).sort(),
       );

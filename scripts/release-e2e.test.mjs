@@ -162,13 +162,19 @@ describe("Release E2E business assertions", () => {
     });
   });
 
-  it("executes Trust Epoch Hub Restore then manual reinstall with continued reporting", async () => {
-    const calls = [];
+  it("fails Trust Epoch Hub Restore closed before claiming impossible Candidate Probe compatibility", async () => {
+    let started = false;
     const written = [];
     await expect(
       runReleaseE2EScenario({
         candidateManifest: candidateManifestWithMigrationBaseline(),
-        environment: migrationBaselineEnvironment(calls),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => {
+            started = true;
+            throw new Error("migration Restore must fail before start");
+          },
+        },
         evidenceSink: {
           write: async (evidence) => written.push(evidence),
         },
@@ -177,29 +183,22 @@ describe("Release E2E business assertions", () => {
         scenario: "hub-restore-compatibility-window",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
       }),
-    ).resolves.toEqual({ status: "succeeded" });
-    expect(calls).toContain("hub.captureBaselineStateSnapshot");
-    expect(calls).toContain("hub.restoreBaselineStateSnapshot");
-    expect(calls).toContain("host.manualReinstall:manual_reinstall");
+    ).rejects.toMatchObject({
+      code: "trust_epoch_migration_restore_compatibility_unavailable",
+    });
+    expect(started).toBe(false);
     expect(written.at(-1)).toMatchObject({
-      auditLog: [
-        expect.objectContaining({
-          action: "probe.manual_reinstall_identity_replaced",
-        }),
-      ],
-      identity: {
-        afterRestore: { probeId: "probe_release_legacy" },
-        afterUpgrade: { probeId: "probe_release_replacement" },
-        beforeUpgrade: { probeId: "probe_release_legacy" },
-        hostId: 7,
+      failureBoundary: "compatibility",
+      protocol: {
+        baselineProbeToCandidateHub: "pending",
+        candidateProbeToBaselineHub: "blocked",
       },
-      migration: { status: "succeeded" },
-      reporting: {
-        postReplacementCandidateHub: {
-          host: { hostProfile: { probeVersion: "1.2.3" }, id: 7 },
+      result: {
+        error: {
+          code: "trust_epoch_migration_restore_compatibility_unavailable",
         },
+        status: "failed",
       },
-      result: { status: "succeeded" },
     });
   });
 
@@ -722,7 +721,6 @@ describe("Probe Host Harness", () => {
               "/var/lib/enoki-probe-bootstrap",
               "/etc/enoki/probe-install.toml",
               "/etc/systemd/system/enoki-probe.service",
-              "/etc/sudoers.d/enoki-probe-operations",
               "/usr/local/bin/enoki-probe",
               "/var/lib/enoki-probe",
             ],
@@ -852,7 +850,6 @@ describe("Probe Host Harness", () => {
               "/var/lib/enoki-probe-bootstrap",
               "/etc/enoki/probe-install.toml",
               "/etc/systemd/system/enoki-probe.service",
-              "/etc/sudoers.d/enoki-probe-operations",
               "/usr/local/bin/enoki-probe",
               "/var/lib/enoki-probe",
             ],
@@ -4418,7 +4415,7 @@ describe("Release E2E Orchestrator", () => {
           hostId: 7,
         },
         privilege: {
-          afterRepair: expect.stringContaining("internal-uninstaller"),
+          afterRepair: "",
           postUninstall: expect.objectContaining({ code: 0 }),
         },
         probeOperation: {
@@ -7148,7 +7145,6 @@ function successfulRepairBoundaryEvidence() {
       "/etc/enoki/probe-install.toml",
       "/etc/systemd/system/enoki-probe.service",
       "/var/lib/enoki-probe",
-      "/etc/sudoers.d/enoki-probe-operations",
     ],
     units: ["enoki-probe.service"],
   };
@@ -7290,6 +7286,7 @@ function successfulRepairBoundaryEvidence() {
     },
     repairedHost: readyHost(),
     repairHostBoundary: {
+      delegationGeneration: 1,
       inventory: installedInventory,
       probeVersion: "1.2.3",
       service: {
@@ -7300,8 +7297,7 @@ function successfulRepairBoundaryEvidence() {
         SubState: "running",
         User: "enoki-probe",
       },
-      sudoers:
-        "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller internal-uninstaller\n",
+      sudoers: "",
     },
     result: { status: "succeeded" },
     uninstallCompletion: {
