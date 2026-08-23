@@ -44,6 +44,15 @@ describe("Probe release context", () => {
         ),
         sourceProbeVersion: "1.3.0",
         targetAssetSetDigest: fixture.targetAssetSetDigest,
+        targetBundles: [
+          "aarch64-unknown-linux-gnu",
+          "aarch64-unknown-linux-musl",
+          "x86_64-unknown-linux-gnu",
+          "x86_64-unknown-linux-musl",
+        ].map((target, index) => ({
+          bundleManifestSha256: String(index + 1).repeat(64),
+          target,
+        })),
         targetProbeVersion: "1.4.0",
       },
     });

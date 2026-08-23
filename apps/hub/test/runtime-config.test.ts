@@ -1,4 +1,9 @@
-import { mkdtempSync, statSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -44,18 +49,22 @@ describe("Hub runtime configuration", () => {
       probeApiOrigin: "https://hub.example",
       trustedProxyCidrs: [],
     });
-    expect(config.probeOperations).toEqual({
+    expect(config.probeOperations).toMatchObject({
       acceptedTimeoutMs: 300_000,
       runningTimeoutMs: 900_000,
       tokenSigningSecret: undefined,
     });
+    expect(config.probeOperations.lifecycleAuthorityKey?.publicKeySha256).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
   });
 
   it("allows deployment configuration to override persistence and Metrics retention", () => {
     const archiveDir = mkdtempSync(path.join(tmpdir(), "enoki-archive-"));
+    const dataRoot = mkdtempSync(path.join(tmpdir(), "enoki-config-"));
 
     const config = createHubRuntimeConfigFromEnvironment({
-      ENOKI_DATA_ROOT: "/var/lib/enoki",
+      ENOKI_DATA_ROOT: dataRoot,
       ENOKI_CLOCK_SKEW_THRESHOLD_SECONDS: "120",
       ENOKI_HOST_STATUS_OFFLINE_AFTER_SECONDS: "45",
       ENOKI_HOST_STATUS_STALE_AFTER_SECONDS: "10",
@@ -73,7 +82,7 @@ describe("Hub runtime configuration", () => {
       OWNER_PASSWORD: "correct horse battery staple",
     });
 
-    expect(config.database.dataRoot).toBe("/var/lib/enoki");
+    expect(config.database.dataRoot).toBe(dataRoot);
     expect(config.database.sqlitePath).toBe("/tmp/custom-enoki.db");
     expect(config.installation).toEqual({
       probeApiOrigin: "https://probe.example",
@@ -99,11 +108,39 @@ describe("Hub runtime configuration", () => {
       probeApiOrigin: "https://probe.example",
       trustedProxyCidrs: [{ address: 167772160n, bits: 32, prefixLength: 8 }],
     });
-    expect(config.probeOperations).toEqual({
+    expect(config.probeOperations).toMatchObject({
       acceptedTimeoutMs: 60_000,
       runningTimeoutMs: 600_000,
       tokenSigningSecret: "stable-token-secret",
     });
+  });
+
+  it("durably reuses the lifecycle authority and recovers its public projection", () => {
+    const dataRoot = mkdtempSync(path.join(tmpdir(), "enoki-config-"));
+    const environment = {
+      ENOKI_DATA_ROOT: dataRoot,
+      ENOKI_MANAGEMENT_ORIGIN: "https://hub.example",
+      OWNER_PASSWORD: "correct horse battery staple",
+    };
+
+    const first = createHubRuntimeConfigFromEnvironment(environment)
+      .probeOperations.lifecycleAuthorityKey;
+    const second = createHubRuntimeConfigFromEnvironment(environment)
+      .probeOperations.lifecycleAuthorityKey;
+    expect(second).toEqual(first);
+    expect(
+      statSync(path.join(dataRoot, "lifecycle-authority-private.pem")).mode &
+        0o777,
+    ).toBe(0o600);
+    expect(
+      statSync(path.join(dataRoot, "lifecycle-authority-public.pem")).mode &
+        0o777,
+    ).toBe(0o644);
+
+    unlinkSync(path.join(dataRoot, "lifecycle-authority-public.pem"));
+    const recovered = createHubRuntimeConfigFromEnvironment(environment)
+      .probeOperations.lifecycleAuthorityKey;
+    expect(recovered).toEqual(first);
   });
 
   it("rejects Host Status thresholds where offline is not after stale", () => {

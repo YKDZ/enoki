@@ -712,7 +712,7 @@ mod tests {
         registered_identity.push_str("probe_id = \"probe_01\"\n");
         fs::write(paths.identity(), registered_identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
-        let identity_before = fs::read(paths.identity()).unwrap();
+        let identity_before = fs::read_to_string(paths.identity()).unwrap();
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
         let mut target_bundle = bundle().with_test_complete_receipts(5);
         target_bundle.version = "1.2.4".to_owned();
@@ -722,7 +722,7 @@ mod tests {
             std::array::from_fn(|_| component());
         systemd.calls.clear();
 
-        let completion = upgrade_current_probe(
+        let completion = upgrade_current_probe_for_operation(
             VerifiedUpgradeComponents {
                 probe: &mut target_probe,
                 observation_runtime: &mut target_runtime,
@@ -734,6 +734,9 @@ mod tests {
             },
             &target_bundle,
             &source,
+            &UpgradeAttempt {
+                operation_id: "41".to_owned(),
+            },
             &paths,
             &mut systemd,
         )
@@ -741,11 +744,88 @@ mod tests {
 
         assert_eq!(completion, UpgradeCompletion::Activated);
         assert_eq!(systemd.calls, ["stop", "reload", "start", "ready"]);
-        assert_eq!(fs::read(paths.identity()).unwrap(), identity_before);
+        let identity_after = fs::read_to_string(paths.identity()).unwrap();
+        assert_ne!(identity_after, identity_before);
+        assert!(identity_after.contains("probe_id = \"probe_01\""));
+        assert!(identity_after.contains("hub_url = \"https://hub.example\""));
+        assert!(identity_after.contains("bundle_version = \"1.2.4\""));
+        assert!(identity_after.contains(&format!(
+            "install_state_sha256 = {:?}",
+            target_bundle.install_state_sha256()
+        )));
+        assert!(identity_after.contains(&format!(
+            "target_manifest_sha256 = {:?}",
+            "d".repeat(64)
+        )));
         let metadata = fs::read_to_string(paths.metadata()).unwrap();
         assert!(metadata.contains("schema_version = 5"));
         assert!(metadata.contains("bundle_version = \"1.2.4\""));
         assert!(metadata.contains(&format!("target_manifest_sha256 = {:?}", "d".repeat(64))));
+        let status = fs::read_to_string(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe/probe-operation-status.toml"),
+        )
+        .unwrap();
+        assert!(status.contains("operation_id = \"41\""));
+        assert!(status.contains("target_probe_version = \"1.2.4\""));
+        assert!(status.contains("status = \"running\""));
+        let journal = fs::read_to_string(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe-bootstrap/probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains("operation_id = \"41\""));
+        assert!(journal.contains("phase = \"activated\""));
+
+        let next_source = inspect_installed_probe_for_upgrade(&paths).unwrap();
+        let mut failed_target = bundle().with_test_complete_receipts(5);
+        failed_target.version = "1.2.5".to_owned();
+        failed_target.manifest_sha256 = "f".repeat(64);
+        failed_target.asset_set_manifest_sha256 = "9".repeat(64);
+        let [mut failed_probe, mut failed_runtime, mut failed_system_state, mut failed_disk_health, mut failed_lifecycle, mut failed_acquirer, mut failed_activator] =
+            std::array::from_fn(|_| component());
+        systemd.fail_start = true;
+
+        let completion = upgrade_current_probe_for_operation(
+            VerifiedUpgradeComponents {
+                probe: &mut failed_probe,
+                observation_runtime: &mut failed_runtime,
+                system_state_provider: &mut failed_system_state,
+                disk_health_provider: &mut failed_disk_health,
+                lifecycle_companion: &mut failed_lifecycle,
+                bootstrap_acquirer: &mut failed_acquirer,
+                bootstrap_activator: &mut failed_activator,
+            },
+            &failed_target,
+            &next_source,
+            &UpgradeAttempt {
+                operation_id: "42".to_owned(),
+            },
+            &paths,
+            &mut systemd,
+        )
+        .unwrap();
+
+        assert_eq!(completion, UpgradeCompletion::RepairRequired);
+        let status = fs::read_to_string(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe/probe-operation-status.toml"),
+        )
+        .unwrap();
+        assert!(status.contains("operation_id = \"42\""));
+        assert!(status.contains("status = \"failed\""));
+        assert!(status.contains("error_code = \"lifecycle_upgrade_repair_required\""));
+        let journal = fs::read_to_string(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe-bootstrap/probe-upgrade-attempt.toml"),
+        )
+        .unwrap();
+        assert!(journal.contains("operation_id = \"42\""));
+        assert!(journal.contains("phase = \"repair-required\""));
     }
 
     #[test]
@@ -1013,7 +1093,8 @@ mod tests {
             &trust(),
             true,
             "test-transaction",
-        );
+        )
+        .expect("test metadata");
         assert!(!metadata.contains("operation_sudoers_path"));
     }
 

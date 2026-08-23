@@ -24,6 +24,7 @@ use crate::{
 };
 use command::run_bounded;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Seek, SeekFrom, Write},
@@ -1266,18 +1267,16 @@ fn stage_complete_layout(
     let identity = staging.join("probe-bootstrap.toml");
     let metadata = staging.join("probe-install.toml");
     let unit = staging.join("enoki-probe.service");
+    let metadata_contents = install_metadata(
+        enrollment,
+        bundle,
+        trust,
+        install_observation,
+        transaction_id,
+    )?;
     for (path, contents) in [
         (&identity, bootstrap_config(enrollment, bundle, trust)),
-        (
-            &metadata,
-            install_metadata(
-                enrollment,
-                bundle,
-                trust,
-                install_observation,
-                transaction_id,
-            ),
-        ),
+        (&metadata, metadata_contents),
         (&unit, service_unit().to_owned()),
     ] {
         let mut file = OpenOptions::new()
@@ -1343,9 +1342,9 @@ fn install_metadata(
     trust: &BuildTrust,
     install_observation: bool,
     transaction_id: &str,
-) -> String {
+) -> Result<String, InstallError> {
     if !install_observation {
-        return format!(
+        return Ok(format!(
             "schema_version = 2\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\n",
             enrollment.hub_origin(),
             IDENTITY,
@@ -1360,10 +1359,18 @@ fn install_metadata(
             SERVICE_USER,
             SERVICE_GROUP,
             UNIT,
-        );
+        ));
     }
-    format!(
-        "schema_version = 5\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\nlifecycle_upgrade_service_unit_path = {:?}\nlifecycle_upgrade_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+    #[cfg(not(test))]
+    let lifecycle_authority_public_key = enrollment
+        .lifecycle_authority_public_key()
+        .ok_or(InstallError::InvalidVerifiedComponent)?;
+    #[cfg(test)]
+    let lifecycle_authority_public_key = enrollment
+        .lifecycle_authority_public_key()
+        .unwrap_or(b"TEST_ONLY_UNPINNED");
+    Ok(format!(
+        "schema_version = 5\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nlifecycle_authority_public_key_pem = {:?}\nlifecycle_authority_public_key_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\nlifecycle_upgrade_service_unit_path = {:?}\nlifecycle_upgrade_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1377,6 +1384,8 @@ fn install_metadata(
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
         trust.root_fingerprint,
+        String::from_utf8_lossy(lifecycle_authority_public_key),
+        format!("{:x}", Sha256::digest(lifecycle_authority_public_key)),
         bundle.install_state_sha256(),
         bundle.manifest_sha256,
         bundle.version,
@@ -1398,7 +1407,7 @@ fn install_metadata(
         LIFECYCLE_UPGRADE_UNIT,
         LIFECYCLE_UPGRADE_SOCKET_UNIT,
         COLLECTOR_SUDOERS,
-    )
+    ))
 }
 
 // 所有执行角色先继承同一拒绝优先下限，再声明各自确需的资源面。
@@ -1558,8 +1567,9 @@ use account::create_static_service_identity_with_commands;
 use filesystem::*;
 pub use systemd::SystemSystemd;
 pub use upgrade::{
-    InstalledUpgradeBinding, VerifiedUpgradeComponents, inspect_installed_probe_for_upgrade,
-    upgrade_current_probe,
+    InstalledUpgradeBinding, UpgradeAttempt, VerifiedUpgradeComponents,
+    inspect_installed_probe_for_upgrade, upgrade_current_probe,
+    upgrade_current_probe_for_operation,
 };
 
 include!("install/tests.rs");

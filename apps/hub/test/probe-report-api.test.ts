@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, createVerify } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,8 +18,15 @@ import {
   validateProbeOperationToken,
 } from "../src/probe/operation-token";
 import {
+  canonicalLifecycleUpgradeAuthority,
+  generateLifecycleAuthorityKeyPair,
+  type LifecycleUpgradeAuthority,
+} from "../src/probe/lifecycle-authority";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
+import {
   createTestProbeIdentity,
   signedProbeHeaders,
+  signedJsonProbeHeaders,
   signedJsonProbeRequest,
   signedProbeRequest,
 } from "./probe-test-auth";
@@ -3145,6 +3152,121 @@ describe("Probe report API", () => {
     await expect(canceled.json()).resolves.toEqual({
       error: "probe_operation_token_operation_closed",
     });
+  });
+
+  it("admits one verified upgrade stage and signs an offline root authority", async () => {
+    const database = await createTemporaryDatabase();
+    const assetDir = await mkdtemp(path.join(os.tmpdir(), "enoki-upgrade-assets-"));
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.3.0",
+      targetVersion: "1.4.0",
+      transition: "compatible",
+    });
+    const authorityKey = generateLifecycleAuthorityKeyPair();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      lifecycleAuthorityKey: authorityKey,
+      now: () => 1_725_000_010_000,
+      probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const operation = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "1.3.0",
+        hostId: host.id,
+        nowMs: 1_725_000_009_000,
+        target: {
+          assetSetDigest: release.targetAssetSetDigest,
+          version: "1.4.0",
+        },
+      }).operation,
+    );
+    const token = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const requestPath = `/api/probe/operations/${operation.id}/upgrade-stage/admit`;
+    const requestBody = JSON.stringify({
+      sourceBundleVersion: "1.3.0",
+      sourceInstallStateSha256: "a".repeat(64),
+      sourceManifestSha256: "b".repeat(64),
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetBundleVersion: "1.4.0",
+      targetManifestSha256: "3".repeat(64),
+      token,
+      verifiedStageSha256: "c".repeat(64),
+    });
+
+    const response = await app.request(
+      requestPath,
+      {
+        body: requestBody,
+        headers: signedJsonProbeHeaders({
+          body: requestBody,
+          pathAndQuery: `https://hub.example${requestPath}`,
+          privateKeyPem: registration.privateKeyPem,
+          probeId: registration.probeId,
+        }),
+        method: "POST",
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      authority: LifecycleUpgradeAuthority;
+      signature: string;
+    };
+    expect(body.authority).toEqual({
+      schemaVersion: 1,
+      hubOrigin: "https://hub.example",
+      hostId: String(host.id),
+      probeId: registration.probeId,
+      operationId: String(operation.id),
+      sourceBundleVersion: "1.3.0",
+      sourceInstallStateSha256: "a".repeat(64),
+      sourceManifestSha256: "b".repeat(64),
+      targetBundleVersion: "1.4.0",
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetManifestSha256: "3".repeat(64),
+      verifiedStageSha256: "c".repeat(64),
+      expiresAtMs: 1_725_000_310_000,
+    });
+    const verifier = createVerify("RSA-SHA256");
+    verifier.update("enoki/lifecycle-upgrade-authority/v1\0");
+    verifier.update(canonicalLifecycleUpgradeAuthority(body.authority));
+    verifier.end();
+    expect(
+      verifier.verify(
+        authorityKey.publicKeyPem,
+        Buffer.from(body.signature, "hex"),
+      ),
+    ).toBe(true);
+    expect(database.probeOperations.findById(operation.id ?? 0)).toMatchObject({
+      acceptedAtMs: 1_725_000_010_000,
+      runningAtMs: 1_725_000_010_000,
+      state: "running",
+    });
+
+    database.close();
   });
 
   it("accepts Probe Operation acknowledgements and status reports idempotently", async () => {

@@ -27,10 +27,10 @@ pub struct LifecycleRequest {
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum LifecycleRequestAuthority {
     HubUpgrade {
+        hub_origin: String,
         host_id: String,
         probe_id: String,
         operation_id: String,
-        operation_token: String,
         source_bundle_version: String,
         source_install_state_sha256: String,
         source_manifest_sha256: String,
@@ -38,6 +38,8 @@ pub enum LifecycleRequestAuthority {
         target_asset_set_digest: String,
         target_manifest_sha256: String,
         verified_stage_sha256: String,
+        expires_at_ms: u64,
+        authority_signature: String,
     },
     HubOperation {
         probe_id: String,
@@ -158,12 +160,66 @@ fn bounded_result_code(code: &str) -> String {
 }
 
 impl LifecycleRequest {
+    pub fn canonical_upgrade_authority_bytes(&self) -> Result<Vec<u8>, LifecycleRejection> {
+        let LifecycleRequestAuthority::HubUpgrade {
+            hub_origin,
+            host_id,
+            probe_id,
+            operation_id,
+            source_bundle_version,
+            source_install_state_sha256,
+            source_manifest_sha256,
+            target_bundle_version,
+            target_asset_set_digest,
+            target_manifest_sha256,
+            verified_stage_sha256,
+            expires_at_ms,
+            ..
+        } = &self.authority
+        else {
+            return Err(LifecycleRejection::InvalidAuthority);
+        };
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CanonicalAuthority<'a> {
+            schema_version: u16,
+            hub_origin: &'a str,
+            host_id: &'a str,
+            probe_id: &'a str,
+            operation_id: &'a str,
+            source_bundle_version: &'a str,
+            source_install_state_sha256: &'a str,
+            source_manifest_sha256: &'a str,
+            target_bundle_version: &'a str,
+            target_asset_set_digest: &'a str,
+            target_manifest_sha256: &'a str,
+            verified_stage_sha256: &'a str,
+            expires_at_ms: u64,
+        }
+        serde_json::to_vec(&CanonicalAuthority {
+            schema_version: 1,
+            hub_origin,
+            host_id,
+            probe_id,
+            operation_id,
+            source_bundle_version,
+            source_install_state_sha256,
+            source_manifest_sha256,
+            target_bundle_version,
+            target_asset_set_digest,
+            target_manifest_sha256,
+            verified_stage_sha256,
+            expires_at_ms: *expires_at_ms,
+        })
+        .map_err(|_| LifecycleRejection::InvalidAuthority)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn hub_upgrade(
+        hub_origin: &str,
         host_id: &str,
         probe_id: &str,
         operation_id: &str,
-        operation_token: &str,
         source_bundle_version: &str,
         source_install_state_sha256: &str,
         source_manifest_sha256: &str,
@@ -171,15 +227,17 @@ impl LifecycleRequest {
         target_asset_set_digest: &str,
         target_manifest_sha256: &str,
         verified_stage_sha256: &str,
+        expires_at_ms: u64,
+        authority_signature: &str,
     ) -> Result<Self, LifecycleRejection> {
         let request = Self {
             schema_version: 1,
             transition: LifecycleTransition::Upgrade,
             authority: LifecycleRequestAuthority::HubUpgrade {
+                hub_origin: hub_origin.to_owned(),
                 host_id: host_id.to_owned(),
                 probe_id: probe_id.to_owned(),
                 operation_id: operation_id.to_owned(),
-                operation_token: operation_token.to_owned(),
                 source_bundle_version: source_bundle_version.to_owned(),
                 source_install_state_sha256: source_install_state_sha256.to_owned(),
                 source_manifest_sha256: source_manifest_sha256.to_owned(),
@@ -187,6 +245,8 @@ impl LifecycleRequest {
                 target_asset_set_digest: target_asset_set_digest.to_owned(),
                 target_manifest_sha256: target_manifest_sha256.to_owned(),
                 verified_stage_sha256: verified_stage_sha256.to_owned(),
+                expires_at_ms,
+                authority_signature: authority_signature.to_owned(),
             },
         };
         request.validate()?;
@@ -287,10 +347,10 @@ impl LifecycleRequest {
         }
         let (probe_id, install_state, manifest, version) = match &self.authority {
             LifecycleRequestAuthority::HubUpgrade {
+                hub_origin,
                 host_id,
                 probe_id,
                 operation_id,
-                operation_token,
                 source_bundle_version,
                 source_install_state_sha256,
                 source_manifest_sha256,
@@ -298,14 +358,14 @@ impl LifecycleRequest {
                 target_asset_set_digest,
                 target_manifest_sha256,
                 verified_stage_sha256,
+                expires_at_ms,
+                authority_signature,
             } => {
                 if self.transition != LifecycleTransition::Upgrade
+                    || !valid_hub_origin(hub_origin)
                     || !valid_identifier(host_id)
                     || !valid_identifier(probe_id)
                     || !valid_identifier(operation_id)
-                    || operation_token.is_empty()
-                    || operation_token.len() > MAX_OPERATION_TOKEN_BYTES
-                    || operation_token.bytes().any(|byte| byte.is_ascii_control())
                     || !valid_bundle_version(source_bundle_version)
                     || !is_sha256_hex(source_install_state_sha256)
                     || !is_sha256_hex(source_manifest_sha256)
@@ -314,6 +374,12 @@ impl LifecycleRequest {
                     || !is_prefixed_sha256(target_asset_set_digest)
                     || !is_sha256_hex(target_manifest_sha256)
                     || !is_sha256_hex(verified_stage_sha256)
+                    || *expires_at_ms == 0
+                    || authority_signature.is_empty()
+                    || authority_signature.len() > 1024
+                    || !authority_signature
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
                 {
                     return Err(LifecycleRejection::InvalidAuthority);
                 }
@@ -607,10 +673,10 @@ mod tests {
     #[test]
     fn compatible_upgrade_authority_roundtrips_with_source_target_and_stage_bindings() {
         let request = LifecycleRequest::hub_upgrade(
+            "https://hub.example",
             "host_01",
             "probe_01",
             "operation_01",
-            "opaque-operation-token",
             "1.2.2",
             &"a".repeat(64),
             &"b".repeat(64),
@@ -618,6 +684,8 @@ mod tests {
             &format!("sha256:{}", "c".repeat(64)),
             &"d".repeat(64),
             &"e".repeat(64),
+            1_800_000_000_000,
+            "signed-authority",
         )
         .expect("升级授权有效");
 
@@ -645,13 +713,11 @@ mod tests {
     }
 
     #[test]
-    fn disabled_transitions_return_one_stable_result_before_planning() {
-        for transition in [LifecycleTransition::Upgrade, LifecycleTransition::Repair] {
-            assert_eq!(
-                LifecyclePlan::for_transition(transition),
-                Err(LifecycleRejection::TransitionNotEnabled),
-            );
-        }
+    fn repair_returns_one_stable_disabled_result_before_planning() {
+        assert_eq!(
+            LifecyclePlan::for_transition(LifecycleTransition::Repair),
+            Err(LifecycleRejection::TransitionNotEnabled),
+        );
     }
 
     #[test]

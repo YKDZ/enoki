@@ -352,6 +352,27 @@ describe("Probe Upgrade Request lifecycle", () => {
       state: "running" as const,
     };
 
+    const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+      nowMs: 1_725_000_030_000,
+      operation: running,
+      hostProfile: {
+        probeVersion: "0.2.0",
+      },
+    });
+    expect(succeeded).toEqual({
+      ...running,
+      completedAtMs: 1_725_000_030_000,
+      failureCode: null,
+      failureMessage: null,
+      state: "succeeded",
+      updatedAtMs: 1_725_000_030_000,
+    });
+    expect(
+      startProbeUpgradeRequest({
+        nowMs: 1_725_000_040_000,
+        operation: succeeded!,
+      }),
+    ).toEqual({ error: null, operation: succeeded });
     expect(
       succeedProbeUpgradeRequestFromHostProfile({
         nowMs: 1_725_000_030_000,
@@ -369,14 +390,7 @@ describe("Probe Upgrade Request lifecycle", () => {
           probeVersion: "0.2.0",
         },
       }),
-    ).toEqual({
-      ...running,
-      completedAtMs: 1_725_000_030_000,
-      failureCode: null,
-      failureMessage: null,
-      state: "succeeded",
-      updatedAtMs: 1_725_000_030_000,
-    });
+    ).toEqual(succeeded);
   });
 
   it("succeeds when Host Profile reports a tag-prefixed Probe version", () => {

@@ -57,6 +57,14 @@ import {
   succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
 } from "./operation.js";
+import {
+  canonicalLifecycleUpgradeAuthority,
+  generateLifecycleAuthorityKeyPair,
+  signLifecycleUpgradeAuthority,
+  type LifecycleAuthorityKeyPair,
+  type LifecycleUpgradeAuthority,
+} from "./lifecycle-authority.js";
+import { readProbeReleaseContextFromDirectory } from "./release-context.js";
 
 const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
 const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
@@ -73,6 +81,7 @@ const maxReportObservationRange = 10_000;
 const defaultClockSkewThresholdMs = 5 * 60 * 1000;
 const enrollmentVerificationTtlMs = 60 * 1000;
 const defaultProbeOperationTokenSecret = randomBytes(32).toString("base64url");
+const defaultLifecycleAuthorityKey = generateLifecycleAuthorityKeyPair();
 
 type ProtoMessage = Record<string, any>;
 
@@ -100,6 +109,9 @@ export type ProbeRouteServices = {
   liveUpdates?: LiveUpdateBroadcaster | null;
   now?: () => number;
   probeOperationTokenSecret?: string;
+  lifecycleAuthorityKey?: LifecycleAuthorityKeyPair;
+  probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: Buffer | string;
   probeApiOrigin?: string;
   trustedProxyCidrs?: TrustedProxyCidr[];
 };
@@ -115,6 +127,18 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     return next();
   });
+
+  routes.get("/lifecycle-authority-key", (context) =>
+    context.body(
+      services.lifecycleAuthorityKey?.publicKeyPem ??
+        defaultLifecycleAuthorityKey.publicKeyPem,
+      200,
+      {
+        "cache-control": "no-store",
+        "content-type": "application/x-pem-file",
+      },
+    ),
+  );
 
   routes.post("/register", async (context) => {
     if (
@@ -971,6 +995,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError(result.error, 403);
     }
 
+    if (operation.kind === "probe_upgrade") {
+      return context.json({ valid: true }, 200, {
+        "cache-control": "no-store",
+      });
+    }
+
     const acknowledged = acknowledgeProbeUpgradeRequest({
       nowMs: operationNowMs,
       operation,
@@ -987,6 +1017,98 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     return context.json({ valid: true }, 200, {
       "cache-control": "no-store",
     });
+  });
+
+  routes.post("/operations/:operationId/upgrade-stage/admit", async (context) => {
+    const requestBody = await readCappedRequestBody(
+      context.req.raw,
+      maxProbeOperationPayloadBytes,
+    );
+    if (!requestBody) return probeJsonError("probe_report_too_large", 413);
+    const host = authenticateProbe(
+      services.hosts,
+      context.req.raw,
+      requestBody,
+      services.probeApiOrigin,
+    );
+    if (!host) return probeJsonError("probe_identity_required", 401);
+    const operationId = parseProbeOperationId(context.req.param("operationId"));
+    const body = readUpgradeStageAdmissionBody(requestBody);
+    const operation =
+      operationId === null
+        ? null
+        : (services.probeOperations?.findById(operationId) ?? null);
+    if (!operation || operation.hostId !== host.id) {
+      return probeJsonError("probe_operation_not_found", 404);
+    }
+    if (!body || operation.kind !== "probe_upgrade") {
+      return probeJsonError("malformed_probe_upgrade_stage_admission", 400);
+    }
+    const operationNowMs = now();
+    const token = validateProbeOperationToken({
+      nowMs: operationNowMs,
+      operation,
+      probeId: host.probeId,
+      secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest,
+      targetProbeVersion: body.targetBundleVersion,
+      token: body.token,
+    });
+    if (token.error) return probeJsonError(token.error, 403);
+    if (!services.probeAssetDir || !services.probeDistributionRootPublicKeyPem) {
+      return probeJsonError("probe_upgrade_authority_unavailable", 503);
+    }
+    const release = await readProbeReleaseContextFromDirectory({
+      assetDir: services.probeAssetDir,
+      trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+    });
+    const transition = release.releaseTransition;
+    if (
+      transition?.classification !== "compatible" ||
+      transition.sourceProbeVersion !== body.sourceBundleVersion ||
+      transition.targetProbeVersion !== body.targetBundleVersion ||
+      transition.targetAssetSetDigest !== body.targetAssetSetDigest ||
+      !transition.targetBundles?.some(
+        (bundle) =>
+          bundle.bundleManifestSha256 === body.targetManifestSha256,
+      )
+    ) {
+      return probeJsonError("probe_upgrade_authority_rejected", 409);
+    }
+    const admitted = services.probeOperations?.admitPendingProbeUpgradeRequest(
+      operationId!,
+      operationNowMs,
+    );
+    if (!admitted) {
+      return probeJsonError("probe_operation_status_invalid", 409);
+    }
+    const authority: LifecycleUpgradeAuthority = {
+      schemaVersion: 1,
+      hubOrigin: services.probeApiOrigin ?? "",
+      hostId: String(host.id),
+      probeId: host.probeId,
+      operationId: String(admitted.id),
+      sourceBundleVersion: body.sourceBundleVersion,
+      sourceInstallStateSha256: body.sourceInstallStateSha256,
+      sourceManifestSha256: body.sourceManifestSha256,
+      targetBundleVersion: body.targetBundleVersion,
+      targetAssetSetDigest: body.targetAssetSetDigest,
+      targetManifestSha256: body.targetManifestSha256,
+      verifiedStageSha256: body.verifiedStageSha256,
+      expiresAtMs: operationNowMs + defaultProbeOperationTokenTtlMs,
+    };
+    const key = services.lifecycleAuthorityKey ?? defaultLifecycleAuthorityKey;
+    return context.json(
+      {
+        authority,
+        signature: signLifecycleUpgradeAuthority(
+          canonicalLifecycleUpgradeAuthority(authority),
+          key,
+        ),
+      },
+      200,
+      { "cache-control": "no-store" },
+    );
   });
 
   routes.post("/operations/:operationId/status", async (context) => {
@@ -1323,6 +1445,55 @@ function readTokenValidationBody(requestBody: Uint8Array) {
           ? body.targetProbeVersion
           : undefined,
       token: body.token,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readUpgradeStageAdmissionBody(requestBody: Uint8Array) {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
+      string,
+      unknown
+    >;
+    const keys = [
+      "sourceBundleVersion",
+      "sourceInstallStateSha256",
+      "sourceManifestSha256",
+      "targetAssetSetDigest",
+      "targetBundleVersion",
+      "targetManifestSha256",
+      "token",
+      "verifiedStageSha256",
+    ];
+    if (
+      Object.keys(body).sort().join("\0") !== keys.sort().join("\0") ||
+      keys.some((key) => typeof body[key] !== "string") ||
+      !/^[0-9a-f]{64}$/.test(String(body.sourceInstallStateSha256)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.sourceManifestSha256)) ||
+      !/^sha256:[0-9a-f]{64}$/.test(String(body.targetAssetSetDigest)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.targetManifestSha256)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.verifiedStageSha256)) ||
+      !/^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/.test(
+        String(body.sourceBundleVersion),
+      ) ||
+      !/^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/.test(
+        String(body.targetBundleVersion),
+      ) ||
+      !(body.token as string).length
+    ) {
+      return null;
+    }
+    return body as {
+      sourceBundleVersion: string;
+      sourceInstallStateSha256: string;
+      sourceManifestSha256: string;
+      targetAssetSetDigest: string;
+      targetBundleVersion: string;
+      targetManifestSha256: string;
+      token: string;
+      verifiedStageSha256: string;
     };
   } catch {
     return null;
@@ -2054,7 +2225,7 @@ async function readCappedRequestBody(request: Request, maxBytes: number) {
 
 function probeJsonError(
   error: string,
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 415,
+  status: 400 | 401 | 403 | 404 | 409 | 413 | 415 | 503,
 ) {
   return new Response(JSON.stringify({ error }), {
     headers: {

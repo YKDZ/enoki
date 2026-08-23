@@ -317,6 +317,16 @@ export function startProbeUpgradeRequest(input: {
     };
   }
 
+  if (input.operation.state === "succeeded") {
+    // root-owned 激活交接在目标 Boot/Profile 证据关闭 Hub operation 前保持
+    // `running`。后续 Probe 重启可以重放这份不可变交接，但不得回退或拒绝
+    // 已成为权威事实的成功终态。
+    return {
+      error: null,
+      operation: input.operation,
+    };
+  }
+
   return {
     error: "probe_operation_status_invalid",
     operation: input.operation,

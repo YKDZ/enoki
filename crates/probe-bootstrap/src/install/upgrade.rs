@@ -1,6 +1,15 @@
 use super::*;
 use crate::lifecycle::{UpgradeCompletion, UpgradeLifecycleEffects, execute_upgrade_lifecycle};
 use std::io::Read;
+use std::os::fd::AsRawFd;
+
+const UPGRADE_ATTEMPT_FILE: &str = "probe-upgrade-attempt.toml";
+const OPERATION_STATUS_FILE: &str = "probe-operation-status.toml";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeAttempt {
+    pub operation_id: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledUpgradeBinding {
@@ -138,10 +147,49 @@ pub fn upgrade_current_probe(
     paths: &FixedInstallPaths,
     systemd: &mut impl SystemdPort,
 ) -> Result<UpgradeCompletion, InstallError> {
+    upgrade_current_probe_inner(components, bundle, expected_source, None, paths, systemd)
+}
+
+pub fn upgrade_current_probe_for_operation(
+    components: VerifiedUpgradeComponents<'_>,
+    bundle: &VerifiedBundle,
+    expected_source: &InstalledUpgradeBinding,
+    attempt: &UpgradeAttempt,
+    paths: &FixedInstallPaths,
+    systemd: &mut impl SystemdPort,
+) -> Result<UpgradeCompletion, InstallError> {
+    if attempt.operation_id.is_empty()
+        || attempt.operation_id.len() > 96
+        || !attempt
+            .operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    upgrade_current_probe_inner(
+        components,
+        bundle,
+        expected_source,
+        Some(attempt),
+        paths,
+        systemd,
+    )
+}
+
+fn upgrade_current_probe_inner(
+    components: VerifiedUpgradeComponents<'_>,
+    bundle: &VerifiedBundle,
+    expected_source: &InstalledUpgradeBinding,
+    attempt: Option<&UpgradeAttempt>,
+    paths: &FixedInstallPaths,
+    systemd: &mut impl SystemdPort,
+) -> Result<UpgradeCompletion, InstallError> {
     let mut effects = UpgradeEffects {
         components: Some(components),
         bundle,
         expected_source,
+        attempt,
         paths,
         systemd,
         prepared: None,
@@ -153,6 +201,7 @@ struct UpgradeEffects<'a, S> {
     components: Option<VerifiedUpgradeComponents<'a>>,
     bundle: &'a VerifiedBundle,
     expected_source: &'a InstalledUpgradeBinding,
+    attempt: Option<&'a UpgradeAttempt>,
     paths: &'a FixedInstallPaths,
     systemd: &'a mut S,
     prepared: Option<PreparedUpgrade>,
@@ -169,37 +218,100 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         {
             return Err(InstallError::ExistingResidue);
         }
+        if let Some(attempt) = self.attempt {
+            begin_upgrade_attempt(self.paths, attempt, self.expected_source, self.bundle)?;
+        }
         let components = self
             .components
             .as_mut()
             .ok_or(InstallError::InvalidVerifiedComponent)?;
         verify_component_lengths(components, self.bundle)?;
-        self.prepared = Some(prepare_upgrade(
-            components,
-            self.bundle,
-            self.paths,
-            &actual,
-        )?);
+        let prepared = prepare_upgrade(components, self.bundle, self.paths, &actual);
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if self.attempt.is_some() {
+                    let _ = clear_upgrade_attempt(self.paths);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(attempt) = self.attempt
+            && write_upgrade_attempt(
+                self.paths,
+                attempt,
+                self.expected_source,
+                self.bundle,
+                "prepared",
+            )
+            .is_err()
+        {
+            let _ = clear_upgrade_attempt(self.paths);
+            return Err(InstallError::Io);
+        }
+        self.prepared = Some(prepared);
         Ok(())
     }
 
     fn activate_complete_bundle(&mut self) -> Result<(), Self::Error> {
         let mut prepared = self.prepared.take().ok_or(InstallError::Io)?;
         prepared.retain_for_repair = true;
-        self.systemd
-            .set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
-        self.systemd.stop()?;
-        for (temporary, destination) in prepared.staged.iter().zip(&prepared.destinations) {
-            fs::rename(temporary, destination).map_err(|_| InstallError::Io)?;
+        let activated = (|| {
+            if let Some(attempt) = self.attempt {
+                write_upgrade_attempt(
+                    self.paths,
+                    attempt,
+                    self.expected_source,
+                    self.bundle,
+                    "activation-started",
+                )?;
+                write_operation_status(self.paths, attempt, &self.bundle.version, "running", None)?;
+            }
+            self.systemd
+                .set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
+            self.systemd.stop()?;
+            for (temporary, destination) in prepared.staged.iter().zip(&prepared.destinations) {
+                fs::rename(temporary, destination).map_err(|_| InstallError::Io)?;
+            }
+            sync_destination_directories(&prepared.destinations)?;
+            self.systemd.daemon_reload()?;
+            self.systemd.start()?;
+            self.systemd.wait_local_activated()?;
+            for backup in &prepared.backups {
+                fs::remove_file(backup).map_err(|_| InstallError::Io)?;
+            }
+            sync_destination_directories(&prepared.backups)?;
+            if let Some(attempt) = self.attempt {
+                write_upgrade_attempt(
+                    self.paths,
+                    attempt,
+                    self.expected_source,
+                    self.bundle,
+                    "activated",
+                )?;
+            }
+            prepared.retain_for_repair = false;
+            Ok(())
+        })();
+        if activated.is_err()
+            && let Some(attempt) = self.attempt
+        {
+            let _ = write_operation_status(
+                self.paths,
+                attempt,
+                &self.bundle.version,
+                "failed",
+                Some("lifecycle_upgrade_repair_required"),
+            );
+            let _ = write_upgrade_attempt(
+                self.paths,
+                attempt,
+                self.expected_source,
+                self.bundle,
+                "repair-required",
+            );
         }
-        self.systemd.daemon_reload()?;
-        self.systemd.start()?;
-        self.systemd.wait_local_activated()?;
-        for backup in &prepared.backups {
-            fs::remove_file(backup).map_err(|_| InstallError::Io)?;
-        }
-        prepared.retain_for_repair = false;
-        Ok(())
+        activated
     }
 }
 
@@ -286,6 +398,7 @@ fn prepare_upgrade(
         paths.lifecycle_companion_socket_unit(),
         paths.lifecycle_upgrade_unit(),
         paths.lifecycle_upgrade_socket_unit(),
+        paths.identity(),
         paths.metadata(),
     ];
     let mut prepared = PreparedUpgrade {
@@ -357,11 +470,21 @@ fn prepare_upgrade(
             .staged
             .push(stage_bytes(contents.as_bytes(), destination, 0o644)?);
     }
+    let current_identity = fs::read_to_string(paths.identity()).map_err(|_| InstallError::Io)?;
+    let identity_metadata = fs::metadata(paths.identity()).map_err(|_| InstallError::Io)?;
+    let updated_identity = updated_receipt_projection(&current_identity, bundle, source)?;
+    prepared.staged.push(stage_bytes_owned(
+        updated_identity.as_bytes(),
+        &prepared.destinations[18],
+        0o600,
+        identity_metadata.uid(),
+        identity_metadata.gid(),
+    )?);
     let current_metadata = fs::read_to_string(paths.metadata()).map_err(|_| InstallError::Io)?;
     let updated = updated_metadata(&current_metadata, bundle, source)?;
     prepared.staged.push(stage_bytes(
         updated.as_bytes(),
-        &prepared.destinations[18],
+        &prepared.destinations[19],
         0o600,
     )?);
     for destination in &prepared.destinations {
@@ -394,6 +517,9 @@ fn stage_reader(source: &mut File, destination: &Path, mode: u32) -> Result<Path
         .open(&path)
         .map_err(|_| InstallError::ExistingResidue)?;
     std::io::copy(source, &mut output).map_err(|_| InstallError::Io)?;
+    output
+        .set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|_| InstallError::Io)?;
     output.sync_all().map_err(|_| InstallError::Io)?;
     Ok(path)
 }
@@ -413,8 +539,34 @@ fn stage_bytes(bytes: &[u8], destination: &Path, mode: u32) -> Result<PathBuf, I
         .open(&temporary)
         .map_err(|_| InstallError::ExistingResidue)?;
     output.write_all(bytes).map_err(|_| InstallError::Io)?;
+    output
+        .set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|_| InstallError::Io)?;
     output.sync_all().map_err(|_| InstallError::Io)?;
     Ok(temporary)
+}
+
+fn stage_bytes_owned(
+    bytes: &[u8],
+    destination: &Path,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+) -> Result<PathBuf, InstallError> {
+    let path = stage_bytes(bytes, destination, mode)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .map_err(|_| InstallError::Io)?;
+    // SAFETY：descriptor 指向刚创建的普通暂存文件；uid/gid 来自已信任的
+    // 当前 Probe Identity inode。
+    if unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0 {
+        let _ = fs::remove_file(&path);
+        return Err(InstallError::Io);
+    }
+    file.sync_all().map_err(|_| InstallError::Io)?;
+    Ok(path)
 }
 
 fn updated_metadata(
@@ -451,6 +603,196 @@ fn updated_metadata(
         return Err(InstallError::ExistingResidue);
     }
     Ok(output)
+}
+
+fn updated_receipt_projection(
+    current: &str,
+    bundle: &VerifiedBundle,
+    source: &InstalledUpgradeBinding,
+) -> Result<String, InstallError> {
+    updated_metadata(current, bundle, source)
+}
+
+fn begin_upgrade_attempt(
+    paths: &FixedInstallPaths,
+    attempt: &UpgradeAttempt,
+    source: &InstalledUpgradeBinding,
+    bundle: &VerifiedBundle,
+) -> Result<(), InstallError> {
+    let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    if let Ok(contents) = fs::read_to_string(&journal) {
+        let prior_operation = journal_string(&contents, "operation_id")?;
+        let phase = journal_string(&contents, "phase")?;
+        if prior_operation == attempt.operation_id
+            || matches!(phase, "activation-started" | "repair-required")
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        if !matches!(phase, "admitted" | "prepared" | "activated") {
+            return Err(InstallError::ExistingResidue);
+        }
+        cleanup_pre_activation_residue(paths)?;
+    } else if journal.exists() {
+        return Err(InstallError::ExistingResidue);
+    }
+    write_upgrade_attempt(paths, attempt, source, bundle, "admitted")
+}
+
+fn journal_string<'a>(contents: &'a str, key: &str) -> Result<&'a str, InstallError> {
+    let prefix = format!("{key} = \"");
+    let mut values = contents.lines().filter_map(|line| {
+        line.strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix('"'))
+    });
+    let value = values.next().ok_or(InstallError::ExistingResidue)?;
+    if value.is_empty() || values.next().is_some() {
+        return Err(InstallError::ExistingResidue);
+    }
+    Ok(value)
+}
+
+fn cleanup_pre_activation_residue(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    for destination in upgrade_destinations(paths) {
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(InstallError::Io)?;
+        for residue in [
+            destination.with_file_name(format!(".{name}.enoki-upgrade-new")),
+            destination.with_file_name(format!(".{name}.enoki-upgrade-old")),
+        ] {
+            match fs::remove_file(residue) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(InstallError::Io),
+            }
+        }
+    }
+    clear_upgrade_attempt(paths)
+}
+
+fn clear_upgrade_attempt(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    match fs::remove_file(&journal) {
+        Ok(()) => sync_directory(paths.bootstrap_state().as_path()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(InstallError::Io),
+    }
+}
+
+fn write_upgrade_attempt(
+    paths: &FixedInstallPaths,
+    attempt: &UpgradeAttempt,
+    source: &InstalledUpgradeBinding,
+    bundle: &VerifiedBundle,
+    phase: &str,
+) -> Result<(), InstallError> {
+    let contents = format!(
+        "schema_version = 1\noperation_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_install_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nphase = {:?}\n",
+        attempt.operation_id,
+        source.source_bundle_version,
+        source.source_install_state_sha256,
+        source.source_manifest_sha256,
+        bundle.version,
+        bundle.install_state_sha256(),
+        bundle.manifest_sha256,
+        phase,
+    );
+    atomic_durable_write(
+        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+        contents.as_bytes(),
+        0o600,
+    )
+}
+
+fn write_operation_status(
+    paths: &FixedInstallPaths,
+    attempt: &UpgradeAttempt,
+    target_version: &str,
+    status: &str,
+    error_code: Option<&str>,
+) -> Result<(), InstallError> {
+    let mut contents = format!(
+        "operation_id = {:?}\ntarget_probe_version = {:?}\nstatus = {:?}\n",
+        attempt.operation_id, target_version, status,
+    );
+    if let Some(code) = error_code {
+        contents.push_str(&format!("error_code = {:?}\nmessage = \"\"\n", code));
+    }
+    atomic_durable_write(
+        &paths.state().join(OPERATION_STATUS_FILE),
+        contents.as_bytes(),
+        0o644,
+    )
+}
+
+fn atomic_durable_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
+    let parent = path.parent().ok_or(InstallError::Io)?;
+    let parent_metadata = fs::symlink_metadata(parent).map_err(|_| InstallError::Io)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.file_type().is_dir() {
+        return Err(InstallError::ExistingResidue);
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(InstallError::Io)?;
+    let temporary = parent.join(format!(".{name}.enoki-write"));
+    let _ = fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .map_err(|_| InstallError::Io)?;
+    file.write_all(bytes).map_err(|_| InstallError::Io)?;
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|_| InstallError::Io)?;
+    file.sync_all().map_err(|_| InstallError::Io)?;
+    fs::rename(&temporary, path).map_err(|_| InstallError::Io)?;
+    sync_directory(parent)
+}
+
+fn sync_destination_directories(paths: &[PathBuf]) -> Result<(), InstallError> {
+    let mut parents = std::collections::BTreeSet::new();
+    for path in paths {
+        parents.insert(path.parent().ok_or(InstallError::Io)?.to_path_buf());
+    }
+    for parent in parents {
+        sync_directory(&parent)?;
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<(), InstallError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| InstallError::Io)
+}
+
+fn upgrade_destinations(paths: &FixedInstallPaths) -> Vec<PathBuf> {
+    vec![
+        paths.binary(),
+        paths.observation_runtime_binary(),
+        paths.cpu_provider_binary(),
+        paths.disk_health_provider_binary(),
+        paths.lifecycle_companion_binary(),
+        paths.bootstrap_acquirer(),
+        paths.bootstrap_activator(),
+        paths.unit(),
+        paths.observation_runtime_unit(),
+        paths.observation_runtime_socket_unit(),
+        paths.cpu_provider_unit(),
+        paths.cpu_provider_socket_unit(),
+        paths.disk_health_provider_unit(),
+        paths.disk_health_provider_socket_unit(),
+        paths.lifecycle_companion_unit(),
+        paths.lifecycle_companion_socket_unit(),
+        paths.lifecycle_upgrade_unit(),
+        paths.lifecycle_upgrade_socket_unit(),
+        paths.identity(),
+        paths.metadata(),
+    ]
 }
 
 fn version_is_newer(target: &str, source: &str) -> bool {

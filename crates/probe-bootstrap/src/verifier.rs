@@ -1231,6 +1231,7 @@ mod tests {
                 manifest_signature: ms,
                 signing_key: daily_pem,
                 bundle_manifest: bundle,
+                lifecycle_authority_public_key: b"public-key".to_vec(),
             },
             fingerprint: sha256_hex(&root_pem),
             root: root_pem,

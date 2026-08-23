@@ -5,8 +5,8 @@ use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-pub const MAGIC: [u8; 8] = *b"ENKBH007";
-pub const SCHEMA_VERSION: u16 = 7;
+pub const MAGIC: [u8; 8] = *b"ENKBH008";
+pub const SCHEMA_VERSION: u16 = 8;
 pub const MAX_COMPONENT_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_METADATA_BYTES: usize = 256 * 1024;
 pub const MAX_ENROLLMENT_BYTES: usize = 8 * 1024;
@@ -27,6 +27,7 @@ pub enum HandoffError {
 pub struct Enrollment {
     hub_origin: String,
     enrollment_token: String,
+    lifecycle_authority_public_key: Option<Vec<u8>>,
 }
 
 impl Enrollment {
@@ -38,6 +39,7 @@ impl Enrollment {
         Ok(Self {
             hub_origin,
             enrollment_token: enrollment_token.to_owned(),
+            lifecycle_authority_public_key: None,
         })
     }
 
@@ -46,6 +48,12 @@ impl Enrollment {
     }
     pub fn enrollment_token(&self) -> &str {
         &self.enrollment_token
+    }
+    pub(crate) fn bind_lifecycle_authority_public_key(&mut self, key: Vec<u8>) {
+        self.lifecycle_authority_public_key = Some(key);
+    }
+    pub(crate) fn lifecycle_authority_public_key(&self) -> Option<&[u8]> {
+        self.lifecycle_authority_public_key.as_deref()
     }
 
     fn encode(&self) -> Result<Vec<u8>, HandoffError> {
@@ -189,6 +197,7 @@ pub struct Handoff {
     pub manifest_signature: Vec<u8>,
     pub signing_key: Vec<u8>,
     pub bundle_manifest: Vec<u8>,
+    pub lifecycle_authority_public_key: Vec<u8>,
 }
 
 impl Handoff {
@@ -231,7 +240,7 @@ impl Handoff {
         output
             .write_all(&SCHEMA_VERSION.to_be_bytes())
             .map_err(|_| HandoffError::Io)?;
-        output.write_all(&[13, 0]).map_err(|_| HandoffError::Io)?;
+        output.write_all(&[14, 0]).map_err(|_| HandoffError::Io)?;
         for (kind, value) in [
             (1, &self.delegation),
             (2, &self.delegation_signature),
@@ -239,30 +248,31 @@ impl Handoff {
             (4, &self.manifest_signature),
             (5, &self.signing_key),
             (6, &self.bundle_manifest),
+            (7, &self.lifecycle_authority_public_key),
         ] {
             write_value(output, kind, value, MAX_METADATA_BYTES)?;
         }
         let enrollment = enrollment.encode()?;
-        write_value(output, 7, &enrollment, MAX_ENROLLMENT_BYTES)?;
-        write_prefix(output, 8, component_len as usize)?;
+        write_value(output, 8, &enrollment, MAX_ENROLLMENT_BYTES)?;
+        write_prefix(output, 9, component_len as usize)?;
         stream_exact(component, output, component_len as usize)?;
-        write_prefix(output, 9, runtime_len as usize)?;
+        write_prefix(output, 10, runtime_len as usize)?;
         stream_exact(runtime, output, runtime_len as usize)?;
-        write_prefix(output, 10, cpu_provider_len as usize)?;
+        write_prefix(output, 11, cpu_provider_len as usize)?;
         stream_exact(cpu_provider, output, cpu_provider_len as usize)?;
-        write_prefix(output, 11, disk_health_provider_len as usize)?;
+        write_prefix(output, 12, disk_health_provider_len as usize)?;
         stream_exact(
             disk_health_provider,
             output,
             disk_health_provider_len as usize,
         )?;
-        write_prefix(output, 12, lifecycle_companion_len as usize)?;
+        write_prefix(output, 13, lifecycle_companion_len as usize)?;
         stream_exact(
             lifecycle_companion,
             output,
             lifecycle_companion_len as usize,
         )?;
-        write_prefix(output, 13, acquirer_len as usize)?;
+        write_prefix(output, 14, acquirer_len as usize)?;
         stream_exact(acquirer, output, acquirer_len as usize)
     }
 
@@ -271,13 +281,13 @@ impl Handoff {
         read_exact(input, &mut header)?;
         if header[..8] != MAGIC
             || u16::from_be_bytes([header[8], header[9]]) != SCHEMA_VERSION
-            || header[10] != 13
+            || header[10] != 14
             || header[11] != 0
         {
             return Err(HandoffError::InvalidHeader);
         }
-        let mut values: [Option<Vec<u8>>; 6] = std::array::from_fn(|_| None);
-        for expected in 1_u8..=6 {
+        let mut values: [Option<Vec<u8>>; 7] = std::array::from_fn(|_| None);
+        for expected in 1_u8..=7 {
             let (kind, length) = read_prefix(input)?;
             if kind != expected || length == 0 {
                 return Err(HandoffError::InvalidSection);
@@ -315,6 +325,10 @@ impl Handoff {
                 .next()
                 .flatten()
                 .ok_or(HandoffError::MissingSection)?,
+            lifecycle_authority_public_key: values
+                .next()
+                .flatten()
+                .ok_or(HandoffError::MissingSection)?,
         })
     }
 
@@ -322,7 +336,7 @@ impl Handoff {
     /// floor are verified/persisted. It consumes no component byte.
     pub fn read_enrollment(input: &mut impl Read) -> Result<Enrollment, HandoffError> {
         let (kind, length) = read_prefix(input)?;
-        if kind != 7 || length == 0 {
+        if kind != 8 || length == 0 {
             return Err(HandoffError::InvalidSection);
         }
         if length > MAX_ENROLLMENT_BYTES {
@@ -341,7 +355,7 @@ impl Handoff {
             return Err(HandoffError::TooLarge);
         }
         let (kind, length) = read_prefix(input)?;
-        if kind != 8 || length as u64 != expected_len {
+        if kind != 9 || length as u64 != expected_len {
             return Err(HandoffError::InvalidSection);
         }
         stream_exact(input, component_sink, length)
@@ -356,7 +370,7 @@ impl Handoff {
             return Err(HandoffError::TooLarge);
         }
         let (kind, length) = read_prefix(input)?;
-        if kind != 13 || length as u64 != expected_len {
+        if kind != 14 || length as u64 != expected_len {
             return Err(HandoffError::InvalidSection);
         }
         stream_exact(input, acquirer_sink, length)?;
@@ -373,7 +387,7 @@ impl Handoff {
         sink: &mut impl Write,
         expected_len: u64,
     ) -> Result<(), HandoffError> {
-        read_role_into(input, sink, expected_len, 9)
+        read_role_into(input, sink, expected_len, 10)
     }
 
     pub fn read_cpu_provider_into(
@@ -381,7 +395,7 @@ impl Handoff {
         sink: &mut impl Write,
         expected_len: u64,
     ) -> Result<(), HandoffError> {
-        read_role_into(input, sink, expected_len, 10)
+        read_role_into(input, sink, expected_len, 11)
     }
 
     pub fn read_disk_health_provider_into(
@@ -389,7 +403,7 @@ impl Handoff {
         sink: &mut impl Write,
         expected_len: u64,
     ) -> Result<(), HandoffError> {
-        read_role_into(input, sink, expected_len, 11)
+        read_role_into(input, sink, expected_len, 12)
     }
 
     pub fn read_lifecycle_companion_into(
@@ -397,7 +411,7 @@ impl Handoff {
         sink: &mut impl Write,
         expected_len: u64,
     ) -> Result<(), HandoffError> {
-        read_role_into(input, sink, expected_len, 12)
+        read_role_into(input, sink, expected_len, 13)
     }
 }
 fn read_role_into(
@@ -480,6 +494,7 @@ mod tests {
             manifest_signature: b"ms".to_vec(),
             signing_key: b"k".to_vec(),
             bundle_manifest: b"b".to_vec(),
+            lifecycle_authority_public_key: b"public-key".to_vec(),
         }
     }
     fn enrollment() -> Enrollment {

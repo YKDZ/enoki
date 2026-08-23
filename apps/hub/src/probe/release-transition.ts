@@ -227,6 +227,10 @@ export function verifiedReleaseTransitionFromMetadata(input: {
     sourceProbeVersion: sourceVersion!,
     sourceProbeSha256,
     targetAssetSetDigest,
+    targetBundles: assets.map(({ bundleManifestSha256, target }) => ({
+      bundleManifestSha256: String(bundleManifestSha256),
+      target: String(target),
+    })),
     targetProbeVersion: targetVersion!,
   };
 }
@@ -422,6 +426,12 @@ function verifiedTrustEpochMigrationTransition(input: {
     sourceProbeVersion: "0.1.74",
     sourceProbeSha256,
     targetAssetSetDigest: input.targetAssetSetDigest,
+    targetBundles: assetClosure(input.manifest.assets)!.map(
+      ({ bundleManifestSha256, target }) => ({
+        bundleManifestSha256: String(bundleManifestSha256),
+        target: String(target),
+      }),
+    ),
     targetProbeVersion: stringAt(input.contract, "target", "version")!,
   };
 }

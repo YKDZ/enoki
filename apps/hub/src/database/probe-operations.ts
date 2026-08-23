@@ -14,6 +14,10 @@ type ProbeOperationDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 const activeStates = ["pending", "accepted", "running"] as const;
 
 export type ProbeOperationRepository = {
+  admitPendingProbeUpgradeRequest: (
+    id: number,
+    nowMs: number,
+  ) => ProbeUpgradeRequest | null;
   createProbeUpgradeRequest: (
     operation: ProbeUpgradeRequest,
   ) => ProbeUpgradeRequest;
@@ -30,6 +34,22 @@ export function createProbeOperationRepository(
   database: ProbeOperationDatabase,
 ): ProbeOperationRepository {
   return {
+    admitPendingProbeUpgradeRequest(id, nowMs) {
+      const row = database
+        .update(probeOperations)
+        .set({
+          acceptedAtMs: nowMs,
+          runningAtMs: nowMs,
+          state: "running",
+          updatedAtMs: nowMs,
+        })
+        .where(
+          and(eq(probeOperations.id, id), eq(probeOperations.state, "pending")),
+        )
+        .returning()
+        .get();
+      return row ? rowToProbeUpgradeRequest(row) : null;
+    },
     createProbeUpgradeRequest(operation) {
       const row = database
         .insert(probeOperations)

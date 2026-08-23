@@ -119,6 +119,15 @@ export async function writeSignedProbeAssetSet(
     authority,
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
+    targetBundles: [
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+    ].map((target, index) => ({
+      bundleManifestSha256: String(index + 1).repeat(64),
+      target,
+    })),
     sourceProbeSha256: (
       trustEpoch?.sourceProbeComponents ?? sourceProbeComponents
     ).map(({ sha256 }: { sha256: string }) => sha256),

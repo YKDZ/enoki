@@ -17,8 +17,8 @@ use enoki_probe_bootstrap::{
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
     install::{
-        FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd, VerifiedUpgradeComponents,
-        upgrade_current_probe,
+        FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd, UpgradeAttempt,
+        VerifiedUpgradeComponents, upgrade_current_probe_for_operation,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
@@ -1503,7 +1503,9 @@ fn parse_probe_repair_failure_marker(
     if status != "failed"
         || !matches!(
             error_code,
-            "post_replacement_restart_failure" | "post_replacement_status_write_failure"
+            "post_replacement_restart_failure"
+                | "post_replacement_status_write_failure"
+                | "lifecycle_upgrade_repair_required"
         )
     {
         return Err(ProbeRepairRunError::FailureMarkerNotPostReplacement);
@@ -1775,10 +1777,10 @@ fn run_probe_compatible_upgrade(
     peer_uid: Option<u32>,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::HubUpgrade {
+        hub_origin,
         host_id: _,
         probe_id,
         operation_id,
-        operation_token: _,
         source_bundle_version,
         source_install_state_sha256,
         source_manifest_sha256,
@@ -1786,10 +1788,23 @@ fn run_probe_compatible_upgrade(
         target_asset_set_digest,
         target_manifest_sha256,
         verified_stage_sha256,
+        expires_at_ms,
+        authority_signature,
     } = request.authority()
     else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
+    if hub_origin != &metadata.hub_url
+        || verify_lifecycle_upgrade_authority(
+            request,
+            metadata,
+            *expires_at_ms,
+            authority_signature,
+        )
+        .is_err()
+    {
+        return LifecycleResponse::failed("lifecycle.invalid_authority");
+    }
     let Some(peer_uid) = peer_uid else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
@@ -1824,7 +1839,7 @@ fn run_probe_compatible_upgrade(
         return LifecycleResponse::failed("lifecycle.upgrade_stage_invalid");
     }
     let mut systemd = SystemSystemd::for_live_upgrade();
-    let result = upgrade_current_probe(
+    let result = upgrade_current_probe_for_operation(
         VerifiedUpgradeComponents {
             probe: &mut stage.probe,
             observation_runtime: &mut stage.observation_runtime,
@@ -1836,6 +1851,9 @@ fn run_probe_compatible_upgrade(
         },
         &stage.bundle,
         &expected_source,
+        &UpgradeAttempt {
+            operation_id: operation_id.clone(),
+        },
         &FixedInstallPaths::production(),
         &mut systemd,
     );
@@ -1855,6 +1873,69 @@ fn run_probe_compatible_upgrade(
             LifecycleResponse::failed("lifecycle.upgrade_failed_before_activation")
         }
     }
+}
+
+fn verify_lifecycle_upgrade_authority(
+    request: &LifecycleRequest,
+    metadata: &TrustedProbeInstallMetadata,
+    expires_at_ms: u64,
+    signature_hex: &str,
+) -> Result<(), ProbeUpgraderRunError> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ProbeUpgraderRunError::InvalidInstallMetadata("system clock is invalid"))?
+        .as_millis();
+    if now_ms > u128::from(expires_at_ms) {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "lifecycle authority expired",
+        ));
+    }
+    let public_key_pem = metadata
+        .lifecycle_authority_public_key_pem
+        .as_deref()
+        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "lifecycle authority public key is missing",
+        ))?;
+    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority public key is invalid")
+    })?;
+    let signature_bytes = decode_lower_hex(signature_hex).ok_or(
+        ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority signature is invalid"),
+    )?;
+    let signature = RsaPkcs1v15Signature::try_from(signature_bytes.as_slice()).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority signature is invalid")
+    })?;
+    let mut signed = b"enoki/lifecycle-upgrade-authority/v1\0".to_vec();
+    signed.extend_from_slice(&request.canonical_upgrade_authority_bytes().map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority is invalid")
+    })?);
+    VerifyingKey::<Sha256>::new(public_key)
+        .verify(&signed, &signature)
+        .map_err(|_| {
+            ProbeUpgraderRunError::InvalidInstallMetadata(
+                "lifecycle authority signature is invalid",
+            )
+        })
+}
+
+fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
+    if value.is_empty()
+        || value.len() % 2 != 0
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 fn run_probe_replacement_migration(
@@ -3479,6 +3560,8 @@ struct TrustedProbeInstallMetadata {
     install_state_sha256: Option<String>,
     target_manifest_sha256: Option<String>,
     bundle_version: Option<String>,
+    lifecycle_authority_public_key_pem: Option<String>,
+    lifecycle_authority_public_key_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3991,6 +4074,29 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
     } else {
         (None, None, None, None, None)
     };
+    let lifecycle_authority_public_key_pem =
+        optional_install_metadata_string(&value, "lifecycle_authority_public_key_pem")?;
+    let lifecycle_authority_public_key_sha256 =
+        optional_install_metadata_string(&value, "lifecycle_authority_public_key_sha256")?;
+    if (schema_version == 5 && lifecycle_authority_public_key_pem.is_none())
+        || (schema_version < 5 && lifecycle_authority_public_key_pem.is_some())
+        || lifecycle_authority_public_key_pem.is_some()
+            != lifecycle_authority_public_key_sha256.is_some()
+        || lifecycle_authority_public_key_sha256
+            .as_deref()
+            .is_some_and(|digest| !is_sha256_hex(digest))
+        || lifecycle_authority_public_key_pem
+            .as_deref()
+            .zip(lifecycle_authority_public_key_sha256.as_deref())
+            .is_some_and(|(pem, digest)| {
+                RsaPublicKey::from_public_key_pem(pem).is_err()
+                    || hex_sha256(pem.as_bytes()) != digest
+            })
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "lifecycle authority public key pin is invalid",
+        ));
+    }
 
     if service_name != "enoki-probe" {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -4050,6 +4156,8 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         install_state_sha256,
         target_manifest_sha256,
         bundle_version,
+        lifecycle_authority_public_key_pem,
+        lifecycle_authority_public_key_sha256,
     })
 }
 
@@ -4434,6 +4542,7 @@ fn execute_schema_three_probe_upgrade(
         manifest_signature: download_hub_asset(transport, hub_url, "manifest.json.sig")?,
         signing_key: download_hub_asset(transport, hub_url, "signing-key.pem")?,
         bundle_manifest: Vec::new(),
+        lifecycle_authority_public_key: Vec::new(),
     };
     if require_newer
         && operation.target_asset_set_digest
@@ -5892,6 +6001,87 @@ mod tests {
     };
     use std::{collections::HashMap, fs};
 
+    #[test]
+    fn compatible_upgrade_authority_is_verified_offline_with_the_pinned_hub_key() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("测试私钥");
+        let public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(Default::default())
+            .expect("测试公钥");
+        let unsigned = LifecycleRequest::hub_upgrade(
+            "https://hub.example",
+            "7",
+            "probe_01",
+            "operation_01",
+            "1.2.2",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+            &format!("sha256:{}", "c".repeat(64)),
+            &"d".repeat(64),
+            &"e".repeat(64),
+            u64::MAX,
+            "00",
+        )
+        .expect("未签authority结构有效");
+        let mut signed_bytes = b"enoki/lifecycle-upgrade-authority/v1\0".to_vec();
+        signed_bytes.extend_from_slice(
+            &unsigned
+                .canonical_upgrade_authority_bytes()
+                .expect("canonical authority"),
+        );
+        let signature = SigningKey::<Sha256>::new(private_key)
+            .sign_with_rng(&mut rng, &signed_bytes)
+            .to_vec()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let request = LifecycleRequest::hub_upgrade(
+            "https://hub.example",
+            "7",
+            "probe_01",
+            "operation_01",
+            "1.2.2",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+            &format!("sha256:{}", "c".repeat(64)),
+            &"d".repeat(64),
+            &"e".repeat(64),
+            u64::MAX,
+            &signature,
+        )
+        .expect("已签authority结构有效");
+        let temporary = tempfile::tempdir().expect("临时目录");
+        let mut metadata = trusted_install_metadata_for_hub(
+            "https://hub.example",
+            &temporary.path().join("enoki-probe"),
+            &temporary.path().join("operation-status"),
+            "f".repeat(64),
+        );
+        metadata.schema_version = 5;
+        metadata.lifecycle_authority_public_key_sha256 =
+            Some(hex_sha256(public_key_pem.as_bytes()));
+        metadata.lifecycle_authority_public_key_pem = Some(public_key_pem);
+
+        let LifecycleRequestAuthority::HubUpgrade {
+            expires_at_ms,
+            authority_signature,
+            ..
+        } = request.authority()
+        else {
+            panic!("expected upgrade authority");
+        };
+        verify_lifecycle_upgrade_authority(
+            &request,
+            &metadata,
+            *expires_at_ms,
+            authority_signature,
+        )
+        .expect("root离线验签");
+    }
+
     #[derive(Default)]
     struct RecordingValidationTransport {
         assets: HashMap<String, Vec<u8>>,
@@ -6438,6 +6628,12 @@ mod tests {
 
     #[test]
     fn probe_repair_failure_marker_requires_complete_post_replacement_evidence() {
+        let lifecycle_marker = parse_probe_repair_failure_marker(
+            "operation_id = \"operation_41\"\ntarget_probe_version = \"0.2.0\"\nstatus = \"failed\"\nerror_code = \"lifecycle_upgrade_repair_required\"\n",
+        )
+        .expect("schema 5 post-activation marker authorizes Repair");
+        assert_eq!(lifecycle_marker.target_probe_version, "0.2.0");
+
         for contents in [
             "not TOML",
             "operation_id = \"operation_41\"\nstatus = \"failed\"\n",
@@ -7093,6 +7289,8 @@ mod tests {
             install_state_sha256: None,
             target_manifest_sha256: None,
             bundle_version: None,
+            lifecycle_authority_public_key_pem: None,
+            lifecycle_authority_public_key_sha256: None,
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: bootstrap_config_path.clone(),
@@ -7217,6 +7415,8 @@ mod tests {
             install_state_sha256: None,
             target_manifest_sha256: None,
             bundle_version: None,
+            lifecycle_authority_public_key_pem: None,
+            lifecycle_authority_public_key_sha256: None,
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: identity_path,
@@ -7344,6 +7544,8 @@ mod tests {
             install_state_sha256: Some("b".repeat(64)),
             target_manifest_sha256: Some("c".repeat(64)),
             bundle_version: Some("1.2.3".to_owned()),
+            lifecycle_authority_public_key_pem: None,
+            lifecycle_authority_public_key_sha256: None,
         };
         let mut systemd = RecordingSystemdRunner {
             paths_required_during_identity_removal: vec![
@@ -7492,6 +7694,8 @@ mod tests {
             install_state_sha256: Some("b".repeat(64)),
             target_manifest_sha256: Some("c".repeat(64)),
             bundle_version: Some("1.2.3".to_owned()),
+            lifecycle_authority_public_key_pem: None,
+            lifecycle_authority_public_key_sha256: None,
         };
         write_test_bootstrap_config(&identity_path, &metadata).expect("identity config");
         let request = LifecycleRequest::hub_uninstall(
@@ -7800,6 +8004,8 @@ mod tests {
             install_state_sha256: None,
             target_manifest_sha256: None,
             bundle_version: None,
+            lifecycle_authority_public_key_pem: None,
+            lifecycle_authority_public_key_sha256: None,
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
@@ -8808,6 +9014,16 @@ mod tests {
                     "lifecycle_companion_socket_unit_path = \"{LIFECYCLE_COMPANION_SOCKET_UNIT_PATH}\"\nlifecycle_upgrade_service_unit_path = \"{LIFECYCLE_UPGRADE_SERVICE_UNIT_PATH}\"\nlifecycle_upgrade_socket_unit_path = \"{LIFECYCLE_UPGRADE_SOCKET_UNIT_PATH}\""
                 ),
             );
+        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).expect("lifecycle private key");
+        let public_key = private_key
+            .to_public_key()
+            .to_public_key_pem(Default::default())
+            .expect("lifecycle public key");
+        let schema_five = format!(
+            "{schema_five}\nlifecycle_authority_public_key_pem = {}\nlifecycle_authority_public_key_sha256 = {:?}\n",
+            toml_string(&public_key),
+            hex_sha256(public_key.as_bytes()),
+        );
         let metadata = parse_trusted_probe_install_metadata(&schema_five)
             .expect("schema five metadata closes over the Upgrade Companion units");
         assert_eq!(metadata.schema_version, 5);
@@ -10952,6 +11168,8 @@ printf '%s\n' '{}'
             install_state_sha256: None,
             target_manifest_sha256: None,
             bundle_version: None,
+            lifecycle_authority_public_key_pem: None,
+            lifecycle_authority_public_key_sha256: None,
         }
     }
 

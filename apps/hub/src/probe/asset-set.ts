@@ -41,6 +41,10 @@ export type VerifiedReleaseTransition = {
   sourceProbeVersion: string;
   sourceProbeSha256: string[];
   targetAssetSetDigest: string;
+  targetBundles?: ReadonlyArray<{
+    bundleManifestSha256: string;
+    target: string;
+  }>;
   targetProbeVersion: string;
 };
 

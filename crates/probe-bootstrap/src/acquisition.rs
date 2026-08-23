@@ -106,6 +106,7 @@ fn open_verified_probe_upgrade_stage_at(
         manifest_signature,
         signing_key,
         bundle_manifest,
+        lifecycle_authority_public_key: Vec::new(),
     };
     let trust = embedded_production_trust_for(BootstrapRole::Activator)
         .ok_or(AcquisitionFailure::BuildTrustUnavailable)?;
@@ -474,7 +475,41 @@ pub fn acquire_and_activate_from_environment(
         .map(PathBuf::from)
         .ok_or(AcquisitionFailure::Local)?;
     let mut acquired = acquire_local(&asset_dir, &archive_path, &policy)?;
+    acquired.handoff.lifecycle_authority_public_key =
+        fetch_lifecycle_authority_public_key(&hub_origin)?;
     acquired.launch_authenticated_activator(&enrollment)
+}
+
+fn fetch_lifecycle_authority_public_key(hub_origin: &str) -> Result<Vec<u8>, AcquisitionFailure> {
+    use rsa::pkcs8::DecodePublicKey;
+
+    let url = format!(
+        "{}/api/probe/lifecycle-authority-key",
+        hub_origin.trim_end_matches('/')
+    );
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(10))
+        .build()
+        .get(&url)
+        .call()
+        .map_err(|_| AcquisitionFailure::Local)?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(16 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AcquisitionFailure::Local)?;
+    if bytes.is_empty()
+        || bytes.len() > 16 * 1024
+        || std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|pem| rsa::RsaPublicKey::from_public_key_pem(pem).ok())
+            .is_none()
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    Ok(bytes)
 }
 
 fn read_enrollment_token(input: &mut impl Read) -> Result<String, AcquisitionFailure> {
@@ -794,6 +829,25 @@ pub fn remove_verified_probe_upgrade_stage(
         .map_err(|_| AcquisitionFailure::Local)
 }
 
+/// admission 失败时由创建者清理本次固定 stage。root 仍只能走独立的
+/// 激活后清理入口，避免把此函数变成可跨 uid 删除的权限面。
+pub fn discard_unadmitted_probe_upgrade_stage(
+    operation_id: &str,
+) -> Result<(), AcquisitionFailure> {
+    let owner_uid = unsafe { libc::geteuid() };
+    if owner_uid == 0 || !valid_stage_identifier(operation_id) {
+        return Err(AcquisitionFailure::RootRefused);
+    }
+    let root = Path::new(PROBE_UPGRADE_STAGE_ROOT);
+    let directory = root.join(operation_id);
+    validate_stage_directory(root, owner_uid)?;
+    validate_stage_directory(&directory, owner_uid)?;
+    fs::remove_dir_all(&directory).map_err(|_| AcquisitionFailure::Local)?;
+    File::open(root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| AcquisitionFailure::Local)
+}
+
 fn write_stage_bytes(
     directory: &Path,
     name: &str,
@@ -879,6 +933,7 @@ fn acquire_local(
         manifest_signature: read_local_metadata(asset_dir, "manifest.json.sig")?,
         signing_key: read_local_metadata(asset_dir, "signing-key.pem")?,
         bundle_manifest: Vec::new(),
+        lifecycle_authority_public_key: Vec::new(),
     };
     let outer =
         verify_outer_metadata(&provisional, policy).map_err(|_| AcquisitionFailure::Permanent)?;
@@ -1101,6 +1156,7 @@ fn acquire_once<T: Transport, P, C: Clock, R, S>(
             remaining_timeout(&dependencies.clock, deadline_at)?,
         )?,
         bundle_manifest: Vec::new(),
+        lifecycle_authority_public_key: Vec::new(),
     };
     let outer = verify_outer_metadata(&provisional, &request.policy)
         .map_err(|_| AcquisitionFailure::Permanent)?;

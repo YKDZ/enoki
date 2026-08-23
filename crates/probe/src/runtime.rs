@@ -43,6 +43,7 @@ use crate::{
     transport::{HttpAttemptError, post_protobuf},
 };
 use prost::Message;
+use serde::Deserialize;
 
 const REPORTING_WINDOW_TICKS: u64 = 3;
 type FinalizedObservationBatch = (
@@ -711,13 +712,41 @@ struct ProbeUpgradeAcquisitionInput<'a> {
     operation_token: &'a str,
     target_asset_set_digest: &'a str,
     target_probe_version: &'a str,
+    source_bundle_version: &'a str,
+    source_install_state_sha256: &'a str,
+    source_manifest_sha256: &'a str,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdmittedUpgradeAuthority {
+    schema_version: u16,
+    hub_origin: String,
+    host_id: String,
+    probe_id: String,
+    operation_id: String,
+    source_bundle_version: String,
+    source_install_state_sha256: String,
+    source_manifest_sha256: String,
+    target_bundle_version: String,
+    target_asset_set_digest: String,
+    target_manifest_sha256: String,
+    verified_stage_sha256: String,
+    expires_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpgradeStageAdmissionResponse {
+    authority: AdmittedUpgradeAuthority,
+    signature: String,
 }
 
 trait ProbeUpgradeAcquisitionPort {
     fn acquire(
         &mut self,
         input: ProbeUpgradeAcquisitionInput<'_>,
-    ) -> Result<enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt, &'static str>;
+    ) -> Result<UpgradeStageAdmissionResponse, &'static str>;
 }
 
 struct HttpProbeUpgradeAcquisition {
@@ -731,61 +760,8 @@ impl ProbeUpgradeAcquisitionPort for HttpProbeUpgradeAcquisition {
     fn acquire(
         &mut self,
         input: ProbeUpgradeAcquisitionInput<'_>,
-    ) -> Result<enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt, &'static str> {
-        let url = hub_url::endpoint(
-            &self.hub_origin,
-            &format!(
-                "/api/probe/operations/{}/token/validate",
-                input.operation_id
-            ),
-        )
-        .map_err(|_| "lifecycle.invalid_authority")?;
-        let body = serde_json::to_vec(&serde_json::json!({
-            "hostId": input.host_id,
-            "targetAssetSetDigest": input.target_asset_set_digest,
-            "targetProbeVersion": input.target_probe_version,
-            "token": input.operation_token,
-        }))
-        .map_err(|_| "lifecycle.invalid_authority")?;
-        let auth = ProbeRequestAuth {
-            probe_id: &self.probe_id,
-            probe_private_key_pem: &self.probe_private_key_pem,
-            server_time_offset_ms: self.server_time_offset_ms,
-        };
-        let headers = signed_probe_request_headers("POST", &url, &auth, &body)
-            .map_err(|_| "lifecycle.invalid_authority")?;
-        let agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout(Duration::from_secs(30))
-            .build();
-        let mut request = agent
-            .post(&url)
-            .set("accept", "application/json")
-            .set("content-type", "application/json");
-        for (name, value) in headers {
-            request = request.set(name, &value);
-        }
-        let response = request
-            .send_bytes(&body)
-            .map_err(|_| "lifecycle.authority_rejected")?;
-        if response.status() != 200 {
-            return Err("lifecycle.authority_rejected");
-        }
-        let mut response_bytes = Vec::new();
-        response
-            .into_reader()
-            .take(16 * 1024 + 1)
-            .read_to_end(&mut response_bytes)
-            .map_err(|_| "lifecycle.authority_rejected")?;
-        if response_bytes.len() > 16 * 1024
-            || serde_json::from_slice::<serde_json::Value>(&response_bytes)
-                .ok()
-                .and_then(|value| value.get("valid").and_then(serde_json::Value::as_bool))
-                != Some(true)
-        {
-            return Err("lifecycle.authority_rejected");
-        }
-        enoki_probe_bootstrap::acquisition::acquire_probe_upgrade_once(
+    ) -> Result<UpgradeStageAdmissionResponse, &'static str> {
+        let stage = enoki_probe_bootstrap::acquisition::acquire_probe_upgrade_once(
             enoki_probe_bootstrap::acquisition::ProbeUpgradeAcquisition {
                 hub_origin: self.hub_origin.clone(),
                 operation_id: input.operation_id.to_owned(),
@@ -798,7 +774,87 @@ impl ProbeUpgradeAcquisitionPort for HttpProbeUpgradeAcquisition {
                 "lifecycle.upgrade_candidate_invalid"
             }
             _ => "lifecycle.upgrade_acquisition_failed",
-        })
+        })?;
+        let admitted = (|| {
+            let url = hub_url::endpoint(
+                &self.hub_origin,
+                &format!(
+                    "/api/probe/operations/{}/upgrade-stage/admit",
+                    input.operation_id
+                ),
+            )
+            .map_err(|_| "lifecycle.invalid_authority")?;
+            let body = serde_json::to_vec(&serde_json::json!({
+                "sourceBundleVersion": input.source_bundle_version,
+                "sourceInstallStateSha256": input.source_install_state_sha256,
+                "sourceManifestSha256": input.source_manifest_sha256,
+                "targetAssetSetDigest": input.target_asset_set_digest,
+                "targetBundleVersion": stage.target_version,
+                "targetManifestSha256": stage.target_manifest_sha256,
+                "token": input.operation_token,
+                "verifiedStageSha256": stage.verified_stage_sha256,
+            }))
+            .map_err(|_| "lifecycle.invalid_authority")?;
+            let auth = ProbeRequestAuth {
+                probe_id: &self.probe_id,
+                probe_private_key_pem: &self.probe_private_key_pem,
+                server_time_offset_ms: self.server_time_offset_ms,
+            };
+            let headers = signed_probe_request_headers("POST", &url, &auth, &body)
+                .map_err(|_| "lifecycle.invalid_authority")?;
+            let agent = ureq::AgentBuilder::new()
+                .redirects(0)
+                .timeout(Duration::from_secs(30))
+                .build();
+            let mut request = agent
+                .post(&url)
+                .set("accept", "application/json")
+                .set("content-type", "application/json");
+            for (name, value) in headers {
+                request = request.set(name, &value);
+            }
+            let response = request
+                .send_bytes(&body)
+                .map_err(|_| "lifecycle.authority_rejected")?;
+            if response.status() != 200 {
+                return Err("lifecycle.authority_rejected");
+            }
+            let mut response_bytes = Vec::new();
+            response
+                .into_reader()
+                .take(16 * 1024 + 1)
+                .read_to_end(&mut response_bytes)
+                .map_err(|_| "lifecycle.authority_rejected")?;
+            if response_bytes.len() > 16 * 1024 {
+                return Err("lifecycle.authority_rejected");
+            }
+            let admitted: UpgradeStageAdmissionResponse =
+                serde_json::from_slice(&response_bytes)
+                    .map_err(|_| "lifecycle.authority_rejected")?;
+            if admitted.authority.schema_version != 1
+                || admitted.authority.hub_origin != self.hub_origin
+                || admitted.authority.host_id != input.host_id
+                || admitted.authority.probe_id != self.probe_id
+                || admitted.authority.operation_id != input.operation_id
+                || admitted.authority.source_bundle_version != input.source_bundle_version
+                || admitted.authority.source_install_state_sha256
+                    != input.source_install_state_sha256
+                || admitted.authority.source_manifest_sha256 != input.source_manifest_sha256
+                || admitted.authority.target_bundle_version != stage.target_version
+                || admitted.authority.target_asset_set_digest != stage.target_asset_set_digest
+                || admitted.authority.target_manifest_sha256 != stage.target_manifest_sha256
+                || admitted.authority.verified_stage_sha256 != stage.verified_stage_sha256
+            {
+                return Err("lifecycle.authority_rejected");
+            }
+            Ok(admitted)
+        })();
+        if admitted.is_err() {
+            let _ = enoki_probe_bootstrap::acquisition::discard_unadmitted_probe_upgrade_stage(
+                input.operation_id,
+            );
+        }
+        admitted
     }
 }
 
@@ -808,7 +864,7 @@ impl ProbeUpgradeAcquisitionPort for DisabledProbeUpgradeAcquisition {
     fn acquire(
         &mut self,
         _: ProbeUpgradeAcquisitionInput<'_>,
-    ) -> Result<enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt, &'static str> {
+    ) -> Result<UpgradeStageAdmissionResponse, &'static str> {
         Err("lifecycle.install_receipt_missing")
     }
 }
@@ -861,7 +917,7 @@ impl ProbeOperationRunner for LifecycleCompanionOperationRunner {
         &mut self,
         input: ProbeUpgradeRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome {
-        let Some((probe_id, install_state, source_manifest, source_version)) = self
+        let Some((_probe_id, install_state, source_manifest, source_version)) = self
             .probe_id
             .as_deref()
             .zip(self.install_state_sha256.as_deref())
@@ -876,7 +932,7 @@ impl ProbeOperationRunner for LifecycleCompanionOperationRunner {
         if source_version != input.operation.current_probe_version {
             return lifecycle_companion_failure("lifecycle.authority_mismatch");
         }
-        let stage = match self
+        let admitted = match self
             .upgrade_acquisition
             .acquire(ProbeUpgradeAcquisitionInput {
                 host_id: input.operation.host_id,
@@ -884,22 +940,27 @@ impl ProbeOperationRunner for LifecycleCompanionOperationRunner {
                 operation_token: input.stdin,
                 target_asset_set_digest: input.operation.target_asset_set_digest,
                 target_probe_version: input.operation.target_probe_version,
+                source_bundle_version: source_version,
+                source_install_state_sha256: install_state,
+                source_manifest_sha256: source_manifest,
             }) {
             Ok(stage) => stage,
             Err(code) => return lifecycle_companion_failure(code),
         };
         let Ok(request) = LifecycleRequest::hub_upgrade(
-            input.operation.host_id,
-            probe_id,
-            input.operation.operation_id,
-            input.stdin,
-            source_version,
-            install_state,
-            source_manifest,
-            &stage.target_version,
-            &stage.target_asset_set_digest,
-            &stage.target_manifest_sha256,
-            &stage.verified_stage_sha256,
+            &admitted.authority.hub_origin,
+            &admitted.authority.host_id,
+            &admitted.authority.probe_id,
+            &admitted.authority.operation_id,
+            &admitted.authority.source_bundle_version,
+            &admitted.authority.source_install_state_sha256,
+            &admitted.authority.source_manifest_sha256,
+            &admitted.authority.target_bundle_version,
+            &admitted.authority.target_asset_set_digest,
+            &admitted.authority.target_manifest_sha256,
+            &admitted.authority.verified_stage_sha256,
+            admitted.authority.expires_at_ms,
+            &admitted.signature,
         ) else {
             return lifecycle_companion_failure("lifecycle.invalid_authority");
         };
@@ -1081,21 +1142,29 @@ mod operation_report_tests {
         fn acquire(
             &mut self,
             input: ProbeUpgradeAcquisitionInput<'_>,
-        ) -> Result<enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt, &'static str>
-        {
+        ) -> Result<UpgradeStageAdmissionResponse, &'static str> {
             assert_eq!(input.host_id, "7");
             assert_eq!(input.operation_id, "operation_01");
             assert_eq!(input.operation_token, "operation-token");
             assert_eq!(input.target_probe_version, "1.2.3");
-            Ok(
-                enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt {
+            Ok(UpgradeStageAdmissionResponse {
+                authority: AdmittedUpgradeAuthority {
+                    schema_version: 1,
+                    hub_origin: "https://hub.example".to_owned(),
+                    host_id: input.host_id.to_owned(),
+                    probe_id: "probe_01".to_owned(),
                     operation_id: input.operation_id.to_owned(),
+                    source_bundle_version: input.source_bundle_version.to_owned(),
+                    source_install_state_sha256: input.source_install_state_sha256.to_owned(),
+                    source_manifest_sha256: input.source_manifest_sha256.to_owned(),
+                    target_bundle_version: input.target_probe_version.to_owned(),
                     target_asset_set_digest: input.target_asset_set_digest.to_owned(),
                     target_manifest_sha256: "d".repeat(64),
-                    target_version: input.target_probe_version.to_owned(),
                     verified_stage_sha256: "e".repeat(64),
+                    expires_at_ms: 1_800_000_000_000,
                 },
-            )
+                signature: "signed-authority".to_owned(),
+            })
         }
     }
 
@@ -2601,6 +2670,86 @@ mod tests {
         assert!(matches!(error, ProbeRunError::Notify(_)));
         assert!(!error.is_permanent_report_failure());
         assert_eq!(transport.report_attempts.len(), 1);
+    }
+
+    #[test]
+    fn restarted_probe_hands_off_local_upgrade_status_without_relaunching_operation() {
+        struct MustNotRun;
+        impl ProbeOperationRunner for MustNotRun {
+            fn run_probe_upgrade(
+                &mut self,
+                _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                panic!("terminal handoff must not reacquire or relaunch Upgrade")
+            }
+
+            fn run_probe_uninstall(
+                &mut self,
+                _input: ProbeUninstallRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                panic!("terminal handoff must not launch another operation")
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        let status_path = temporary.path().join("probe-operation-status.toml");
+        fs::write(
+            &status_path,
+            "operation_id = \"41\"\ntarget_probe_version = \"1.2.4\"\nstatus = \"running\"\n",
+        )
+        .expect("operation status");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                &format!("operation_status_path = {:?}", status_path),
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+        let mut transport = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses: VecDeque::from([Ok(ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1,
+            }
+            .encode_to_vec())]),
+        };
+
+        run_probe_with_loop_control_and_runner_factory(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(1),
+            },
+            |_config, _path| MustNotRun,
+        )
+        .expect("startup handoff succeeds");
+
+        let report = ProbeReportRequest::decode(transport.report_attempts[0].as_slice())
+            .expect("startup report decodes");
+        assert!(matches!(
+            report.operation_statuses.as_slice(),
+            [ProbeOperationStatus {
+                operation_id,
+                status: Some(Status::Running(_)),
+            }] if operation_id == "41"
+        ));
     }
 
     #[test]
