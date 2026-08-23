@@ -8124,8 +8124,11 @@ printf '%s\n' '{}'
         let provider = b"new provider".to_vec();
         let disk_health_provider = b"new disk health provider".to_vec();
         let acquirer = b"acquirer".to_vec();
-        let target_units = enoki_probe_bootstrap::install::fixed_observation_unit_contents()
-            .map(|unit| [unit, b"# target-version-integration\n"].concat());
+        let target_units =
+            enoki_probe_bootstrap::install::fixed_observation_unit_contents().map(|mut unit| {
+                unit.extend_from_slice(b"# target-version-integration\n");
+                unit
+            });
         let mut integration = b"enoki.observation-integration.v1\n".to_vec();
         for unit in &target_units {
             integration.extend_from_slice(unit.len().to_string().as_bytes());
@@ -8140,7 +8143,7 @@ printf '%s\n' '{}'
         )
         .into_bytes();
         let bundle_manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v3\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v1\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v2\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v2\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v4\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v2\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
             hex_sha256(&acquirer),
             acquirer.len(),
             hex_sha256(&activator),

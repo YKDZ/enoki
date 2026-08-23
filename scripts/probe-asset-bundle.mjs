@@ -7,22 +7,22 @@
 export const probeBundleComponentProfiles = Object.freeze({
   probe: Object.freeze({
     path: "enoki-probe",
-    permissionProfile: "probe-v1",
+    permissionProfile: "probe-v2",
     resourceContract: "hub-reporting-v1",
   }),
   "observation-runtime": Object.freeze({
     path: "enoki-observation-runtime",
-    permissionProfile: "observation-runtime-v1",
+    permissionProfile: "observation-runtime-v2",
     resourceContract: "official-observation-v2",
   }),
   "system-state-provider": Object.freeze({
     path: "enoki-cpu-resource-provider",
-    permissionProfile: "system-state-provider-v3",
+    permissionProfile: "system-state-provider-v4",
     resourceContract: "system-state-v3",
   }),
   "disk-health-provider": Object.freeze({
     path: "enoki-disk-health-resource-provider",
-    permissionProfile: "disk-health-provider-v1",
+    permissionProfile: "disk-health-provider-v2",
     resourceContract: "disk-health-v1",
   }),
 });

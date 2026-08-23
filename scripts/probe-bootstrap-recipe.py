@@ -38,7 +38,7 @@ TARGETS = (
     "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
 )
 EXPECTED_ROLES = {
-    "probe": ("enoki-probe", "probe-v1"),
+    "probe": ("enoki-probe", "probe-v2"),
     "bootstrap-acquirer": ("bootstrap/enoki-probe-bootstrap-acquire", "bootstrap-acquirer-v1"),
     "bootstrap-activator": ("bootstrap/enoki-probe-bootstrap-activate", "bootstrap-activator-v1"),
 }

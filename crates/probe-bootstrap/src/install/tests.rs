@@ -599,6 +599,151 @@ mod tests {
     }
 
     #[test]
+    fn signed_execution_roles_render_the_closed_systemd_policy_floor() {
+        let role_units = fixed_execution_role_units();
+        assert_eq!(
+            role_units.each_ref().map(|(profile, _)| *profile),
+            [
+                "probe-v2",
+                "observation-runtime-v2",
+                "system-state-provider-v4",
+                "disk-health-provider-v2",
+            ],
+        );
+        for (role, unit) in &role_units {
+            let unit = std::str::from_utf8(unit).expect("canonical unit 为 UTF-8");
+            for property in [
+                "NoNewPrivileges=true",
+                "CapabilityBoundingSet=",
+                "AmbientCapabilities=",
+                "PrivateTmp=true",
+                "ProtectSystem=strict",
+                "ProtectControlGroups=true",
+                "ProtectKernelTunables=true",
+                "ProtectKernelModules=true",
+                "ProtectKernelLogs=true",
+                "ProtectClock=true",
+                "RestrictSUIDSGID=true",
+                "RestrictRealtime=true",
+                "RestrictNamespaces=true",
+                "LockPersonality=true",
+                "MemoryDenyWriteExecute=true",
+                "SystemCallArchitectures=native",
+                "SystemCallFilter=@system-service",
+                "TasksMax=64",
+                "UMask=0077",
+            ] {
+                assert!(unit.contains(property), "{role} 缺少 {property}");
+            }
+            assert!(unit.contains("MemoryMax="), "{role} 缺少内存上限");
+        }
+
+        for unit in [service_unit(), observation_runtime_unit(), cpu_provider_unit()] {
+            assert!(unit.contains("PrivateDevices=true"));
+        }
+        for provider in [cpu_provider_unit(), disk_health_provider_unit()] {
+            assert!(provider.contains(
+                "SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self"
+            ));
+        }
+        let disk_health = disk_health_provider_unit();
+        assert!(disk_health.contains("DevicePolicy=closed"));
+        assert!(disk_health.contains("DeviceAllow=block-* rw"));
+        assert!(!disk_health.contains("PrivateDevices=true"));
+    }
+
+    #[test]
+    fn fixed_provider_role_closure_bounds_each_activation_and_the_global_total() {
+        let sockets = [
+            (
+                cpu_provider_socket_unit(),
+                "Service=enoki-cpu-resource-provider@.service",
+                "TriggerLimitIntervalSec=10s",
+                "TriggerLimitBurst=12",
+            ),
+            (
+                disk_health_provider_socket_unit(),
+                "Service=enoki-disk-health-resource-provider@.service",
+                "TriggerLimitIntervalSec=60s",
+                "TriggerLimitBurst=2",
+            ),
+        ];
+        assert_eq!(sockets.len(), 2, "签名角色闭包固定全局最多两个 Provider 实例");
+        for (socket, service, interval, burst) in sockets {
+            for property in [
+                "Accept=true",
+                "SocketMode=0660",
+                "SocketUser=root",
+                "SocketGroup=enoki-observation-ipc",
+                "MaxConnections=1",
+                "MaxConnectionsPerSource=1",
+                "Backlog=1",
+                service,
+                interval,
+                burst,
+            ] {
+                assert!(socket.contains(property), "Provider socket 缺少 {property}");
+            }
+        }
+        for service in [cpu_provider_unit(), disk_health_provider_unit()] {
+            for property in [
+                "RuntimeMaxSec=",
+                "TimeoutStartSec=",
+                "TimeoutStopSec=1s",
+                "KillMode=control-group",
+                "SendSIGKILL=yes",
+                "OOMPolicy=kill",
+            ] {
+                assert!(service.contains(property), "Provider service 缺少 {property}");
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_roles_expose_only_their_declared_transport_and_resource_surfaces() {
+        let probe = service_unit();
+        assert!(probe.contains("Requires=enoki-observation-runtime.socket\n"));
+        assert!(!probe.contains("Requires=enoki-cpu-resource-provider.socket"));
+        assert!(probe.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
+        assert!(probe.contains("ReadWritePaths=/var/lib/enoki-probe"));
+        for control_path in [
+            "-/run/systemd/private",
+            "-/run/systemd/system",
+            "-/run/dbus/system_bus_socket",
+        ] {
+            assert!(probe.contains(control_path));
+        }
+
+        let runtime = observation_runtime_unit();
+        assert!(runtime.contains("PrivateNetwork=true"));
+        assert!(runtime.contains("RestrictAddressFamilies=AF_UNIX"));
+        assert!(runtime.contains("IPAddressDeny=any"));
+        assert!(runtime.contains("/var/lib/enoki-probe/identity"));
+        assert!(runtime.contains("SupplementaryGroups=enoki-observation-ipc"));
+
+        let system_state = cpu_provider_unit();
+        assert!(system_state.contains("CapabilityBoundingSet=\n"));
+        assert!(system_state.contains("RestrictAddressFamilies=AF_NETLINK"));
+        assert!(system_state.contains("ReadOnlyPaths=/proc/stat"));
+        assert!(!system_state.contains("DeviceAllow=block-*"));
+
+        let disk_health = disk_health_provider_unit();
+        assert!(disk_health.contains("CapabilityBoundingSet=CAP_SYS_RAWIO"));
+        assert!(disk_health.contains("RestrictAddressFamilies=\n"));
+        assert!(disk_health.contains("BindReadOnlyPaths=-/usr/sbin/smartctl"));
+        assert!(!disk_health.contains("ReadOnlyPaths=/proc/stat"));
+
+        assert!(observation_runtime_socket_unit().contains("SocketGroup=enoki-probe"));
+        for socket in [
+            cpu_provider_socket_unit(),
+            disk_health_provider_socket_unit(),
+        ] {
+            assert!(socket.contains("SocketGroup=enoki-observation-ipc"));
+            assert!(socket.contains("SocketMode=0660"));
+        }
+    }
+
+    #[test]
     fn schema_three_omits_the_retired_operation_launcher_and_authority_path() {
         let config = bootstrap_config(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
@@ -705,6 +850,31 @@ mod tests {
             .path()
             .join("etc/sudoers.d/enoki-probe-operations")
             .exists());
+
+        let installed_probe_unit = fs::read(
+            temporary
+                .path()
+                .join("etc/systemd/system/enoki-probe.service"),
+        )
+        .unwrap();
+        assert_eq!(installed_probe_unit, fixed_execution_role_units()[0].1);
+        for (name, expected) in [
+            "enoki-observation-runtime.service",
+            "enoki-observation-runtime.socket",
+            "enoki-cpu-resource-provider@.service",
+            "enoki-cpu-resource-provider.socket",
+            "enoki-disk-health-resource-provider@.service",
+            "enoki-disk-health-resource-provider.socket",
+        ]
+        .into_iter()
+        .zip(fixed_observation_unit_contents())
+        {
+            assert_eq!(
+                fs::read(temporary.path().join("etc/systemd/system").join(name)).unwrap(),
+                expected,
+                "fresh install 必须发布 canonical {name}",
+            );
+        }
     }
 
     #[test]

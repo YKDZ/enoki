@@ -11,6 +11,10 @@ mod systemd;
 mod transaction;
 
 use crate::{
+    bundle_role::{
+        DISK_HEALTH_PERMISSION_PROFILE, OBSERVATION_RUNTIME_PERMISSION_PROFILE,
+        PROBE_PERMISSION_PROFILE, SYSTEM_STATE_PERMISSION_PROFILE,
+    },
     handoff::Enrollment,
     trust::{BootstrapRole, BuildTrust},
     verifier::VerifiedBundle,
@@ -811,17 +815,20 @@ fn activate_current_probe_with_observation_files(
                 (paths.observation_runtime_unit(), observation_runtime_unit()),
                 (
                     paths.observation_runtime_socket_unit(),
-                    observation_runtime_socket_unit(),
+                    observation_runtime_socket_unit().to_owned(),
                 ),
                 (paths.cpu_provider_unit(), cpu_provider_unit()),
-                (paths.cpu_provider_socket_unit(), cpu_provider_socket_unit()),
+                (
+                    paths.cpu_provider_socket_unit(),
+                    cpu_provider_socket_unit().to_owned(),
+                ),
                 (
                     paths.disk_health_provider_unit(),
                     disk_health_provider_unit(),
                 ),
                 (
                     paths.disk_health_provider_socket_unit(),
-                    disk_health_provider_socket_unit(),
+                    disk_health_provider_socket_unit().to_owned(),
                 ),
             ])
             .into_iter()
@@ -1242,43 +1249,73 @@ fn install_metadata(
     )
 }
 
-fn service_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+// 所有执行角色先继承同一拒绝优先下限，再声明各自确需的资源面。
+const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabilities=\nPrivateTmp=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nRestrictRealtime=true\nRestrictNamespaces=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nKeyringMode=private\nSystemCallArchitectures=native\nSystemCallFilter=@system-service\nTasksMax=64\nUMask=0077\n";
+
+fn service_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
 }
 
 fn observation_runtime_socket_unit() -> &'static str {
     "[Unit]\nDescription=Enoki Observation Runtime socket\n\n[Socket]\nListenStream=/run/enoki-observation-runtime.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
-fn observation_runtime_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nPrivateNetwork=true\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictAddressFamilies=AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release\n"
+fn observation_runtime_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=simple\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release /var/lib/enoki-probe/identity -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket\n"
+    )
 }
 
 fn cpu_provider_socket_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nMaxConnections=1\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=12\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+    "[Unit]\nDescription=Enoki CPU Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-cpu-resource-provider.sock\nAccept=true\nService=enoki-cpu-resource-provider@.service\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nBacklog=1\nMaxConnections=1\nMaxConnectionsPerSource=1\nTriggerLimitIntervalSec=10s\nTriggerLimitBurst=12\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
-fn cpu_provider_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki one-shot System State Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateDevices=true\nRestrictAddressFamilies=AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nPrivateTmp=true\nProtectHome=read-only\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=ptraceable\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
+fn cpu_provider_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Enoki one-shot System State Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStartSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=read-only\nProtectProc=ptraceable\nMemoryMax=256M\nRestrictAddressFamilies=AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
+    )
 }
 
 fn disk_health_provider_socket_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Disk Health Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-disk-health-resource-provider.sock\nAccept=true\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nMaxConnections=1\nTriggerLimitIntervalSec=60s\nTriggerLimitBurst=2\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+    "[Unit]\nDescription=Enoki Disk Health Resource Provider socket\n\n[Socket]\nListenStream=/run/enoki-disk-health-resource-provider.sock\nAccept=true\nService=enoki-disk-health-resource-provider@.service\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-observation-ipc\nBacklog=1\nMaxConnections=1\nMaxConnectionsPerSource=1\nTriggerLimitIntervalSec=60s\nTriggerLimitBurst=2\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
-fn disk_health_provider_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki one-shot Disk Health Resource Provider\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-disk-health-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=10s\nTimeoutStopSec=1s\nKillMode=control-group\nNoNewPrivileges=true\nCapabilityBoundingSet=CAP_SYS_RAWIO\nAmbientCapabilities=\nDevicePolicy=closed\nDeviceAllow=block-* rw\nRestrictAddressFamilies=\nIPAddressDeny=any\nSocketBindDeny=any\nPrivateTmp=true\nProtectHome=true\nProtectSystem=strict\nProtectControlGroups=true\nProtectKernelTunables=true\nProtectKernelModules=true\nProtectKernelLogs=true\nProtectClock=true\nRestrictSUIDSGID=true\nLockPersonality=true\nMemoryDenyWriteExecute=true\nProtectProc=invisible\nInaccessiblePaths=/boot /home /media /mnt /opt /root /srv\nBindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl -/var/local/emhttp/disks.ini\n"
+fn disk_health_provider_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Enoki one-shot Disk Health Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-disk-health-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=10s\nTimeoutStartSec=10s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=CAP_SYS_RAWIO\nDevicePolicy=closed\nDeviceAllow=block-* rw\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=128M\nRestrictAddressFamilies=\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/boot /home /media /mnt /opt /root /srv\nBindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl -/var/local/emhttp/disks.ini\n"
+    )
+}
+
+/// 签名 permission profile 到 canonical execution unit 的构建期固定映射。
+pub fn fixed_execution_role_units() -> [(&'static str, Vec<u8>); 4] {
+    [
+        (PROBE_PERMISSION_PROFILE, service_unit().into_bytes()),
+        (
+            OBSERVATION_RUNTIME_PERMISSION_PROFILE,
+            observation_runtime_unit().into_bytes(),
+        ),
+        (
+            SYSTEM_STATE_PERMISSION_PROFILE,
+            cpu_provider_unit().into_bytes(),
+        ),
+        (
+            DISK_HEALTH_PERMISSION_PROFILE,
+            disk_health_provider_unit().into_bytes(),
+        ),
+    ]
 }
 
 /// Upgrader 与首次安装共享的固定 systemd integration assets。
-pub fn fixed_observation_unit_contents() -> [&'static [u8]; 6] {
+pub fn fixed_observation_unit_contents() -> [Vec<u8>; 6] {
     [
-        observation_runtime_unit().as_bytes(),
-        observation_runtime_socket_unit().as_bytes(),
-        cpu_provider_unit().as_bytes(),
-        cpu_provider_socket_unit().as_bytes(),
-        disk_health_provider_unit().as_bytes(),
-        disk_health_provider_socket_unit().as_bytes(),
+        observation_runtime_unit().into_bytes(),
+        observation_runtime_socket_unit().as_bytes().to_vec(),
+        cpu_provider_unit().into_bytes(),
+        cpu_provider_socket_unit().as_bytes().to_vec(),
+        disk_health_provider_unit().into_bytes(),
+        disk_health_provider_socket_unit().as_bytes().to_vec(),
     ]
 }
 
@@ -1288,7 +1325,7 @@ pub fn render_observation_integration_v1() -> Vec<u8> {
     for unit in fixed_observation_unit_contents() {
         output.extend_from_slice(unit.len().to_string().as_bytes());
         output.push(b'\n');
-        output.extend_from_slice(unit);
+        output.extend_from_slice(&unit);
     }
     output
 }

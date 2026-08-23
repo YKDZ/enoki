@@ -1,6 +1,7 @@
 //! Offline trust verification.  Archive parsing is exposed only to the
 //! unprivileged acquisition module; root activation verifies metadata and the
 //! component bytes, never a compressed archive.
+use crate::bundle_role::BUNDLE_COMPONENTS;
 use crate::handoff::Handoff;
 #[cfg(feature = "acquirer")]
 use flate2::bufread::GzDecoder;
@@ -22,27 +23,6 @@ use tar::Archive;
 
 const DELEGATION_DOMAIN: &[u8] = b"enoki/probe-trust-delegation/v1\0";
 const MAX_BUNDLE_MANIFEST_BYTES: usize = 256 * 1024;
-const BUNDLE_COMPONENTS: [(&str, &str, &str, &str); 4] = [
-    ("enoki-probe", "probe-v1", "hub-reporting-v1", "probe"),
-    (
-        "enoki-observation-runtime",
-        "observation-runtime-v1",
-        "official-observation-v2",
-        "observation-runtime",
-    ),
-    (
-        "enoki-cpu-resource-provider",
-        "system-state-provider-v3",
-        "system-state-v3",
-        "system-state-provider",
-    ),
-    (
-        "enoki-disk-health-resource-provider",
-        "disk-health-provider-v1",
-        "disk-health-v1",
-        "disk-health-provider",
-    ),
-];
 pub const MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
 const BUNDLED_BOOTSTRAP_ASSETS: [(&str, &str, &str); 2] = [
     (
@@ -82,7 +62,7 @@ impl VerifiedBundle {
     pub fn delegation_generation(&self) -> u64 {
         self.delegation_generation
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "activator"))]
     pub(crate) fn with_test_observation_receipts(mut self, size: u64) -> Self {
         for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
             if matches!(
@@ -1107,7 +1087,7 @@ mod tests {
         let disk_health_provider = b"disk-health-provider".to_vec();
         let acquirer = b"acquirer".to_vec();
         let activator = b"activator".to_vec();
-        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v3\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v1\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len(),sha256_hex(&disk_health_provider),disk_health_provider.len()).into_bytes();
+        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v2\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v2\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v4\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v2\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len(),sha256_hex(&disk_health_provider),disk_health_provider.len()).into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
         let mut tar = Builder::new(gzip);
         for (name, data, kind) in [
@@ -1242,7 +1222,7 @@ mod tests {
             target: TARGET.to_owned(),
         };
         let manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v1\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v1\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v3\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v1\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v2\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v2\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v4\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v2\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
             "1".repeat(64),
             "2".repeat(64),
             "3".repeat(64),
@@ -1257,6 +1237,13 @@ mod tests {
         assert!(
             verify_bundle_manifest(mixed_contract.as_bytes(), "1.2.3", &asset, 1).is_err(),
             "a current manifest must reject the legacy CPU-only provider contract",
+        );
+        let mixed_permission_profile =
+            manifest.replace("system-state-provider-v4", "system-state-provider-v3");
+        assert!(
+            verify_bundle_manifest(mixed_permission_profile.as_bytes(), "1.2.3", &asset, 1)
+                .is_err(),
+            "当前清单不得接受旧 Provider sandbox profile",
         );
     }
 

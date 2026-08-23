@@ -70,7 +70,7 @@ Enoki 的安全边界尽量保持简单：
 - 常驻探针不以 root 运行，也不直接读取设备事实或执行 `smartctl`。Observation Runtime 只通过构建期固定的本机 Resource Provider 合同取得结果；Hub、管理员、探针配置、主机概况或指标上报都不能传入路径、命令、参数、权限配置或采集器列表
 - Observation Runtime 独占官方采集器的固定注册、调度、指标计算、delta 状态和有界结果；常驻探针只请求完整观测窗口，按已验证配置筛选已完成字段并沿认证上报路径转发。新安装不会创建已退役的采集 helper sudoers
 - System State Provider 与 Disk Health Provider 是相互独立的一次性 systemd socket 激活进程。两者都有固定调用者身份、激活预算、运行期限和有界 typed response；Disk Health Provider 还使用固定 `smartctl` 绝对候选路径和参数，清空继承环境并仅设置固定的 `LANG=C`，同时固定工作目录以及子进程超时与回收合同
-- Provider 的生产 unit 从 deny-first 配置派生，限制 capability、设备、地址族、文件系统视图和进程视图；文件读取还由构建期固定的 Landlock allowlist 约束。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；当前版本不支持本机升级、修复和卸载
+- 探针、观测进程和两类采集进程的生产 unit 使用与签名角色一致的固定最小权限配置，限制 capability、设备、网络、文件系统、进程视图、命名空间、系统调用、任务数、内存和文件创建权限。两类采集进程还受固定并发、激活速率、执行期限和完整进程组清理约束，文件读取另由构建期固定的 Landlock allowlist 限制。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；当前版本不支持本机升级、修复和卸载
 
 ## 部署
 

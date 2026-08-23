@@ -6,6 +6,7 @@
 pub mod acquisition;
 #[cfg(feature = "activator")]
 pub mod activation;
+mod bundle_role;
 pub mod generation;
 pub mod handoff;
 #[cfg(feature = "activator")]
