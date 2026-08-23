@@ -1,4 +1,9 @@
-use std::{fs, path::Path, time::Duration};
+use std::{
+    fs,
+    path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -159,6 +164,21 @@ impl ObservationWindowClient for ChangingHostProfileObservationRuntime {
             ..host_profile_with_disk_capability(true)
         });
         Ok(result)
+    }
+}
+
+struct UnavailableObservationRuntime {
+    calls: AtomicUsize,
+}
+
+impl ObservationWindowClient for UnavailableObservationRuntime {
+    fn request_finalized_window(
+        &self,
+        _cadence: Duration,
+        _sequence_start: u64,
+    ) -> Result<ObservationWindowResult, ObservationClientError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Err(ObservationClientError::Unavailable)
     }
 }
 
@@ -1444,6 +1464,68 @@ fn probe_run_loop_uses_a_derived_three_sample_reporting_window_at_one_second_col
             .collect::<Vec<_>>(),
         vec![2, 3, 4],
     );
+}
+
+#[test]
+fn unavailable_runtime_advances_one_sequence_and_waits_before_the_next_window() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 2",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response(1, false),
+            report_response(2, false),
+            report_response(3, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+    let runtime = UnavailableObservationRuntime {
+        calls: AtomicUsize::new(0),
+    };
+
+    run_probe_with_loop_control_and_observation_client(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(3),
+        },
+        &runtime,
+    )
+    .expect("Runtime failure keeps the reporting channel alive");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reports
+            .iter()
+            .map(|report| (report.sequence_start, report.sequence_end))
+            .collect::<Vec<_>>(),
+        [(1, 1), (2, 2), (3, 3)]
+    );
+    for failure in &reports[1..] {
+        assert!(failure.metrics.is_empty());
+        assert!(failure.cpu_resource_collection_outcomes.is_empty());
+        assert!(failure.observation_window_failure.is_some());
+    }
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(sleeper.observed_sleeps, [Duration::from_secs(2)]);
 }
 
 #[test]

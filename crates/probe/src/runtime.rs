@@ -509,19 +509,16 @@ fn run_reporting_loop(
                 None,
             ),
             Err(error) => {
-                // Runtime failure closes the same elapsed three-tick window;
-                // it must not allocate a fourth timestamp-free observation.
-                let sequence_start = sequence
-                    .saturating_sub(REPORTING_WINDOW_TICKS)
-                    .saturating_add(1);
+                let failure_sequence = sequence.saturating_add(1);
+                sequence = failure_sequence;
                 let reason = match error {
                     ObservationClientError::BundleIncoherent => crate::protocol::enoki::v1::ObservationWindowFailureReason::ProbeAssetBundleIncoherent,
                     ObservationClientError::Unavailable => crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeUnavailable,
                     ObservationClientError::InvalidRequest | ObservationClientError::InvalidResponse | ObservationClientError::WindowFailed => crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeInvalidResponse,
                 };
                 (
-                    sequence_start,
-                    sequence,
+                    failure_sequence,
+                    failure_sequence,
                     Vec::new(),
                     Vec::new(),
                     None,
@@ -531,6 +528,7 @@ fn run_reporting_loop(
                 )
             }
         };
+        let observation_window_failed = observation_window_failure.is_some();
 
         if let Some(profile) = runtime_host_profile.as_ref() {
             host_profile = Some(profile.clone());
@@ -580,6 +578,10 @@ fn run_reporting_loop(
             active_configuration = outcome.active_configuration;
             pending_configuration_error = outcome.configuration_error;
             operation_reports.observe_response(&response, operation_runner);
+        }
+
+        if observation_window_failed && !report_limit_reached(reports_sent, control) {
+            sleeper.sleep(active_configuration.metrics_collection_interval);
         }
 
         if host_profile_snapshot_requested(&response)
@@ -1114,18 +1116,11 @@ fn collect_observation_batch(
     observation_runtime: &impl ObservationWindowClient,
 ) -> Result<FinalizedObservationBatch, ObservationClientError> {
     let sequence_start = *sequence + 1;
-    let runtime_window = match observation_runtime.request_finalized_window(
+    let runtime_window = observation_runtime.request_finalized_window(
         active_configuration.metrics_collection_interval,
         sequence_start,
-    ) {
-        Ok(window) => window,
-        Err(error) => {
-            *sequence = sequence.saturating_add(REPORTING_WINDOW_TICKS);
-            return Err(error);
-        }
-    };
+    )?;
     if runtime_window.attempts.len() != REPORTING_WINDOW_TICKS as usize {
-        *sequence = sequence.saturating_add(REPORTING_WINDOW_TICKS);
         return Err(ObservationClientError::InvalidResponse);
     }
 
@@ -1137,7 +1132,6 @@ fn collect_observation_batch(
         if attempt.sequence != expected_sequence
             || attempt.sample.is_some() == attempt.cpu_resource_outcome.is_some()
         {
-            *sequence = sequence_start.saturating_add(REPORTING_WINDOW_TICKS - 1);
             return Err(ObservationClientError::InvalidResponse);
         }
         if let Some(runtime_sample) = attempt.sample {
