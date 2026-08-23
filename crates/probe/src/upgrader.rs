@@ -2640,7 +2640,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         (None, None)
     } else if schema_version == 3 {
         (
-            required_fixed_install_metadata_path(
+            optional_fixed_install_metadata_path(
                 &value,
                 "operation_sudoers_path",
                 PRODUCTION_OPERATION_SUDOERS_PATH,
@@ -2888,6 +2888,17 @@ fn required_fixed_install_metadata_path(
         ));
     }
     Ok(Some(path))
+}
+
+fn optional_fixed_install_metadata_path(
+    value: &toml::Value,
+    key: &'static str,
+    expected: &'static str,
+) -> Result<Option<PathBuf>, ProbeUpgraderRunError> {
+    if value.get(key).is_none() {
+        return Ok(None);
+    }
+    required_fixed_install_metadata_path(value, key, expected)
 }
 
 fn validate_identity_path(

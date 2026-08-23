@@ -599,27 +599,21 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_persists_the_trusted_operation_launcher_and_authority_paths() {
+    fn schema_three_omits_the_retired_operation_launcher_and_authority_path() {
         let config = bootstrap_config(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &trust(),
             true,
         );
-        assert!(config.contains("upgrader_launch = \"systemd\""));
-        assert!(config.contains(
-            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\""
-        ));
+        assert!(!config.contains("upgrader_launch"));
+        assert!(!config.contains("operation_sudoers_path"));
 
         let metadata = install_metadata(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &trust(),
             true,
         );
-        assert!(metadata.contains(
-            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\""
-        ));
-        assert!(operation_sudoers().contains("internal-upgrader --config"));
-        assert!(operation_sudoers().contains("internal-uninstaller --config"));
+        assert!(!metadata.contains("operation_sudoers_path"));
     }
 
     #[test]
@@ -671,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_fresh_install_publishes_the_real_operation_entrypoint_transactionally() {
+    fn complete_fresh_install_does_not_publish_the_retired_operation_entrypoint() {
         let temporary = tempdir().unwrap();
         for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
@@ -706,15 +700,12 @@ mod tests {
             temporary.path().join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
         )
         .unwrap();
-        let sudoers = fs::read_to_string(
-            temporary.path().join("etc/sudoers.d/enoki-probe-operations"),
-        )
-        .unwrap();
-        assert!(config.contains("upgrader_launch = \"systemd\""));
-        assert!(sudoers.contains("systemd-run --collect --pipe --wait"));
-        assert!(sudoers.contains("internal-upgrader --config /var/lib/enoki-probe/identity/probe-bootstrap.toml"));
-        assert!(sudoers.contains("internal-uninstaller --config /var/lib/enoki-probe/identity/probe-bootstrap.toml"));
-        assert_eq!(fs::metadata(temporary.path().join("etc/sudoers.d/enoki-probe-operations")).unwrap().mode() & 0o777, 0o440);
+        assert!(!config.contains("upgrader_launch"));
+        assert!(!config.contains("operation_sudoers_path"));
+        assert!(!temporary
+            .path()
+            .join("etc/sudoers.d/enoki-probe-operations")
+            .exists());
     }
 
     #[test]

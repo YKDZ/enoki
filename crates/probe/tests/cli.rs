@@ -61,7 +61,7 @@ fn parses_probe_run_command_for_systemd_service_entrypoint() {
 }
 
 #[test]
-fn parses_the_typed_probe_local_lifecycle_entrypoint_for_a_staged_candidate_only() {
+fn rejects_the_retired_probe_local_lifecycle_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "local-install".to_string(),
@@ -71,14 +71,14 @@ fn parses_the_typed_probe_local_lifecycle_entrypoint_for_a_staged_candidate_only
 
     assert_eq!(
         command,
-        ProbeCommand::InternalLocalLifecycle {
-            candidate_binary: PathBuf::from("/tmp/enoki-probe-candidate"),
+        ProbeCommand::Rejected {
+            code: "probe_lifecycle_companion_required",
         },
     );
 }
 
 #[test]
-fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
+fn rejects_the_retired_internal_probe_upgrader_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-upgrader".to_string(),
@@ -88,14 +88,14 @@ fn parses_internal_probe_upgrader_command_for_limited_privilege_entrypoint() {
 
     assert_eq!(
         command,
-        ProbeCommand::InternalUpgrader {
-            bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
+        ProbeCommand::Rejected {
+            code: "probe_lifecycle_companion_required",
         },
     );
 }
 
 #[test]
-fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() {
+fn rejects_the_retired_internal_probe_uninstaller_entrypoint() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),
         "internal-uninstaller".to_string(),
@@ -105,8 +105,8 @@ fn parses_internal_probe_uninstaller_command_for_limited_privilege_entrypoint() 
 
     assert_eq!(
         command,
-        ProbeCommand::InternalUninstaller {
-            bootstrap_config_path: PathBuf::from("/etc/enoki/probe-bootstrap.toml"),
+        ProbeCommand::Rejected {
+            code: "probe_lifecycle_companion_required",
         },
     );
 }

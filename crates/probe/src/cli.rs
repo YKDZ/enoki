@@ -3,15 +3,6 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeCommand {
     Help,
-    InternalLocalLifecycle {
-        candidate_binary: PathBuf,
-    },
-    InternalUpgrader {
-        bootstrap_config_path: PathBuf,
-    },
-    InternalUninstaller {
-        bootstrap_config_path: PathBuf,
-    },
     Uninstall,
     Repair,
     Rejected {
@@ -33,8 +24,11 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
     let _binary = args.next();
 
     match args.next().as_deref() {
-        Some("local-install") => parse_internal_local_lifecycle_command(args),
-        Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
+        Some("local-install" | "internal-uninstaller" | "internal-upgrader") => {
+            ProbeCommand::Rejected {
+                code: "probe_lifecycle_companion_required",
+            }
+        }
         Some("uninstall") => {
             if args.next().is_none() {
                 ProbeCommand::Uninstall
@@ -42,7 +36,6 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
                 ProbeCommand::Help
             }
         }
-        Some("internal-upgrader") => parse_internal_upgrader_command(args),
         Some("repair") => {
             if args.next().is_none() {
                 ProbeCommand::Repair
@@ -56,57 +49,6 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
         Some("run") => parse_run_command(args),
         Some("--version" | "-V") => ProbeCommand::Version,
         _ => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_local_lifecycle_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
-    match (args.next().as_deref(), args.next()) {
-        (Some("--candidate"), Some(candidate_binary)) if args.next().is_none() => {
-            ProbeCommand::InternalLocalLifecycle {
-                candidate_binary: PathBuf::from(candidate_binary),
-            }
-        }
-        _ => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_uninstaller_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
-    let mut bootstrap_config_path = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" => {
-                bootstrap_config_path = args.next().map(PathBuf::from);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match bootstrap_config_path {
-        Some(bootstrap_config_path) => ProbeCommand::InternalUninstaller {
-            bootstrap_config_path,
-        },
-        None => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_upgrader_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
-    let mut bootstrap_config_path = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" => {
-                bootstrap_config_path = args.next().map(PathBuf::from);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match bootstrap_config_path {
-        Some(bootstrap_config_path) => ProbeCommand::InternalUpgrader {
-            bootstrap_config_path,
-        },
-        None => ProbeCommand::Help,
     }
 }
 
@@ -176,27 +118,14 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "  enoki-probe --version\n",
             "  enoki-probe register --hub-url <url> ",
             "--enrollment-token <token> --config <path>\n",
-            "  sudo enoki-probe repair\n",
-            "  sudo enoki-probe uninstall\n",
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
-        ProbeCommand::InternalLocalLifecycle { .. } => {
-            "Probe Local Lifecycle performs typed fresh installation and readiness verification.\n"
-                .to_string()
-        }
-        ProbeCommand::InternalUpgrader { .. } => {
-            "Probe Upgrader performs privileged Probe Upgrade execution.\n".to_string()
-        }
-        ProbeCommand::InternalUninstaller { .. } => {
-            "Probe Uninstaller performs privileged Probe uninstall execution.\n".to_string()
-        }
         ProbeCommand::Uninstall => {
-            "Local Probe Uninstall removes this machine's local Probe installation without contacting the Hub.\n".to_string()
+            "Probe uninstall is unsupported; follow the migration guide to reinstall the Probe manually.\n".to_string()
         }
         ProbeCommand::Repair => {
-            "Probe Repair reinstalls from the bound Hub using the existing Probe Identity.\n"
-                .to_string()
+            "Probe repair is unsupported; follow the migration guide to reinstall the Probe manually.\n".to_string()
         }
         ProbeCommand::Rejected { code } => format!("Probe command rejected: code={code}\n"),
         ProbeCommand::Register { .. } => {

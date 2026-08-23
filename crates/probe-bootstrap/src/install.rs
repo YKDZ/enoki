@@ -56,6 +56,7 @@ const DISK_HEALTH_PROVIDER_SOCKET_UNIT: &str =
 const BOOTSTRAP_ACQUIRER: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const BOOTSTRAP_ACTIVATOR: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const BOOTSTRAP_STATE: &str = "/var/lib/enoki-probe-bootstrap";
+// 仅用于拒绝/清理旧安装残留；新安装绝不创建此路径。
 const OPERATION_SUDOERS: &str = "/etc/sudoers.d/enoki-probe-operations";
 const COLLECTOR_SUDOERS: &str = "/etc/sudoers.d/enoki-probe-collector-helpers";
 const LEGACY_SUDOERS: &str = "/etc/sudoers.d/enoki-probe-upgrader";
@@ -434,10 +435,6 @@ impl FixedInstallPaths {
     fn bootstrap_state(&self) -> PathBuf {
         self.map(BOOTSTRAP_STATE)
     }
-    fn operation_sudoers(&self) -> PathBuf {
-        self.map(OPERATION_SUDOERS)
-    }
-
     fn expected_root_uid(&self) -> u32 {
         if self.root == Path::new("/") {
             0
@@ -809,16 +806,6 @@ fn activate_current_probe_with_observation_files(
             &mut journal,
             RollbackStep::RemoveUnit,
         )?;
-        if install_observation {
-            ports.files.write_owned(
-                &paths.operation_sudoers(),
-                operation_sudoers().as_bytes(),
-                0o440,
-                ServiceIdentity { uid: 0, gid: 0 },
-                &mut journal,
-                RollbackStep::RemoveUnit,
-            )?;
-        }
         for (path, contents) in install_observation
             .then_some([
                 (paths.observation_runtime_unit(), observation_runtime_unit()),
@@ -1195,14 +1182,10 @@ fn record_rollback(
 fn bootstrap_config(
     enrollment: &Enrollment,
     trust: &BuildTrust,
-    install_observation: bool,
+    _install_observation: bool,
 ) -> String {
-    let operation = install_observation.then_some(format!(
-        "operation_sudoers_path = {:?}\nupgrader_launch = \"systemd\"\n",
-        OPERATION_SUDOERS
-    ));
     format!(
-        "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\n{}probe_distribution_root_sha256 = {:?}\nlog_level = \"info\"\n",
+        "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nprobe_distribution_root_sha256 = {:?}\nlog_level = \"info\"\n",
         enrollment.hub_origin(),
         enrollment.enrollment_token(),
         STATE,
@@ -1210,7 +1193,6 @@ fn bootstrap_config(
         BINARY,
         SERVICE_NAME,
         SERVICE_USER,
-        operation.unwrap_or_default(),
         trust.root_fingerprint,
     )
 }
@@ -1239,7 +1221,7 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\noperation_sudoers_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 3\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1263,14 +1245,7 @@ fn install_metadata(
         CPU_PROVIDER_SOCKET_UNIT,
         DISK_HEALTH_PROVIDER_UNIT,
         DISK_HEALTH_PROVIDER_SOCKET_UNIT,
-        OPERATION_SUDOERS,
         COLLECTOR_SUDOERS,
-    )
-}
-
-fn operation_sudoers() -> String {
-    format!(
-        "# Managed by Enoki Probe installer.\n{SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={SERVICE_NAME}-upgrader --property=Type=exec -- {BINARY} internal-upgrader --config {IDENTITY}\n{SERVICE_USER} ALL=(root) NOPASSWD: /usr/bin/systemd-run --collect --pipe --wait --unit={SERVICE_NAME}-uninstaller --property=Type=exec -- {BINARY} internal-uninstaller --config {IDENTITY}\n"
     )
 }
 

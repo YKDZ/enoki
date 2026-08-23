@@ -28,12 +28,6 @@ use crate::{
         observation_batch_report, snapshot_replay_report, startup_report,
     },
     transport::{HttpAttemptError, post_protobuf},
-    upgrader::{
-        ProbeUninstallerLaunch, ProbeUpgraderCommandOutput, ProbeUpgraderLaunch,
-        ProbeUpgraderLaunchError, SystemProbeUpgraderCommandRunner,
-        launch_systemd_probe_uninstaller, launch_systemd_probe_upgrader,
-        parse_probe_upgrader_result,
-    },
 };
 use prost::Message;
 
@@ -275,7 +269,7 @@ pub fn run_probe_with_loop_control(
         transport,
         sleeper,
         control,
-        InstalledProbeOperationRunner::from_bootstrap,
+        UnsupportedProbeOperationRunner::from_bootstrap,
         notify_systemd_ready,
         &observation_runtime,
     )
@@ -294,7 +288,7 @@ pub fn run_probe_with_loop_control_and_observation_client(
         transport,
         sleeper,
         control,
-        InstalledProbeOperationRunner::from_bootstrap,
+        UnsupportedProbeOperationRunner::from_bootstrap,
         notify_systemd_ready,
         observation_runtime,
     )
@@ -680,6 +674,7 @@ struct ProbeUninstallRunnerInput<'a> {
 }
 
 enum ProbeUpgradeRunnerOutcome {
+    #[cfg(test)]
     Running,
     Failed(ProbeOperationFailed),
 }
@@ -696,114 +691,46 @@ trait ProbeOperationRunner {
     ) -> ProbeUpgradeRunnerOutcome;
 }
 
-struct InstalledProbeOperationRunner {
-    bootstrap_config_path: PathBuf,
-    install_path: Option<PathBuf>,
-    launch: Option<String>,
-}
+struct UnsupportedProbeOperationRunner;
 
-impl InstalledProbeOperationRunner {
-    fn from_bootstrap(bootstrap_config: &BootstrapConfig, bootstrap_config_path: PathBuf) -> Self {
-        Self {
-            bootstrap_config_path,
-            install_path: bootstrap_config.install_path.as_ref().map(PathBuf::from),
-            launch: bootstrap_config.upgrader_launch.clone(),
-        }
+impl UnsupportedProbeOperationRunner {
+    fn from_bootstrap(
+        _bootstrap_config: &BootstrapConfig,
+        _bootstrap_config_path: PathBuf,
+    ) -> Self {
+        Self
     }
 }
 
-impl ProbeOperationRunner for InstalledProbeOperationRunner {
+impl ProbeOperationRunner for UnsupportedProbeOperationRunner {
     fn run_probe_upgrade(
         &mut self,
         input: ProbeUpgradeRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome {
-        let _ = input.operation.current_probe_version;
-        let Some(install_path) = self.install_path.clone() else {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Upgrader launch is not configured.".to_string(),
-            });
-        };
-        if self.launch.as_deref() != Some("systemd") {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Upgrader requires a systemd installation.".to_string(),
-            });
-        }
-
-        let mut runner = SystemProbeUpgraderCommandRunner;
-        probe_upgrade_outcome_from_launch_result(launch_systemd_probe_upgrader(
-            ProbeUpgraderLaunch {
-                bootstrap_config_path: self.bootstrap_config_path.clone(),
-                install_path,
-                operation_id: input.operation.operation_id.to_string(),
-                target_asset_set_digest: input.operation.target_asset_set_digest.to_string(),
-                target_probe_version: input.operation.target_probe_version.to_string(),
-                token: input.stdin.to_string(),
-            },
-            &mut runner,
-        ))
+        let _ = (
+            input.stdin,
+            input.operation.current_probe_version,
+            input.operation.operation_id,
+            input.operation.target_asset_set_digest,
+            input.operation.target_probe_version,
+        );
+        unsupported_lifecycle_operation()
     }
 
     fn run_probe_uninstall(
         &mut self,
         input: ProbeUninstallRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome {
-        let Some(install_path) = self.install_path.clone() else {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Uninstaller launch is not configured.".to_string(),
-            });
-        };
-        if self.launch.as_deref() != Some("systemd") {
-            return ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message: "Probe Uninstaller requires a systemd installation.".to_string(),
-            });
-        }
-
-        let mut runner = SystemProbeUpgraderCommandRunner;
-        probe_upgrade_outcome_from_launch_result(launch_systemd_probe_uninstaller(
-            ProbeUninstallerLaunch {
-                bootstrap_config_path: self.bootstrap_config_path.clone(),
-                install_path,
-                operation_id: input.operation_id.to_string(),
-                token: input.stdin.to_string(),
-            },
-            &mut runner,
-        ))
+        let _ = (input.stdin, input.operation_id);
+        unsupported_lifecycle_operation()
     }
 }
 
-fn probe_upgrade_outcome_from_launch_result(
-    result: Result<ProbeUpgraderCommandOutput, ProbeUpgraderLaunchError>,
-) -> ProbeUpgradeRunnerOutcome {
-    match result {
-        Ok(output) => match parse_probe_upgrader_result(&output.stdout) {
-            Some(result) if result.status == "running" => ProbeUpgradeRunnerOutcome::Running,
-            Some(result) if result.status == "failed" => {
-                ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                    error_code: result
-                        .error_code
-                        .unwrap_or_else(|| "probe_upgrader_failed".to_string()),
-                    message: result.message.unwrap_or_default(),
-                })
-            }
-            _ => ProbeUpgradeRunnerOutcome::Running,
-        },
-        Err(ProbeUpgraderLaunchError::UnsupportedInstallation(message)) => {
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "unsupported_installation".to_string(),
-                message,
-            })
-        }
-        Err(ProbeUpgraderLaunchError::InsufficientPrivilege(message)) => {
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                error_code: "insufficient_privilege".to_string(),
-                message,
-            })
-        }
-    }
+fn unsupported_lifecycle_operation() -> ProbeUpgradeRunnerOutcome {
+    ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+        error_code: "unsupported_installation".to_owned(),
+        message: "This Probe requires manual replacement before lifecycle operations.".to_owned(),
+    })
 }
 
 #[derive(Default)]
@@ -849,6 +776,7 @@ impl ProbeOperationReportQueue {
         self.statuses.push((
             operation.id.clone(),
             match outcome {
+                #[cfg(test)]
                 ProbeUpgradeRunnerOutcome::Running => Status::Running(ProbeOperationRunning {}),
                 ProbeUpgradeRunnerOutcome::Failed(failed) => Status::Failed(failed),
             },
@@ -924,41 +852,53 @@ mod operation_report_tests {
     }
 
     #[test]
-    fn successful_upgrader_launch_reports_running() {
-        let outcome = probe_upgrade_outcome_from_launch_result(Ok(ProbeUpgraderCommandOutput {
-            stdout: "Probe Upgrader result: operation=operation-01 status=running\n".to_string(),
-        }));
-
-        assert!(matches!(outcome, ProbeUpgradeRunnerOutcome::Running));
-    }
-
-    #[test]
-    fn launch_insufficient_privilege_reports_failed_status() {
-        let outcome = probe_upgrade_outcome_from_launch_result(Err(
-            ProbeUpgraderLaunchError::InsufficientPrivilege("sudo denied".to_string()),
-        ));
+    fn unavailable_companion_reports_one_stable_closed_failure() {
+        let outcome = unsupported_lifecycle_operation();
 
         assert!(matches!(
             outcome,
             ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 ref error_code,
                 ref message,
-            }) if error_code == "insufficient_privilege" && message == "sudo denied"
+            }) if error_code == "unsupported_installation"
+                && message == "This Probe requires manual replacement before lifecycle operations."
         ));
     }
 
     #[test]
-    fn unsupported_installation_reports_failed_status() {
-        let outcome = probe_upgrade_outcome_from_launch_result(Err(
-            ProbeUpgraderLaunchError::UnsupportedInstallation("sudo missing".to_string()),
-        ));
+    fn unavailable_companion_acknowledges_once_without_retrying_the_operation() {
+        let response = ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_owned(),
+            pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                id: "operation-01".to_owned(),
+                operation: Some(Operation::ProbeUpgrade(
+                    crate::protocol::enoki::v1::ProbeUpgradeOperation {
+                        current_probe_version: "0.1.0".to_owned(),
+                        operation_token: "operation-token".to_owned(),
+                        target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                        target_probe_version: "0.2.0".to_owned(),
+                    },
+                )),
+            }),
+            requested_snapshot_collector_ids: Vec::new(),
+            server_time_ms: 1,
+        };
+        let mut queue = ProbeOperationReportQueue::default();
+        let mut runner = UnsupportedProbeOperationRunner;
 
+        queue.observe_response(&response, &mut runner);
+        queue.observe_response(&response, &mut runner);
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
+
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(statuses.len(), 1);
         assert!(matches!(
-            outcome,
-            ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
-                ref error_code,
-                ref message,
-            }) if error_code == "unsupported_installation" && message == "sudo missing"
+            statuses[0].status,
+            Some(Status::Failed(ref failure))
+                if failure.error_code == "unsupported_installation"
+                    && failure.message
+                        == "This Probe requires manual replacement before lifecycle operations."
         ));
     }
 
@@ -1353,7 +1293,6 @@ struct BootstrapConfig {
     enrollment_id: Option<String>,
     enrollment_token: Option<String>,
     hub_url: Option<String>,
-    install_path: Option<String>,
     metrics_collection_interval_seconds: Option<u64>,
     operation_status_path: Option<String>,
     probe_configuration_version: Option<String>,
@@ -1361,7 +1300,6 @@ struct BootstrapConfig {
     probe_private_key_pem: Option<String>,
     server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
-    upgrader_launch: Option<String>,
 }
 
 impl BootstrapConfig {
@@ -1416,7 +1354,6 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         enrollment_id: string_value(&value, "enrollment_id")?,
         enrollment_token: string_value(&value, "enrollment_token")?,
         hub_url: string_value(&value, "hub_url")?,
-        install_path: string_value(&value, "install_path")?,
         metrics_collection_interval_seconds: integer_value(
             &value,
             "metrics_collection_interval_seconds",
@@ -1427,7 +1364,6 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
         server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         state_dir: string_value(&value, "state_dir")?,
-        upgrader_launch: string_value(&value, "upgrader_launch")?,
     })
 }
 
@@ -2185,7 +2121,7 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(1),
             },
-            InstalledProbeOperationRunner::from_bootstrap,
+            UnsupportedProbeOperationRunner::from_bootstrap,
             || {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,
@@ -2283,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn install_config_registration_then_operation_uses_preserved_fake_launch_metadata() {
+    fn registration_then_operation_reports_without_lifecycle_launch_metadata() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
         fs::write(
@@ -2292,8 +2228,6 @@ mod tests {
                 "hub_url = \"https://hub.example\"",
                 "enrollment_token = \"enk_enroll_secret\"",
                 "state_dir = \"/var/lib/enoki-probe\"",
-                "install_path = \"/usr/local/bin/enoki-probe\"",
-                "upgrader_launch = \"systemd\"",
                 "log_level = \"info\"",
                 "",
             ]
@@ -2336,7 +2270,7 @@ mod tests {
                 }
                 .encode_to_vec(),
                 ProbeReportResponse {
-                    accepted_sequence_end: 4,
+                    accepted_sequence_end: 2,
                     current_probe_configuration_version: "default-v1".to_string(),
                     pending_operation: None,
                     requested_snapshot_collector_ids: Vec::new(),
@@ -2357,15 +2291,8 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(2),
             },
-            move |bootstrap_config, _bootstrap_config_path| {
-                assert_eq!(
-                    bootstrap_config.install_path.as_deref(),
-                    Some("/usr/local/bin/enoki-probe"),
-                );
-                assert_eq!(bootstrap_config.upgrader_launch.as_deref(), Some("systemd"));
-                SharedFakeOperationRunner {
-                    observed_launches: Rc::clone(&observed_launches_for_factory),
-                }
+            move |_bootstrap_config, _bootstrap_config_path| SharedFakeOperationRunner {
+                observed_launches: Rc::clone(&observed_launches_for_factory),
             },
         )
         .expect("registration then operation reporting succeeds");
@@ -2380,8 +2307,7 @@ mod tests {
         );
         let bootstrap_config =
             fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
-        assert!(bootstrap_config.contains("install_path = \"/usr/local/bin/enoki-probe\""));
-        assert!(bootstrap_config.contains("upgrader_launch = \"systemd\""));
+        assert!(!bootstrap_config.contains("upgrader_launch"));
 
         let reports = transport
             .observed_report_bodies

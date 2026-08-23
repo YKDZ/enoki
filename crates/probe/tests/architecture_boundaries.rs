@@ -10,6 +10,7 @@ const DISK_HEALTH_PROVIDER_BINARY: &str =
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
+const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
 
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -95,4 +96,69 @@ fn fresh_probe_installation_cannot_render_collector_helper_sudoers() {
 
     assert!(!UPGRADER.contains("fn write_collector_helper_sudoers"));
     assert!(UPGRADER.contains("fn remove_legacy_collector_helper_sudoers"));
+}
+
+#[test]
+fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
+    let bootstrap = production_source(BOOTSTRAP_INSTALL);
+    for forbidden in [
+        "operation_sudoers().as_bytes()",
+        "fn operation_sudoers()",
+        "upgrader_launch = \"systemd\"",
+    ] {
+        assert!(
+            !bootstrap.contains(forbidden),
+            "新安装不得创建旧 operation 权限入口：{forbidden}",
+        );
+    }
+
+    let probe_entry = production_source(PROBE_MAIN);
+    for forbidden in [
+        "run_probe_local_install",
+        "run_probe_upgrader",
+        "run_probe_uninstaller",
+        "run_local_probe_uninstall",
+        "run_probe_repair",
+    ] {
+        assert!(
+            !probe_entry.contains(forbidden),
+            "Probe executable 入口不得执行旧 lifecycle 工具：{forbidden}",
+        );
+    }
+    for forbidden in [
+        "launch_systemd_probe_upgrader",
+        "launch_systemd_probe_uninstaller",
+        "SystemProbeUpgraderCommandRunner",
+    ] {
+        assert!(
+            !production_source(PROBE_RUNTIME).contains(forbidden),
+            "Probe Runtime 不得调用旧 systemd-run executor：{forbidden}",
+        );
+    }
+}
+
+#[test]
+fn built_probe_does_not_link_legacy_lifecycle_execution_symbols() {
+    let output = std::process::Command::new("nm")
+        .arg("-C")
+        .arg(env!("CARGO_BIN_EXE_enoki-probe"))
+        .output()
+        .expect("nm 可读取测试构建的 Probe binary");
+    assert!(output.status.success(), "nm 必须成功");
+    let symbols = String::from_utf8(output.stdout).expect("nm 输出为 UTF-8");
+    for forbidden in [
+        "run_probe_local_install",
+        "run_probe_upgrader",
+        "run_probe_uninstaller",
+        "run_local_probe_uninstall",
+        "run_probe_repair",
+        "launch_systemd_probe_upgrader",
+        "launch_systemd_probe_uninstaller",
+        "SystemProbeUpgraderCommandRunner",
+    ] {
+        assert!(
+            !symbols.contains(forbidden),
+            "Probe binary 不得链接旧 lifecycle 执行符号：{forbidden}",
+        );
+    }
 }
