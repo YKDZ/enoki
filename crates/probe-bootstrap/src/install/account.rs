@@ -112,7 +112,7 @@ fn inspect_owned_ipc_group(
     identity: Option<ServiceIdentity>,
     deadline: Option<Instant>,
 ) -> Result<bool, InstallError> {
-    if identity != Some(ServiceIdentity { uid: 0, gid: 0 }) {
+    if identity.is_some_and(|identity| identity != ServiceIdentity { uid: 0, gid: 0 }) {
         return Ok(false);
     }
     let deadline = deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
@@ -127,10 +127,29 @@ fn inspect_owned_ipc_group(
         return Ok(false);
     }
     let record = String::from_utf8(output.stdout).map_err(|_| InstallError::Account)?;
+    Ok(owned_ipc_group_record_matches(
+        group_name,
+        transaction_id,
+        identity,
+        &record,
+    ))
+}
+
+pub(super) fn owned_ipc_group_record_matches(
+    group_name: &str,
+    transaction_id: &str,
+    identity: Option<ServiceIdentity>,
+    record: &str,
+) -> bool {
+    // transaction marker 在 groupadd 前已随 journal 持久化；numeric receipt 只是附加约束，
+    // 不能让 groupadd 与 receipt 落盘之间的崩溃窗口失去补偿所有权。
+    if identity.is_some_and(|identity| identity != ServiceIdentity { uid: 0, gid: 0 }) {
+        return false;
+    }
     let fields = record.trim_end().split(':').collect::<Vec<_>>();
-    Ok(fields.len() == 4
+    fields.len() == 4
         && fields[0] == group_name
-        && fields[1] == group_account_marker(transaction_id))
+        && fields[1] == group_account_marker(transaction_id)
 }
 
 fn remove_owned_ipc_group(
@@ -139,15 +158,46 @@ fn remove_owned_ipc_group(
     identity: Option<ServiceIdentity>,
     deadline: Option<Instant>,
 ) -> Result<(), InstallError> {
-    if !inspect_owned_ipc_group(group_name, transaction_id, identity, deadline)? {
+    let deadline = deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET);
+    remove_owned_ipc_group_with_commands(
+        group_name,
+        transaction_id,
+        identity,
+        &mut |group_name| {
+            let output = run_bounded(
+                "/usr/bin/getent",
+                &["gshadow", group_name],
+                InstallError::Account,
+                deadline,
+                COMMAND_STEP_BUDGET,
+            )?;
+            if output.status.code() == Some(2) {
+                return Ok(None);
+            }
+            String::from_utf8(output.stdout)
+                .map(Some)
+                .map_err(|_| InstallError::Account)
+        },
+        &mut |program, arguments| {
+            require_success(program, arguments, InstallError::Account, deadline)
+        },
+    )
+}
+
+pub(super) fn remove_owned_ipc_group_with_commands(
+    group_name: &str,
+    transaction_id: &str,
+    identity: Option<ServiceIdentity>,
+    lookup: &mut impl FnMut(&str) -> Result<Option<String>, InstallError>,
+    execute: &mut impl FnMut(&str, &[&str]) -> Result<(), InstallError>,
+) -> Result<(), InstallError> {
+    let Some(record) = lookup(group_name)? else {
+        return Ok(());
+    };
+    if !owned_ipc_group_record_matches(group_name, transaction_id, identity, &record) {
         return Ok(());
     }
-    require_success(
-        "/usr/sbin/groupdel",
-        &[group_name],
-        InstallError::Account,
-        deadline.unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET),
-    )
+    execute("/usr/sbin/groupdel", &[group_name])
 }
 
 fn account_marker(transaction_id: &str) -> String {

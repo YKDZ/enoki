@@ -3,7 +3,8 @@ mod tests {
     use super::*;
     use super::account::{
         account_records_match_transaction, create_probe_ipc_group_with_commands,
-        create_transaction_identity_with_commands,
+        create_transaction_identity_with_commands, owned_ipc_group_record_matches,
+        remove_owned_ipc_group_with_commands,
     };
     use crate::handoff::Enrollment;
     use crate::trust::BootstrapRole;
@@ -43,6 +44,77 @@ mod tests {
             ["/usr/sbin/groupadd --system --password !enoki-bootstrap-tx-1 enoki-probe-ipc"]
         );
         assert!(calls.iter().all(|call| !call.contains("useradd")));
+    }
+
+    #[test]
+    fn transaction_marker_owns_probe_ipc_group_before_identity_receipt_is_durable() {
+        let record = "enoki-probe-ipc:!enoki-bootstrap-tx-1::\n";
+
+        assert!(owned_ipc_group_record_matches(
+            PROBE_IPC_GROUP,
+            "tx-1",
+            None,
+            record,
+        ));
+        assert!(owned_ipc_group_record_matches(
+            PROBE_IPC_GROUP,
+            "tx-1",
+            Some(ServiceIdentity { uid: 0, gid: 0 }),
+            record,
+        ));
+        assert!(!owned_ipc_group_record_matches(
+            PROBE_IPC_GROUP,
+            "another-tx",
+            None,
+            record,
+        ));
+
+        let mut removals = Vec::new();
+        remove_owned_ipc_group_with_commands(
+            PROBE_IPC_GROUP,
+            "tx-1",
+            None,
+            &mut |_| Ok(Some(record.to_owned())),
+            &mut |program, arguments| {
+                removals.push(format!("{program} {}", arguments.join(" ")));
+                Ok(())
+            },
+        )
+        .expect("identity receipt 缺失时按 marker 补偿");
+        assert_eq!(removals, ["/usr/sbin/groupdel enoki-probe-ipc"]);
+
+        removals.clear();
+        remove_owned_ipc_group_with_commands(
+            PROBE_IPC_GROUP,
+            "another-tx",
+            None,
+            &mut |_| Ok(Some(record.to_owned())),
+            &mut |program, arguments| {
+                removals.push(format!("{program} {}", arguments.join(" ")));
+                Ok(())
+            },
+        )
+        .expect("不删除其他事务的 IPC 组");
+        assert!(removals.is_empty());
+
+        remove_owned_ipc_group_with_commands(
+            PROBE_IPC_GROUP,
+            "tx-1",
+            None,
+            &mut |_| Ok(None),
+            &mut |program, arguments| {
+                removals.push(format!("{program} {}", arguments.join(" ")));
+                Ok(())
+            },
+        )
+        .expect("已补偿的 IPC 组可幂等重试");
+        assert!(removals.is_empty());
+        assert!(!owned_ipc_group_record_matches(
+            PROBE_IPC_GROUP,
+            "tx-1",
+            Some(ServiceIdentity { uid: 1, gid: 1 }),
+            record,
+        ));
     }
 
     #[derive(Default)]
