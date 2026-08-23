@@ -17,7 +17,7 @@ use crate::{
         SYSTEM_STATE_PERMISSION_PROFILE,
     },
     handoff::Enrollment,
-    lifecycle::{LifecycleExecution, LifecyclePhase, LifecycleTransition},
+    lifecycle::{FreshInstallLifecycleEffects, execute_fresh_install_lifecycle},
     trust::{BootstrapRole, BuildTrust},
     verifier::VerifiedBundle,
 };
@@ -621,7 +621,7 @@ fn activate_current_probe_with_files(
 #[allow(clippy::too_many_arguments)]
 fn activate_current_probe_with_observation_files(
     component: &mut File,
-    mut observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
+    observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
     bootstrap_components: Option<(&mut File, &mut File)>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -629,8 +629,72 @@ fn activate_current_probe_with_observation_files(
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
 ) -> Result<(), InstallError> {
-    let mut lifecycle = LifecycleExecution::begin(LifecycleTransition::FreshInstall)
-        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
+    let mut effects = FreshInstallEffects {
+        component,
+        observation_components,
+        bootstrap_components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        ports,
+    };
+    execute_fresh_install_lifecycle(&mut effects)
+}
+
+struct FreshInstallEffects<'input, 'ports, A, S, F> {
+    component: &'input mut File,
+    observation_components: Option<(
+        &'input mut File,
+        &'input mut File,
+        &'input mut File,
+        &'input mut File,
+    )>,
+    bootstrap_components: Option<(&'input mut File, &'input mut File)>,
+    enrollment: &'input Enrollment,
+    bundle: &'input VerifiedBundle,
+    trust: &'input BuildTrust,
+    paths: &'input FixedInstallPaths,
+    ports: &'input mut InstallPorts<'ports, A, S, F>,
+}
+
+impl<A, S, F> FreshInstallLifecycleEffects for FreshInstallEffects<'_, '_, A, S, F>
+where
+    A: AccountPort,
+    S: SystemdPort,
+    F: InstallFilePort,
+{
+    type Error = InstallError;
+
+    fn verify(&mut self) -> Result<(), Self::Error> {
+        verify_fresh_install_inputs(
+            self.component,
+            self.observation_components.as_mut(),
+            self.bundle,
+            self.trust,
+        )
+    }
+
+    fn stage_and_activate(&mut self) -> Result<(), Self::Error> {
+        activate_verified_fresh_install(
+            self.component,
+            self.observation_components.take(),
+            self.bootstrap_components.take(),
+            self.enrollment,
+            self.bundle,
+            self.trust,
+            self.paths,
+            self.ports,
+        )
+    }
+}
+
+fn verify_fresh_install_inputs(
+    component: &mut File,
+    observation_components: Option<&mut (&mut File, &mut File, &mut File, &mut File)>,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+) -> Result<(), InstallError> {
     let trust_version = trust.version.strip_prefix('v').unwrap_or(trust.version);
     let runtime_receipt = bundle.component_receipt("observation-runtime");
     let cpu_provider_receipt = bundle.component_receipt("system-state-provider");
@@ -649,9 +713,8 @@ fn activate_current_probe_with_observation_files(
         return Err(InstallError::InvalidVerifiedComponent);
     }
     validate_component(component, bundle.component_len)?;
-    let install_observation = observation_components.is_some();
     if let Some((runtime, cpu_provider, disk_health_provider, lifecycle_companion)) =
-        observation_components.as_mut()
+        observation_components
     {
         validate_component(runtime, runtime_receipt.expect("checked").1)?;
         validate_component(cpu_provider, cpu_provider_receipt.expect("checked").1)?;
@@ -664,9 +727,21 @@ fn activate_current_probe_with_observation_files(
             lifecycle_companion_receipt.expect("checked").1,
         )?;
     }
-    lifecycle
-        .advance(LifecyclePhase::Verified)
-        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_verified_fresh_install(
+    component: &mut File,
+    observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
+    bootstrap_components: Option<(&mut File, &mut File)>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+) -> Result<(), InstallError> {
+    let install_observation = observation_components.is_some();
     let _activation_lock = ActivationLock::acquire(
         &paths.bootstrap_state(),
         paths.expected_root_uid(),
@@ -758,14 +833,8 @@ fn activate_current_probe_with_observation_files(
             ));
         }
     };
-    lifecycle
-        .advance(LifecyclePhase::Staged)
-        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
     let mut enabled = false;
     let mut started = false;
-    lifecycle
-        .advance(LifecyclePhase::Activating)
-        .map_err(|_| InstallError::InvalidVerifiedComponent)?;
     let result = (|| {
         ports
             .files
@@ -894,9 +963,7 @@ fn activate_current_probe_with_observation_files(
     match result {
         Ok(()) => {
             journal.commit_layout(&paths.bootstrap_state(), &bundle.version)?;
-            lifecycle
-                .advance(LifecyclePhase::Complete)
-                .map_err(|_| InstallError::InvalidVerifiedComponent)
+            Ok(())
         }
         Err(install_error) => {
             let rollback_deadline = Instant::now() + ROLLBACK_COMMAND_BUDGET;

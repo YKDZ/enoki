@@ -327,132 +327,58 @@ impl LifecyclePlan {
     }
 }
 
-/// 所有本机生命周期转换共享的有限执行状态。转换各自拥有一条固定路径，
-/// 因而新装不能伪装成清理，卸载也不能进入暂存或激活阶段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LifecyclePhase {
-    Authorized,
-    Verified,
-    Staged,
-    Activating,
-    Cleaning,
-    Reporting,
-    Committing,
-    Finalizing,
+pub enum LifecycleCompletion {
     Complete,
-    Failed,
+    RecoveryPending,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LifecycleExecution {
-    transition: LifecycleTransition,
-    phase: LifecyclePhase,
+pub enum UninstallCommitPolicy {
+    Local,
+    HubTerminal,
 }
 
-impl LifecycleExecution {
-    pub fn begin(transition: LifecycleTransition) -> Result<Self, LifecycleRejection> {
-        LifecyclePlan::for_transition(transition)?;
-        Ok(Self {
-            transition,
-            phase: LifecyclePhase::Authorized,
-        })
-    }
+pub trait FreshInstallLifecycleEffects {
+    type Error;
 
-    pub fn advance(&mut self, next: LifecyclePhase) -> Result<(), LifecycleRejection> {
-        let valid = match (self.transition, self.phase, next) {
-            (
-                LifecycleTransition::FreshInstall,
-                LifecyclePhase::Authorized,
-                LifecyclePhase::Verified,
-            )
-            | (
-                LifecycleTransition::FreshInstall,
-                LifecyclePhase::Verified,
-                LifecyclePhase::Staged,
-            )
-            | (
-                LifecycleTransition::FreshInstall,
-                LifecyclePhase::Staged,
-                LifecyclePhase::Activating,
-            )
-            | (
-                LifecycleTransition::FreshInstall,
-                LifecyclePhase::Activating,
-                LifecyclePhase::Complete,
-            )
-            | (
-                LifecycleTransition::Uninstall,
-                LifecyclePhase::Authorized,
-                LifecyclePhase::Verified,
-            )
-            | (
-                LifecycleTransition::Uninstall,
-                LifecyclePhase::Verified,
-                LifecyclePhase::Cleaning,
-            )
-            | (
-                LifecycleTransition::Uninstall,
-                LifecyclePhase::Cleaning,
-                LifecyclePhase::Reporting,
-            )
-            | (
-                LifecycleTransition::Uninstall,
-                LifecyclePhase::Reporting,
-                LifecyclePhase::Committing,
-            )
-            | (
-                LifecycleTransition::Uninstall,
-                LifecyclePhase::Committing,
-                LifecyclePhase::Finalizing,
-            )
-            | (
-                LifecycleTransition::Uninstall,
-                LifecyclePhase::Finalizing,
-                LifecyclePhase::Complete,
-            ) => true,
-            (_, phase, LifecyclePhase::Failed)
-                if !matches!(phase, LifecyclePhase::Complete | LifecyclePhase::Failed) =>
-            {
-                true
-            }
-            _ => false,
-        };
-        if !valid {
-            return Err(LifecycleRejection::InvalidState);
+    fn verify(&mut self) -> Result<(), Self::Error>;
+    fn stage_and_activate(&mut self) -> Result<(), Self::Error>;
+}
+
+pub fn execute_fresh_install_lifecycle<E: FreshInstallLifecycleEffects>(
+    effects: &mut E,
+) -> Result<(), E::Error> {
+    LifecyclePlan::for_transition(LifecycleTransition::FreshInstall)
+        .expect("构建期固定的新装转换必须保持启用");
+    effects.verify()?;
+    effects.stage_and_activate()
+}
+
+pub trait UninstallLifecycleEffects {
+    type Error;
+
+    fn verify(&mut self) -> Result<(), Self::Error>;
+    fn clean(&mut self) -> Result<(), Self::Error>;
+    fn report(&mut self) -> Result<(), Self::Error>;
+    fn commit(&mut self) -> Result<(), Self::Error>;
+    fn finalize(&mut self) -> Result<(), Self::Error>;
+}
+
+pub fn execute_uninstall_lifecycle<E: UninstallLifecycleEffects>(
+    effects: &mut E,
+    commit_policy: UninstallCommitPolicy,
+) -> Result<LifecycleCompletion, E::Error> {
+    effects.verify()?;
+    effects.clean()?;
+    effects.report()?;
+    effects.commit()?;
+    match effects.finalize() {
+        Ok(()) => Ok(LifecycleCompletion::Complete),
+        Err(_) if commit_policy == UninstallCommitPolicy::HubTerminal => {
+            Ok(LifecycleCompletion::RecoveryPending)
         }
-        self.phase = next;
-        Ok(())
-    }
-
-    #[must_use]
-    pub const fn phase(self) -> LifecyclePhase {
-        self.phase
-    }
-
-    /// 由状态机进入阶段后立即执行对应副作用；任一阶段失败都在返回前封闭为
-    /// `Failed`，后续阶段不会被调用。
-    pub fn run_uninstall<E>(
-        &mut self,
-        mut execute: impl FnMut(LifecyclePhase) -> Result<(), E>,
-    ) -> Result<(), E> {
-        for phase in [
-            LifecyclePhase::Verified,
-            LifecyclePhase::Cleaning,
-            LifecyclePhase::Reporting,
-            LifecyclePhase::Committing,
-            LifecyclePhase::Finalizing,
-        ] {
-            self.advance(phase)
-                .expect("固定卸载阶段序列必须符合封闭状态机");
-            if let Err(error) = execute(phase) {
-                self.advance(LifecyclePhase::Failed)
-                    .expect("非终态卸载可封闭为失败");
-                return Err(error);
-            }
-        }
-        self.advance(LifecyclePhase::Complete)
-            .expect("固定卸载 finalization 后可提交完成");
-        Ok(())
+        Err(error) => Err(error),
     }
 }
 
@@ -548,69 +474,84 @@ mod tests {
     }
 
     #[test]
-    fn enabled_transitions_share_one_closed_execution_state_machine() {
-        let mut install =
-            LifecycleExecution::begin(LifecycleTransition::FreshInstall).expect("新装已启用");
-        assert_eq!(install.phase(), LifecyclePhase::Authorized);
-        for phase in [
-            LifecyclePhase::Verified,
-            LifecyclePhase::Staged,
-            LifecyclePhase::Activating,
-            LifecyclePhase::Complete,
-        ] {
-            install.advance(phase).expect("新装状态合法");
+    fn fresh_install_runner_executes_one_enabled_typed_effect() {
+        struct Effects(Vec<&'static str>);
+        impl FreshInstallLifecycleEffects for Effects {
+            type Error = &'static str;
+            fn verify(&mut self) -> Result<(), Self::Error> {
+                self.0.push("verify");
+                Ok(())
+            }
+            fn stage_and_activate(&mut self) -> Result<(), Self::Error> {
+                self.0.push("stage-and-activate");
+                Ok(())
+            }
         }
-
-        let mut uninstall =
-            LifecycleExecution::begin(LifecycleTransition::Uninstall).expect("卸载已启用");
-        for phase in [
-            LifecyclePhase::Verified,
-            LifecyclePhase::Cleaning,
-            LifecyclePhase::Reporting,
-            LifecyclePhase::Committing,
-            LifecyclePhase::Finalizing,
-            LifecyclePhase::Complete,
-        ] {
-            uninstall.advance(phase).expect("卸载状态合法");
-        }
+        let mut effects = Effects(Vec::new());
+        let result = execute_fresh_install_lifecycle(&mut effects);
+        assert_eq!(result, Ok(()));
+        assert_eq!(effects.0, ["verify", "stage-and-activate"]);
     }
 
     #[test]
-    fn lifecycle_execution_rejects_cross_transition_phase_disguise() {
-        let mut install =
-            LifecycleExecution::begin(LifecycleTransition::FreshInstall).expect("新装已启用");
-        assert_eq!(
-            install.advance(LifecyclePhase::Cleaning),
-            Err(LifecycleRejection::InvalidState),
-        );
-        let mut uninstall =
-            LifecycleExecution::begin(LifecycleTransition::Uninstall).expect("卸载已启用");
-        assert_eq!(
-            uninstall.advance(LifecyclePhase::Staged),
-            Err(LifecycleRejection::InvalidState),
-        );
-    }
-
-    #[test]
-    fn uninstall_runner_stops_at_the_exact_failed_effect_phase() {
-        for failed in [
-            LifecyclePhase::Verified,
-            LifecyclePhase::Cleaning,
-            LifecyclePhase::Reporting,
-            LifecyclePhase::Committing,
-            LifecyclePhase::Finalizing,
-        ] {
-            let mut execution =
-                LifecycleExecution::begin(LifecycleTransition::Uninstall).expect("卸载已启用");
-            let mut observed = Vec::new();
-            let result = execution.run_uninstall(|phase| {
-                observed.push(phase);
-                (phase != failed).then_some(()).ok_or("stage-failed")
-            });
-
-            assert_eq!(result, Err("stage-failed"));
-            assert_eq!(observed.last(), Some(&failed));
-            assert_eq!(execution.phase(), LifecyclePhase::Failed);
+    fn uninstall_runner_owns_effect_order_and_terminal_commit_policy() {
+        struct Effects {
+            calls: Vec<&'static str>,
+            fail: Option<&'static str>,
         }
+        impl UninstallLifecycleEffects for Effects {
+            type Error = &'static str;
+            fn verify(&mut self) -> Result<(), Self::Error> {
+                self.call("verify")
+            }
+            fn clean(&mut self) -> Result<(), Self::Error> {
+                self.call("clean")
+            }
+            fn report(&mut self) -> Result<(), Self::Error> {
+                self.call("report")
+            }
+            fn commit(&mut self) -> Result<(), Self::Error> {
+                self.call("commit")
+            }
+            fn finalize(&mut self) -> Result<(), Self::Error> {
+                self.call("finalize")
+            }
+        }
+        impl Effects {
+            fn call(&mut self, phase: &'static str) -> Result<(), &'static str> {
+                self.calls.push(phase);
+                (self.fail != Some(phase))
+                    .then_some(())
+                    .ok_or("stage-failed")
+            }
+        }
+
+        for failed in ["verify", "clean", "report", "commit"] {
+            let mut effects = Effects {
+                calls: Vec::new(),
+                fail: Some(failed),
+            };
+            assert_eq!(
+                execute_uninstall_lifecycle(&mut effects, UninstallCommitPolicy::Local),
+                Err("stage-failed")
+            );
+            assert_eq!(effects.calls.last(), Some(&failed));
+        }
+        let mut remote = Effects {
+            calls: Vec::new(),
+            fail: Some("finalize"),
+        };
+        assert_eq!(
+            execute_uninstall_lifecycle(&mut remote, UninstallCommitPolicy::HubTerminal),
+            Ok(LifecycleCompletion::RecoveryPending)
+        );
+        let mut local = Effects {
+            calls: Vec::new(),
+            fail: Some("finalize"),
+        };
+        assert_eq!(
+            execute_uninstall_lifecycle(&mut local, UninstallCommitPolicy::Local),
+            Err("stage-failed")
+        );
     }
 }
