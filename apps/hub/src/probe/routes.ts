@@ -966,18 +966,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_report_too_large", 413);
     }
 
-    const host = authenticateProbe(
-      services.hosts,
-      context.req.raw,
-      requestBody,
-      services.probeApiOrigin,
-      true,
-    );
-
-    if (!host) {
-      return probeJsonError("probe_identity_required", 401);
-    }
-
     const operationId = parseProbeOperationId(context.req.param("operationId"));
     if (operationId === null) {
       return probeJsonError("probe_operation_not_found", 404);
@@ -988,17 +976,33 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_operation_not_found", 404);
     }
 
-    if (operation.hostId !== host.id) {
-      return probeJsonError("probe_operation_token_probe_mismatch", 403);
-    }
-
     const body = readOperationStatusBody(requestBody);
     if (!body) {
       return probeJsonError("malformed_probe_operation_status", 400);
     }
 
+    const allowDeletedTerminalUninstall =
+      operation.kind === "probe_uninstall" &&
+      operation.state === "succeeded" &&
+      body.status === "succeeded";
+    const host = authenticateProbeOperationStatus(
+      services.hosts,
+      context.req.raw,
+      requestBody,
+      services.probeApiOrigin,
+      allowDeletedTerminalUninstall,
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    if (operation.hostId !== host.id) {
+      return probeJsonError("probe_operation_token_probe_mismatch", 403);
+    }
+
     const tokenResult = validateProbeOperationToken({
-      allowSucceededUninstallReplay: body.status === "succeeded",
+      allowSucceededUninstallReplay: allowDeletedTerminalUninstall,
       nowMs: now(),
       operation,
       probeId: host.probeId,
@@ -1790,20 +1794,35 @@ function authenticateProbe(
   request: Request,
   body: Uint8Array,
   probeApiOrigin = "http://localhost",
-  includeDeleted = false,
 ) {
   const signedAuthentication = authenticateSignedProbeRequest(
     hosts,
     request,
     body,
     probeApiOrigin,
-    includeDeleted,
   );
   if (signedAuthentication.kind === "authenticated") {
     return signedAuthentication.host;
   }
 
   return null;
+}
+
+function authenticateProbeOperationStatus(
+  hosts: HostRepository,
+  request: Request,
+  body: Uint8Array,
+  probeApiOrigin: string | undefined,
+  allowDeletedTerminalUninstall: boolean,
+) {
+  const authentication = authenticateSignedProbeRequest(
+    hosts,
+    request,
+    body,
+    probeApiOrigin,
+    allowDeletedTerminalUninstall,
+  );
+  return authentication.kind === "authenticated" ? authentication.host : null;
 }
 
 function authenticateSignedProbeRequest(

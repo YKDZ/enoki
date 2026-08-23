@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createProbeUpgradeRequest } from "../src/probe/operation";
+import {
+  createProbeUninstallRequest,
+  createProbeUpgradeRequest,
+} from "../src/probe/operation";
 import {
   issueProbeOperationToken,
   validateProbeOperationToken,
@@ -157,5 +160,52 @@ describe("Probe Operation Token", () => {
         }),
       ).toEqual({ error: "probe_operation_token_operation_closed" });
     }
+  });
+
+  it("accepts only an exactly bound succeeded uninstall replay after token expiry", () => {
+    const running = {
+      ...createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: 7,
+        nowMs: 1_725_000_000_000,
+      }).operation,
+      id: 42,
+      state: "succeeded" as const,
+    };
+    const token = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_060_000,
+      operation: { ...running, state: "running" },
+      probeId: "probe_01",
+      secret: "test-signing-secret",
+    });
+    const validate = (overrides = {}) =>
+      validateProbeOperationToken({
+        allowSucceededUninstallReplay: true,
+        nowMs: 1_725_000_060_001,
+        operation: running,
+        probeId: "probe_01",
+        secret: "test-signing-secret",
+        targetAssetSetDigest: "",
+        targetProbeVersion: "",
+        token,
+        ...overrides,
+      });
+
+    expect(validate()).toEqual({ error: null });
+    expect(validate({ probeId: "probe_02" })).toEqual({
+      error: "probe_operation_token_probe_mismatch",
+    });
+    expect(validate({ operation: { ...running, id: 43 } })).toEqual({
+      error: "probe_operation_token_operation_mismatch",
+    });
+    expect(
+      validate({ operation: { ...running, kind: "probe_upgrade" } }),
+    ).toEqual({ error: "probe_operation_token_operation_mismatch" });
+    expect(validate({ token: `${token}changed` })).toEqual({
+      error: "probe_operation_token_invalid",
+    });
+    expect(validate({ allowSucceededUninstallReplay: false })).toEqual({
+      error: "probe_operation_token_expired",
+    });
   });
 });

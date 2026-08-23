@@ -106,16 +106,19 @@ export function validateProbeOperationToken(input: {
     return { error: "probe_operation_token_target_mismatch" };
   }
 
-  if (input.nowMs > payload.expiresAtMs) {
+  const succeededUninstallReplay =
+    input.allowSucceededUninstallReplay === true &&
+    input.operation.kind === "probe_uninstall" &&
+    input.operation.state === "succeeded";
+
+  if (input.nowMs > payload.expiresAtMs && !succeededUninstallReplay) {
     return { error: "probe_operation_token_expired" };
   }
 
   if (
     closedStates.includes(input.operation.state) &&
     !(
-      input.allowSucceededUninstallReplay === true &&
-      input.operation.kind === "probe_uninstall" &&
-      input.operation.state === "succeeded"
+      succeededUninstallReplay
     )
   ) {
     return { error: "probe_operation_token_operation_closed" };

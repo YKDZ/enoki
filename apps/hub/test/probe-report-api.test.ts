@@ -13,7 +13,10 @@ import {
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
 } from "../src/probe/operation";
-import { validateProbeOperationToken } from "../src/probe/operation-token";
+import {
+  issueProbeOperationToken,
+  validateProbeOperationToken,
+} from "../src/probe/operation-token";
 import {
   createTestProbeIdentity,
   signedProbeHeaders,
@@ -900,6 +903,7 @@ describe("Probe report API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      probeOperationTokenSecret: "hub-only-delete-token-secret",
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -908,6 +912,19 @@ describe("Probe report API", () => {
     if (!host) {
       throw new Error("registered Probe Host is missing");
     }
+    const uninstall = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: Date.now(),
+      }).operation,
+    );
+    const uninstallToken = issueProbeOperationToken({
+      expiresAtMs: Date.now() + 60_000,
+      operation: uninstall,
+      probeId: registration.probeId,
+      secret: "hub-only-delete-token-secret",
+    });
     const deletion = await app.request(
       `/api/web/hosts/${host.id}?mode=hub-only`,
       {
@@ -917,6 +934,16 @@ describe("Probe report API", () => {
     );
     expect(deletion.status).toBe(200);
     expect(database.hosts.findActiveById(host.id)).toBeNull();
+
+    const activeUninstallStatus = await app.request(
+      `/api/probe/operations/${uninstall.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${uninstall.id}/status`,
+        JSON.stringify({ status: "succeeded", token: uninstallToken }),
+      ),
+    );
+    expect(activeUninstallStatus.status).toBe(401);
 
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const reportBody = ReportRequest.encode(
@@ -5317,6 +5344,21 @@ describe("Probe report API", () => {
     );
     expect(repeatedStatus.status).toBe(200);
     expect(removedHostIds).toEqual([host.id]);
+
+    const failedReplay = await app.request(
+      `/api/probe/operations/${operation.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/status`,
+        JSON.stringify({
+          errorCode: "probe_uninstall_failed",
+          message: "",
+          status: "failed",
+          token,
+        }),
+      ),
+    );
+    expect(failedReplay.status).toBe(401);
 
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
