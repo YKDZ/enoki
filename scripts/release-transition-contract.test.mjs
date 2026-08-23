@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
 import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
@@ -9,22 +9,39 @@ import {
   preflightReleaseMigrationConfiguration,
   verifyReleaseTransitionContract,
 } from "./release-transition-contract.mjs";
+import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 describe("Trust Epoch release transition", () => {
-  it("requires one signed source Probe component digest for every fixed target", () => {
-    const fixture = transitionFixture();
-    expect(() =>
-      createReleaseTransitionContract({
-        ...fixture.createInput,
-        sourceProbeComponents: undefined,
-      }),
-    ).toThrow("source Probe closure is invalid");
+  let fixture;
+
+  beforeAll(async () => {
+    fixture = await transitionFixture();
   });
 
-  it("binds the authorized legacy baseline to one replacement-required candidate", () => {
-    const fixture = transitionFixture();
-    const signed = createReleaseTransitionContract(fixture.createInput);
+  afterAll(async () => {
+    await fixture.cleanup();
+  });
+
+  it("derives every source Probe digest from the signed release asset closure", async () => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
+
+    expect(signed.contract.source.probeComponents).toEqual(
+      fixture.sourceProbeComponents,
+    );
+  });
+
+  it("requires the authenticated source release asset closure", async () => {
+    await expect(
+      createReleaseTransitionContract({
+        ...fixture.createInput,
+        sourceAssetDir: undefined,
+      }),
+    ).rejects.toThrow("source Probe asset closure is required");
+  });
+
+  it("binds the authorized legacy baseline to one replacement-required candidate", async () => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
 
     expect(signed.contract).toMatchObject({
       candidateCommit: fixture.expected.candidateCommit,
@@ -51,9 +68,8 @@ describe("Trust Epoch release transition", () => {
     ).toEqual(signed.contract);
   });
 
-  it("reports that a different ordinary candidate does not match", () => {
-    const fixture = transitionFixture();
-    const signed = createReleaseTransitionContract(fixture.createInput);
+  it("reports that a different ordinary candidate does not match", async () => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
 
     expect(() =>
       verifyReleaseTransitionContract({
@@ -85,9 +101,8 @@ describe("Trust Epoch release transition", () => {
       (_baseline, transition) =>
         (transition.source.hubDigest = `sha256:${"f".repeat(64)}`),
     ],
-  ])("rejects an ordinary A/B mismatch in %s", (_name, mutate) => {
-    const fixture = transitionFixture();
-    const signed = createReleaseTransitionContract(fixture.createInput);
+  ])("rejects an ordinary A/B mismatch in %s", async (_name, mutate) => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
     const baseline = {
       authorization: {
         legacyReleaseSha256: sha256(
@@ -116,9 +131,8 @@ describe("Trust Epoch release transition", () => {
     ).toThrow("candidate does not match");
   });
 
-  it("preflights the four public values before candidate signing", () => {
-    const fixture = transitionFixture();
-    const signed = createReleaseTransitionContract(fixture.createInput);
+  it("preflights the four public values before candidate signing", async () => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
     expect(
       preflightReleaseMigrationConfiguration({
         authorization: fixture.createInput.authorizationBytes.toString(),
@@ -134,7 +148,6 @@ describe("Trust Epoch release transition", () => {
   });
 
   it("requires the four public values to be configured together", () => {
-    const fixture = transitionFixture();
     expect(() =>
       preflightReleaseMigrationConfiguration({
         authorization: fixture.createInput.authorizationBytes.toString(),
@@ -149,7 +162,6 @@ describe("Trust Epoch release transition", () => {
   });
 
   it("rejects bounded transition metadata before parsing", () => {
-    const fixture = transitionFixture();
     expect(() =>
       verifyReleaseTransitionContract({
         authorizationBytes: fixture.createInput.authorizationBytes,
@@ -162,7 +174,6 @@ describe("Trust Epoch release transition", () => {
   });
 
   it("rejects an authorization asset cardinality above the fixed bound", () => {
-    const fixture = transitionFixture();
     expect(() =>
       createTrustEpochMigrationAuthorization({
         candidateVersion: "v1.2.3",
@@ -181,7 +192,7 @@ describe("Trust Epoch release transition", () => {
   });
 });
 
-function transitionFixture() {
+async function transitionFixture() {
   const root = keyPair();
   const release = keyPair();
   const delegation = createProbeTrustDelegation({
@@ -190,12 +201,12 @@ function transitionFixture() {
     releasePublicKeyPem: release.publicKey,
     rootPrivateKeyPem: root.privateKey,
   });
+  const source = await createSignedLegacyProbeAssetSetFixture({
+    privateKeyPem: release.privateKey,
+    publicKeyPem: release.publicKey,
+  });
   const legacyRelease = {
-    assets: [
-      { name: "manifest.json", sha256: "1".repeat(64), size: 100 },
-      { name: "manifest.json.sig", sha256: "2".repeat(64), size: 256 },
-      { name: "signing-key.pem", sha256: "3".repeat(64), size: 451 },
-    ],
+    assets: source.assets,
     githubRelease: {
       id: 368250351,
       peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
@@ -208,7 +219,7 @@ function transitionFixture() {
       digest: `sha256:${"5".repeat(64)}`,
       image: "ghcr.io/ykdz/enoki-hub",
     },
-    legacySigningKeySha256: "3".repeat(64),
+    legacySigningKeySha256: sha256(Buffer.from(release.publicKey)),
   };
   const authorization = createTrustEpochMigrationAuthorization({
     candidateVersion: "v1.2.3",
@@ -253,17 +264,7 @@ function transitionFixture() {
       legacyRelease,
       rootPrivateKeyPem: root.privateKey,
       rootPublicKeyPem: root.publicKey,
-      sourceProbeComponents: [
-        "aarch64-unknown-linux-gnu",
-        "aarch64-unknown-linux-musl",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-      ].map((target, index) => ({
-        file: "enoki-probe",
-        role: "probe",
-        sha256: String(index + 5).repeat(64),
-        target,
-      })),
+      sourceAssetDir: source.assetDir,
       targetManifestBytes,
       targetVersion: "1.2.3",
     },
@@ -276,6 +277,8 @@ function transitionFixture() {
       targetVersion: "1.2.3",
     },
     root,
+    cleanup: source.cleanup,
+    sourceProbeComponents: source.probeComponents,
   };
 }
 

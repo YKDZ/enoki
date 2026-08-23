@@ -37,6 +37,7 @@ import {
   verifyProbeTrustDelegation,
 } from "./release-candidate-lib.mjs";
 import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
+import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -1011,7 +1012,20 @@ with open(os.devnull, "rb") as input_stream:
       const fixture = await createProbeAssetSetFixture(workDir, {
         version: "v1.2.3",
       });
-      const legacyRelease = legacyMigrationRelease();
+      const sourceRelease = generateKeyPairSync("rsa", {
+        modulusLength: 2048,
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const source = await createSignedLegacyProbeAssetSetFixture({
+        privateKeyPem: sourceRelease.privateKey,
+        publicKeyPem: sourceRelease.publicKey,
+      });
+      const legacyRelease = {
+        ...legacyMigrationRelease(),
+        assets: source.assets,
+        legacySigningKeySha256: sha256(Buffer.from(sourceRelease.publicKey)),
+      };
       const authorization = createTrustEpochMigrationAuthorization({
         candidateVersion: "v1.2.3",
         distribution: "enoki",
@@ -1021,7 +1035,7 @@ with open(os.devnull, "rb") as input_stream:
       const targetManifestBytes = await readFile(
         path.join(fixture.outputDir, "manifest.json"),
       );
-      const transition = createReleaseTransitionContract({
+      const transition = await createReleaseTransitionContract({
         authorizationBytes: authorization.bytes,
         authorizationSignature: authorization.signature,
         candidateCommit: checkedOutCommit,
@@ -1034,20 +1048,11 @@ with open(os.devnull, "rb") as input_stream:
         legacyRelease,
         rootPrivateKeyPem: fixture.root.privateKey,
         rootPublicKeyPem: fixture.root.publicKey,
-        sourceProbeComponents: [
-          "aarch64-unknown-linux-gnu",
-          "aarch64-unknown-linux-musl",
-          "x86_64-unknown-linux-gnu",
-          "x86_64-unknown-linux-musl",
-        ].map((target, index) => ({
-          file: "enoki-probe",
-          role: "probe",
-          sha256: String(index + 5).repeat(64),
-          target,
-        })),
+        sourceAssetDir: source.assetDir,
         targetManifestBytes,
         targetVersion: "1.2.3",
       });
+      await source.cleanup();
       await Promise.all([
         writeFile(
           path.join(fixture.outputDir, "release-transition-contract.json"),

@@ -1636,11 +1636,201 @@ export async function inspectProbeAssetSet(
   };
 }
 
+export async function inspectLegacyProbeAssetSet(
+  assetDir,
+  { expectedAssets, expectedSigningKeySha256, expectedVersion },
+) {
+  if (!Array.isArray(expectedAssets) || expectedAssets.length === 0) {
+    throw new Error("legacy Probe Asset Set authorization is incomplete");
+  }
+  const expectedFiles = expectedAssets
+    .map((asset) => {
+      assertPlainObject(asset, "legacy Probe Asset Set authorized asset");
+      assertExactKeys(asset, ["name", "sha256", "size"]);
+      if (
+        typeof asset.name !== "string" ||
+        path.basename(asset.name) !== asset.name ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(asset.name) ||
+        !/^[0-9a-f]{64}$/.test(asset.sha256) ||
+        !Number.isSafeInteger(asset.size) ||
+        asset.size < 1
+      ) {
+        throw new Error("legacy Probe Asset Set authorization is invalid");
+      }
+      return asset.name;
+    })
+    .sort();
+  if (new Set(expectedFiles).size !== expectedFiles.length) {
+    throw new Error("legacy Probe Asset Set authorization is invalid");
+  }
+  assertSameFileNames(
+    (await readdir(assetDir)).sort(),
+    expectedFiles,
+    "legacy Probe Asset Set",
+  );
+  for (const asset of expectedAssets) {
+    const assetPath = path.join(assetDir, asset.name);
+    const details = await stat(assetPath);
+    if (
+      !details.isFile() ||
+      details.size !== asset.size ||
+      (await fileSha256(assetPath)) !== asset.sha256
+    ) {
+      throw new Error(
+        `legacy Probe Asset Set authorized asset does not match ${asset.name}`,
+      );
+    }
+  }
+
+  const manifestBytes = await readFile(path.join(assetDir, "manifest.json"));
+  const signingKey = await readFile(path.join(assetDir, "signing-key.pem"));
+  if (sha256(signingKey) !== expectedSigningKeySha256) {
+    throw new Error("legacy Probe Asset Set signing identity does not match");
+  }
+  let signatureValid = false;
+  try {
+    signatureValid = verify(
+      "RSA-SHA256",
+      manifestBytes,
+      createPublicKey(signingKey),
+      await readFile(path.join(assetDir, "manifest.json.sig")),
+    );
+  } catch {
+    signatureValid = false;
+  }
+  if (!signatureValid) {
+    throw new Error("legacy Probe Asset Set manifest signature is invalid");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestBytes.toString("utf8"));
+  } catch {
+    throw new Error("legacy Probe Asset Set manifest is malformed");
+  }
+  assertPlainObject(manifest, "legacy Probe Asset Set manifest");
+  assertExactKeys(manifest, ["assets", "kind", "signature", "version"]);
+  assertPlainObject(
+    manifest.signature,
+    "legacy Probe Asset Set signature descriptor",
+  );
+  assertExactKeys(manifest.signature, ["algorithm", "file", "publicKey"]);
+  if (
+    manifest.kind !== "enoki-probe-assets" ||
+    manifest.version !== expectedVersion ||
+    manifest.signature.algorithm !== "rsa-sha256" ||
+    manifest.signature.file !== "manifest.json.sig" ||
+    manifest.signature.publicKey !== "signing-key.pem" ||
+    !Array.isArray(manifest.assets) ||
+    manifest.assets.length !== probeTargets.length
+  ) {
+    throw new Error("legacy Probe Asset Set manifest is invalid");
+  }
+
+  const probeComponents = [];
+  for (let index = 0; index < probeTargets.length; index += 1) {
+    const target = probeTargets[index];
+    const asset = manifest.assets[index];
+    assertPlainObject(asset, `legacy Probe Asset Set target ${target}`);
+    assertExactKeys(asset, ["file", "sha256", "size", "target"]);
+    const file = `enoki-probe-${target}.tar.gz`;
+    if (
+      asset.file !== file ||
+      asset.target !== target ||
+      !/^[0-9a-f]{64}$/.test(asset.sha256) ||
+      !Number.isSafeInteger(asset.size) ||
+      asset.size < 1
+    ) {
+      throw new Error(`legacy Probe Asset Set target ${target} is invalid`);
+    }
+    const archivePath = path.join(assetDir, file);
+    const archiveDetails = await stat(archivePath);
+    if (
+      archiveDetails.size !== asset.size ||
+      (await fileSha256(archivePath)) !== asset.sha256
+    ) {
+      throw new Error(`legacy Probe Asset Set archive does not match ${file}`);
+    }
+    if (
+      (await readFile(`${archivePath}.sha256`, "utf8")) !==
+      `${asset.sha256}  ${file}\n`
+    ) {
+      throw new Error(`legacy Probe Asset Set sidecar does not match ${file}`);
+    }
+    probeComponents.push({
+      file: "enoki-probe",
+      role: "probe",
+      sha256: await inspectLegacyProbeArchive(archivePath, {
+        target,
+        version: `v${manifest.version}`,
+      }),
+      target,
+    });
+  }
+  const installer = await readFile(
+    path.join(assetDir, "install-probe.sh"),
+    "utf8",
+  );
+  if (!installer.includes(expectedSigningKeySha256)) {
+    throw new Error("legacy Probe installer does not pin its signing identity");
+  }
+  return { probeComponents, version: manifest.version };
+}
+
 function assertSigningPublicKey(publicKeyPem) {
   try {
     createPublicKey(publicKeyPem);
   } catch {
     throw new Error("Probe asset signing public key is malformed");
+  }
+}
+
+async function inspectLegacyProbeArchive(archivePath, { target, version }) {
+  const extractionDir = await mkdtemp(
+    path.join(tmpdir(), "enoki-legacy-probe-archive-"),
+  );
+  try {
+    let listing;
+    try {
+      ({ stdout: listing } = await execFileAsync(
+        "tar",
+        ["--list", "--gzip", "--file", archivePath],
+        { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
+      ));
+    } catch {
+      throw new Error(
+        `legacy Probe archive ${path.basename(archivePath)} is invalid`,
+      );
+    }
+    if (listing !== "enoki-probe\n") {
+      throw new Error(
+        `legacy Probe archive ${path.basename(archivePath)} closure is invalid`,
+      );
+    }
+    await execFileAsync(
+      "tar",
+      [
+        "--extract",
+        "--gzip",
+        "--file",
+        archivePath,
+        "--directory",
+        extractionDir,
+        "--no-same-owner",
+      ],
+      { env: untrustedToolEnvironment(), maxBuffer: 1024 * 1024 },
+    );
+    const binaryPath = path.join(extractionDir, "enoki-probe");
+    const details = await lstat(binaryPath);
+    if (!details.isFile() || (details.mode & 0o111) === 0) {
+      throw new Error(
+        `legacy Probe archive ${path.basename(archivePath)} payload is invalid`,
+      );
+    }
+    const binary = await readFile(binaryPath);
+    inspectProbeElf(binary, { target, version });
+    return sha256(binary);
+  } finally {
+    await rm(extractionDir, { force: true, recursive: true });
   }
 }
 

@@ -6,7 +6,10 @@ import {
   verify,
 } from "node:crypto";
 
-import { verifyProbeTrustDelegation } from "./release-candidate-lib.mjs";
+import {
+  inspectLegacyProbeAssetSet,
+  verifyProbeTrustDelegation,
+} from "./release-candidate-lib.mjs";
 import { verifyTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const signingDomain = Buffer.from(
@@ -26,7 +29,7 @@ const MAX_SIGNATURE_BYTES = 1024;
 const MAX_TARGET_BUNDLE_BYTES = 1024 * 1024 * 1024;
 const MAX_TARGET_CLOSURE_BYTES = 4 * 1024 * 1024 * 1024;
 
-export function createReleaseTransitionContract(input) {
+export async function createReleaseTransitionContract(input) {
   assertBoundedBytes(
     input.targetManifestBytes,
     MAX_CONTRACT_BYTES,
@@ -60,6 +63,20 @@ export function createReleaseTransitionContract(input) {
   ) {
     throw new Error("Release Transition Contract root identity does not match");
   }
+  if (typeof input.sourceAssetDir !== "string" || !input.sourceAssetDir) {
+    throw new Error(
+      "Release Transition Contract source Probe asset closure is required",
+    );
+  }
+  const sourceAssetSet = await inspectLegacyProbeAssetSet(
+    input.sourceAssetDir,
+    {
+      expectedAssets: authorization.legacyRelease.assets,
+      expectedSigningKeySha256:
+        authorization.legacyRelease.legacySigningKeySha256,
+      expectedVersion: authorization.legacyRelease.githubRelease.tag.slice(1),
+    },
+  );
   const contract = validateContract({
     candidateCommit: input.candidateCommit,
     distribution: authorization.distribution,
@@ -75,9 +92,7 @@ export function createReleaseTransitionContract(input) {
       hubImage: authorization.legacyRelease.hub.image,
       legacySigningKeySha256:
         authorization.legacyRelease.legacySigningKeySha256,
-      probeComponents: validateSourceProbeComponents(
-        input.sourceProbeComponents,
-      ),
+      probeComponents: sourceAssetSet.probeComponents,
       releaseId: authorization.legacyRelease.githubRelease.id,
       repository: authorization.legacyRelease.githubRelease.repository,
       tag: authorization.legacyRelease.githubRelease.tag,

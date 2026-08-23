@@ -37,6 +37,7 @@ import {
   probeTargets,
 } from "./release-candidate-lib.mjs";
 import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
+import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -555,12 +556,17 @@ async function createResolverFixture(options = {}) {
     legacyProbe: options.legacyProbe,
   });
   if (options.historicalTransition) {
+    const sourceRelease = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const source = await createSignedLegacyProbeAssetSetFixture({
+      privateKeyPem: sourceRelease.privateKey,
+      publicKeyPem: sourceRelease.publicKey,
+    });
     const legacyRelease = {
-      assets: [
-        { name: "manifest.json", sha256: "1".repeat(64), size: 100 },
-        { name: "manifest.json.sig", sha256: "2".repeat(64), size: 256 },
-        { name: "signing-key.pem", sha256: "3".repeat(64), size: 451 },
-      ],
+      assets: source.assets,
       githubRelease: {
         id: 368250351,
         peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
@@ -573,7 +579,7 @@ async function createResolverFixture(options = {}) {
         digest: `sha256:${"5".repeat(64)}`,
         image: "ghcr.io/ykdz/enoki-hub",
       },
-      legacySigningKeySha256: "3".repeat(64),
+      legacySigningKeySha256: sha256(Buffer.from(sourceRelease.publicKey)),
     };
     const authorization = createTrustEpochMigrationAuthorization({
       candidateVersion: version,
@@ -581,7 +587,7 @@ async function createResolverFixture(options = {}) {
       legacyRelease,
       rootPrivateKeyPem: probe.root.privateKey,
     });
-    const transition = createReleaseTransitionContract({
+    const transition = await createReleaseTransitionContract({
       authorizationBytes: authorization.bytes,
       authorizationSignature: authorization.signature,
       candidateCommit: commitSha,
@@ -594,22 +600,13 @@ async function createResolverFixture(options = {}) {
       legacyRelease,
       rootPrivateKeyPem: probe.root.privateKey,
       rootPublicKeyPem: probe.root.publicKey,
-      sourceProbeComponents: [
-        "aarch64-unknown-linux-gnu",
-        "aarch64-unknown-linux-musl",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-      ].map((target, index) => ({
-        file: "enoki-probe",
-        role: "probe",
-        sha256: String(index + 5).repeat(64),
-        target,
-      })),
+      sourceAssetDir: source.assetDir,
       targetManifestBytes: await readFile(
         path.join(probe.outputDir, "manifest.json"),
       ),
       targetVersion: version.slice(1),
     });
+    await source.cleanup();
     await Promise.all([
       writeFile(
         path.join(probe.outputDir, "release-transition-contract.json"),

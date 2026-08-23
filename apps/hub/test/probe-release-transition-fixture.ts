@@ -11,6 +11,8 @@ import path from "node:path";
 import { createProbeTrustDelegation } from "../../../scripts/release-candidate-lib.mjs";
 // @ts-expect-error JavaScript release transition issuer has no declaration file.
 import { createReleaseTransitionContract } from "../../../scripts/release-transition-contract.mjs";
+// @ts-expect-error JavaScript release test fixture has no declaration file.
+import { createSignedLegacyProbeAssetSetFixture } from "../../../scripts/release-transition-test-fixture.mjs";
 // @ts-expect-error JavaScript Trust Epoch authorization issuer has no declaration file.
 import { createTrustEpochMigrationAuthorization } from "../../../scripts/trust-epoch-migration-lib.mjs";
 
@@ -61,12 +63,11 @@ export async function writeSignedProbeAssetSet(
     })}\n`,
   );
   const trustEpoch = input.trustEpoch
-    ? createTrustEpochMigrationFixture({
+    ? await createTrustEpochMigrationFixture({
         authority,
         delegation,
         manifest,
         targetVersion: input.targetVersion,
-        sourceProbeComponents,
       })
     : null;
   const contract =
@@ -118,29 +119,30 @@ export async function writeSignedProbeAssetSet(
     authority,
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
-    sourceProbeSha256: sourceProbeComponents.map(({ sha256 }) => sha256),
+    sourceProbeSha256: (
+      trustEpoch?.sourceProbeComponents ?? sourceProbeComponents
+    ).map(({ sha256 }: { sha256: string }) => sha256),
   };
 }
 
-function createTrustEpochMigrationFixture({
+async function createTrustEpochMigrationFixture({
   authority,
   delegation,
   manifest,
   targetVersion,
-  sourceProbeComponents,
 }: {
   authority: TestProbeReleaseAuthority;
   delegation: ReturnType<typeof createProbeTrustDelegation>;
   manifest: Buffer;
   targetVersion: string;
-  sourceProbeComponents: ReturnType<typeof sourceProbeComponentFixture>;
 }) {
+  const sourceRelease = testKeyPair();
+  const source = await createSignedLegacyProbeAssetSetFixture({
+    privateKeyPem: sourceRelease.privateKey,
+    publicKeyPem: sourceRelease.publicKey,
+  });
   const legacyRelease = {
-    assets: [
-      { name: "manifest.json", sha256: "1".repeat(64), size: 100 },
-      { name: "manifest.json.sig", sha256: "2".repeat(64), size: 256 },
-      { name: "signing-key.pem", sha256: "3".repeat(64), size: 451 },
-    ],
+    assets: source.assets,
     githubRelease: {
       id: 368250351,
       peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
@@ -153,7 +155,7 @@ function createTrustEpochMigrationFixture({
       digest: `sha256:${"5".repeat(64)}`,
       image: "ghcr.io/ykdz/enoki-hub",
     },
-    legacySigningKeySha256: "3".repeat(64),
+    legacySigningKeySha256: sha256(Buffer.from(sourceRelease.publicKey)),
   };
   const authorization = createTrustEpochMigrationAuthorization({
     candidateVersion: `v${targetVersion}`,
@@ -161,22 +163,27 @@ function createTrustEpochMigrationFixture({
     legacyRelease,
     rootPrivateKeyPem: authority.privateKey,
   });
-  return {
-    authorization,
-    contract: createReleaseTransitionContract({
-      authorizationBytes: authorization.bytes,
-      authorizationSignature: authorization.signature,
-      candidateCommit: "a".repeat(40),
-      delegationBytes: delegation.bytes,
-      delegationSignature: delegation.signature,
-      legacyRelease,
-      rootPrivateKeyPem: authority.privateKey,
-      rootPublicKeyPem: authority.publicKey,
-      targetManifestBytes: manifest,
-      targetVersion,
-      sourceProbeComponents,
-    }),
-  };
+  try {
+    return {
+      authorization,
+      contract: await createReleaseTransitionContract({
+        authorizationBytes: authorization.bytes,
+        authorizationSignature: authorization.signature,
+        candidateCommit: "a".repeat(40),
+        delegationBytes: delegation.bytes,
+        delegationSignature: delegation.signature,
+        legacyRelease,
+        rootPrivateKeyPem: authority.privateKey,
+        rootPublicKeyPem: authority.publicKey,
+        sourceAssetDir: source.assetDir,
+        targetManifestBytes: manifest,
+        targetVersion,
+      }),
+      sourceProbeComponents: source.probeComponents,
+    };
+  } finally {
+    await source.cleanup();
+  }
 }
 
 function createGenericReleaseTransitionContract({

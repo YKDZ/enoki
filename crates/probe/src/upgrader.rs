@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt, fs,
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -40,6 +40,7 @@ use crate::{
 };
 
 const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-runtime";
+const PRODUCTION_PROBE_BINARY_PATH: &str = "/usr/local/bin/enoki-probe";
 const CPU_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const LIFECYCLE_COMPANION_BINARY_PATH: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
@@ -1781,23 +1782,113 @@ fn run_probe_replacement_migration(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InstalledProbeBinaryFacts {
+    device: u64,
+    inode: u64,
+    is_regular_file: bool,
+    is_symlink: bool,
+    length: u64,
+    link_count: u64,
+    mode: u32,
+    owner_uid: u32,
+}
+
 fn fixed_installed_probe_sha256(path: &Path) -> Result<String, std::io::Error> {
-    let mut file = fs::File::open(path)?;
-    let length = file.metadata()?.len();
-    if length == 0 || length > MAX_INSTALLED_PROBE_BYTES {
+    if path != Path::new(PRODUCTION_PROBE_BINARY_PATH) {
         return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "installed Probe size is outside the fixed bound",
+            std::io::ErrorKind::InvalidInput,
+            "installed Probe path is not the fixed production path",
         ));
     }
+    let path_facts = installed_probe_binary_facts(&fs::symlink_metadata(path)?);
+    validate_installed_probe_binary_facts(path_facts)?;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let opened_facts = installed_probe_binary_facts(&file.metadata()?);
+    validate_installed_probe_binary_facts(opened_facts)?;
+    if path_facts != opened_facts {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "installed Probe path and opened file do not match",
+        ));
+    }
+    let digest = installed_probe_sha256_from_reader(&mut file, opened_facts)?;
+    if installed_probe_binary_facts(&file.metadata()?) != opened_facts {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "installed Probe changed while it was hashed",
+        ));
+    }
+    Ok(digest)
+}
+
+fn installed_probe_binary_facts(metadata: &fs::Metadata) -> InstalledProbeBinaryFacts {
+    InstalledProbeBinaryFacts {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        is_regular_file: metadata.file_type().is_file(),
+        is_symlink: metadata.file_type().is_symlink(),
+        length: metadata.len(),
+        link_count: metadata.nlink(),
+        mode: metadata.mode() & 0o7777,
+        owner_uid: metadata.uid(),
+    }
+}
+
+fn validate_installed_probe_binary_facts(
+    facts: InstalledProbeBinaryFacts,
+) -> Result<(), std::io::Error> {
+    if facts.is_symlink
+        || !facts.is_regular_file
+        || facts.owner_uid != 0
+        || facts.mode != 0o755
+        || facts.link_count != 1
+        || facts.length == 0
+        || facts.length > MAX_INSTALLED_PROBE_BYTES
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "installed Probe file facts are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn installed_probe_sha256_from_reader(
+    mut reader: impl Read,
+    facts: InstalledProbeBinaryFacts,
+) -> Result<String, std::io::Error> {
+    validate_installed_probe_binary_facts(facts)?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = reader.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "installed Probe size exceeded its bound",
+            )
+        })?;
+        if total > facts.length {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "installed Probe size changed while it was hashed",
+            ));
+        }
         digest.update(&buffer[..read]);
+    }
+    if total != facts.length {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "installed Probe size changed while it was hashed",
+        ));
     }
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -3480,6 +3571,11 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         }
     };
     let install_path = required_install_metadata_path(&value, "install_path")?;
+    if matches!(schema_version, 3 | 4) && install_path != Path::new(PRODUCTION_PROBE_BINARY_PATH) {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "install_path does not match the fixed production path",
+        ));
+    }
     let hub_url = required_install_metadata_string(&value, "hub_url")?;
     let operation_status_path = required_install_metadata_path(&value, "operation_status_path")?;
     let state_dir = required_install_metadata_path(&value, "state_dir")?;
@@ -5742,11 +5838,30 @@ mod tests {
     }
 
     #[test]
-    fn signed_source_component_digest_proves_a_legacy_install_without_executing_it() {
+    fn root_owned_installed_probe_facts_prove_a_legacy_component_without_runner_uid() {
+        let facts = InstalledProbeBinaryFacts {
+            device: 11,
+            inode: 22,
+            is_regular_file: true,
+            is_symlink: false,
+            length: 22,
+            link_count: 1,
+            mode: 0o755,
+            owner_uid: 0,
+        };
+        validate_installed_probe_binary_facts(facts).expect("canonical facts are accepted");
+        let installed_digest = installed_probe_sha256_from_reader(
+            std::io::Cursor::new(b"legacy probe component"),
+            facts,
+        )
+        .expect("bounded component is hashed");
+        assert_eq!(
+            installed_digest,
+            "d7f57fc65a2c73a675a0952208f072d22e3c9e65995b07753e53946e2638966e"
+        );
+
         let temporary = tempfile::tempdir().unwrap();
         let installed_probe = temporary.path().join("enoki-probe");
-        fs::write(&installed_probe, b"legacy probe component").unwrap();
-        let installed_digest = fixed_installed_probe_sha256(&installed_probe).unwrap();
         let status = temporary.path().join("probe-operation-status.toml");
         let mut metadata = trusted_install_metadata_for_hub(
             "https://hub.example",
@@ -8527,6 +8642,31 @@ mod tests {
     }
 
     #[test]
+    fn schema_three_and_four_metadata_fix_the_installed_probe_path() {
+        for schema_version in [3, 4] {
+            let contents = schema_three_install_metadata_contents()
+                .replace(
+                    "schema_version = 3",
+                    &format!("schema_version = {schema_version}"),
+                )
+                .replace(
+                    "install_path = \"/usr/local/bin/enoki-probe\"",
+                    "install_path = \"/opt/enoki-probe\"",
+                );
+
+            let error = parse_trusted_probe_install_metadata(&contents)
+                .expect_err("signed install metadata cannot redirect the Probe binary");
+
+            assert!(matches!(
+                error,
+                ProbeUpgraderRunError::InvalidInstallMetadata(
+                    "install_path does not match the fixed production path"
+                )
+            ));
+        }
+    }
+
+    #[test]
     fn signed_package_metadata_uses_root_trust_without_legacy_sudoers_or_daily_key() {
         let root = "a".repeat(64);
         let contents = [
@@ -8577,33 +8717,7 @@ mod tests {
 
     #[test]
     fn schema_three_metadata_owns_the_complete_observation_role_inventory() {
-        let contents = [
-            "schema_version = 3",
-            "hub_url = \"https://hub.example\"",
-            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
-            "install_path = \"/usr/local/bin/enoki-probe\"",
-            "observation_runtime_path = \"/usr/local/bin/enoki-observation-runtime\"",
-            "cpu_provider_path = \"/usr/local/bin/enoki-cpu-resource-provider\"",
-            "observation_ipc_group = \"enoki-observation-ipc\"",
-            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
-            "state_dir = \"/var/lib/enoki-probe\"",
-            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
-            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
-            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
-            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
-            "service_name = \"enoki-probe\"",
-            "service_user = \"enoki-probe\"",
-            "service_group = \"enoki-probe\"",
-            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
-            "observation_runtime_service_unit_path = \"/etc/systemd/system/enoki-observation-runtime.service\"",
-            "observation_runtime_socket_unit_path = \"/etc/systemd/system/enoki-observation-runtime.socket\"",
-            "cpu_provider_service_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider@.service\"",
-            "cpu_provider_socket_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider.socket\"",
-            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\"",
-            "collector_helper_sudoers_path = \"/etc/sudoers.d/enoki-probe-collector-helpers\"",
-            "",
-        ]
-        .join("\n");
+        let contents = schema_three_install_metadata_contents();
 
         let metadata = parse_trusted_probe_install_metadata(&contents).unwrap();
 
@@ -10729,6 +10843,36 @@ printf '%s\n' '{}'
                     .display()
             ),
             legacy,
+        ]
+        .join("\n")
+    }
+
+    fn schema_three_install_metadata_contents() -> String {
+        [
+            "schema_version = 3",
+            "hub_url = \"https://hub.example\"",
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"",
+            "install_path = \"/usr/local/bin/enoki-probe\"",
+            "observation_runtime_path = \"/usr/local/bin/enoki-observation-runtime\"",
+            "cpu_provider_path = \"/usr/local/bin/enoki-cpu-resource-provider\"",
+            "observation_ipc_group = \"enoki-observation-ipc\"",
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"",
+            "state_dir = \"/var/lib/enoki-probe\"",
+            "probe_distribution_root_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+            "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
+            "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
+            "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
+            "service_name = \"enoki-probe\"",
+            "service_user = \"enoki-probe\"",
+            "service_group = \"enoki-probe\"",
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"",
+            "observation_runtime_service_unit_path = \"/etc/systemd/system/enoki-observation-runtime.service\"",
+            "observation_runtime_socket_unit_path = \"/etc/systemd/system/enoki-observation-runtime.socket\"",
+            "cpu_provider_service_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider@.service\"",
+            "cpu_provider_socket_unit_path = \"/etc/systemd/system/enoki-cpu-resource-provider.socket\"",
+            "operation_sudoers_path = \"/etc/sudoers.d/enoki-probe-operations\"",
+            "collector_helper_sudoers_path = \"/etc/sudoers.d/enoki-probe-collector-helpers\"",
+            "",
         ]
         .join("\n")
     }
