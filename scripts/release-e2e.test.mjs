@@ -149,6 +149,15 @@ describe("Release E2E business assertions", () => {
     ).resolves.toEqual({ status: "succeeded" });
     expect(calls).toContain("host.manualReinstall:manual_reinstall");
     expect(calls).not.toContain("hub.requestProbeUpgrade");
+    expect(
+      calls
+        .filter((call) => call.startsWith("hub.getHost:candidate:"))
+        .slice(0, 3),
+    ).toEqual([
+      "hub.getHost:candidate:default-v1:clean",
+      "hub.getHost:candidate:host-7-1:configuration-error",
+      "hub.getHost:candidate:host-7-1:clean",
+    ]);
     expect(written.at(-1)).toMatchObject({
       identityContinuity: {
         after: { probeId: "probe_release_replacement" },
@@ -244,6 +253,59 @@ describe("Release E2E business assertions", () => {
         },
         status: "failed",
       },
+    });
+  });
+
+  it("preserves only the validated public authorization summary in redacted evidence", async () => {
+    const written = [];
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithMigrationBaseline(),
+        environment: {
+          cleanup: async () => ({
+            clean: true,
+            summaries: {
+              authorization: "Bearer release-credential",
+              authorizationDigest: "a".repeat(64),
+              authorizationPayload: "release-authorization-payload",
+              authorizationToken: "release-authorization-token",
+              enrollmentToken: "enk_enroll_release_credential",
+              headersSha256: "Bearer release-credential",
+              invalid: { authorizationSha256: "not-a-sha256-summary" },
+              ownerPassword: "owner-password",
+              privateKeyFingerprint: "raw-private-key-material",
+              privateKeyPem:
+                "-----BEGIN PRIVATE KEY-----\nraw-private-key-material\n-----END PRIVATE KEY-----",
+              valid: { authorizationSha256: "b".repeat(64) },
+            },
+          }),
+          start: async () => {
+            throw new Error("migration Restore must fail before start");
+          },
+        },
+        evidenceSink: {
+          write: async (evidence) => written.push(evidence),
+        },
+        ownerPassword: "owner-password",
+        runId: "run-redacted-public-summary",
+        scenario: "hub-restore-compatibility-window",
+      }),
+    ).rejects.toMatchObject({
+      code: "trust_epoch_migration_restore_compatibility_unavailable",
+    });
+
+    expect(written.at(-1).cleanup.environment.summaries).toEqual({
+      authorization: "[REDACTED]",
+      authorizationDigest: "[REDACTED]",
+      authorizationPayload: "[REDACTED]",
+      authorizationToken: "[REDACTED]",
+      enrollmentToken: "[REDACTED]",
+      headersSha256: "[REDACTED]",
+      invalid: { authorizationSha256: "[REDACTED]" },
+      ownerPassword: "[REDACTED]",
+      privateKeyFingerprint: "[REDACTED]",
+      privateKeyPem: "[REDACTED]",
+      valid: { authorizationSha256: "b".repeat(64) },
     });
   });
 
@@ -7457,20 +7519,25 @@ function migrationBaselineEnvironment(calls, candidateManifest) {
   let listCalls = 0;
   let metricSequence = 3;
   let replaced = false;
+  let candidateHostObservations = 0;
   const hostMetadata = {
     connectAddress: "release-test-host",
     description: "retained description",
     displayName: "retained Host",
     observedIp: "192.0.2.10",
   };
-  const currentHost = () =>
+  const currentHost = ({
+    reportedVersion = configuration.version,
+    warnings = [],
+  } = {}) =>
     readyHost({
       hostMetadata,
       hostProfile: {
         ...readyHost().hostProfile,
         probeVersion: replaced ? "1.2.3" : "0.1.74",
       },
-      reportedProbeConfigurationVersion: configuration.version,
+      reportedProbeConfigurationVersion: reportedVersion,
+      warnings,
     });
   const metrics = () =>
     Array.from({ length: metricSequence }, (_, index) =>
@@ -7617,7 +7684,20 @@ function migrationBaselineEnvironment(calls, candidateManifest) {
       return auditLog;
     },
     async getHost() {
-      return currentHost();
+      if (!replaced) return currentHost();
+      candidateHostObservations += 1;
+      const reportedVersion =
+        candidateHostObservations === 1 ? "default-v1" : configuration.version;
+      const configurationError = candidateHostObservations === 2;
+      calls.push(
+        `hub.getHost:candidate:${reportedVersion}:${configurationError ? "configuration-error" : "clean"}`,
+      );
+      return currentHost({
+        reportedVersion,
+        warnings: configurationError
+          ? [{ code: "probe_configuration_error" }]
+          : [],
+      });
     },
     async getHostMetrics() {
       const result = metrics();

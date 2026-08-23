@@ -1751,12 +1751,20 @@ async function runBaselineUpgradeUninstallScenario({
 
     const candidateHost = await waitForObservation({
       code: "candidate_probe_reporting_timeout",
-      label: "Candidate Probe Host Profile after Upgrade",
+      label: migrationBaseline
+        ? "Candidate Probe retained Configuration after manual reinstall"
+        : "Candidate Probe Host Profile after Upgrade",
       observe: () => hub.getHost(hostId),
       poll,
       ready: (value) =>
         value?.id === hostId &&
-        isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
+        isCandidateHostReady(value, candidateManifest.probeAssetSet.version) &&
+        (!migrationBaseline ||
+          (value.reportedProbeConfigurationVersion ===
+            evidence.probeConfiguration.beforeUpgrade.reportedVersion &&
+            !value.warnings?.some(
+              (warning) => warning.code === "probe_configuration_error",
+            ))),
     });
     evidence.candidateHost = compactHostEvidence(candidateHost);
     evidence.hostBoundary = await host.assertInstalled(
@@ -6143,10 +6151,19 @@ function serializedError(error) {
   return serialized;
 }
 
+const publicSensitiveEvidenceSummaryFormats = Object.freeze({
+  authorizationSha256: /^[0-9a-f]{64}$/,
+});
+
+function isValidatedPublicSensitiveEvidenceSummary(key, value) {
+  const format = publicSensitiveEvidenceSummaryFormats[key];
+  return typeof value === "string" && format?.test(value) === true;
+}
+
 function redactSensitiveEvidence(value, secrets, key = "") {
   if (
     key &&
-    !/(?:digest|fingerprint|sha256)$/i.test(key) &&
+    !isValidatedPublicSensitiveEvidenceSummary(key, value) &&
     /(?:authorization|cookie|enrollment.?token|headers?|owner.?password|private.?key|signing.?secret|install.?command)/i.test(
       key,
     )
