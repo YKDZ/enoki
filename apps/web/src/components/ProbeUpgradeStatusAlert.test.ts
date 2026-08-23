@@ -35,7 +35,7 @@ describe("Probe Upgrade current problem", () => {
     expect(wrapper.emitted("retryProbeUpgrade")).toHaveLength(1);
   });
 
-  it("shows the fixed local repair command for repairable failures", () => {
+  it("shows the fixed local repair command only for the Hub repair disposition", () => {
     const wrapper = mount(ProbeUpgradeStatusAlert, {
       props: { status: failedProbeUpgradeStatus("probe_repair") },
     });
@@ -57,12 +57,13 @@ describe("Probe Upgrade current problem", () => {
     expect(wrapper.find("button").exists()).toBe(false);
   });
 
-  it("renders unknown failures generically without a privileged action", () => {
+  it("does not infer a privileged action when the Hub disposition is unknown", () => {
     const wrapper = mount(ProbeUpgradeStatusAlert, {
       props: { status: failedProbeUpgradeStatus(null) },
     });
 
     expect(wrapper.text()).toContain("Hub 无法安全判断恢复方式");
+    expect(wrapper.text()).not.toContain("需要修复探针");
     expect(wrapper.find("button").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("sudo");
     expect(wrapper.text()).not.toContain("http");

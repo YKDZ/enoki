@@ -36,7 +36,7 @@ export function manualProbeReinstallPolicy(input: {
     operation.kind !== "probe_upgrade" ||
     operation.state !== "failed" ||
     !operation.failureCode ||
-    probeUpgradeRecoveryDisposition(operation.failureCode) !==
+    probeUpgradeRecoveryDisposition(operation) !==
       "manual_reinstall_required" ||
     !input.hostProbeVersion ||
     input.sourceProbeSha256.length === 0 ||

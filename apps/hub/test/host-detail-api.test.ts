@@ -1423,19 +1423,34 @@ describe("Host detail API", () => {
       "当前安装方式不支持 Probe 升级。",
     );
 
-    for (const [failureCode, recoveryDisposition] of [
-      ["accepted_timeout", "retry_probe_upgrade"],
-      ["lifecycle.upgrade_failed_before_activation", "retry_probe_upgrade"],
-      ["lifecycle.upgrade_repair_required", "manual_reinstall_required"],
-      ["post_replacement_restart_failure", "manual_reinstall_required"],
-      ["unrecognized_failure", null],
+    for (const [failureCode, recoveryDisposition, trustedLifecycleEvidence] of [
+      ["accepted_timeout", "retry_probe_upgrade", false],
+      [
+        "lifecycle.upgrade_failed_before_activation",
+        "retry_probe_upgrade",
+        false,
+      ],
+      ["signing_key_untrusted", "retry_probe_upgrade", true],
+      ["lifecycle.upgrade_repair_required", "probe_repair", true],
+      ["lifecycle.upgrade_repair_required", "manual_reinstall_required", false],
+      ["lifecycle.authority_mismatch", null, true],
+      ["running_timeout", "manual_reinstall_required", true],
+      ["post_replacement_restart_failure", "manual_reinstall_required", true],
+      ["unrecognized_failure", null, true],
     ] as const) {
       const failureMessage = `private diagnostic for ${failureCode}`;
       database.sqlite
         .prepare(
-          "update probe_operations set failure_code = ?, failure_message = ? where id = (select id from probe_operations where managed_host_id = ? order by id desc limit 1)",
+          "update probe_operations set kind = 'probe_upgrade', failure_code = ?, failure_message = ?, target_manifest_sha256 = ?, upgrade_authority_sha256 = ?, verified_stage_sha256 = ?, repair_evidence_sha256 = null, repair_failed_operation_id = null where id = (select id from probe_operations where managed_host_id = ? order by id desc limit 1)",
         )
-        .run(failureCode, failureMessage, hostId);
+        .run(
+          failureCode,
+          failureMessage,
+          trustedLifecycleEvidence ? "1".repeat(64) : null,
+          trustedLifecycleEvidence ? "2".repeat(64) : null,
+          trustedLifecycleEvidence ? "3".repeat(64) : null,
+          hostId,
+        );
 
       const classifiedResponse = await app.request(`/api/web/hosts/${hostId}`, {
         headers: {
@@ -1460,6 +1475,64 @@ describe("Host detail API", () => {
       expect(JSON.stringify(classifiedBody)).not.toContain(failureMessage);
     }
 
+    database.sqlite
+      .prepare(
+        "update probe_operations set kind = 'probe_repair', failure_code = 'lifecycle.repair_unresolved', failure_message = ?, target_manifest_sha256 = ?, upgrade_authority_sha256 = null, verified_stage_sha256 = ?, repair_authority_expires_at_ms = ?, repair_evidence_sha256 = ?, repair_failed_operation_id = ?, repair_nonce = ? where id = ?",
+      )
+      .run(
+        "private unresolved repair diagnostic",
+        "4".repeat(64),
+        "5".repeat(64),
+        1_725_000_080_000,
+        "6".repeat(64),
+        createdBody.probeUpgradeRequest.id,
+        "7".repeat(32),
+        createdBody.probeUpgradeRequest.id,
+      );
+
+    const unresolvedRepairResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    expect(unresolvedRepairResponse.status).toBe(200);
+    const unresolvedRepairBody = await unresolvedRepairResponse.json();
+    expect(unresolvedRepairBody).toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "probe_repair" },
+          state: "failed",
+        }),
+      }),
+    });
+    expect(JSON.stringify(unresolvedRepairBody)).not.toContain(
+      "lifecycle.repair_unresolved",
+    );
+    expect(JSON.stringify(unresolvedRepairBody)).not.toContain(
+      "private unresolved repair diagnostic",
+    );
+
+    database.sqlite
+      .prepare(
+        "update probe_operations set repair_evidence_sha256 = null where id = ?",
+      )
+      .run(createdBody.probeUpgradeRequest.id);
+    const unboundRepairResponse = await app.request(
+      `/api/web/hosts/${hostId}`,
+      { headers: { cookie: ownerSession } },
+    );
+    await expect(unboundRepairResponse.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "manual_reinstall_required" },
+        }),
+      }),
+    });
+    database.sqlite
+      .prepare(
+        "update probe_operations set repair_evidence_sha256 = ? where id = ?",
+      )
+      .run("6".repeat(64), createdBody.probeUpgradeRequest.id);
+
     const operationHistoryResponse = await app.request(
       `/api/web/probe-operations/${createdBody.probeUpgradeRequest.id}`,
       { headers: { cookie: ownerSession } },
@@ -1467,8 +1540,9 @@ describe("Host detail API", () => {
     expect(operationHistoryResponse.status).toBe(200);
     await expect(operationHistoryResponse.json()).resolves.toEqual({
       probeOperation: expect.objectContaining({
-        failure: { recoveryDisposition: null },
+        failure: { recoveryDisposition: "probe_repair" },
         id: createdBody.probeUpgradeRequest.id,
+        kind: "probe_repair",
         state: "failed",
       }),
     });
@@ -1520,7 +1594,8 @@ describe("Host detail API", () => {
     });
     expect(database.probeOperations.findLatestForHost(hostId)).toEqual(
       expect.objectContaining({
-        failureCode: "unrecognized_failure",
+        failureCode: "lifecycle.repair_unresolved",
+        kind: "probe_repair",
         state: "failed",
       }),
     );

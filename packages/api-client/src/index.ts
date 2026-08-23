@@ -262,7 +262,7 @@ export type ProbeUpgradeAllResponse = {
 export type ProbeOperationResponse = {
   probeOperation: ProbeUpgradeStatus & {
     hostId: number;
-    kind: "probe_upgrade" | "probe_uninstall";
+    kind: "probe_upgrade" | "probe_repair" | "probe_uninstall";
   };
 };
 

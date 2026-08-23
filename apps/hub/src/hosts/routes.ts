@@ -874,9 +874,7 @@ function probeUpgradeStatus(
     createdAtMs: operation.createdAtMs,
     failure: operation.failureCode
       ? {
-          recoveryDisposition: probeUpgradeRecoveryDisposition(
-            operation.failureCode,
-          ),
+          recoveryDisposition: probeUpgradeRecoveryDisposition(operation),
         }
       : null,
     id: requiredOperationId(operation),
