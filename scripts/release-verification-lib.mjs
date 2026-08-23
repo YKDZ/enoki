@@ -58,6 +58,7 @@ export function createMatrixGateResult({
       evidenceValidationErrors.length === 0
         ? evidenceOutcome
         : "failed",
+    releaseBaselineKind: evidence?.releaseBaseline?.kind ?? null,
     scenarioId,
     scenarioStepOutcome: scenarioOutcome,
     schemaVersion: 1,
@@ -73,6 +74,13 @@ function validateHostScenarioEvidence(evidence, outcome, cellId) {
   if (evidence?.phase !== "succeeded") errors.push("phase was not succeeded");
   validateReleaseTestHostEvidence(evidence, cellId, errors);
   validateCleanupEvidence(evidence?.cleanup, errors);
+  const baselineKind = evidence?.releaseBaseline?.kind;
+  if (
+    baselineKind !== "enoki-release-baseline" &&
+    baselineKind !== "enoki-trust-epoch-migration-baseline"
+  ) {
+    errors.push("Release Baseline evidence kind is invalid");
+  }
   if (evidence?.scenario !== "fresh-install-uninstall") {
     validateUninstallEvidence(evidence?.uninstall, errors);
   }
@@ -672,7 +680,19 @@ function containsUnredactedSecret(value) {
 
 function validateBaselineEvidence(evidence, errors) {
   const version = candidateProbeVersion(evidence);
-  if (
+  const migration =
+    evidence?.releaseBaseline?.kind === "enoki-trust-epoch-migration-baseline";
+  if (migration) {
+    if (
+      evidence?.upgradeOperationTimeline?.length !== 0 ||
+      evidence?.manualRecovery?.kind !== "trust_epoch_manual_reinstall" ||
+      evidence.manualRecovery.hostId !== evidence?.candidateHost?.id ||
+      typeof evidence.manualRecovery.enrollmentId !== "string" ||
+      !evidence.manualRecovery.enrollmentId
+    ) {
+      errors.push("Trust Epoch manual reinstall evidence is invalid");
+    }
+  } else if (
     evidence?.manualRecovery === null ||
     evidence?.manualRecovery === undefined
   ) {
@@ -714,11 +734,22 @@ function validateBaselineEvidence(evidence, errors) {
   if (!isCandidateHostReady(evidence?.candidateHost, version)) {
     errors.push("Candidate Host Profile is invalid");
   }
-  validateIdentityContinuity(
-    evidence?.identityContinuity,
-    evidence?.candidateHost?.id,
-    errors,
-  );
+  if (migration) {
+    validateIdentityReplacement(
+      evidence?.identityContinuity,
+      evidence?.candidateHost?.id,
+      errors,
+    );
+    validateMigrationRetention(evidence?.migrationRetention, errors, {
+      expectedConfiguration: evidence?.probeConfiguration?.beforeUpgrade,
+    });
+  } else {
+    validateIdentityContinuity(
+      evidence?.identityContinuity,
+      evidence?.candidateHost?.id,
+      errors,
+    );
+  }
   validateMetrics(evidence?.metrics?.beforeUpgrade, "pre-Upgrade", errors);
   validateMetrics(evidence?.metrics?.afterUpgrade, "post-Upgrade", errors);
   validateMetricsProgression(
@@ -735,12 +766,21 @@ function validateBaselineEvidence(evidence, errors) {
     evidence?.probeConfiguration?.afterUpgrade,
     errors,
   );
-  validateLifecycleAuditLog(evidence, true, errors);
+  validateLifecycleAuditLog(evidence, !migration, errors);
+  if (migration) validateManualReinstallAuditLog(evidence, errors);
   validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
 }
 
 function validateRepairEvidence(evidence, errors) {
   const version = candidateProbeVersion(evidence);
+  if (
+    evidence?.releaseBaseline?.kind === "enoki-trust-epoch-migration-baseline"
+  ) {
+    errors.push(
+      "Trust Epoch migration Repair has no production-authorized eligibility sequence",
+    );
+    return;
+  }
   validateTerminalOperation(
     evidence?.operationTimeline,
     "probe_upgrade",
@@ -936,6 +976,77 @@ function validateIdentityContinuity(identity, hostId, errors) {
   }
 }
 
+function validateIdentityReplacement(identity, hostId, errors) {
+  const before = identity?.before;
+  const after = identity?.after;
+  if (
+    !Number.isSafeInteger(identity?.hostId) ||
+    identity.hostId !== hostId ||
+    !validProbeIdentity(before) ||
+    !validProbeIdentity(after) ||
+    after.probeId === before.probeId ||
+    after.identitySha256 === before.identitySha256
+  ) {
+    errors.push("Probe Identity replacement is invalid");
+  }
+}
+
+function validateMigrationRetention(
+  retention,
+  errors,
+  { expectedConfiguration } = {},
+) {
+  if (
+    !Number.isSafeInteger(retention?.hostBefore?.id) ||
+    retention.hostBefore.id !== retention?.hostAfter?.id ||
+    !validHostMetadata(retention?.hostBefore?.hostMetadata) ||
+    JSON.stringify(retention.hostBefore.hostMetadata) !==
+      JSON.stringify(retention?.hostAfter?.hostMetadata) ||
+    retention?.configuration?.mode !== "override" ||
+    !Array.isArray(
+      retention?.configuration?.configuration?.enabledCollectorIds,
+    ) ||
+    !Number.isSafeInteger(
+      retention?.configuration?.configuration?.metricsCollectionIntervalSeconds,
+    ) ||
+    (expectedConfiguration !== undefined &&
+      !sameEffectiveProbeConfiguration(
+        retention?.configuration,
+        expectedConfiguration,
+      )) ||
+    !Array.isArray(retention?.metricHistoryAnchors) ||
+    retention.metricHistoryAnchors.length < 1
+  ) {
+    errors.push(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+  }
+}
+
+function validateManualReinstallAuditLog(evidence, errors) {
+  const identity = evidence?.identityContinuity;
+  const hostId = evidence?.candidateHost?.id;
+  const event = Array.isArray(evidence?.auditLog)
+    ? evidence.auditLog.find(
+        (entry) => entry?.action === "probe.manual_reinstall_identity_replaced",
+      )
+    : null;
+  if (
+    event?.actor !== "system" ||
+    event?.outcome !== "success" ||
+    event?.subjectId !== String(hostId) ||
+    event?.subjectType !== "host" ||
+    event?.details?.oldProbeId !== identity?.before?.probeId ||
+    event?.details?.newProbeId !== identity?.after?.probeId ||
+    !Array.isArray(event?.details?.sourceProbeSha256) ||
+    event.details.sourceProbeSha256.length < 1 ||
+    !/^sha256:[0-9a-f]{64}$/.test(event?.details?.targetAssetSetDigest ?? "") ||
+    event?.details?.targetProbeVersion !== candidateProbeVersion(evidence)
+  ) {
+    errors.push("manual reinstall identity replacement Audit Log is invalid");
+  }
+}
+
 function candidateProbeVersion(evidence) {
   const version = evidence?.candidate?.version;
   return typeof version === "string" && version.startsWith("v")
@@ -1037,13 +1148,29 @@ function validateTerminalOperation(timeline, kind, state, label, errors) {
 
 function validateRestoreEvidence(evidence, errors) {
   const version = candidateProbeVersion(evidence);
-  validateTerminalOperation(
-    evidence?.migration?.operationTimeline,
-    "probe_upgrade",
-    "succeeded",
-    "restore migration",
-    errors,
-  );
+  const migration =
+    evidence?.releaseBaseline?.kind === "enoki-trust-epoch-migration-baseline";
+  if (migration) {
+    const replacement = evidence?.migration?.operationTimeline;
+    if (
+      !Array.isArray(replacement) ||
+      replacement.length !== 1 ||
+      replacement[0]?.kind !== "trust_epoch_manual_reinstall" ||
+      replacement[0]?.hostId !== evidence?.identity?.hostId ||
+      typeof replacement[0]?.enrollmentId !== "string" ||
+      !replacement[0].enrollmentId
+    ) {
+      errors.push("restore Trust Epoch manual reinstall evidence is invalid");
+    }
+  } else {
+    validateTerminalOperation(
+      evidence?.migration?.operationTimeline,
+      "probe_upgrade",
+      "succeeded",
+      "restore migration",
+      errors,
+    );
+  }
   if (evidence?.migration?.status !== "succeeded") {
     errors.push("restore migration did not succeed");
   }
@@ -1051,6 +1178,7 @@ function validateRestoreEvidence(evidence, errors) {
     errors.push("restore migration Candidate version is invalid");
   }
   if (
+    !migration &&
     evidence?.migration?.operationTimeline?.[0]?.targetProbeVersion !== version
   ) {
     errors.push("restore migration target version is invalid");
@@ -1092,9 +1220,12 @@ function validateRestoreEvidence(evidence, errors) {
   }
   const candidateReporting = evidence?.reporting?.candidateHub;
   const restoredReporting = evidence?.reporting?.restoredBaselineHub;
+  const reportingVersion = migration
+    ? evidence?.releaseBaseline?.probeVersion
+    : version;
   if (
-    !isCandidateHostReady(candidateReporting?.host, version) ||
-    !isCandidateHostReady(restoredReporting?.host, version)
+    !isCandidateHostReady(candidateReporting?.host, reportingVersion) ||
+    !isCandidateHostReady(restoredReporting?.host, reportingVersion)
   ) {
     errors.push("Candidate-to-Baseline Host reporting is invalid");
   }
@@ -1106,12 +1237,43 @@ function validateRestoreEvidence(evidence, errors) {
     "Restore",
     errors,
   );
+  if (migration) {
+    const postReplacement = evidence?.reporting?.postReplacementCandidateHub;
+    if (!isCandidateHostReady(postReplacement?.host, version)) {
+      errors.push("post-replacement Candidate reporting is invalid");
+    }
+    validateMetrics(
+      postReplacement?.metrics,
+      "post-replacement Candidate",
+      errors,
+    );
+    validateMigrationRetention(evidence?.migrationRetention, errors, {
+      expectedConfiguration: evidence?.probeConfiguration?.beforeReplacement,
+    });
+    const replacementEvent = Array.isArray(evidence?.auditLog)
+      ? evidence.auditLog[0]
+      : null;
+    if (
+      replacementEvent?.action !== "probe.manual_reinstall_identity_replaced" ||
+      replacementEvent?.actor !== "system" ||
+      replacementEvent?.outcome !== "success" ||
+      replacementEvent?.subjectId !== String(evidence?.identity?.hostId) ||
+      replacementEvent?.details?.oldProbeId !==
+        evidence?.identity?.beforeUpgrade?.probeId ||
+      replacementEvent?.details?.newProbeId !==
+        evidence?.identity?.afterUpgrade?.probeId ||
+      !Array.isArray(replacementEvent?.details?.sourceProbeSha256) ||
+      replacementEvent.details.sourceProbeSha256.length < 1 ||
+      !/^sha256:[0-9a-f]{64}$/.test(
+        replacementEvent?.details?.targetAssetSetDigest ?? "",
+      ) ||
+      replacementEvent?.details?.targetProbeVersion !== version
+    ) {
+      errors.push("restore manual reinstall Audit Log is invalid");
+    }
+  }
   const identity = evidence?.identity;
-  const identities = [
-    identity?.beforeUpgrade,
-    identity?.afterUpgrade,
-    identity?.afterRestore,
-  ];
+  const identities = [identity?.beforeUpgrade, identity?.afterRestore];
   if (
     !Number.isSafeInteger(identity?.hostId) ||
     identity.hostId !== candidateReporting?.host?.id ||
@@ -1126,9 +1288,20 @@ function validateRestoreEvidence(evidence, errors) {
       (value) =>
         value?.probeId !== identities[0]?.probeId ||
         value?.identitySha256 !== identities[0]?.identitySha256,
-    )
+    ) ||
+    (migration
+      ? !validProbeIdentity(identity?.afterUpgrade) ||
+        identity.afterUpgrade.probeId === identities[0]?.probeId ||
+        identity.afterUpgrade.identitySha256 === identities[0]?.identitySha256
+      : identity?.afterUpgrade?.probeId !== identities[0]?.probeId ||
+        identity?.afterUpgrade?.identitySha256 !==
+          identities[0]?.identitySha256)
   ) {
-    errors.push("Restore Probe Identity continuity is invalid");
+    errors.push(
+      migration
+        ? "Restore Probe Identity replacement is invalid"
+        : "Restore Probe Identity continuity is invalid",
+    );
   }
   const beforeProfile = evidence?.hostProfileContinuity?.candidateBeforeRestore;
   const restoredProfile = evidence?.hostProfileContinuity?.restoredBaseline;
@@ -1213,6 +1386,7 @@ export function createReleaseVerificationSummary({
       evidenceUrl: artifactUrl(gate?.artifactName),
       expectedOutcome,
       outcome: gate?.outcome ?? "missing",
+      releaseBaselineKind: gate?.releaseBaselineKind ?? null,
       runner: cell.runner,
       scenarioId: cell.scenarioId,
       scenarioStepOutcome: gate?.scenarioStepOutcome ?? "missing",
@@ -1259,7 +1433,9 @@ export function createReleaseVerificationSummary({
           gatesByCell.get(gate.cellId)?.candidate,
           candidateManifest?.candidate,
         ) &&
-        gatesByCell.get(gate.cellId)?.scenarioId === gate.scenarioId,
+        gatesByCell.get(gate.cellId)?.scenarioId === gate.scenarioId &&
+        gatesByCell.get(gate.cellId)?.releaseBaselineKind ===
+          candidateManifest?.releaseBaseline?.kind,
     );
 
   const hub = candidateManifest?.hub ?? identities.hub ?? null;

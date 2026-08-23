@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
+import { renderInstallCommand } from "../apps/hub/src/enrollment/install-command.ts";
 import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
 import { createReleaseCandidateManifest } from "./release-candidate-lib.mjs";
 import {
@@ -41,6 +42,35 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe("Release E2E business assertions", () => {
+  it("accepts the production Bootstrap recipe command and rejects unsafe variants", async () => {
+    const enrollment = officialEnrollment();
+    const rendered = renderInstallCommand(
+      {
+        bootstrapRecipe: enrollment.bootstrapRecipe,
+        probeApiOrigin: enrollment.hubUrl,
+      },
+      { enrollmentToken: enrollment.enrollmentToken },
+    );
+    expect(rendered.installCommand).toBe(officialInstallCommand);
+
+    for (const installCommand of [
+      `${rendered.installCommand}; sh`,
+      rendered.installCommand.replace("python3 --", "sudo python3 --"),
+      rendered.installCommand.replace(
+        "./enoki-probe-bootstrap.py",
+        "https://attacker.example/bootstrap.py",
+      ),
+    ]) {
+      const client = createHubLifecycleClient({
+        baseUrl: "https://hub.example",
+        fetch: async () => jsonResponse({ ...enrollment, installCommand }, 201),
+      });
+      await expect(client.createEnrollment()).rejects.toThrow(
+        /invalid Probe install command/,
+      );
+    }
+  });
+
   it("accepts only the verified Trust Epoch migration baseline union member", async () => {
     const manifest = candidateManifestWithMigrationBaseline();
     await expect(
@@ -77,38 +107,100 @@ describe("Release E2E business assertions", () => {
     ).rejects.toThrow(/manifest fields must be exactly/i);
   });
 
-  it("dispatches all baseline lifecycle scenarios through production manual reinstall and Uninstall", async () => {
-    const source = await readFile(
-      fileURLToPath(new URL("./release-e2e-lib.mjs", import.meta.url)),
-      "utf8",
-    );
-    for (const [start, end] of [
-      [
-        "async function runHubRestoreCompatibilityWindowScenario",
-        "async function runPostReplacementRepairUninstallScenario",
+  it("fails migration Repair closed before starting a second lifecycle", async () => {
+    let started = false;
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithMigrationBaseline(),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => {
+            started = true;
+          },
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-migration-repair-authority",
+        scenario: "post-replacement-repair-uninstall",
+      }),
+    ).rejects.toMatchObject({
+      code: "trust_epoch_migration_repair_authority_unavailable",
+    });
+    expect(started).toBe(false);
+  });
+
+  it("executes Trust Epoch baseline migration through production manual reinstall with replacement evidence", async () => {
+    const calls = [];
+    const written = [];
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithMigrationBaseline(),
+        environment: migrationBaselineEnvironment(calls),
+        evidenceSink: {
+          write: async (evidence) => written.push(evidence),
+        },
+        ownerPassword: "owner-password",
+        runId: "run-migration-baseline-behavior",
+        scenario: "baseline-upgrade-uninstall",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).resolves.toEqual({ status: "succeeded" });
+    expect(calls).toContain("host.manualReinstall:manual_reinstall");
+    expect(calls).not.toContain("hub.requestProbeUpgrade");
+    expect(written.at(-1)).toMatchObject({
+      identityContinuity: {
+        after: { probeId: "probe_release_replacement" },
+        before: { probeId: "probe_release_legacy" },
+        hostId: 7,
+      },
+      migrationRetention: {
+        hostAfter: { id: 7 },
+        hostBefore: { id: 7 },
+      },
+      result: { status: "succeeded" },
+      uninstall: { hubSoftDeleted: true, status: "succeeded" },
+    });
+  });
+
+  it("executes Trust Epoch Hub Restore then manual reinstall with continued reporting", async () => {
+    const calls = [];
+    const written = [];
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithMigrationBaseline(),
+        environment: migrationBaselineEnvironment(calls),
+        evidenceSink: {
+          write: async (evidence) => written.push(evidence),
+        },
+        ownerPassword: "owner-password",
+        runId: "run-migration-restore-behavior",
+        scenario: "hub-restore-compatibility-window",
+        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
+      }),
+    ).resolves.toEqual({ status: "succeeded" });
+    expect(calls).toContain("hub.captureBaselineStateSnapshot");
+    expect(calls).toContain("hub.restoreBaselineStateSnapshot");
+    expect(calls).toContain("host.manualReinstall:manual_reinstall");
+    expect(written.at(-1)).toMatchObject({
+      auditLog: [
+        expect.objectContaining({
+          action: "probe.manual_reinstall_identity_replaced",
+        }),
       ],
-      [
-        "async function runPostReplacementRepairUninstallScenario",
-        "function createRepairBoundaryEvidence",
-      ],
-      [
-        "async function runBaselineUpgradeUninstallScenario",
-        "async function runFreshInstallUninstallScenario",
-      ],
-    ]) {
-      const body = source.slice(source.indexOf(start), source.indexOf(end));
-      expect(body).toContain("isTrustEpochMigrationBaseline(baseline)");
-      expect(body).toContain("hub.createManualReinstallEnrollment(hostId)");
-      expect(body).toContain("host.manualReinstall(");
-      expect(body).toContain("identitySha256");
-      expect(body).toContain("value?.id === hostId");
-      expect(body).toContain("hub.getHostMetrics(hostId)");
-      expect(body).toContain("requestProbeUninstall(hostId)");
-      expect(body).toContain("verifyUninstallCompletion(runId)");
-    }
-    expect(source).toContain(
-      "`/api/web/enrollments/manual-reinstall/${hostId}`",
-    );
+      identity: {
+        afterRestore: { probeId: "probe_release_legacy" },
+        afterUpgrade: { probeId: "probe_release_replacement" },
+        beforeUpgrade: { probeId: "probe_release_legacy" },
+        hostId: 7,
+      },
+      migration: { status: "succeeded" },
+      reporting: {
+        postReplacementCandidateHub: {
+          host: { hostProfile: { probeVersion: "1.2.3" }, id: 7 },
+        },
+      },
+      result: { status: "succeeded" },
+    });
   });
 
   it("derives baseline kind from the validated Candidate Manifest in workflow", async () => {
@@ -568,7 +660,7 @@ describe("Probe Host Harness", () => {
 
     await harness.assertDisposable("run-claim");
     await expect(
-      harness.install(officialInstallCommand, "run-claim"),
+      harness.install(officialEnrollment(), "run-claim"),
     ).rejects.toThrow("Host already claimed");
 
     const claim = commands.find((command) =>
@@ -676,7 +768,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-123");
-    await harness.install(officialInstallCommand, "run-123");
+    await harness.install(officialEnrollment(), "run-123");
     const installed = await harness.assertInstalled("run-123", "1.2.3");
     const identity = await harness.readProbeIdentity("run-123");
     await harness.beginUpgradeOwnershipTransition("run-123", "1.2.3");
@@ -789,7 +881,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-version");
-    await harness.install(officialInstallCommand, "run-version");
+    await harness.install(officialEnrollment(), "run-version");
     await expect(
       harness.assertInstalled("run-version", "1.2.3"),
     ).rejects.toThrow(/Probe binary version 9\.9\.9.*Candidate 1\.2\.3/);
@@ -865,7 +957,7 @@ describe("Probe Host Harness", () => {
     };
 
     await harness.assertDisposable("run-repair-host");
-    await harness.install(officialInstallCommand, "run-repair-host");
+    await harness.install(officialEnrollment(), "run-repair-host");
     await harness.beginUpgradeOwnershipTransition("run-repair-host", "1.2.3");
     await harness.armPostReplacementRestartFault("run-repair-host", "1.2.3");
     await harness.bindUpgradeOwnershipTransition("run-repair-host", pending);
@@ -949,7 +1041,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-123");
-    await harness.install(officialInstallCommand, "run-123");
+    await harness.install(officialEnrollment(), "run-123");
     const completion = await harness.verifyUninstallCompletion("run-123");
 
     expect(completion).toEqual(
@@ -1001,7 +1093,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-local-uninstall");
-    await harness.install(officialInstallCommand, "run-local-uninstall");
+    await harness.install(officialEnrollment(), "run-local-uninstall");
     await expect(
       harness.localUninstall("run-local-uninstall"),
     ).resolves.toMatchObject({
@@ -1016,7 +1108,7 @@ describe("Probe Host Harness", () => {
       },
     });
     await harness.install(
-      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_reenroll' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+      officialEnrollment({ enrollmentToken: "enk_enroll_reenroll" }),
       "run-local-uninstall",
     );
     expect(commands).toContainEqual({
@@ -1074,7 +1166,7 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:installed-state")) {
           return successfulCommand(state);
         }
-        if (command.includes("ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat'")) {
+        if (command.includes("'enk_enroll_repeat' | python3")) {
           return {
             code: 1,
             stderr:
@@ -1085,20 +1177,21 @@ describe("Probe Host Harness", () => {
         return successfulCommandText(productInstallerOutput());
       },
     });
-    const repeatedCommand =
-      "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_repeat' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate";
+    const repeatedEnrollment = officialEnrollment({
+      enrollmentToken: "enk_enroll_repeat",
+    });
 
     await harness.assertDisposable("run-repeat-add");
-    await harness.install(officialInstallCommand, "run-repeat-add");
+    await harness.install(officialEnrollment(), "run-repeat-add");
     const before = await harness.captureInstallationState("run-repeat-add");
     await expect(
-      harness.rejectRepeatedInstall(repeatedCommand, "run-repeat-add"),
+      harness.rejectRepeatedInstall(repeatedEnrollment, "run-repeat-add"),
     ).resolves.toMatchObject({ code: "existing_probe_installation" });
     const after = await harness.captureInstallationState("run-repeat-add");
 
     expect(after).toEqual(before);
     expect(commands).toContainEqual({
-      command: `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${repeatedCommand}\n`,
+      command: `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${repeatedEnrollment.installCommand}\n`,
       options: { root: false, sensitive: true },
     });
   });
@@ -1150,7 +1243,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-terminal-report");
-    await harness.install(officialInstallCommand, "run-terminal-report");
+    await harness.install(officialEnrollment(), "run-terminal-report");
     await expect(
       harness.awaitPermanentReportRejection("run-terminal-report"),
     ).resolves.toEqual(terminalEvidence);
@@ -1222,13 +1315,13 @@ describe("Probe Host Harness", () => {
             "LoadState=loaded\nActiveState=failed\nSubState=failed\n",
           );
         }
-        if (command.includes("ENOKI_ENROLLMENT_TOKEN")) installed = true;
+        if (command.includes("'enk_enroll_secret' | python3")) installed = true;
         return successfulCommandText(productInstallerOutput());
       },
     });
 
     await harness.assertDisposable("run-terminal-diagnostics");
-    await harness.install(officialInstallCommand, "run-terminal-diagnostics");
+    await harness.install(officialEnrollment(), "run-terminal-diagnostics");
     await expect(
       harness.collectDiagnostics("run-terminal-diagnostics"),
     ).resolves.toEqual({
@@ -1455,7 +1548,7 @@ describe("Probe Host Harness", () => {
     });
     await harness.assertDisposable("run-partial");
     await expect(
-      harness.install(officialInstallCommand, "run-partial"),
+      harness.install(officialEnrollment(), "run-partial"),
     ).rejects.toMatchObject({
       code: "probe_installation_failed",
       installerEvidence: { code: 1, stderr: "interrupted" },
@@ -1512,7 +1605,7 @@ describe("Probe Host Harness", () => {
 
     await harness.assertDisposable("run-recording-failure");
     await expect(
-      harness.install(officialInstallCommand, "run-recording-failure"),
+      harness.install(officialEnrollment(), "run-recording-failure"),
     ).rejects.toMatchObject({
       code: "probe_resource_recording_failed",
       installerEvidence: {
@@ -1576,7 +1669,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-clean-release");
-    await harness.install(officialInstallCommand, "run-clean-release");
+    await harness.install(officialEnrollment(), "run-clean-release");
     await expect(harness.cleanup("run-clean-release")).resolves.toEqual({
       clean: true,
       removedPartialInstallation: false,
@@ -1655,7 +1748,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-aggregate-cleanup");
-    await harness.install(officialInstallCommand, "run-aggregate-cleanup");
+    await harness.install(officialEnrollment(), "run-aggregate-cleanup");
     await harness.armPostReplacementRestartFault(
       "run-aggregate-cleanup",
       "1.2.3",
@@ -1727,7 +1820,7 @@ describe("Probe Host Harness", () => {
     });
 
     await harness.assertDisposable("run-foreign-change");
-    await harness.install(officialInstallCommand, "run-foreign-change");
+    await harness.install(officialEnrollment(), "run-foreign-change");
 
     await expect(harness.cleanup("run-foreign-change")).rejects.toThrow(
       /fingerprint changed/,
@@ -1766,9 +1859,10 @@ describe("Hub Lifecycle Client", () => {
         if (pathname === "/api/web/enrollments") {
           return jsonResponse(
             {
+              ...officialEnrollment({
+                enrollmentToken: "enk_enroll_release_e2e_test_token",
+              }),
               enrollmentId: "enr_existing_host_0001",
-              enrollmentToken: "enk_enroll_release_e2e_test_token",
-              installCommand: officialInstallCommand,
               status: "pending",
               target: { hostId: 7, kind: "existing_host" },
             },
@@ -1947,9 +2041,8 @@ describe("Hub Lifecycle Client", () => {
         if (pathname === "/api/web/enrollments/manual-reinstall/7") {
           return jsonResponse(
             {
+              ...officialEnrollment(),
               enrollmentId: "enr_manual_reinstall_0001",
-              enrollmentToken: "enk_enroll_secret",
-              installCommand: officialInstallCommand,
               target: { hostId: 7, kind: "manual_reinstall" },
             },
             201,
@@ -2250,10 +2343,7 @@ describe("Hub Lifecycle Client", () => {
         });
       }
       if (pathname === "/api/web/enrollments" && method === "POST") {
-        return jsonResponse(
-          { enrollmentToken: "secret", installCommand: officialInstallCommand },
-          201,
-        );
+        return jsonResponse(officialEnrollment(), 201);
       }
       if (pathname === "/api/web/hosts" && method === "GET") {
         return jsonResponse({ hosts: [] });
@@ -2353,9 +2443,10 @@ describe("Hub Lifecycle Client", () => {
       }
       if (pathname === "/api/web/enrollments" && method === "POST") {
         return jsonResponse({
+          ...officialEnrollment({
+            enrollmentToken: "enk_enroll_client_evidence_token",
+          }),
           enrollmentId: "enr_client_evidence_0001",
-          enrollmentToken: "enk_enroll_client_evidence_token",
-          installCommand: officialInstallCommand,
           status: "pending",
           target: { kind: "new_host" },
         });
@@ -2416,9 +2507,10 @@ describe("Hub Lifecycle Client", () => {
       }
       if (pathname === "/api/web/enrollments" && method === "POST") {
         return jsonResponse({
+          ...officialEnrollment({
+            enrollmentToken: "enk_enroll_client_refresh_error_token",
+          }),
           enrollmentId: "enr_client_refresh_error_0001",
-          enrollmentToken: "enk_enroll_client_refresh_error_token",
-          installCommand: officialInstallCommand,
           status: "pending",
           target: { kind: "new_host" },
         });
@@ -2562,7 +2654,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async install(command) {
         calls.push("host.install");
-        expect(command).toBe(officialInstallCommand);
+        expect(command.installCommand).toBe(officialInstallCommand);
       },
       async verifyUninstallCompletion() {
         calls.push("host.verifyUninstallCompletion");
@@ -3173,7 +3265,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async install(command) {
         calls.push("host.install:baseline");
-        expect(command).toBe(officialInstallCommand);
+        expect(command.installCommand).toBe(officialInstallCommand);
         installed = true;
       },
       async readProbeIdentity() {
@@ -3406,7 +3498,7 @@ describe("Release E2E Orchestrator", () => {
       },
       async recoverUpgradeWithInstaller(command, _runId, operation) {
         expect(activeHub).toBe("candidate");
-        expect(command).toBe(officialInstallCommand);
+        expect(command.installCommand).toBe(officialInstallCommand);
         expect(operation).toEqual(failedUpgrade);
         recovered = true;
         return {
@@ -5208,7 +5300,10 @@ describe("Release E2E command", () => {
                 "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
               )
               ? "/tmp/enoki-release-e2e-recipe.abcdef\n"
-              : command === "sh"
+              : command === "sh" &&
+                  options.input.includes(
+                    "# enoki-release-e2e:candidate-bootstrap-recipe-verify",
+                  )
                 ? "verified\n"
                 : "removed\n",
           );
@@ -5251,6 +5346,9 @@ describe("Release E2E command", () => {
       );
       expect(verification.options.input).toContain('[ "$(id -u)" != 0 ]');
       expect(commands.some(({ command }) => command === "sudo")).toBe(false);
+      await expect(
+        adapter.release({ runId: "run-bootstrap" }),
+      ).resolves.toMatchObject({ clean: true, recipe: { clean: true } });
     } finally {
       await rm(candidateDir, { force: true, recursive: true });
     }
@@ -5265,6 +5363,66 @@ describe("Release E2E command", () => {
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toMatch(/terminated by SIGKILL|timed out/i);
+  });
+
+  it("retains failed Bootstrap staging ownership when deletion cannot be verified", async () => {
+    const candidateDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-e2e-bootstrap-cleanup-"),
+    );
+    try {
+      const adapter = createCiReleaseInfrastructureAdapter({
+        candidateManifestPath: path.join(
+          candidateDir,
+          "candidate-manifest.json",
+        ),
+        environment: {
+          GITHUB_ACTIONS: "true",
+          GITHUB_RUN_ATTEMPT: "2",
+          GITHUB_RUN_ID: "1234",
+          RUNNER_ARCH: "X64",
+          RUNNER_OS: "Linux",
+        },
+        loadCandidate: async () => ({
+          candidateDir,
+          manifest: candidateManifest(),
+        }),
+        transferFile: async () => {
+          throw new Error("transfer failed");
+        },
+        runProcess: async (_command, _arguments, options) => {
+          if (
+            options.input.includes(
+              "# enoki-release-e2e:candidate-bootstrap-recipe-stage",
+            )
+          ) {
+            return successfulCommandText(
+              "/tmp/enoki-release-e2e-recipe.failed01\n",
+            );
+          }
+          return {
+            code: 1,
+            stderr: "owned stage directory was not removed",
+            stdout: "",
+          };
+        },
+      });
+      const prepared = await adapter.prepare({
+        matrixCell: freshMatrixCell(),
+        runId: "run-bootstrap-cleanup",
+      });
+      await expect(
+        prepared.provisionBootstrap({ runId: "run-bootstrap-cleanup" }),
+      ).rejects.toMatchObject({
+        cleanupError: expect.objectContaining({
+          message: expect.stringContaining("was not removed"),
+        }),
+      });
+      await expect(
+        adapter.release({ runId: "run-bootstrap-cleanup" }),
+      ).rejects.toThrow(/was not removed/);
+    } finally {
+      await rm(candidateDir, { force: true, recursive: true });
+    }
   });
 
   it("transfers the validated Bootstrap recipe over SSH with fixed scp arguments", async () => {
@@ -6560,7 +6718,37 @@ function productInstallerOutput() {
 }
 
 const officialInstallCommand =
-  "ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_secret' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate";
+  "printf '%s\\n' 'enk_enroll_secret' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example'";
+
+function officialEnrollment(overrides = {}) {
+  const enrollmentToken = overrides.enrollmentToken ?? "enk_enroll_secret";
+  const hubUrl = overrides.hubUrl ?? "https://hub.example";
+  return {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recipe: {
+        file: "enoki-probe-bootstrap.py",
+        sha256: "e".repeat(64),
+        size: 123,
+        version: "v1",
+      },
+      rootFingerprint: "d".repeat(64),
+      schemaVersion: 1,
+      targets: [
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+      ],
+    },
+    enrollmentToken,
+    hubUrl,
+    installCommand: `printf '%s\\n' '${enrollmentToken}' | python3 -- ./enoki-probe-bootstrap.py --hub-origin '${hubUrl}'`,
+    ...overrides,
+  };
+}
 
 function candidateManifest() {
   return createReleaseCandidateManifest({
@@ -6752,21 +6940,6 @@ function freshMatrixCell() {
     operatingSystemVersion: "22.04",
     runner: "ubuntu-22.04",
     scenarioId: "fresh-install-uninstall",
-  };
-}
-
-function fakeExtractedBootstrapRoles(directory) {
-  return {
-    acquirer: {
-      binaryPath: path.join(directory, "enoki-probe-bootstrap-acquire"),
-      sha256: "a".repeat(64),
-      size: 123,
-    },
-    activator: {
-      binaryPath: path.join(directory, "enoki-probe-bootstrap-activate"),
-      sha256: "b".repeat(64),
-      size: 456,
-    },
   };
 }
 
@@ -7156,6 +7329,238 @@ function portableMetric(overrides = {}) {
     sequence: 1,
     uptimeSeconds: 100,
     ...overrides,
+  };
+}
+
+function migrationBaselineEnvironment(calls) {
+  const legacyIdentity = {
+    identitySha256: "a".repeat(64),
+    probeId: "probe_release_legacy",
+  };
+  const replacementIdentity = {
+    identitySha256: "b".repeat(64),
+    probeId: "probe_release_replacement",
+  };
+  const requestedUninstall = {
+    acceptedAtMs: null,
+    completedAtMs: null,
+    createdAtMs: 30,
+    failure: null,
+    hostId: 7,
+    id: 42,
+    kind: "probe_uninstall",
+    runningAtMs: null,
+    state: "pending",
+    targetProbeVersion: "",
+    updatedAtMs: 30,
+  };
+  const succeededUninstall = {
+    ...requestedUninstall,
+    acceptedAtMs: 31,
+    completedAtMs: 32,
+    runningAtMs: 31,
+    state: "succeeded",
+    updatedAtMs: 32,
+  };
+  const uninstallTimeline = [
+    requestedUninstall,
+    succeededUninstall,
+    { ...succeededUninstall },
+  ];
+  let configuration = {
+    enabledCollectorIds: ["official.cpu", "official.memory"],
+    metricsCollectionIntervalSeconds: 30,
+    version: "default-v1",
+  };
+  let configurationSequence = 0;
+  let listCalls = 0;
+  let metricSequence = 2;
+  let replaced = false;
+  const hostMetadata = {
+    connectAddress: "release-test-host",
+    description: "retained description",
+    displayName: "retained Host",
+    observedIp: "192.0.2.10",
+  };
+  const currentHost = () =>
+    readyHost({
+      hostMetadata,
+      hostProfile: {
+        ...readyHost().hostProfile,
+        probeVersion: replaced ? "1.2.3" : "0.1.74",
+      },
+      reportedProbeConfigurationVersion: configuration.version,
+    });
+  const metrics = () =>
+    Array.from({ length: metricSequence }, (_, index) =>
+      portableMetric({
+        collectedAtMs: (index + 1) * 10,
+        sequence: index + 1,
+      }),
+    );
+  const auditLog = [
+    ...lifecycleAuditLog(),
+    {
+      action: "probe.manual_reinstall_identity_replaced",
+      actor: "system",
+      details: {
+        enrollmentId: "enr_manual_reinstall_behavior",
+        newProbeId: replacementIdentity.probeId,
+        oldProbeId: legacyIdentity.probeId,
+        sourceProbeSha256: ["c".repeat(64)],
+        targetAssetSetDigest: `sha256:${"d".repeat(64)}`,
+        targetProbeVersion: "1.2.3",
+      },
+      id: 9,
+      occurredAtMs: 90,
+      outcome: "success",
+      subjectId: "7",
+      subjectType: "host",
+    },
+  ];
+  const host = {
+    async assertDisposable() {},
+    async assertInstalled() {
+      return { probeVersion: replaced ? "1.2.3" : "0.1.74" };
+    },
+    async cleanup() {
+      return { clean: true };
+    },
+    async collectEvidence() {
+      return { journaldRetained: true };
+    },
+    async install(enrollment) {
+      calls.push("host.install:legacy-v0.1.74");
+      expect(enrollment.installCommand).toBe(
+        "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+      );
+    },
+    async manualReinstall(enrollment) {
+      calls.push(`host.manualReinstall:${enrollment.target.kind}`);
+      expect(enrollment.installCommand).toBe(officialInstallCommand);
+      replaced = true;
+      metricSequence += 1;
+      return { status: "succeeded" };
+    },
+    async readProbeIdentity() {
+      return replaced ? replacementIdentity : legacyIdentity;
+    },
+    async verifyUninstallCompletion() {
+      return {
+        clean: true,
+        inventory: {
+          accounts: { group: false, user: false },
+          files: [],
+          units: [],
+        },
+        journaldRetained: true,
+        sharedDependenciesRetained: true,
+      };
+    },
+  };
+  const hub = {
+    async authenticate() {},
+    async captureBaselineStateSnapshot() {
+      calls.push("hub.captureBaselineStateSnapshot");
+      return {
+        baselineImageDigest: `sha256:${"2".repeat(64)}`,
+        baselineVersion: "v0.1.74",
+        hotDataFileCount: 1,
+        hotDataFiles: ["data-root/enoki.db"],
+        manifestDigest: `sha256:${"7".repeat(64)}`,
+        recoveryTime: "2026-08-23T00:00:00.000Z",
+        roots: [
+          { id: "data-root", included: true, path: "/data" },
+          {
+            id: "metrics-archive",
+            included: true,
+            path: "/data/metrics-archive",
+          },
+        ],
+        tool: "enoki-hub-state",
+        version: "v1",
+      };
+    },
+    async collectEvidence() {
+      return { apiTimeline: [] };
+    },
+    async createEnrollment() {
+      return {
+        enrollmentToken: "enk_enroll_legacy",
+        hubUrl: "https://hub.example",
+        installCommand:
+          "curl -fsSL 'https://hub.example/api/probe/install.sh' | sudo env ENOKI_HUB_URL='https://hub.example' ENOKI_ENROLLMENT_TOKEN='enk_enroll_legacy' bash",
+      };
+    },
+    async createManualReinstallEnrollment() {
+      return officialEnrollment({
+        enrollmentId: "enr_manual_reinstall_behavior",
+        target: { hostId: 7, kind: "manual_reinstall" },
+      });
+    },
+    async getAuditLog() {
+      return auditLog;
+    },
+    async getHost() {
+      return currentHost();
+    },
+    async getHostMetrics() {
+      const result = metrics();
+      metricSequence += 1;
+      return result;
+    },
+    async getHostProbeConfiguration() {
+      return { configuration: { ...configuration }, mode: "override" };
+    },
+    async isHostSoftDeleted() {
+      return true;
+    },
+    async listHosts() {
+      listCalls += 1;
+      return listCalls === 1 ? [] : [{ id: 7 }];
+    },
+    async requestProbeUninstall() {
+      return uninstallTimeline[0];
+    },
+    async restoreBaselineStateSnapshot() {
+      calls.push("hub.restoreBaselineStateSnapshot");
+      return {
+        image: {
+          activeManifestDigest: `sha256:${"2".repeat(64)}`,
+          expectedManifestDigest: `sha256:${"2".repeat(64)}`,
+        },
+        restore: {
+          manifestDigest: `sha256:${"7".repeat(64)}`,
+          status: "succeeded",
+        },
+        verify: {
+          manifestDigest: `sha256:${"7".repeat(64)}`,
+          status: "succeeded",
+        },
+      };
+    },
+    async switchToCandidate() {
+      calls.push("hub.switchToCandidate");
+    },
+    async updateHostProbeConfiguration(_hostId, input) {
+      configurationSequence += 1;
+      configuration = {
+        ...input.configuration,
+        version: `host-7-${configurationSequence}`,
+      };
+      return { configuration: { ...configuration }, mode: "override" };
+    },
+    async waitForProbeOperation() {
+      return uninstallTimeline;
+    },
+  };
+  return {
+    async cleanup() {
+      return { clean: true };
+    },
+    async start() {
+      return { host, hub };
+    },
   };
 }
 

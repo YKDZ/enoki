@@ -135,6 +135,7 @@ async function runHubRestoreCompatibilityWindowScenario({
 
   const poll = normalizedPollTiming(timing);
   const evidence = {
+    auditLog: null,
     candidate: candidateManifest.candidate,
     cleanup: null,
     failureBoundary: null,
@@ -166,19 +167,23 @@ async function runHubRestoreCompatibilityWindowScenario({
       operationTimeline: [],
       status: "pending",
     },
+    migrationRetention: null,
     phase: "scenario-running",
     protocol: {
       baselineProbeToCandidateHub: "pending",
       candidateProbeToBaselineHub: "pending",
     },
+    probeConfiguration: { beforeReplacement: null, retained: null },
     releaseBaseline: {
       hubDigest: baseline.hub.imageDigest,
+      kind: baseline.kind,
       probeVersion: releaseBaselineProbeVersion(baseline),
       tag: baseline.tag,
     },
     releaseTestHost: null,
     reporting: {
       candidateHub: null,
+      postReplacementCandidateHub: null,
       restoredBaselineHub: null,
     },
     result: { status: "running" },
@@ -227,7 +232,7 @@ async function runHubRestoreCompatibilityWindowScenario({
         "Release Baseline Hub did not return its official Probe install command",
       );
     }
-    await host.install(enrollment.installCommand, runId);
+    await host.install(enrollment, runId);
     await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
     const hostSummary = await waitForObservation({
       code: "restore_probe_enrollment_timeout",
@@ -247,7 +252,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       beforeUpgrade: baselineIdentity,
       hostId,
     };
-    await waitForObservation({
+    const baselineHost = await waitForObservation({
       code: "restore_baseline_reporting_timeout",
       label: "Release Baseline core reporting before Hub State Snapshot",
       observe: () => hub.getHost(hostId),
@@ -256,13 +261,20 @@ async function runHubRestoreCompatibilityWindowScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, releaseBaselineProbeVersion(baseline)),
     });
-    await waitForObservation({
+    const baselineMetrics = await waitForObservation({
       code: "restore_baseline_metrics_timeout",
       label: "Release Baseline portable Metrics before Hub State Snapshot",
       observe: () => hub.getHostMetrics(hostId),
       poll,
       ready: hasAdvancingPortableMetrics,
     });
+    const baselineHostProjection = stableHubHostProjection(baselineHost);
+    const baselineMetricAnchors =
+      compactMetricsEvidence(baselineMetrics).map(compactMetricAnchor);
+    if (isTrustEpochMigrationBaseline(baseline)) {
+      evidence.probeConfiguration.beforeReplacement =
+        await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
+    }
 
     activeBoundary = "snapshot";
     evidence.snapshot = await hub.captureBaselineStateSnapshot({
@@ -429,17 +441,18 @@ async function runHubRestoreCompatibilityWindowScenario({
     activeBoundary = "uninstall";
     await hub.switchToCandidate();
     await hub.authenticate(ownerPassword);
+    let retainedConfiguration = null;
     if (migrationBaseline) {
       const replacementEnrollment =
         await hub.createManualReinstallEnrollment(hostId);
-      await host.manualReinstall(replacementEnrollment.installCommand, runId);
+      await host.manualReinstall(replacementEnrollment, runId);
       await host.assertInstalled(
         runId,
         candidateManifest.probeAssetSet.version,
       );
       const replacementIdentity = await host.readProbeIdentity(runId);
       if (
-        replacementIdentity.probeId !== baselineIdentity.probeId ||
+        replacementIdentity.probeId === baselineIdentity.probeId ||
         replacementIdentity.identitySha256 === baselineIdentity.identitySha256
       ) {
         throw assertionError(
@@ -457,7 +470,7 @@ async function runHubRestoreCompatibilityWindowScenario({
       ];
       evidence.migration.status = "succeeded";
     }
-    await waitForObservation({
+    const postReplacementHost = await waitForObservation({
       code: "candidate_probe_post_restore_hub_timeout",
       label: "Candidate Probe reporting after returning to Candidate Hub",
       observe: () => hub.getHost(hostId),
@@ -466,6 +479,58 @@ async function runHubRestoreCompatibilityWindowScenario({
         value?.id === hostId &&
         isCandidateHostReady(value, candidateManifest.probeAssetSet.version),
     });
+    if (migrationBaseline) {
+      retainedConfiguration = await hub.getHostProbeConfiguration(hostId);
+      if (
+        !sameEffectiveProbeConfiguration(
+          retainedConfiguration,
+          evidence.probeConfiguration.beforeReplacement,
+        )
+      ) {
+        throw assertionError(
+          "manual_reinstall_configuration_not_retained",
+          "Hub Restore Trust Epoch manual reinstall did not retain Probe Configuration",
+        );
+      }
+      const postReplacementMetrics = await waitForObservation({
+        code: "candidate_probe_post_replacement_metrics_timeout",
+        label: "Candidate Probe Metrics after Trust Epoch manual reinstall",
+        observe: () => hub.getHostMetrics(hostId),
+        poll,
+        ready: (samples) =>
+          hasAdvancingPortableMetrics(samples) &&
+          retainsMetricHistoryAnchors(samples, baselineMetricAnchors),
+      });
+      const postReplacementProjection =
+        stableHubHostProjection(postReplacementHost);
+      if (
+        postReplacementProjection.id !== baselineHostProjection.id ||
+        JSON.stringify(postReplacementProjection.hostMetadata) !==
+          JSON.stringify(baselineHostProjection.hostMetadata)
+      ) {
+        throw assertionError(
+          "manual_reinstall_host_metadata_not_retained",
+          "Hub Restore Trust Epoch manual reinstall did not retain Host identity and metadata",
+        );
+      }
+      evidence.migrationRetention = {
+        configuration: retainedConfiguration,
+        hostAfter: postReplacementProjection,
+        hostBefore: baselineHostProjection,
+        metricHistoryAnchors: baselineMetricAnchors,
+      };
+      evidence.probeConfiguration.retained = retainedConfiguration;
+      evidence.reporting.postReplacementCandidateHub = {
+        host: compactHostEvidence(postReplacementHost),
+        metrics: compactMetricsEvidence(postReplacementMetrics),
+      };
+      evidence.auditLog = assertManualReinstallAuditEvent(
+        await hub.getAuditLog(),
+        hostId,
+        baselineIdentity,
+        evidence.identity.afterUpgrade,
+      );
+    }
     const requestedUninstall = await hub.requestProbeUninstall(hostId);
     evidence.uninstall.operationTimeline = [requestedUninstall];
     evidence.uninstall.operationTimeline = await hub.waitForProbeOperation(
@@ -597,6 +662,12 @@ async function runPostReplacementRepairUninstallScenario({
     throw new Error("Release E2E environment and evidence sink are required");
   }
   const baseline = candidateManifest.releaseBaseline;
+  if (isTrustEpochMigrationBaseline(baseline)) {
+    throw assertionError(
+      "trust_epoch_migration_repair_authority_unavailable",
+      "Trust Epoch manual reinstall cannot create the failed Upgrade and root-owned post-activation journal required by the production Repair authority",
+    );
+  }
 
   const poll = normalizedPollTiming(timing);
   const evidence = {
@@ -615,6 +686,7 @@ async function runPostReplacementRepairUninstallScenario({
     probeConfiguration: { afterRepair: null, beforeUpgrade: null },
     releaseBaseline: {
       hubDigest: baseline.hub.imageDigest,
+      kind: baseline.kind,
       probeVersion: releaseBaselineProbeVersion(baseline),
       tag: baseline.tag,
     },
@@ -668,7 +740,7 @@ async function runPostReplacementRepairUninstallScenario({
         "Release Baseline Hub did not return its official Probe install command",
       );
     }
-    await host.install(enrollment.installCommand, runId);
+    await host.install(enrollment, runId);
     await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
     const hostSummary = await waitForObservation({
       code: "repair_probe_enrollment_timeout",
@@ -724,59 +796,34 @@ async function runPostReplacementRepairUninstallScenario({
       await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
 
     const candidateProbeVersion = candidateManifest.probeAssetSet.version;
-    const migrationBaseline = isTrustEpochMigrationBaseline(baseline);
-    let requestedUpgrade = null;
-    let repairIdentity = baselineIdentity;
-    if (migrationBaseline) {
-      const replacementEnrollment =
-        await hub.createManualReinstallEnrollment(hostId);
-      await host.manualReinstall(replacementEnrollment.installCommand, runId);
-      await host.assertInstalled(runId, candidateProbeVersion);
-      const replacementIdentity = await host.readProbeIdentity(runId);
-      if (
-        replacementIdentity.probeId !== baselineIdentity.probeId ||
-        replacementIdentity.identitySha256 === baselineIdentity.identitySha256
-      ) {
-        throw assertionError(
-          "probe_identity_epoch_mismatch",
-          "Trust Epoch manual reinstall did not preserve the Host while replacing Probe credentials",
-        );
-      }
-      repairIdentity = replacementIdentity;
-      evidence.failureBoundary = {
-        enrollmentId: replacementEnrollment.enrollmentId,
-        hostId,
-        kind: "trust_epoch_manual_reinstall",
-      };
-    } else {
-      await host.beginUpgradeOwnershipTransition(runId, candidateProbeVersion);
-      await host.armPostReplacementRestartFault(runId, candidateProbeVersion);
-      requestedUpgrade = await hub.requestProbeUpgrade(hostId);
-      if (requestedUpgrade.targetProbeVersion !== candidateProbeVersion) {
-        throw assertionError(
-          "probe_upgrade_target_mismatch",
-          "Probe Repair scenario Upgrade did not target the Candidate Probe",
-        );
-      }
-      await host.bindUpgradeOwnershipTransition(runId, requestedUpgrade);
-      evidence.operationTimeline = [requestedUpgrade];
-      evidence.failureBoundary = await waitForObservation({
-        code: "post_replacement_upgrade_failure_timeout",
-        label: "local post-replacement Upgrade failure before Repair",
-        observe: () =>
-          host.assertPostReplacementUpgradeFailure(
-            runId,
-            requestedUpgrade,
-            candidateProbeVersion,
-          ),
-        poll,
-        ready: (value) =>
-          value?.localFailureCode === "post_replacement_restart_failure" &&
-          value.operationId === requestedUpgrade.id &&
-          value.probeVersion === candidateProbeVersion,
-      });
-      await host.removePostReplacementRestartFault(runId);
+    const repairIdentity = baselineIdentity;
+    await host.beginUpgradeOwnershipTransition(runId, candidateProbeVersion);
+    await host.armPostReplacementRestartFault(runId, candidateProbeVersion);
+    const requestedUpgrade = await hub.requestProbeUpgrade(hostId);
+    if (requestedUpgrade.targetProbeVersion !== candidateProbeVersion) {
+      throw assertionError(
+        "probe_upgrade_target_mismatch",
+        "Probe Repair scenario Upgrade did not target the Candidate Probe",
+      );
     }
+    await host.bindUpgradeOwnershipTransition(runId, requestedUpgrade);
+    evidence.operationTimeline = [requestedUpgrade];
+    evidence.failureBoundary = await waitForObservation({
+      code: "post_replacement_upgrade_failure_timeout",
+      label: "local post-replacement Upgrade failure before Repair",
+      observe: () =>
+        host.assertPostReplacementUpgradeFailure(
+          runId,
+          requestedUpgrade,
+          candidateProbeVersion,
+        ),
+      poll,
+      ready: (value) =>
+        value?.localFailureCode === "post_replacement_restart_failure" &&
+        value.operationId === requestedUpgrade.id &&
+        value.probeVersion === candidateProbeVersion,
+    });
+    await host.removePostReplacementRestartFault(runId);
     evidence.repair = await host.repair(runId);
     if (evidence.repair?.repairedVersion !== candidateProbeVersion) {
       throw assertionError(
@@ -803,29 +850,27 @@ async function runPostReplacementRepairUninstallScenario({
       before: repairIdentity,
       hostId,
     };
-    if (!migrationBaseline) {
-      evidence.operationTimeline = await hub.waitForProbeOperation(
-        requestedUpgrade,
-        { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
+    evidence.operationTimeline = await hub.waitForProbeOperation(
+      requestedUpgrade,
+      { intervalMs: poll.intervalMs, timeoutMs: poll.timeoutMs },
+    );
+    const failedUpgrade = evidence.operationTimeline.at(-1);
+    if (failedUpgrade?.state !== "failed" || !failedUpgrade.failure) {
+      throw assertionError(
+        "post_replacement_upgrade_not_failed",
+        `Probe Upgrade did not retain a failed operation after Repair: ${JSON.stringify(failedUpgrade)}`,
       );
-      const failedUpgrade = evidence.operationTimeline.at(-1);
-      if (failedUpgrade?.state !== "failed" || !failedUpgrade.failure) {
-        throw assertionError(
-          "post_replacement_upgrade_not_failed",
-          `Probe Upgrade did not retain a failed operation after Repair: ${JSON.stringify(failedUpgrade)}`,
-        );
-      }
-      evidence.failureBoundary.hubFailureCode = failedUpgrade.failure.code;
-      await host.completeRepairOwnershipTransition(runId, failedUpgrade);
+    }
+    evidence.failureBoundary.hubFailureCode = failedUpgrade.failure.code;
+    await host.completeRepairOwnershipTransition(runId, failedUpgrade);
 
-      const preservedFailure = await hub.getProbeOperation(failedUpgrade);
-      assertStableTerminalOperation(failedUpgrade, preservedFailure);
-      if (preservedFailure.state !== "failed") {
-        throw assertionError(
-          "repair_rewrote_failed_upgrade",
-          "Probe Repair rewrote the failed Probe Upgrade operation",
-        );
-      }
+    const preservedFailure = await hub.getProbeOperation(failedUpgrade);
+    assertStableTerminalOperation(failedUpgrade, preservedFailure);
+    if (preservedFailure.state !== "failed") {
+      throw assertionError(
+        "repair_rewrote_failed_upgrade",
+        "Probe Repair rewrote the failed Probe Upgrade operation",
+      );
     }
     const repairedHost = await waitForObservation({
       code: "candidate_probe_repair_reporting_timeout",
@@ -873,15 +918,13 @@ async function runPostReplacementRepairUninstallScenario({
       );
     }
     const auditLog = await hub.getAuditLog();
-    evidence.auditLog = migrationBaseline
-      ? assertLifecycleAuditLog(auditLog, hostId, requestedUninstall.id)
-      : assertBaselineUpgradeAuditLog(
-          auditLog,
-          hostId,
-          requestedUpgrade.id,
-          requestedUninstall.id,
-          candidateProbeVersion,
-        );
+    evidence.auditLog = assertBaselineUpgradeAuditLog(
+      auditLog,
+      hostId,
+      requestedUpgrade.id,
+      requestedUninstall.id,
+      candidateProbeVersion,
+    );
     evidence.uninstallCompletion = await host.verifyUninstallCompletion(runId);
     evidence.uninstall.hostCompletion = evidence.uninstallCompletion;
     if (
@@ -1609,11 +1652,13 @@ async function runBaselineUpgradeUninstallScenario({
     infrastructure: null,
     metrics: { afterUpgrade: null, beforeUpgrade: null },
     manualRecovery: null,
+    migrationRetention: null,
     operationTimeline: [],
     phase: "scenario-running",
     probeConfiguration: { afterUpgrade: null, beforeUpgrade: null },
     releaseBaseline: {
       hubDigest: baseline.hub.imageDigest,
+      kind: baseline.kind,
       probeVersion: releaseBaselineProbeVersion(baseline),
       tag: baseline.tag,
     },
@@ -1662,7 +1707,7 @@ async function runBaselineUpgradeUninstallScenario({
         "Release Baseline Hub did not return its official Probe install command",
       );
     }
-    await host.install(enrollment.installCommand, runId);
+    await host.install(enrollment, runId);
     await host.assertInstalled(runId, releaseBaselineProbeVersion(baseline));
 
     const hostSummary = await waitForObservation({
@@ -1724,6 +1769,9 @@ async function runBaselineUpgradeUninstallScenario({
     evidence.metrics.beforeUpgrade = compactMetricsEvidence(beforeMetrics);
     evidence.probeConfiguration.beforeUpgrade =
       await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
+    const baselineHostProjection = stableHubHostProjection(compatibleHost);
+    const baselineMetricAnchors =
+      compactMetricsEvidence(beforeMetrics).map(compactMetricAnchor);
     evidence.compatibility = {
       host: compactHostEvidence(compatibleHost),
       status: "succeeded",
@@ -1745,10 +1793,7 @@ async function runBaselineUpgradeUninstallScenario({
         enrollmentId: replacementEnrollment.enrollmentId,
         hostId,
         kind: "trust_epoch_manual_reinstall",
-        result: await host.manualReinstall(
-          replacementEnrollment.installCommand,
-          runId,
-        ),
+        result: await host.manualReinstall(replacementEnrollment, runId),
       };
     } else {
       await host.beginUpgradeOwnershipTransition(
@@ -1787,7 +1832,7 @@ async function runBaselineUpgradeUninstallScenario({
           );
         }
         evidence.manualRecovery = await host.recoverUpgradeWithInstaller(
-          recoveryEnrollment.installCommand,
+          recoveryEnrollment,
           runId,
           finalUpgrade,
         );
@@ -1813,21 +1858,18 @@ async function runBaselineUpgradeUninstallScenario({
       candidateManifest.probeAssetSet.version,
     );
     const candidateIdentity = await host.readProbeIdentity(runId);
-    if (candidateIdentity.probeId !== baselineIdentity.probeId) {
-      throw assertionError(
-        "probe_identity_changed",
-        "Candidate transition changed the logical Probe Identity",
-      );
-    }
     if (
-      migrationBaseline ===
-      (candidateIdentity.identitySha256 === baselineIdentity.identitySha256)
+      migrationBaseline
+        ? candidateIdentity.probeId === baselineIdentity.probeId ||
+          candidateIdentity.identitySha256 === baselineIdentity.identitySha256
+        : candidateIdentity.probeId !== baselineIdentity.probeId ||
+          candidateIdentity.identitySha256 !== baselineIdentity.identitySha256
     ) {
       throw assertionError(
         "probe_identity_epoch_mismatch",
         migrationBaseline
-          ? "Trust Epoch manual reinstall did not replace Probe credentials"
-          : "Probe Upgrade changed the Probe credentials",
+          ? "Trust Epoch manual reinstall did not replace Probe identity and credentials"
+          : "Probe Upgrade changed the Probe identity or credentials",
       );
     }
     evidence.identityContinuity = {
@@ -1835,6 +1877,37 @@ async function runBaselineUpgradeUninstallScenario({
       before: baselineIdentity,
       hostId,
     };
+    if (migrationBaseline) {
+      const retainedConfiguration = await hub.getHostProbeConfiguration(hostId);
+      if (
+        !sameEffectiveProbeConfiguration(
+          retainedConfiguration,
+          evidence.probeConfiguration.beforeUpgrade,
+        )
+      ) {
+        throw assertionError(
+          "manual_reinstall_configuration_not_retained",
+          "Trust Epoch manual reinstall did not retain the Host Probe Configuration",
+        );
+      }
+      const candidateHostProjection = stableHubHostProjection(candidateHost);
+      if (
+        candidateHostProjection.id !== baselineHostProjection.id ||
+        JSON.stringify(candidateHostProjection.hostMetadata) !==
+          JSON.stringify(baselineHostProjection.hostMetadata)
+      ) {
+        throw assertionError(
+          "manual_reinstall_host_metadata_not_retained",
+          "Trust Epoch manual reinstall did not retain Host identity and metadata",
+        );
+      }
+      evidence.migrationRetention = {
+        configuration: retainedConfiguration,
+        hostAfter: candidateHostProjection,
+        hostBefore: baselineHostProjection,
+        metricHistoryAnchors: baselineMetricAnchors,
+      };
+    }
     if (!migrationBaseline && evidence.manualRecovery === null) {
       await host.completeUpgradeOwnershipTransition(runId, finalUpgrade);
     }
@@ -1858,6 +1931,15 @@ async function runBaselineUpgradeUninstallScenario({
         metricsAdvanceBeyond(samples, candidateMetricCheckpoint),
     });
     evidence.metrics.afterUpgrade = compactMetricsEvidence(afterMetrics);
+    if (
+      migrationBaseline &&
+      !retainsMetricHistoryAnchors(afterMetrics, baselineMetricAnchors)
+    ) {
+      throw assertionError(
+        "manual_reinstall_metric_history_not_retained",
+        "Trust Epoch manual reinstall did not retain pre-replacement Metrics history",
+      );
+    }
     evidence.probeConfiguration.afterUpgrade =
       await proveProbeConfigurationRoundTrip({ hostId, hub, poll });
 
@@ -1884,7 +1966,13 @@ async function runBaselineUpgradeUninstallScenario({
     }
     const auditLog = await hub.getAuditLog();
     evidence.auditLog = migrationBaseline
-      ? assertLifecycleAuditLog(auditLog, hostId, requestedUninstall.id)
+      ? assertMigrationLifecycleAuditLog(
+          auditLog,
+          hostId,
+          requestedUninstall.id,
+          baselineIdentity,
+          candidateIdentity,
+        )
       : assertBaselineUpgradeAuditLog(
           auditLog,
           hostId,
@@ -2026,6 +2114,14 @@ async function runFreshInstallUninstallScenario({
     phase: "scenario-running",
     probeConfiguration: null,
     reEnrollment: null,
+    releaseBaseline: {
+      hubDigest: candidateManifest.releaseBaseline.hub.imageDigest,
+      kind: candidateManifest.releaseBaseline.kind,
+      probeVersion: releaseBaselineProbeVersion(
+        candidateManifest.releaseBaseline,
+      ),
+      tag: candidateManifest.releaseBaseline.tag,
+    },
     releaseTestHost: null,
     repeatedAdd: null,
     result: { status: "running" },
@@ -2058,7 +2154,7 @@ async function runFreshInstallUninstallScenario({
     const newHostTarget = { kind: "new_host" };
     const enrollment = await hub.createEnrollment(newHostTarget);
     assertCreatedEnrollment(enrollment, newHostTarget);
-    const initialInstall = await host.install(enrollment.installCommand, runId);
+    const initialInstall = await host.install(enrollment, runId);
     evidence.initialInstall = initialInstall;
     evidence.hostBoundary = await host.assertInstalled(
       runId,
@@ -2110,7 +2206,7 @@ async function runFreshInstallUninstallScenario({
     );
     const stateBeforeRepeatedAdd = await host.captureInstallationState(runId);
     const rejection = await host.rejectRepeatedInstall(
-      repeatedEnrollment.installCommand,
+      repeatedEnrollment,
       runId,
     );
     const stateAfterRepeatedAdd = await host.captureInstallationState(runId);
@@ -2183,10 +2279,7 @@ async function runFreshInstallUninstallScenario({
     const existingHostTarget = { hostId, kind: "existing_host" };
     const reEnrollment = await hub.createEnrollment(existingHostTarget);
     assertCreatedEnrollment(reEnrollment, existingHostTarget);
-    const reEnrollmentInstall = await host.install(
-      reEnrollment.installCommand,
-      runId,
-    );
+    const reEnrollmentInstall = await host.install(reEnrollment, runId);
     const reEnrollmentBoundary = await host.assertInstalled(
       runId,
       candidateManifest.probeAssetSet.version,
@@ -2465,6 +2558,7 @@ export function createHubLifecycleClient({
       ) {
         throw new Error("Hub returned an invalid Enrollment response");
       }
+      assertEnrollmentInstallContract(body);
       recordEnrollmentEvidence(enrollments, body);
       return body;
     },
@@ -2483,6 +2577,7 @@ export function createHubLifecycleClient({
           "Hub returned an invalid manual Probe reinstall Enrollment response",
         );
       }
+      assertEnrollmentInstallContract(body);
       assertEnrollmentTarget(body.target);
       if (
         body.target.kind !== "manual_reinstall" ||
@@ -2704,8 +2799,8 @@ export function createHubLifecycleClient({
 
 export function createProbeHostHarness({
   execute,
-  installWorkingDirectory,
   ownershipToken = randomUUID(),
+  prepareInstall,
 }) {
   if (typeof execute !== "function") {
     throw new Error("Probe Host Harness requires an execute function");
@@ -2719,13 +2814,8 @@ export function createProbeHostHarness({
   let postReplacementFaultArmed = false;
   let readyForReinstallation = false;
   let sharedDependenciesBefore = null;
-  if (
-    installWorkingDirectory !== undefined &&
-    !/^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/.test(
-      installWorkingDirectory,
-    )
-  ) {
-    throw new Error("Probe Host Harness install working directory is invalid");
+  if (prepareInstall !== undefined && typeof prepareInstall !== "function") {
+    throw new Error("Probe Host Harness install preparation is invalid");
   }
 
   async function inventory() {
@@ -2772,14 +2862,39 @@ export function createProbeHostHarness({
     }
   }
 
-  async function runInstallCommand(installCommand, runId, transition) {
+  async function prepareEnrollmentInstall(enrollment, runId) {
+    const installContract = assertEnrollmentInstallContract(enrollment);
+    const prepared = prepareInstall
+      ? await prepareInstall({ enrollment, installContract, runId })
+      : null;
+    const workingDirectory = prepared?.workingDirectory;
+    if (
+      workingDirectory !== undefined &&
+      !/^\/tmp\/enoki-release-e2e-recipe\.[A-Za-z0-9]+$/.test(workingDirectory)
+    ) {
+      throw new Error(
+        "Probe Host Harness install working directory is invalid",
+      );
+    }
+    if (
+      installContract.kind === "bootstrap-recipe" &&
+      prepareInstall &&
+      !workingDirectory
+    ) {
+      throw new Error(
+        "Probe Bootstrap recipe was not staged from the active Hub image",
+      );
+    }
+    return { installContract, workingDirectory };
+  }
+
+  async function runInstallCommand(enrollment, runId, transition) {
     assertRunId(runId);
     if (disposableRunId !== runId) {
       throw new Error(
         "Release Test Host must pass disposable preflight before installation",
       );
     }
-    assertInstallCommand(installCommand);
     const reinstallation = runOwnsMutation;
     if (transition === "manual-reinstall") {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
@@ -2804,8 +2919,10 @@ export function createProbeHostHarness({
       }
       runOwnsMutation = true;
     }
+    const { workingDirectory: installWorkingDirectory } =
+      await prepareEnrollmentInstall(enrollment, runId);
     const result = await execute(
-      `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installWorkingDirectory ? `cd -- ${shellSingleQuote(installWorkingDirectory)}\n` : ""}${installCommand}\n`,
+      `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installWorkingDirectory ? `cd -- ${shellSingleQuote(installWorkingDirectory)}\n` : ""}${enrollment.installCommand}\n`,
       {
         root: false,
         sensitive: true,
@@ -2910,12 +3027,12 @@ export function createProbeHostHarness({
       return inspected;
     },
 
-    async install(installCommand, runId) {
-      return runInstallCommand(installCommand, runId, "fresh");
+    async install(enrollment, runId) {
+      return runInstallCommand(enrollment, runId, "fresh");
     },
 
-    async manualReinstall(installCommand, runId) {
-      return runInstallCommand(installCommand, runId, "manual-reinstall");
+    async manualReinstall(enrollment, runId) {
+      return runInstallCommand(enrollment, runId, "manual-reinstall");
     },
 
     async assertInstalled(runId, expectedProbeVersion) {
@@ -3019,11 +3136,14 @@ export function createProbeHostHarness({
       return state;
     },
 
-    async rejectRepeatedInstall(installCommand, runId) {
+    async rejectRepeatedInstall(enrollment, runId) {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
-      assertInstallCommand(installCommand);
+      const { workingDirectory } = await prepareEnrollmentInstall(
+        enrollment,
+        runId,
+      );
       const result = await execute(
-        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
+        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${workingDirectory ? `cd -- ${shellSingleQuote(workingDirectory)}\n` : ""}${enrollment.installCommand}\n`,
         {
           root: false,
           sensitive: true,
@@ -3215,9 +3335,12 @@ export function createProbeHostHarness({
       return { operationId: operation.id, owned: true };
     },
 
-    async recoverUpgradeWithInstaller(installCommand, runId, operation) {
+    async recoverUpgradeWithInstaller(enrollment, runId, operation) {
       assertOwnedRun(runId, disposableRunId, runOwnsMutation);
-      assertInstallCommand(installCommand);
+      const { workingDirectory } = await prepareEnrollmentInstall(
+        enrollment,
+        runId,
+      );
       assertProbeOperation(operation, {
         kind: "probe_upgrade",
         targetProbeVersion: operation?.targetProbeVersion,
@@ -3233,7 +3356,7 @@ export function createProbeHostHarness({
         );
       }
       const result = await execute(
-        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${installCommand}\n`,
+        `# enoki-release-e2e:bootstrap-acquire\nset -eu\n[ "$(id -u)" != 0 ]\n${workingDirectory ? `cd -- ${shellSingleQuote(workingDirectory)}\n` : ""}${enrollment.installCommand}\n`,
         {
           root: false,
           sensitive: true,
@@ -4380,13 +4503,88 @@ function assertInstallCommand(command) {
   if (
     typeof command !== "string" ||
     command.length > 16_384 ||
-    command.includes("\n") ||
-    /\b(?:curl|wget|bash|sh)\b/.test(command) ||
-    !/^ENOKI_HUB_URL='[^']*' ENOKI_ENROLLMENT_TOKEN='[^']+' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate$/.test(
-      command,
-    )
+    command.includes("\n")
   ) {
     throw new Error("Hub returned an invalid Probe install command");
+  }
+  const recipe = command.match(
+    /^printf '%s\\n' '(enk_enroll_[A-Za-z0-9_-]+)' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin '(https?:\/\/[^'\s]+)'$/,
+  );
+  if (recipe) {
+    assertInstallHubOrigin(recipe[2]);
+    return { hubUrl: recipe[2], kind: "bootstrap-recipe", token: recipe[1] };
+  }
+  const legacy = command.match(
+    /^curl -fsSL '(https?:\/\/[^'\s]+\/api\/probe\/install\.sh)' \| sudo env ENOKI_HUB_URL='(https?:\/\/[^'\s]+)' ENOKI_ENROLLMENT_TOKEN='(enk_enroll_[A-Za-z0-9_-]+)' bash$/,
+  );
+  if (legacy) {
+    assertInstallHubOrigin(legacy[2]);
+    if (legacy[1] !== `${legacy[2]}/api/probe/install.sh`) {
+      throw new Error("Hub returned an invalid Probe install command");
+    }
+    return { hubUrl: legacy[2], kind: "legacy-v0.1.74", token: legacy[3] };
+  }
+  throw new Error("Hub returned an invalid Probe install command");
+}
+
+function assertInstallHubOrigin(value) {
+  const url = new URL(value);
+  if (
+    url.origin !== value ||
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error("Hub returned an invalid Probe install command");
+  }
+}
+
+function assertEnrollmentInstallContract(enrollment) {
+  const contract = assertInstallCommand(enrollment?.installCommand);
+  if (
+    enrollment?.enrollmentToken !== contract.token ||
+    enrollment?.hubUrl !== contract.hubUrl
+  ) {
+    throw new Error(
+      "Hub Enrollment install command is not bound to its token and origin",
+    );
+  }
+  if (contract.kind === "bootstrap-recipe") {
+    assertBootstrapRecipeRecord(enrollment.bootstrapRecipe);
+  } else if (enrollment.bootstrapRecipe !== undefined) {
+    throw new Error(
+      "Legacy Enrollment unexpectedly supplied a Probe Bootstrap recipe",
+    );
+  }
+  return contract;
+}
+
+function assertBootstrapRecipeRecord(record) {
+  assertExactObjectKeys(record, [
+    "bundleVersion",
+    "distribution",
+    "kind",
+    "recipe",
+    "rootFingerprint",
+    "schemaVersion",
+    "targets",
+  ]);
+  assertExactObjectKeys(record.recipe, ["file", "sha256", "size", "version"]);
+  if (
+    record.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    record.schemaVersion !== 1 ||
+    !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+      record.bundleVersion ?? "",
+    ) ||
+    record.distribution !== "enoki" ||
+    !/^[0-9a-f]{64}$/.test(record.rootFingerprint ?? "") ||
+    JSON.stringify(record.targets) !== JSON.stringify(probeTargets) ||
+    record.recipe.file !== "enoki-probe-bootstrap.py" ||
+    record.recipe.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(record.recipe.sha256 ?? "") ||
+    !isPositiveSafeInteger(record.recipe.size)
+  ) {
+    throw new Error("Hub returned an invalid Probe Bootstrap recipe record");
   }
 }
 
@@ -4967,14 +5165,11 @@ function assertScenarioParticipants(host, hub) {
   const hubMethods = [
     "authenticate",
     "createEnrollment",
-    "getAuditLog",
     "getHost",
     "getHostMetrics",
-    "getHostProbeConfiguration",
     "isHostSoftDeleted",
     "listHosts",
     "requestProbeUninstall",
-    "updateHostProbeConfiguration",
     "waitForProbeOperation",
   ];
   if (
@@ -5204,7 +5399,12 @@ function assertBaselineScenarioParticipants(host, hub, baseline) {
   const hubMethods = ["switchToCandidate"];
   if (isTrustEpochMigrationBaseline(baseline)) {
     hostMethods.push("manualReinstall");
-    hubMethods.push("createManualReinstallEnrollment");
+    hubMethods.push(
+      "createManualReinstallEnrollment",
+      "getAuditLog",
+      "getHostProbeConfiguration",
+      "updateHostProbeConfiguration",
+    );
   } else {
     hostMethods.push(
       "beginUpgradeOwnershipTransition",
@@ -5248,7 +5448,12 @@ function assertHubRestoreScenarioParticipants(host, hub, baseline) {
   ];
   if (isTrustEpochMigrationBaseline(baseline)) {
     hostMethods.push("manualReinstall");
-    hubMethods.push("createManualReinstallEnrollment");
+    hubMethods.push(
+      "createManualReinstallEnrollment",
+      "getAuditLog",
+      "getHostProbeConfiguration",
+      "updateHostProbeConfiguration",
+    );
   } else {
     hostMethods.push(
       "beginUpgradeOwnershipTransition",
@@ -5396,6 +5601,57 @@ function assertLifecycleAuditLog(auditLog, hostId, operationId) {
     );
   }
   return selected;
+}
+
+function assertMigrationLifecycleAuditLog(
+  auditLog,
+  hostId,
+  operationId,
+  oldIdentity,
+  newIdentity,
+) {
+  const selected = assertLifecycleAuditLog(auditLog, hostId, operationId);
+  return [
+    ...selected,
+    ...assertManualReinstallAuditEvent(
+      auditLog,
+      hostId,
+      oldIdentity,
+      newIdentity,
+    ),
+  ];
+}
+
+function assertManualReinstallAuditEvent(
+  auditLog,
+  hostId,
+  oldIdentity,
+  newIdentity,
+) {
+  const replacement = auditLog.find(
+    (event) =>
+      event?.action === "probe.manual_reinstall_identity_replaced" &&
+      isValidLifecycleAuditEvent(event) &&
+      event.actor === "system" &&
+      event.outcome === "success" &&
+      event.subjectId === String(hostId) &&
+      event.subjectType === "host" &&
+      event.details?.oldProbeId === oldIdentity.probeId &&
+      event.details?.newProbeId === newIdentity.probeId &&
+      Array.isArray(event.details?.sourceProbeSha256) &&
+      event.details.sourceProbeSha256.length > 0 &&
+      /^sha256:[0-9a-f]{64}$/.test(event.details?.targetAssetSetDigest ?? "") &&
+      /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(
+        event.details?.targetProbeVersion ?? "",
+      ),
+  );
+  if (!replacement) {
+    throw assertionError(
+      "manual_reinstall_audit_log_missing",
+      "Hub Audit Log is missing the production manual reinstall identity replacement event",
+    );
+  }
+  return [replacement];
 }
 
 function assertBaselineUpgradeAuditLog(
@@ -5965,7 +6221,7 @@ function redactSensitiveText(value, secrets) {
     if (secret) redacted = redacted.replaceAll(secret, "[REDACTED]");
   }
   redacted = redacted.replace(
-    /ENOKI_HUB_URL='[^']*' ENOKI_ENROLLMENT_TOKEN='[^']+' \/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/g,
+    /printf '%s\\n' 'enk_enroll_[A-Za-z0-9_-]+' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin 'https?:\/\/[^'\s]+'|curl -fsSL 'https?:\/\/[^'\s]+\/api\/probe\/install\.sh' \| sudo env ENOKI_HUB_URL='https?:\/\/[^'\s]+' ENOKI_ENROLLMENT_TOKEN='enk_enroll_[A-Za-z0-9_-]+' bash/g,
     "[REDACTED_INSTALLER_COMMAND]",
   );
   return redacted

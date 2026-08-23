@@ -36,6 +36,7 @@ import {
   validateProbeSigningIdentity,
   verifyProbeTrustDelegation,
 } from "./release-candidate-lib.mjs";
+import { loadValidatedCandidate } from "./release-e2e-adapters.mjs";
 import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
 import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
@@ -1642,6 +1643,11 @@ with open(os.devnull, "rb") as input_stream:
         (await readdir(probeAssetSetDir)).sort(),
       );
       expect(manifestText.endsWith("\n")).toBe(true);
+      const consumed = await loadValidatedCandidate(
+        path.join(candidateDir, "candidate-manifest.json"),
+        { trustedRootPublicKeyPem: testDistributionRoot.publicKey },
+      );
+      expect(consumed.manifest).toEqual(manifest);
 
       const secondCandidateDir = path.join(workDir, "candidate-second");
       await runCandidateCli([

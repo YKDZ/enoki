@@ -332,11 +332,22 @@ function createCandidateBootstrapProvisioner({
   let provisionedRunId = null;
   let stageDir = null;
   return {
-    async provision({ runId }) {
+    async provision({ recipe: requestedRecipe, runId, sourcePath } = {}) {
+      const selectedRecipe = requestedRecipe ?? recipe;
+      const selectedPath = sourcePath ?? recipePath;
       if (provisioned) {
-        throw new Error(
-          "Candidate Probe Bootstrap recipe is already provisioned",
+        const removed = await execute(
+          removeCandidateBootstrapRecipeScript(stageDir),
+          { sensitive: true },
         );
+        if (removed.code !== 0 || removed.stdout.trim() !== "removed") {
+          throw new Error(
+            `Could not replace staged Probe Bootstrap recipe: ${removed.stderr}`,
+          );
+        }
+        provisioned = false;
+        provisionedRunId = null;
+        stageDir = null;
       }
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(runId ?? "")) {
         throw new Error("Release E2E infrastructure run ID is invalid");
@@ -355,13 +366,17 @@ function createCandidateBootstrapProvisioner({
         );
       }
       stageDir = staged.stdout.trim();
+      provisionedRunId = runId;
       try {
         await transferFile({
-          destination: path.join(stageDir, recipe.file),
-          source: recipePath,
+          destination: path.join(stageDir, selectedRecipe.file),
+          source: selectedPath,
         });
         const verified = await execute(
-          verifyCandidateBootstrapRecipeScript({ recipe, stageDir }),
+          verifyCandidateBootstrapRecipeScript({
+            recipe: selectedRecipe,
+            stageDir,
+          }),
           { sensitive: true },
         );
         if (verified.code !== 0 || verified.stdout.trim() !== "verified") {
@@ -370,19 +385,29 @@ function createCandidateBootstrapProvisioner({
           );
         }
       } catch (error) {
-        await execute(removeCandidateBootstrapRecipeScript(stageDir), {
-          sensitive: true,
-        }).catch(() => {});
-        stageDir = null;
+        const cleanup = await execute(
+          removeCandidateBootstrapRecipeScript(stageDir),
+          { sensitive: true },
+        ).catch((cleanupError) => ({
+          code: -1,
+          stderr: cleanupError.message,
+          stdout: "",
+        }));
+        if (cleanup.code === 0 && cleanup.stdout.trim() === "removed") {
+          stageDir = null;
+        } else {
+          error.cleanupError = new Error(
+            `Could not clean failed Probe Bootstrap recipe staging: ${cleanup.stderr}`,
+          );
+        }
         throw error;
       }
       provisioned = true;
-      provisionedRunId = runId;
       return {
         evidence: {
-          file: recipe.file,
-          sha256: recipe.sha256,
-          version: recipe.version,
+          file: selectedRecipe.file,
+          sha256: selectedRecipe.sha256,
+          version: selectedRecipe.version,
         },
         workingDirectory: stageDir,
       };
@@ -760,19 +785,45 @@ export function createReleaseEnvironment({
         useHubStateSnapshot: scenario === "hub-restore-compatibility-window",
       });
       const lifecycle = createHubLifecycleClient({ baseUrl: hubOwnerUrl });
-      const bootstrap = bootstrapProvisioner
-        ? await bootstrapProvisioner({ candidateManifest, runId })
-        : null;
       const host = createProbeHostHarness({
         execute,
-        installWorkingDirectory: bootstrap?.workingDirectory,
         ownershipToken,
+        async prepareInstall({ enrollment, installContract }) {
+          if (installContract.kind === "legacy-v0.1.74") {
+            if (
+              candidateManifest.releaseBaseline?.kind !==
+                "enoki-trust-epoch-migration-baseline" ||
+              candidateManifest.releaseBaseline?.tag !== "v0.1.74" ||
+              dockerResources?.activeHub !== "baseline"
+            ) {
+              throw new Error(
+                "Legacy Probe installer is allowed only from the verified v0.1.74 Trust Epoch migration baseline Hub",
+              );
+            }
+            return null;
+          }
+          if (!bootstrapProvisioner) {
+            throw new Error(
+              "Release E2E infrastructure cannot stage the active Hub Probe Bootstrap recipe",
+            );
+          }
+          const exported = await docker.exportActiveBootstrapRecipe({
+            recipe: enrollment.bootstrapRecipe.recipe,
+            resources: dockerResources,
+            runId,
+          });
+          return bootstrapProvisioner({
+            recipe: enrollment.bootstrapRecipe.recipe,
+            runId,
+            sourcePath: exported.sourcePath,
+          });
+        },
       });
       const releaseTestHost = matrixCell
         ? await host.assertReleaseTestHost(matrixCell)
         : null;
       return {
-        bootstrap: bootstrap?.evidence ?? null,
+        bootstrap: null,
         docker: dockerResources,
         host,
         hub: {
@@ -807,10 +858,7 @@ export function createReleaseEnvironment({
             return { ...api, runtime };
           },
         },
-        infrastructure:
-          infrastructure && bootstrap
-            ? { ...infrastructure, bootstrap: bootstrap.evidence }
-            : (infrastructure ?? null),
+        infrastructure: infrastructure ?? null,
         releaseTestHost,
       };
     },
@@ -976,6 +1024,7 @@ export function createDockerHubController({
         configDigest: active.configDigest,
         container,
         containerCreated: false,
+        exportedRecipeDirs: [],
         identityVerified: false,
         manifestDigest: active.manifestDigest,
         redactionSecrets: [ownerPassword, operationSigningSecret],
@@ -1013,6 +1062,52 @@ export function createDockerHubController({
       }
       await runHubRuntime(currentResources, active);
       return currentResources;
+    },
+
+    async exportActiveBootstrapRecipe({ recipe, resources, runId }) {
+      const owned = resources ?? currentResources;
+      if (
+        !owned ||
+        owned !== currentResources ||
+        owned.runId !== runId ||
+        !owned.containerCreated ||
+        !owned.identityVerified
+      ) {
+        throw new Error(
+          "Active verified Hub runtime is required to export its Probe Bootstrap recipe",
+        );
+      }
+      if (
+        recipe?.file !== "enoki-probe-bootstrap.py" ||
+        !/^[0-9a-f]{64}$/.test(recipe?.sha256 ?? "") ||
+        !Number.isSafeInteger(recipe?.size) ||
+        recipe.size < 1 ||
+        recipe.version !== "v1"
+      ) {
+        throw new Error("Active Hub Enrollment recipe descriptor is invalid");
+      }
+      const exportDir = await mkdtemp(
+        path.join(tmpdir(), "enoki-release-e2e-active-recipe."),
+      );
+      const sourcePath = path.join(exportDir, recipe.file);
+      try {
+        await successfulExec(exec, containerEngine, [
+          "cp",
+          `${owned.container}:/app/probe-bootstrap-publication/${recipe.file}`,
+          sourcePath,
+        ]);
+        const bytes = await readFile(sourcePath);
+        if (bytes.length !== recipe.size || sha256(bytes) !== recipe.sha256) {
+          throw new Error(
+            "Active Hub Probe Bootstrap recipe does not match its verified Enrollment record",
+          );
+        }
+      } catch (error) {
+        await rm(exportDir, { force: true, recursive: true });
+        throw error;
+      }
+      owned.exportedRecipeDirs.push(exportDir);
+      return { sourcePath };
     },
 
     async captureBaselineStateSnapshot({
@@ -1299,6 +1394,14 @@ export function createDockerHubController({
       const owned = resources ?? currentResources;
       if (!owned) return { clean: true, skipped: "hub_not_started" };
       const errors = [];
+      for (const exportDir of owned.exportedRecipeDirs ?? []) {
+        try {
+          await rm(exportDir, { force: true, recursive: true });
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      owned.exportedRecipeDirs = [];
       await cleanDockerObject({
         createdProperty: "containerCreated",
         name: owned.container,

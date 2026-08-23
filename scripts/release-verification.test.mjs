@@ -274,7 +274,7 @@ describe("verify-only release workflow", () => {
       standardCi: standardCiEvidence(candidateManifest.candidate),
       verified: true,
     });
-    expect(summary.gates.hostScenarios).toHaveLength(6);
+    expect(summary.gates.hostScenarios).toHaveLength(7);
     expect(
       summary.gates.hostScenarios.filter(
         (gate) => gate.scenarioId === "hub-restore-compatibility-window",
@@ -455,7 +455,7 @@ describe("verify-only release workflow", () => {
         "Candidate Manifest identity is missing",
       ]),
     );
-    expect(summary.gates.hostScenarios).toHaveLength(6);
+    expect(summary.gates.hostScenarios).toHaveLength(7);
     expect(
       summary.gates.hostScenarios.every((gate) => gate.outcome === "missing"),
     ).toBe(true);
@@ -972,6 +972,185 @@ describe("verify-only release workflow", () => {
     expect(gate.outcome).toBe("succeeded");
   });
 
+  it("accepts typed Trust Epoch manual reinstall evidence and rejects identity continuity", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "baseline-upgrade-uninstall",
+      candidate,
+    );
+    const before = probeIdentityEvidence();
+    const after = {
+      identitySha256: "e".repeat(64),
+      probeId: "probe_release_replacement",
+    };
+    const hostProjection = {
+      ...evidenceHost("1.2.2"),
+      reportedProbeConfigurationVersion: "host-7-1",
+    };
+    evidence.releaseBaseline.kind = "enoki-trust-epoch-migration-baseline";
+    evidence.upgradeOperationTimeline = [];
+    evidence.manualRecovery = {
+      enrollmentId: "enr_manual_reinstall_0001",
+      hostId: 7,
+      kind: "trust_epoch_manual_reinstall",
+      result: { status: "succeeded" },
+    };
+    evidence.identityContinuity = { after, before, hostId: 7 };
+    evidence.migrationRetention = {
+      configuration: {
+        configuration: probeConfigurationValues("host-7-1"),
+        mode: "override",
+      },
+      hostAfter: hostProjection,
+      hostBefore: hostProjection,
+      metricHistoryAnchors: evidenceMetrics(1),
+    };
+    evidence.auditLog = [
+      ...lifecycleAuditLog(),
+      {
+        action: "probe.manual_reinstall_identity_replaced",
+        actor: "system",
+        details: {
+          newProbeId: after.probeId,
+          oldProbeId: before.probeId,
+          sourceProbeSha256: ["a".repeat(64)],
+          targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+          targetProbeVersion: "1.2.3",
+        },
+        id: 9,
+        occurredAtMs: 109,
+        outcome: "success",
+        subjectId: "7",
+        subjectType: "host",
+      },
+    ];
+    const gateFor = (value) =>
+      createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+        evidence: value,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+    expect(gateFor(evidence).evidenceValidationErrors).toEqual([]);
+    const unchanged = structuredClone(evidence);
+    unchanged.identityContinuity.after.probeId = before.probeId;
+    expect(gateFor(unchanged).evidenceValidationErrors).toContain(
+      "Probe Identity replacement is invalid",
+    );
+  });
+
+  it("rejects successful migration Repair evidence without production eligibility", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "post-replacement-repair-uninstall",
+      candidate,
+    );
+    evidence.releaseBaseline.kind = "enoki-trust-epoch-migration-baseline";
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--post-replacement-repair-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--post-replacement-repair-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+    expect(gate.evidenceValidationErrors).toContain(
+      "Trust Epoch migration Repair has no production-authorized eligibility sequence",
+    );
+    expect(gate.outcome).toBe("failed");
+  });
+
+  it("accepts typed Trust Epoch Hub Restore replacement evidence and fails closed without continued reporting", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "hub-restore-compatibility-window",
+      candidate,
+    );
+    const before = probeIdentityEvidence();
+    const after = {
+      identitySha256: "e".repeat(64),
+      probeId: "probe_release_replacement",
+    };
+    const hostProjection = evidenceHost("0.1.74");
+    evidence.releaseBaseline = {
+      ...evidence.releaseBaseline,
+      kind: "enoki-trust-epoch-migration-baseline",
+      probeVersion: "0.1.74",
+    };
+    evidence.migration.operationTimeline = [
+      {
+        enrollmentId: "enr_manual_reinstall_restore",
+        hostId: 7,
+        kind: "trust_epoch_manual_reinstall",
+      },
+    ];
+    evidence.identity = {
+      afterRestore: before,
+      afterUpgrade: after,
+      beforeUpgrade: before,
+      hostId: 7,
+    };
+    evidence.reporting.candidateHub.host = evidenceHost("0.1.74");
+    evidence.reporting.restoredBaselineHub.host = evidenceHost("0.1.74");
+    evidence.reporting.postReplacementCandidateHub = {
+      host: evidenceHost("1.2.3"),
+      metrics: evidenceMetrics(5),
+    };
+    evidence.migrationRetention = {
+      configuration: {
+        configuration: probeConfigurationValues("host-7-1"),
+        mode: "override",
+      },
+      hostAfter: hostProjection,
+      hostBefore: hostProjection,
+      metricHistoryAnchors: evidenceMetrics(1),
+    };
+    evidence.probeConfiguration = {
+      beforeReplacement: probeConfigurationEvidence("host-7-1"),
+      retained: evidence.migrationRetention.configuration,
+    };
+    evidence.auditLog = [
+      {
+        action: "probe.manual_reinstall_identity_replaced",
+        actor: "system",
+        details: {
+          newProbeId: after.probeId,
+          oldProbeId: before.probeId,
+          sourceProbeSha256: ["a".repeat(64)],
+          targetAssetSetDigest: `sha256:${"b".repeat(64)}`,
+          targetProbeVersion: "1.2.3",
+        },
+        id: 9,
+        occurredAtMs: 109,
+        outcome: "success",
+        subjectId: "7",
+        subjectType: "host",
+      },
+    ];
+    const gateFor = (value) =>
+      createMatrixGateResult({
+        artifactName:
+          "release-e2e-ubuntu-22.04-x86_64--hub-restore-compatibility-window-1",
+        candidate,
+        cellId: "ubuntu-22.04-x86_64--hub-restore-compatibility-window",
+        evidence: value,
+        scenarioOutcome: "success",
+        verifyCleanOutcome: "success",
+      });
+
+    expect(gateFor(evidence).evidenceValidationErrors).toEqual([]);
+    const missingReporting = structuredClone(evidence);
+    missingReporting.reporting.postReplacementCandidateHub = null;
+    expect(gateFor(missingReporting).evidenceValidationErrors).toContain(
+      "post-replacement Candidate reporting is invalid",
+    );
+  });
+
   it("fails closed when recorded Host platform or CI infrastructure does not belong to the matrix cell", () => {
     const candidate = releaseCandidateManifest().candidate;
     const evidence = successfulHostEvidence(
@@ -1351,6 +1530,7 @@ function expectedHostGateResults(matrix, candidateManifest) {
       cellId: `${environment.capabilityId}--${scenario.id}`,
       evidenceOutcome: "succeeded",
       outcome: "succeeded",
+      releaseBaselineKind: candidateManifest.releaseBaseline.kind,
       scenarioId: scenario.id,
       scenarioStepOutcome: "success",
       verifyCleanStepOutcome: "success",
@@ -1397,6 +1577,7 @@ function successfulHostEvidence(
     },
     infrastructure,
     phase: "succeeded",
+    releaseBaseline: { kind: "enoki-release-baseline" },
     releaseTestHost: {
       architecture: "x86_64",
       deviceView: true,
@@ -1541,7 +1722,10 @@ function successfulHostEvidence(
         afterUpgrade: probeConfigurationEvidence("host-7-2"),
         beforeUpgrade: probeConfigurationEvidence("host-7-1"),
       },
-      releaseBaseline: { probeVersion: "1.2.2" },
+      releaseBaseline: {
+        kind: "enoki-release-baseline",
+        probeVersion: "1.2.2",
+      },
       upgradeOperationTimeline: evidenceOperationTimeline({
         id: 81,
         kind: "probe_upgrade",
@@ -1579,6 +1763,7 @@ function successfulHostEvidence(
       },
       repairHostBoundary: installedHostBoundary("1.2.3"),
       repairedHost: evidenceHost("1.2.3"),
+      releaseBaseline: { kind: "enoki-release-baseline" },
     };
   }
   return {
@@ -1619,7 +1804,10 @@ function successfulHostEvidence(
       baselineProbeToCandidateHub: "succeeded",
       candidateProbeToBaselineHub: "succeeded",
     },
-    releaseBaseline: { hubDigest: `sha256:${"2".repeat(64)}` },
+    releaseBaseline: {
+      hubDigest: `sha256:${"2".repeat(64)}`,
+      kind: "enoki-release-baseline",
+    },
     reporting: {
       candidateHub: {
         host: evidenceHost("1.2.3"),
