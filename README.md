@@ -28,7 +28,7 @@ Enoki **有**以下功能：
 - 从 Hub 分发探针二进制文件从而不依赖探针侧额外网络连通性
 - REST API
 - 主页的卡片瀑布流 / 表格视图
-- Hub 侧可协调探针操作；当前版本不支持本机升级、修复和卸载，相关请求会稳定报告不支持
+- Hub 侧可协调探针卸载；本机也可执行 `sudo enoki-probe uninstall`。升级和修复尚未启用，相关请求会稳定报告不支持
 - 探针常态下不拥有 root 权限
 - CPU / RAM / 磁盘 / 网络接口等多种常见指标
 - 基于时钟的指标级采集 / 上报间隔
@@ -56,7 +56,7 @@ Enoki **有**以下功能：
 
 Enoki 的安全边界尽量保持简单：
 
-- 管理界面可查看主机元数据和操作状态；当前探针不支持本机升级、修复与卸载，建议仅在可信网络中使用
+- 管理界面可查看主机元数据和操作状态；当前支持 Hub 组合卸载和本机卸载，升级与修复尚未启用
 - 除显式启用无密码模式外，所有部署都必须显式设置 `OWNER_PASSWORD`；`ENOKI_WEB_UI_NO_PASSWORD=true` 只适合完全可信的内网、演示或临时截图环境。生产或 Docker 环境必须同时显式设置 `ENOKI_ALLOW_INSECURE_NO_PASSWORD=true` 才能启用无密码模式
 - 管理面和探针 API 分别使用显式 Origin；两者可按部署网络选择 HTTP 或 HTTPS。显式的非 loopback HTTP 会在 Hub 启动时记录一次结构化警告：它放弃了传输保密性和服务器身份认证，但不会放宽应用认证
 - 探针注册后会生成自己的非对称身份密钥，后续上报和操作状态使用请求签名证明身份。签名会绑定请求方法、目标地址、路径、查询参数、随机数、时间戳和请求体摘要
@@ -64,13 +64,13 @@ Enoki 的安全边界尽量保持简单：
 - `ENOKI_TRUSTED_PROXY_CIDRS` 只用于从 `X-Forwarded-For` 取得 Observed IP 审计证据；它不影响 Origin、认证、授权、拒绝、限流或客户端网络准入，且忽略 `X-Real-IP`
 - 探针身份私钥和启动配置需要保持私密，配置文件不应允许其他用户读取
 - Hub 只在 `/api/probe/assets/*` 有界分发已签名的探针安装包；当前新安装不会由常驻探针启动本地升级执行器
-- 安装器会把 Hub 地址写入 root-owned 安装元数据；常驻探针保留操作协调和状态上报，但当前版本不会下载或激活升级资产
+- 安装器会把 Hub 地址和已验证安装回执写入 root 所有的安装元数据；常驻探针只协调卸载请求，独立的有界生命周期角色验证授权并执行固定清理事务。本地卸载不删除 Hub 中的主机记录
 - 官方版使用本仓库配置的资产签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针安装包
 - Hub 管理员可以创建探针操作请求，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界；当前探针会封闭报告不支持，不会跨入本机提权执行。
 - 常驻探针不以 root 运行，也不直接读取设备事实或执行 `smartctl`。Observation Runtime 只通过构建期固定的本机 Resource Provider 合同取得结果；Hub、管理员、探针配置、主机概况或指标上报都不能传入路径、命令、参数、权限配置或采集器列表
 - Observation Runtime 独占官方采集器的固定注册、调度、指标计算、delta 状态和有界结果；常驻探针只请求完整观测窗口，按已验证配置筛选已完成字段并沿认证上报路径转发。新安装不会创建已退役的采集 helper sudoers
 - System State Provider 与 Disk Health Provider 是相互独立的一次性 systemd socket 激活进程。两者都有固定调用者身份、激活预算、运行期限和有界 typed response；Disk Health Provider 还使用固定 `smartctl` 绝对候选路径和参数，清空继承环境并仅设置固定的 `LANG=C`，同时固定工作目录以及子进程超时与回收合同
-- 探针、观测进程和两类采集进程的生产 unit 使用与签名角色一致的固定最小权限配置，限制 capability、设备、网络、文件系统、进程视图、命名空间、系统调用、任务数、内存和文件创建权限。两类采集进程还受固定并发、激活速率、执行期限和完整进程组清理约束，文件读取另由构建期固定的 Landlock allowlist 限制。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；当前版本不支持本机升级、修复和卸载
+- 探针、观测进程、两类采集进程和生命周期进程的生产 unit 使用与签名角色一致的固定最小权限配置，限制 capability、设备、网络、文件系统、进程视图、命名空间、系统调用、任务数、内存和文件创建权限。两类采集进程还受固定并发、激活速率、执行期限和完整进程组清理约束，文件读取另由构建期固定的 Landlock allowlist 限制。新安装不创建旧 operation sudoers，也不保留 `sudo systemd-run` 回退；卸载仅执行固定清单，升级和修复尚未启用
 
 ## 部署
 
@@ -100,7 +100,7 @@ Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl`
 
 把 recipe 保存在当前目录后，在 Hub Web UI 中创建安装并复制页面生成的一次性命令，以当前非 root 用户执行。recipe 会从 Hub 有界下载根、委派和清单元数据，并且只下载一次与当前平台匹配的 versioned“探针安装包”；在验证离线根指纹、委派、签名清单、归档精确大小与摘要以及完整固定角色 closure 之前，不会执行安装包内代码。已验证 acquirer 字节直接写入 sealed memfd 并从绑定该 FD 的 `/proc/self/fd` 执行，不会落入用户可写 pathname 后重读；acquirer 随后从同一私有归档复验全部 receipt，把已验证 activator 封存在不可写 memfd，并通过私有 socket/FD handoff 交给 sudo。root 不联网，会再次验证 handoff、activator、acquirer 和全部运行组件的精确摘要与大小，再在同一个 fresh transaction 中发布 `probe`、`observation-runtime`、`system-state-provider`、`disk-health-provider`、`bootstrap-acquirer` 与 `bootstrap-activator` 六个固定角色。Enrollment Token 只经 stdin 传给 acquirer，不进入 root 环境或命令行。没有 skip、运行时可选信任根、第二下载路径或旧脚本回退。
 
-Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机升级、修复或卸载；相关请求会稳定报告不支持。
+Hub 只对已安装探针所需的签名安装包提供有界分发。当前版本不会从常驻探针执行本机特权操作；卸载交由独立的固定角色完成，升级和修复请求会稳定报告未启用。
 
 `ENOKI_PROBE_API_ORIGIN` 只能是 `scheme://host[:port]`，不支持路径前缀。若既有探针依赖未文档化的前缀，请调整网络路由后在 Hub 中使用“手动重新安装探针”；没有旧前缀兼容层。
 

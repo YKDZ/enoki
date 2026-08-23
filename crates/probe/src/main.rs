@@ -17,12 +17,13 @@ fn main() {
         ProbeCommand::Version => {
             print!("{}", render_probe_output(ProbeCommand::Version));
         }
-        ProbeCommand::Uninstall => {
-            eprintln!(
-                "Probe uninstall is unavailable in this version: code=unsupported_installation."
-            );
-            std::process::exit(2);
-        }
+        ProbeCommand::Uninstall => match enoki_probe::runtime::request_local_probe_uninstall() {
+            Ok(()) => println!("Probe uninstall completed."),
+            Err(code) => {
+                eprintln!("Probe uninstall failed: code={code}.");
+                std::process::exit(1);
+            }
+        },
         ProbeCommand::Repair => {
             eprintln!(
                 "Probe repair is unavailable in this version: code=unsupported_installation."

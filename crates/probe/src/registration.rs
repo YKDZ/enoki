@@ -319,11 +319,14 @@ struct BootstrapConfig<'a> {
 
 #[derive(Default)]
 struct InstallerOwnedFields {
+    bundle_version: Option<String>,
     install_path: Option<String>,
+    install_state_sha256: Option<String>,
     log_level: Option<String>,
     operation_status_path: Option<String>,
     probe_asset_public_key_sha256: Option<String>,
     probe_distribution_root_sha256: Option<String>,
+    target_manifest_sha256: Option<String>,
     bootstrap_acquirer_path: Option<String>,
     bootstrap_activator_path: Option<String>,
     bootstrap_state_dir: Option<String>,
@@ -346,11 +349,14 @@ fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, Regi
         .map_err(|_| RegistrationError::InvalidResponse("invalid bootstrap config TOML"))?;
 
     Ok(InstallerOwnedFields {
+        bundle_version: string_value(&value, "bundle_version")?,
         install_path: string_value(&value, "install_path")?,
+        install_state_sha256: string_value(&value, "install_state_sha256")?,
         log_level: string_value(&value, "log_level")?,
         operation_status_path: string_value(&value, "operation_status_path")?,
         probe_asset_public_key_sha256: string_value(&value, "probe_asset_public_key_sha256")?,
         probe_distribution_root_sha256: string_value(&value, "probe_distribution_root_sha256")?,
+        target_manifest_sha256: string_value(&value, "target_manifest_sha256")?,
         bootstrap_acquirer_path: string_value(&value, "bootstrap_acquirer_path")?,
         bootstrap_activator_path: string_value(&value, "bootstrap_activator_path")?,
         bootstrap_state_dir: string_value(&value, "bootstrap_state_dir")?,
@@ -425,6 +431,27 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
             .installer_owned_fields
             .probe_distribution_root_sha256
             .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "install_state_sha256",
+        config
+            .installer_owned_fields
+            .install_state_sha256
+            .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "target_manifest_sha256",
+        config
+            .installer_owned_fields
+            .target_manifest_sha256
+            .as_deref(),
+    );
+    push_optional_string(
+        &mut output,
+        "bundle_version",
+        config.installer_owned_fields.bundle_version.as_deref(),
     );
     push_optional_string(
         &mut output,

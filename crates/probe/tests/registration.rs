@@ -178,6 +178,9 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
             "service_name = \"enoki-probe\"",
             "probe_asset_public_key_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
             "probe_distribution_root_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+            "install_state_sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"",
+            "target_manifest_sha256 = \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"",
+            "bundle_version = \"1.2.3\"",
             "bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"",
             "bootstrap_activator_path = \"/usr/local/bin/enoki-probe-bootstrap-activate\"",
             "bootstrap_state_dir = \"/var/lib/enoki-probe-bootstrap\"",
@@ -234,6 +237,13 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     assert!(bootstrap_config.contains(
         "probe_distribution_root_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
     ));
+    assert!(bootstrap_config.contains(
+        "install_state_sha256 = \"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\""
+    ));
+    assert!(bootstrap_config.contains(
+        "target_manifest_sha256 = \"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\""
+    ));
+    assert!(bootstrap_config.contains("bundle_version = \"1.2.3\""));
     assert!(
         bootstrap_config
             .contains("bootstrap_acquirer_path = \"/usr/local/bin/enoki-probe-bootstrap-acquire\"")

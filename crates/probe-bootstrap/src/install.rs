@@ -736,6 +736,7 @@ fn activate_current_probe_with_observation_files(
     let staged = match stage_complete_layout(
         component,
         enrollment,
+        bundle,
         trust,
         journal.staging_directory(),
         install_observation,
@@ -1144,6 +1145,7 @@ fn recover_interrupted_install(
 fn stage_complete_layout(
     component: &mut File,
     enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
     trust: &BuildTrust,
     staging: &Path,
     install_observation: bool,
@@ -1164,10 +1166,10 @@ fn stage_complete_layout(
     let metadata = staging.join("probe-install.toml");
     let unit = staging.join("enoki-probe.service");
     for (path, contents) in [
-        (&identity, bootstrap_config(enrollment, trust)),
+        (&identity, bootstrap_config(enrollment, bundle, trust)),
         (
             &metadata,
-            install_metadata(enrollment, trust, install_observation),
+            install_metadata(enrollment, bundle, trust, install_observation),
         ),
         (&unit, service_unit().to_owned()),
     ] {
@@ -1207,9 +1209,13 @@ fn record_rollback(
     }
 }
 
-fn bootstrap_config(enrollment: &Enrollment, trust: &BuildTrust) -> String {
+fn bootstrap_config(
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+) -> String {
     format!(
-        "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nprobe_distribution_root_sha256 = {:?}\nlog_level = \"info\"\n",
+        "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nprobe_distribution_root_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nlog_level = \"info\"\n",
         enrollment.hub_origin(),
         enrollment.enrollment_token(),
         STATE,
@@ -1218,11 +1224,15 @@ fn bootstrap_config(enrollment: &Enrollment, trust: &BuildTrust) -> String {
         SERVICE_NAME,
         SERVICE_USER,
         trust.root_fingerprint,
+        bundle.install_state_sha256(),
+        bundle.manifest_sha256,
+        bundle.version,
     )
 }
 
 fn install_metadata(
     enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
     trust: &BuildTrust,
     install_observation: bool,
 ) -> String {
@@ -1245,7 +1255,7 @@ fn install_metadata(
         );
     }
     format!(
-        "schema_version = 4\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 4\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1257,6 +1267,9 @@ fn install_metadata(
         "/var/lib/enoki-probe/probe-operation-status.toml",
         STATE,
         trust.root_fingerprint,
+        bundle.install_state_sha256(),
+        bundle.manifest_sha256,
+        bundle.version,
         BOOTSTRAP_STATE,
         BOOTSTRAP_ACQUIRER,
         BOOTSTRAP_ACTIVATOR,
@@ -1291,7 +1304,7 @@ fn lifecycle_companion_socket_unit() -> &'static str {
 
 fn lifecycle_companion_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nPrivateNetwork=true\nRestrictAddressFamilies=AF_UNIX\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap\n"
+        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap\n"
     )
 }
 

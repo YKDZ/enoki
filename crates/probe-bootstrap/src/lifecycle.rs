@@ -1,12 +1,258 @@
 //! 探针本机生命周期的封闭领域合同。
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+pub const MAX_LIFECYCLE_REQUEST_BYTES: usize = 8 * 1024;
+pub const MAX_OPERATION_TOKEN_BYTES: usize = 2 * 1024;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum LifecycleTransition {
     FreshInstall,
     Upgrade,
     Repair,
     ReplacementMigration,
     Uninstall,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifecycleRequest {
+    schema_version: u16,
+    transition: LifecycleTransition,
+    authority: LifecycleRequestAuthority,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum LifecycleRequestAuthority {
+    HubOperation {
+        probe_id: String,
+        operation_id: String,
+        operation_token: String,
+        install_state_sha256: String,
+        target_manifest_sha256: String,
+        bundle_version: String,
+    },
+    LocalRoot {
+        probe_id: String,
+        install_state_sha256: String,
+        target_manifest_sha256: String,
+        bundle_version: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LifecycleResultStatus {
+    Succeeded,
+    Failed,
+    NotEnabled,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifecycleResponse {
+    schema_version: u16,
+    status: LifecycleResultStatus,
+    code: String,
+}
+
+impl LifecycleResponse {
+    #[must_use]
+    pub fn succeeded() -> Self {
+        Self {
+            schema_version: 1,
+            status: LifecycleResultStatus::Succeeded,
+            code: "lifecycle.succeeded".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn failed(code: &str) -> Self {
+        Self {
+            schema_version: 1,
+            status: LifecycleResultStatus::Failed,
+            code: bounded_result_code(code),
+        }
+    }
+
+    #[must_use]
+    pub fn not_enabled() -> Self {
+        Self {
+            schema_version: 1,
+            status: LifecycleResultStatus::NotEnabled,
+            code: LifecycleRejection::TransitionNotEnabled.code().to_owned(),
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("固定 Lifecycle Response 可序列化")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, LifecycleRejection> {
+        if bytes.is_empty() || bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        let response: Self =
+            serde_json::from_slice(bytes).map_err(|_| LifecycleRejection::InvalidAuthority)?;
+        if response.schema_version != 1
+            || response.encode().as_slice() != bytes
+            || bounded_result_code(&response.code) != response.code
+        {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        Ok(response)
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> LifecycleResultStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+}
+
+fn bounded_result_code(code: &str) -> String {
+    if (1..=96).contains(&code.len())
+        && code.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+    {
+        code.to_owned()
+    } else {
+        "lifecycle.failed".to_owned()
+    }
+}
+
+impl LifecycleRequest {
+    pub fn hub_uninstall(
+        probe_id: &str,
+        operation_id: &str,
+        operation_token: &str,
+        install_state_sha256: &str,
+        target_manifest_sha256: &str,
+        bundle_version: &str,
+    ) -> Result<Self, LifecycleRejection> {
+        let request = Self {
+            schema_version: 1,
+            transition: LifecycleTransition::Uninstall,
+            authority: LifecycleRequestAuthority::HubOperation {
+                probe_id: probe_id.to_owned(),
+                operation_id: operation_id.to_owned(),
+                operation_token: operation_token.to_owned(),
+                install_state_sha256: install_state_sha256.to_owned(),
+                target_manifest_sha256: target_manifest_sha256.to_owned(),
+                bundle_version: bundle_version.to_owned(),
+            },
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn local_uninstall(
+        probe_id: &str,
+        install_state_sha256: &str,
+        target_manifest_sha256: &str,
+        bundle_version: &str,
+    ) -> Result<Self, LifecycleRejection> {
+        let request = Self {
+            schema_version: 1,
+            transition: LifecycleTransition::Uninstall,
+            authority: LifecycleRequestAuthority::LocalRoot {
+                probe_id: probe_id.to_owned(),
+                install_state_sha256: install_state_sha256.to_owned(),
+                target_manifest_sha256: target_manifest_sha256.to_owned(),
+                bundle_version: bundle_version.to_owned(),
+            },
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, LifecycleRejection> {
+        if bytes.is_empty() || bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        let request: Self =
+            serde_json::from_slice(bytes).map_err(|_| LifecycleRejection::InvalidAuthority)?;
+        request.validate()?;
+        if request.encode()?.as_slice() != bytes {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        Ok(request)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, LifecycleRejection> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| LifecycleRejection::InvalidAuthority)?;
+        if bytes.len() > MAX_LIFECYCLE_REQUEST_BYTES {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        Ok(bytes)
+    }
+
+    pub fn validate(&self) -> Result<(), LifecycleRejection> {
+        if self.schema_version != 1 {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        let (probe_id, install_state, manifest, version) = match &self.authority {
+            LifecycleRequestAuthority::HubOperation {
+                probe_id,
+                operation_id,
+                operation_token,
+                install_state_sha256,
+                target_manifest_sha256,
+                bundle_version,
+            } => {
+                if !valid_identifier(operation_id)
+                    || operation_token.is_empty()
+                    || operation_token.len() > MAX_OPERATION_TOKEN_BYTES
+                    || operation_token.bytes().any(|byte| byte.is_ascii_control())
+                {
+                    return Err(LifecycleRejection::InvalidAuthority);
+                }
+                (
+                    probe_id,
+                    install_state_sha256,
+                    target_manifest_sha256,
+                    bundle_version,
+                )
+            }
+            LifecycleRequestAuthority::LocalRoot {
+                probe_id,
+                install_state_sha256,
+                target_manifest_sha256,
+                bundle_version,
+            } => (
+                probe_id,
+                install_state_sha256,
+                target_manifest_sha256,
+                bundle_version,
+            ),
+        };
+        if !valid_identifier(probe_id)
+            || !is_sha256_hex(install_state)
+            || !is_sha256_hex(manifest)
+            || !valid_bundle_version(version)
+        {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn transition(&self) -> LifecycleTransition {
+        self.transition
+    }
+
+    #[must_use]
+    pub const fn authority(&self) -> &LifecycleRequestAuthority {
+        &self.authority
+    }
 }
 
 impl LifecycleTransition {
@@ -233,5 +479,34 @@ mod tests {
                 Err(LifecycleRejection::TransitionNotEnabled),
             );
         }
+    }
+
+    #[test]
+    fn lifecycle_request_round_trip_is_canonical_and_bound_to_fixed_authority_facts() {
+        let request = LifecycleRequest::hub_uninstall(
+            "probe_01",
+            "operation_01",
+            "opaque-operation-token",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+        )
+        .expect("授权事实有效");
+        let encoded = request.encode().expect("编码");
+
+        assert_eq!(LifecycleRequest::decode(&encoded), Ok(request));
+    }
+
+    #[test]
+    fn lifecycle_request_rejects_unbound_or_noncanonical_authority() {
+        let invalid = format!(
+            "{{\"schemaVersion\":1,\"transition\":\"uninstall\",\"authority\":{{\"kind\":\"hub-operation\",\"probe_id\":\"probe_01\",\"operationId\":\"operation_01\",\"operationToken\":\"token\",\"installStateSha256\":\"{}\",\"targetManifestSha256\":\"{}\",\"bundleVersion\":\"1.2.3\"}}}}",
+            "a".repeat(64),
+            "b".repeat(64),
+        );
+        assert_eq!(
+            LifecycleRequest::decode(invalid.as_bytes()),
+            Err(LifecycleRejection::InvalidAuthority),
+        );
     }
 }

@@ -1,4 +1,17 @@
-use std::{collections::HashSet, error::Error, fmt, fs, io::Read, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    error::Error,
+    fmt, fs,
+    io::{Read, Write},
+    net::Shutdown,
+    os::unix::net::UnixStream,
+    path::PathBuf,
+    time::Duration,
+};
+
+use enoki_probe_bootstrap::lifecycle::{
+    LifecycleRequest, LifecycleResponse, LifecycleResultStatus, MAX_LIFECYCLE_REQUEST_BYTES,
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -269,7 +282,7 @@ pub fn run_probe_with_loop_control(
         transport,
         sleeper,
         control,
-        UnsupportedProbeOperationRunner::from_bootstrap,
+        LifecycleCompanionOperationRunner::from_bootstrap,
         notify_systemd_ready,
         &observation_runtime,
     )
@@ -288,7 +301,7 @@ pub fn run_probe_with_loop_control_and_observation_client(
         transport,
         sleeper,
         control,
-        UnsupportedProbeOperationRunner::from_bootstrap,
+        LifecycleCompanionOperationRunner::from_bootstrap,
         notify_systemd_ready,
         observation_runtime,
     )
@@ -672,7 +685,6 @@ struct ProbeUninstallRunnerInput<'a> {
 }
 
 enum ProbeUpgradeRunnerOutcome {
-    #[cfg(test)]
     Running,
     Failed(ProbeOperationFailed),
 }
@@ -689,18 +701,29 @@ trait ProbeOperationRunner {
     ) -> ProbeUpgradeRunnerOutcome;
 }
 
-struct UnsupportedProbeOperationRunner;
+const LIFECYCLE_COMPANION_SOCKET: &str = "/run/enoki-probe-lifecycle-companion.sock";
 
-impl UnsupportedProbeOperationRunner {
-    fn from_bootstrap(
-        _bootstrap_config: &BootstrapConfig,
-        _bootstrap_config_path: PathBuf,
-    ) -> Self {
-        Self
+struct LifecycleCompanionOperationRunner {
+    probe_id: Option<String>,
+    install_state_sha256: Option<String>,
+    target_manifest_sha256: Option<String>,
+    bundle_version: Option<String>,
+    socket_path: PathBuf,
+}
+
+impl LifecycleCompanionOperationRunner {
+    fn from_bootstrap(bootstrap_config: &BootstrapConfig, _bootstrap_config_path: PathBuf) -> Self {
+        Self {
+            probe_id: bootstrap_config.probe_id.clone(),
+            install_state_sha256: bootstrap_config.install_state_sha256.clone(),
+            target_manifest_sha256: bootstrap_config.target_manifest_sha256.clone(),
+            bundle_version: bootstrap_config.bundle_version.clone(),
+            socket_path: PathBuf::from(LIFECYCLE_COMPANION_SOCKET),
+        }
     }
 }
 
-impl ProbeOperationRunner for UnsupportedProbeOperationRunner {
+impl ProbeOperationRunner for LifecycleCompanionOperationRunner {
     fn run_probe_upgrade(
         &mut self,
         input: ProbeUpgradeRunnerInput<'_>,
@@ -719,9 +742,96 @@ impl ProbeOperationRunner for UnsupportedProbeOperationRunner {
         &mut self,
         input: ProbeUninstallRunnerInput<'_>,
     ) -> ProbeUpgradeRunnerOutcome {
-        let _ = (input.stdin, input.operation_id);
-        unsupported_lifecycle_operation()
+        let Some((probe_id, install_state, manifest, version)) = self
+            .probe_id
+            .as_deref()
+            .zip(self.install_state_sha256.as_deref())
+            .zip(self.target_manifest_sha256.as_deref())
+            .zip(self.bundle_version.as_deref())
+            .map(|(((probe_id, install_state), manifest), version)| {
+                (probe_id, install_state, manifest, version)
+            })
+        else {
+            return lifecycle_companion_failure("lifecycle.install_receipt_missing");
+        };
+        let Ok(request) = LifecycleRequest::hub_uninstall(
+            probe_id,
+            input.operation_id,
+            input.stdin,
+            install_state,
+            manifest,
+            version,
+        ) else {
+            return lifecycle_companion_failure("lifecycle.invalid_authority");
+        };
+        match request_lifecycle_companion_at(&self.socket_path, &request) {
+            Ok(response) if response.status() == LifecycleResultStatus::Succeeded => {
+                ProbeUpgradeRunnerOutcome::Running
+            }
+            Ok(response) => lifecycle_companion_failure(response.code()),
+            Err(()) => lifecycle_companion_failure("lifecycle.companion_unavailable"),
+        }
     }
+}
+
+fn request_lifecycle_companion_at(
+    socket_path: &std::path::Path,
+    request: &LifecycleRequest,
+) -> Result<LifecycleResponse, ()> {
+    let mut stream = UnixStream::connect(socket_path).map_err(|_| ())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(90)))
+        .map_err(|_| ())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| ())?;
+    stream
+        .write_all(&request.encode().map_err(|_| ())?)
+        .map_err(|_| ())?;
+    stream.shutdown(Shutdown::Write).map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    stream
+        .take(MAX_LIFECYCLE_REQUEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    LifecycleResponse::decode(&bytes).map_err(|_| ())
+}
+
+pub fn request_local_probe_uninstall() -> Result<(), &'static str> {
+    let config = read_bootstrap_config(&PathBuf::from(
+        "/var/lib/enoki-probe/identity/probe-bootstrap.toml",
+    ))
+    .map_err(|_| "lifecycle.identity_invalid")?;
+    let Some((probe_id, install_state, manifest, version)) = config
+        .probe_id
+        .as_deref()
+        .zip(config.install_state_sha256.as_deref())
+        .zip(config.target_manifest_sha256.as_deref())
+        .zip(config.bundle_version.as_deref())
+        .map(|(((probe_id, install_state), manifest), version)| {
+            (probe_id, install_state, manifest, version)
+        })
+    else {
+        return Err("lifecycle.install_receipt_missing");
+    };
+    let request = LifecycleRequest::local_uninstall(probe_id, install_state, manifest, version)
+        .map_err(|_| "lifecycle.invalid_authority")?;
+    let response =
+        request_lifecycle_companion_at(std::path::Path::new(LIFECYCLE_COMPANION_SOCKET), &request)
+            .map_err(|_| "lifecycle.companion_unavailable")?;
+    match response.status() {
+        LifecycleResultStatus::Succeeded => Ok(()),
+        LifecycleResultStatus::Failed | LifecycleResultStatus::NotEnabled => {
+            Err("lifecycle.uninstall_failed")
+        }
+    }
+}
+
+fn lifecycle_companion_failure(code: &str) -> ProbeUpgradeRunnerOutcome {
+    ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
+        error_code: code.to_owned(),
+        message: "The local Probe lifecycle operation failed.".to_owned(),
+    })
 }
 
 fn unsupported_lifecycle_operation() -> ProbeUpgradeRunnerOutcome {
@@ -774,7 +884,6 @@ impl ProbeOperationReportQueue {
         self.statuses.push((
             operation.id.clone(),
             match outcome {
-                #[cfg(test)]
                 ProbeUpgradeRunnerOutcome::Running => Status::Running(ProbeOperationRunning {}),
                 ProbeUpgradeRunnerOutcome::Failed(failed) => Status::Failed(failed),
             },
@@ -850,6 +959,99 @@ mod operation_report_tests {
     }
 
     #[test]
+    fn lifecycle_companion_socket_round_trips_one_bound_uninstall_request() {
+        use std::os::unix::net::UnixListener;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("lifecycle.sock");
+        let listener = UnixListener::bind(&socket).expect("bind lifecycle socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept lifecycle request");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).expect("read request");
+            let request = LifecycleRequest::decode(&bytes).expect("typed request");
+            assert_eq!(
+                request.transition(),
+                enoki_probe_bootstrap::lifecycle::LifecycleTransition::Uninstall
+            );
+            stream
+                .write_all(&LifecycleResponse::succeeded().encode())
+                .expect("write response");
+        });
+        let request = LifecycleRequest::hub_uninstall(
+            "probe_01",
+            "operation_01",
+            "operation-token",
+            &"a".repeat(64),
+            &"b".repeat(64),
+            "1.2.3",
+        )
+        .expect("bound request");
+
+        let response =
+            request_lifecycle_companion_at(&socket, &request).expect("companion response");
+
+        assert_eq!(response.status(), LifecycleResultStatus::Succeeded);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn probe_forwards_one_hub_uninstall_to_companion_and_reports_running_without_retry() {
+        use std::os::unix::net::UnixListener;
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("lifecycle.sock");
+        let listener = UnixListener::bind(&socket).expect("bind lifecycle socket");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept lifecycle request");
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).expect("read request");
+            let request = LifecycleRequest::decode(&bytes).expect("typed request");
+            assert!(matches!(
+                request.authority(),
+                enoki_probe_bootstrap::lifecycle::LifecycleRequestAuthority::HubOperation {
+                    operation_id,
+                    operation_token,
+                    ..
+                } if operation_id == "operation_01" && operation_token == "operation-token"
+            ));
+            stream
+                .write_all(&LifecycleResponse::succeeded().encode())
+                .expect("write response");
+        });
+        let response = ProbeReportResponse {
+            accepted_sequence_end: 1,
+            current_probe_configuration_version: "default-v1".to_owned(),
+            pending_operation: Some(crate::protocol::enoki::v1::ProbeOperation {
+                id: "operation_01".to_owned(),
+                operation: Some(Operation::ProbeUninstall(
+                    crate::protocol::enoki::v1::ProbeUninstallOperation {
+                        operation_token: "operation-token".to_owned(),
+                    },
+                )),
+            }),
+            requested_snapshot_collector_ids: Vec::new(),
+            server_time_ms: 1,
+        };
+        let mut runner = LifecycleCompanionOperationRunner {
+            probe_id: Some("probe_01".to_owned()),
+            install_state_sha256: Some("a".repeat(64)),
+            target_manifest_sha256: Some("b".repeat(64)),
+            bundle_version: Some("1.2.3".to_owned()),
+            socket_path: socket,
+        };
+        let mut queue = ProbeOperationReportQueue::default();
+
+        queue.observe_response(&response, &mut runner);
+        queue.observe_response(&response, &mut runner);
+        let (acknowledgements, statuses) = queue.take_progress().into_parts();
+
+        assert_eq!(acknowledgements.len(), 1);
+        assert!(matches!(statuses[0].status, Some(Status::Running(_))));
+        server.join().expect("server thread");
+    }
+
+    #[test]
     fn unavailable_companion_reports_one_stable_closed_failure() {
         let outcome = unsupported_lifecycle_operation();
 
@@ -883,7 +1085,13 @@ mod operation_report_tests {
             server_time_ms: 1,
         };
         let mut queue = ProbeOperationReportQueue::default();
-        let mut runner = UnsupportedProbeOperationRunner;
+        let mut runner = LifecycleCompanionOperationRunner {
+            probe_id: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
+            socket_path: PathBuf::from(LIFECYCLE_COMPANION_SOCKET),
+        };
 
         queue.observe_response(&response, &mut runner);
         queue.observe_response(&response, &mut runner);
@@ -1287,10 +1495,12 @@ impl ActiveProbeConfiguration {
 
 struct BootstrapConfig {
     bootstrap_config_path: Option<PathBuf>,
+    bundle_version: Option<String>,
     enabled_collector_ids: Option<Vec<String>>,
     enrollment_id: Option<String>,
     enrollment_token: Option<String>,
     hub_url: Option<String>,
+    install_state_sha256: Option<String>,
     metrics_collection_interval_seconds: Option<u64>,
     operation_status_path: Option<String>,
     probe_configuration_version: Option<String>,
@@ -1298,6 +1508,7 @@ struct BootstrapConfig {
     probe_private_key_pem: Option<String>,
     server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
+    target_manifest_sha256: Option<String>,
 }
 
 impl BootstrapConfig {
@@ -1348,10 +1559,12 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
 
     Ok(BootstrapConfig {
         bootstrap_config_path: Some(path.clone()),
+        bundle_version: string_value(&value, "bundle_version")?,
         enabled_collector_ids: string_array_value(&value, "enabled_collector_ids")?,
         enrollment_id: string_value(&value, "enrollment_id")?,
         enrollment_token: string_value(&value, "enrollment_token")?,
         hub_url: string_value(&value, "hub_url")?,
+        install_state_sha256: string_value(&value, "install_state_sha256")?,
         metrics_collection_interval_seconds: integer_value(
             &value,
             "metrics_collection_interval_seconds",
@@ -1362,6 +1575,7 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
         server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         state_dir: string_value(&value, "state_dir")?,
+        target_manifest_sha256: string_value(&value, "target_manifest_sha256")?,
     })
 }
 
@@ -2119,7 +2333,7 @@ mod tests {
             RunLoopControl {
                 max_reports: Some(1),
             },
-            UnsupportedProbeOperationRunner::from_bootstrap,
+            LifecycleCompanionOperationRunner::from_bootstrap,
             || {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::ConnectionRefused,

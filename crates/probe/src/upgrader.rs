@@ -12,6 +12,9 @@ use std::{
 use enoki_probe_bootstrap::{
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
+    lifecycle::{
+        LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, LifecycleTransition,
+    },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
         verify_metadata, verify_outer_metadata,
@@ -37,6 +40,7 @@ use crate::{
 const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-runtime";
 const CPU_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY_PATH: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
+const LIFECYCLE_COMPANION_BINARY_PATH: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 const OBSERVATION_RUNTIME_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-observation-runtime.service";
 const OBSERVATION_RUNTIME_SOCKET_UNIT_PATH: &str =
@@ -49,12 +53,33 @@ const DISK_HEALTH_PROVIDER_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-disk-health-resource-provider@.service";
 const DISK_HEALTH_PROVIDER_SOCKET_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-disk-health-resource-provider.socket";
-const OBSERVATION_SERVICES: [&str; 4] = [
+const LIFECYCLE_COMPANION_SERVICE_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-companion@.service";
+const LIFECYCLE_COMPANION_SOCKET_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-probe-lifecycle-companion.socket";
+const OBSERVATION_SERVICES_SCHEMA_THREE: [&str; 4] = [
     "enoki-observation-runtime.service",
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
 ];
+const OBSERVATION_SERVICES_SCHEMA_FOUR: [&str; 7] = [
+    "enoki-observation-runtime.service",
+    "enoki-observation-runtime.socket",
+    "enoki-cpu-resource-provider.socket",
+    "enoki-disk-health-resource-provider.socket",
+    "enoki-cpu-resource-provider@*.service",
+    "enoki-disk-health-resource-provider@*.service",
+    "enoki-probe-lifecycle-companion.socket",
+];
+
+fn observation_services(schema_version: u32) -> &'static [&'static str] {
+    if schema_version == 4 {
+        &OBSERVATION_SERVICES_SCHEMA_FOUR
+    } else {
+        &OBSERVATION_SERVICES_SCHEMA_THREE
+    }
+}
 const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1526,6 +1551,128 @@ pub fn run_probe_uninstaller(
     run_probe_uninstaller_with_systemd_runner(input, stdin, transport, &mut systemd)
 }
 
+/// Lifecycle Companion 的唯一生产入口。授权事实在任何系统变更前与
+/// root-owned 安装状态和当前 Probe Identity 精确比对。
+pub fn run_lifecycle_companion(
+    request: &LifecycleRequest,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+) -> LifecycleResponse {
+    if request.transition() != LifecycleTransition::Uninstall {
+        return LifecycleResponse::not_enabled();
+    }
+    if unsafe { libc::geteuid() } != 0 {
+        return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    let metadata = match read_trusted_probe_install_metadata(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        None,
+    ) {
+        Ok(metadata) if metadata.schema_version == 4 => metadata,
+        Ok(_) => return LifecycleResponse::failed("lifecycle.replacement_required"),
+        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
+    };
+    let identity = match read_trusted_probe_install_preflight(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        None,
+    ) {
+        Ok(identity) => identity,
+        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+    };
+    let (probe_id, install_state, manifest, version) = match request.authority() {
+        LifecycleRequestAuthority::HubOperation {
+            probe_id,
+            install_state_sha256,
+            target_manifest_sha256,
+            bundle_version,
+            ..
+        }
+        | LifecycleRequestAuthority::LocalRoot {
+            probe_id,
+            install_state_sha256,
+            target_manifest_sha256,
+            bundle_version,
+        } => (
+            probe_id,
+            install_state_sha256,
+            target_manifest_sha256,
+            bundle_version,
+        ),
+    };
+    if identity.probe_id != *probe_id
+        || metadata.install_state_sha256.as_deref() != Some(install_state)
+        || metadata.target_manifest_sha256.as_deref() != Some(manifest)
+        || metadata.bundle_version.as_deref() != Some(version)
+    {
+        return LifecycleResponse::failed("lifecycle.authority_mismatch");
+    }
+
+    let result = match request.authority() {
+        LifecycleRequestAuthority::HubOperation {
+            operation_id,
+            operation_token,
+            ..
+        } => {
+            let input = format!(
+                "operation_id = {}\ntoken = {}\n",
+                toml_string(operation_id),
+                toml_string(operation_token),
+            );
+            run_probe_uninstaller(
+                ProbeUninstallerRunInput {
+                    bootstrap_config_path: metadata.identity_path.clone(),
+                },
+                &input,
+                transport,
+            )
+            .map(|outcome| outcome.status == "succeeded")
+        }
+        LifecycleRequestAuthority::LocalRoot { .. } => run_local_probe_uninstall().map(|_| true),
+    };
+    match result {
+        Ok(true) => LifecycleResponse::succeeded(),
+        Ok(false) => LifecycleResponse::failed("lifecycle.uninstall_failed"),
+        Err(error) => LifecycleResponse::failed(error.code()),
+    }
+}
+
+pub fn run_local_lifecycle_companion(
+    transport: &mut impl ProbeUpgraderValidationTransport,
+) -> LifecycleResponse {
+    if unsafe { libc::geteuid() } != 0 {
+        return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    let metadata = match read_trusted_probe_install_metadata(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        None,
+    ) {
+        Ok(metadata) if metadata.schema_version == 4 => metadata,
+        Ok(_) => return LifecycleResponse::failed("lifecycle.replacement_required"),
+        Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
+    };
+    let identity = match read_trusted_probe_install_preflight(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        None,
+    ) {
+        Ok(identity) => identity,
+        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+    };
+    let Some((install_state, manifest, version)) = metadata
+        .install_state_sha256
+        .as_deref()
+        .zip(metadata.target_manifest_sha256.as_deref())
+        .zip(metadata.bundle_version.as_deref())
+        .map(|((install_state, manifest), version)| (install_state, manifest, version))
+    else {
+        return LifecycleResponse::failed("lifecycle.install_state_invalid");
+    };
+    let Ok(request) =
+        LifecycleRequest::local_uninstall(&identity.probe_id, install_state, manifest, version)
+    else {
+        return LifecycleResponse::failed("lifecycle.install_state_invalid");
+    };
+    run_lifecycle_companion(&request, transport)
+}
+
 /// Removes local Probe resources from trusted install metadata only.  This
 /// public, root-authorized path never creates a Hub request; the Hub Host
 /// record therefore remains unchanged for offline removal or re-enrollment.
@@ -1696,6 +1843,7 @@ fn rebase_trusted_install_metadata_paths(
         &mut metadata.observation_runtime_path,
         &mut metadata.cpu_provider_path,
         &mut metadata.disk_health_provider_path,
+        &mut metadata.lifecycle_companion_path,
     ]
     .into_iter()
     .flatten()
@@ -1751,6 +1899,7 @@ fn plan_probe_uninstall_cleanup<'a>(
         install_metadata.observation_runtime_path.as_deref(),
         install_metadata.cpu_provider_path.as_deref(),
         install_metadata.disk_health_provider_path.as_deref(),
+        install_metadata.lifecycle_companion_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -1760,7 +1909,7 @@ fn plan_probe_uninstall_cleanup<'a>(
     for path in &install_metadata.observation_unit_paths {
         ensure_absolute_path(path)?;
     }
-    if matches!(install_metadata.schema_version, 2 | 3) {
+    if matches!(install_metadata.schema_version, 2..=4) {
         validate_owned_bootstrap_role(install_metadata.bootstrap_acquirer_path.as_deref())?;
         validate_owned_bootstrap_role(install_metadata.bootstrap_activator_path.as_deref())?;
         validate_owned_bootstrap_state(install_metadata.bootstrap_state_dir.as_deref())?;
@@ -1779,8 +1928,12 @@ fn execute_probe_uninstall_cleanup(
     let input = plan.input;
     let install_metadata = plan.install_metadata;
     let install_metadata_path = plan.install_metadata_path;
-    if install_metadata.schema_version == 3 {
-        for service in OBSERVATION_SERVICES.into_iter().rev() {
+    if matches!(install_metadata.schema_version, 3 | 4) {
+        for service in observation_services(install_metadata.schema_version)
+            .iter()
+            .copied()
+            .rev()
+        {
             systemd.stop_service(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_stop_failed",
@@ -1860,8 +2013,8 @@ fn execute_probe_uninstall_cleanup(
                 error,
             )
         })?;
-    if install_metadata.schema_version == 3 {
-        for service in OBSERVATION_SERVICES {
+    if matches!(install_metadata.schema_version, 3 | 4) {
+        for service in observation_services(install_metadata.schema_version) {
             systemd.reset_failed(service).map_err(|error| {
                 probe_uninstall_cleanup_error(
                     "probe_uninstall_service_reset_failed",
@@ -1883,6 +2036,7 @@ fn execute_probe_uninstall_cleanup(
         install_metadata.observation_runtime_path.as_deref(),
         install_metadata.cpu_provider_path.as_deref(),
         install_metadata.disk_health_provider_path.as_deref(),
+        install_metadata.lifecycle_companion_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -2007,6 +2161,7 @@ fn verify_probe_uninstall_cleanup(
         metadata.observation_runtime_path.as_deref(),
         metadata.cpu_provider_path.as_deref(),
         metadata.disk_health_provider_path.as_deref(),
+        metadata.lifecycle_companion_path.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -2383,8 +2538,12 @@ struct TrustedProbeInstallMetadata {
     observation_runtime_path: Option<PathBuf>,
     cpu_provider_path: Option<PathBuf>,
     disk_health_provider_path: Option<PathBuf>,
+    lifecycle_companion_path: Option<PathBuf>,
     observation_unit_paths: Vec<PathBuf>,
     observation_ipc_group: Option<String>,
+    install_state_sha256: Option<String>,
+    target_manifest_sha256: Option<String>,
+    bundle_version: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2573,7 +2732,7 @@ fn read_trusted_probe_install_metadata_read_only_with_file_metadata(
                 "schema v1 metadata mode must be 0600",
             ));
         }
-    } else if matches!(metadata.schema_version, 2 | 3) {
+    } else if matches!(metadata.schema_version, 2..=4) {
         if file_metadata.mode != 0o600 {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "schema v2 metadata mode must be 0600",
@@ -2608,6 +2767,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         Some(toml::Value::Integer(1)) => 1,
         Some(toml::Value::Integer(2)) => 2,
         Some(toml::Value::Integer(3)) => 3,
+        Some(toml::Value::Integer(4)) => 4,
         Some(toml::Value::Integer(_)) => {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
                 "unsupported schema version",
@@ -2638,7 +2798,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             ));
         }
         (None, None)
-    } else if schema_version == 3 {
+    } else if matches!(schema_version, 3 | 4) {
         (
             optional_fixed_install_metadata_path(
                 &value,
@@ -2666,25 +2826,25 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
     let service_name = required_install_metadata_string(&value, "service_name")?;
     let service_user = optional_install_metadata_string(&value, "service_user")?
         .unwrap_or_else(|| "enoki-probe".to_string());
-    let identity_path = if matches!(schema_version, 1..=3) {
+    let identity_path = if matches!(schema_version, 1..=4) {
         required_install_metadata_path(&value, "identity_path")?
     } else {
         legacy_identity_path
             .unwrap_or_else(|| Path::new("/etc/enoki/probe-bootstrap.toml"))
             .to_path_buf()
     };
-    let service_group = if matches!(schema_version, 1..=3) {
+    let service_group = if matches!(schema_version, 1..=4) {
         required_install_metadata_string(&value, "service_group")?
     } else {
         service_user.clone()
     };
-    let service_unit_path = if matches!(schema_version, 1..=3) {
+    let service_unit_path = if matches!(schema_version, 1..=4) {
         required_install_metadata_path(&value, "service_unit_path")?
     } else {
         PathBuf::from("/etc/systemd/system/enoki-probe.service")
     };
     let (probe_asset_public_key_sha256, probe_distribution_root_sha256) =
-        if matches!(schema_version, 2 | 3) {
+        if matches!(schema_version, 2..=4) {
             let root = required_install_metadata_string(&value, "probe_distribution_root_sha256")?;
             if !is_sha256_hex(&root) {
                 return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
@@ -2701,7 +2861,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             )
         };
     let (bootstrap_acquirer_path, bootstrap_activator_path, bootstrap_state_dir) =
-        if matches!(schema_version, 2 | 3) {
+        if matches!(schema_version, 2..=4) {
             (
                 required_fixed_install_metadata_path(
                     &value,
@@ -2737,7 +2897,8 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         disk_health_provider_path,
         observation_unit_paths,
         observation_ipc_group,
-    ) = if schema_version == 3 {
+        lifecycle_companion_path,
+    ) = if matches!(schema_version, 3 | 4) {
         let runtime = required_fixed_install_metadata_path(
             &value,
             "observation_runtime_path",
@@ -2758,6 +2919,15 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
                 "schema 3 Disk Health Provider inventory is partial",
             ));
         }
+        let lifecycle_companion = if schema_version == 4 {
+            required_fixed_install_metadata_path(
+                &value,
+                "lifecycle_companion_path",
+                LIFECYCLE_COMPANION_BINARY_PATH,
+            )?
+        } else {
+            None
+        };
         let disk_health_provider = if has_disk_health_provider {
             required_fixed_install_metadata_path(
                 &value,
@@ -2797,6 +2967,18 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
                 ),
             ]);
         }
+        if schema_version == 4 {
+            unit_specs.extend([
+                (
+                    "lifecycle_companion_service_unit_path",
+                    LIFECYCLE_COMPANION_SERVICE_UNIT_PATH,
+                ),
+                (
+                    "lifecycle_companion_socket_unit_path",
+                    LIFECYCLE_COMPANION_SOCKET_UNIT_PATH,
+                ),
+            ]);
+        }
         let units = unit_specs
             .into_iter()
             .map(|(key, expected)| required_fixed_install_metadata_path(&value, key, expected))
@@ -2816,9 +2998,28 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             disk_health_provider,
             units,
             Some(ipc_group),
+            lifecycle_companion,
         )
     } else {
-        (None, None, None, Vec::new(), None)
+        (None, None, None, Vec::new(), None, None)
+    };
+
+    let (install_state_sha256, target_manifest_sha256, bundle_version) = if schema_version == 4 {
+        let install_state = required_install_metadata_string(&value, "install_state_sha256")?;
+        let manifest = required_install_metadata_string(&value, "target_manifest_sha256")?;
+        let version = required_install_metadata_string(&value, "bundle_version")?;
+        if !is_sha256_hex(&install_state)
+            || !is_sha256_hex(&manifest)
+            || version.is_empty()
+            || version.len() > 64
+        {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "schema 4 lifecycle receipt is invalid",
+            ));
+        }
+        (Some(install_state), Some(manifest), Some(version))
+    } else {
+        (None, None, None)
     };
 
     if service_name != "enoki-probe" {
@@ -2836,7 +3037,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
             "service group is not safe",
         ));
     }
-    if !matches!(schema_version, 2 | 3) && !is_sha256_hex(&probe_asset_public_key_sha256) {
+    if !matches!(schema_version, 2..=4) && !is_sha256_hex(&probe_asset_public_key_sha256) {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "trusted Probe asset signing key fingerprint is not a valid sha256 value",
         ));
@@ -2863,7 +3064,7 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         state_dir,
         operation_sudoers_path,
         collector_helper_sudoers_path,
-        old_sudoers_paths: if matches!(schema_version, 2 | 3) {
+        old_sudoers_paths: if matches!(schema_version, 2..=4) {
             Vec::new()
         } else {
             vec![PathBuf::from(PRODUCTION_LEGACY_UPGRADER_SUDOERS_PATH)]
@@ -2871,8 +3072,12 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
         observation_runtime_path,
         cpu_provider_path,
         disk_health_provider_path,
+        lifecycle_companion_path,
         observation_unit_paths,
         observation_ipc_group,
+        install_state_sha256,
+        target_manifest_sha256,
+        bundle_version,
     })
 }
 
@@ -3678,7 +3883,7 @@ fn stop_schema_three_services(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
-    for service in OBSERVATION_SERVICES.into_iter().rev() {
+    for service in OBSERVATION_SERVICES_SCHEMA_THREE.into_iter().rev() {
         systemd.stop_service(service)?;
     }
     systemd.stop_service(&install_metadata.service_name)
@@ -3688,7 +3893,7 @@ fn restart_schema_three_services(
     systemd: &mut impl ProbeUpgraderSystemdRunner,
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
-    for service in OBSERVATION_SERVICES.into_iter().rev() {
+    for service in OBSERVATION_SERVICES_SCHEMA_THREE.into_iter().rev() {
         systemd.restart_service(service)?;
         systemd.verify_service_active(service)?;
     }
@@ -4316,7 +4521,7 @@ fn failed_probe_uninstaller_result(
 ) -> ProbeUpgraderResult {
     ProbeUpgraderResult {
         error_code: Some(probe_upgrader_error_code(error).to_string()),
-        message: Some(error.to_string()),
+        message: Some("Probe uninstall failed.".to_owned()),
         operation_id: operation.operation_id.clone(),
         status: "failed".to_string(),
     }
@@ -5540,8 +5745,12 @@ mod tests {
             observation_runtime_path: None,
             cpu_provider_path: None,
             disk_health_provider_path: None,
+            lifecycle_companion_path: None,
             observation_unit_paths: Vec::new(),
             observation_ipc_group: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: bootstrap_config_path.clone(),
@@ -5658,8 +5867,12 @@ mod tests {
             observation_runtime_path: Some(runtime_path.clone()),
             cpu_provider_path: Some(provider_path.clone()),
             disk_health_provider_path: None,
+            lifecycle_companion_path: None,
             observation_unit_paths: observation_units.to_vec(),
             observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_string()),
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: identity_path,
@@ -5680,7 +5893,7 @@ mod tests {
         {
             assert!(!path.exists(), "{} remains", path.display());
         }
-        for service in OBSERVATION_SERVICES {
+        for service in OBSERVATION_SERVICES_SCHEMA_THREE {
             assert!(systemd.calls.contains(&format!("stop {service}")));
             assert!(systemd.calls.contains(&format!("disable {service}")));
         }
@@ -5692,6 +5905,124 @@ mod tests {
         assert!(systemd.calls.contains(&format!(
             "remove-service-identity {OBSERVATION_IPC_GROUP}:{OBSERVATION_IPC_GROUP}"
         )));
+    }
+
+    #[test]
+    fn schema_four_uninstall_removes_the_companion_and_complete_fixed_layout() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        let state_dir = root.join("var/lib/enoki-probe");
+        let identity_path = state_dir.join("identity/probe-bootstrap.toml");
+        let metadata_path = root.join("etc/enoki/probe-install.toml");
+        let binaries = [
+            root.join("usr/local/bin/enoki-probe"),
+            root.join("usr/local/bin/enoki-observation-runtime"),
+            root.join("usr/local/bin/enoki-cpu-resource-provider"),
+            root.join("usr/local/bin/enoki-disk-health-resource-provider"),
+            root.join("usr/local/bin/enoki-probe-lifecycle-companion"),
+        ];
+        let units = [
+            root.join("etc/systemd/system/enoki-probe.service"),
+            root.join("etc/systemd/system/enoki-observation-runtime.service"),
+            root.join("etc/systemd/system/enoki-observation-runtime.socket"),
+            root.join("etc/systemd/system/enoki-cpu-resource-provider@.service"),
+            root.join("etc/systemd/system/enoki-cpu-resource-provider.socket"),
+            root.join("etc/systemd/system/enoki-disk-health-resource-provider@.service"),
+            root.join("etc/systemd/system/enoki-disk-health-resource-provider.socket"),
+            root.join("etc/systemd/system/enoki-probe-lifecycle-companion@.service"),
+            root.join("etc/systemd/system/enoki-probe-lifecycle-companion.socket"),
+        ];
+        let bootstrap_roles = [
+            root.join("usr/local/bin/enoki-probe-bootstrap-acquire"),
+            root.join("usr/local/bin/enoki-probe-bootstrap-activate"),
+        ];
+        let bootstrap_state = root.join("var/lib/enoki-probe-bootstrap");
+        for parent in [
+            identity_path.parent().unwrap(),
+            metadata_path.parent().unwrap(),
+            binaries[0].parent().unwrap(),
+            units[0].parent().unwrap(),
+        ] {
+            fs::create_dir_all(parent).unwrap();
+        }
+        for path in binaries
+            .iter()
+            .chain(units.iter())
+            .chain(bootstrap_roles.iter())
+            .chain([&identity_path, &metadata_path])
+        {
+            fs::write(path, "owned").unwrap();
+        }
+        for path in &bootstrap_roles {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(bootstrap_state.join("trust")).unwrap();
+        fs::create_dir(bootstrap_state.join("inbox")).unwrap();
+        for path in [
+            &bootstrap_state,
+            &bootstrap_state.join("trust"),
+            &bootstrap_state.join("inbox"),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        for entry in ["delegation-generation", ".delegation-generation.lock"] {
+            let path = bootstrap_state.join("trust").join(entry);
+            fs::write(&path, "owned").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let metadata = TrustedProbeInstallMetadata {
+            schema_version: 4,
+            hub_url: "https://hub.example".into(),
+            identity_path: identity_path.clone(),
+            install_path: binaries[0].clone(),
+            operation_status_path: state_dir.join("probe-operation-status.toml"),
+            probe_asset_public_key_sha256: "a".repeat(64),
+            probe_distribution_root_sha256: Some("a".repeat(64)),
+            bootstrap_acquirer_path: Some(bootstrap_roles[0].clone()),
+            bootstrap_activator_path: Some(bootstrap_roles[1].clone()),
+            bootstrap_state_dir: Some(bootstrap_state),
+            service_name: "enoki-probe".into(),
+            service_group: "enoki-probe".into(),
+            service_unit_path: units[0].clone(),
+            service_user: "enoki-probe".into(),
+            state_dir,
+            operation_sudoers_path: None,
+            collector_helper_sudoers_path: None,
+            old_sudoers_paths: Vec::new(),
+            observation_runtime_path: Some(binaries[1].clone()),
+            cpu_provider_path: Some(binaries[2].clone()),
+            disk_health_provider_path: Some(binaries[3].clone()),
+            lifecycle_companion_path: Some(binaries[4].clone()),
+            observation_unit_paths: units[1..].to_vec(),
+            observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_owned()),
+            install_state_sha256: Some("b".repeat(64)),
+            target_manifest_sha256: Some("c".repeat(64)),
+            bundle_version: Some("1.2.3".to_owned()),
+        };
+        let mut systemd = RecordingSystemdRunner::default();
+        execute_probe_uninstall_with_install_metadata_path(
+            &ProbeUninstallerRunInput {
+                bootstrap_config_path: identity_path,
+            },
+            &metadata,
+            &mut systemd,
+            &metadata_path,
+        )
+        .expect("schema four uninstall succeeds");
+
+        for path in binaries.into_iter().chain(units) {
+            assert!(!path.exists(), "{} remains", path.display());
+        }
+        for service in OBSERVATION_SERVICES_SCHEMA_FOUR {
+            assert!(systemd.calls.contains(&format!("stop {service}")));
+            assert!(systemd.calls.contains(&format!("disable {service}")));
+        }
+        assert!(
+            systemd
+                .calls
+                .iter()
+                .all(|call| !call.contains("lifecycle-companion@"))
+        );
     }
 
     #[cfg(unix)]
@@ -5734,8 +6065,12 @@ mod tests {
             observation_runtime_path: None,
             cpu_provider_path: None,
             disk_health_provider_path: None,
+            lifecycle_companion_path: None,
             observation_unit_paths: Vec::new(),
             observation_ipc_group: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
         };
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
@@ -5850,7 +6185,7 @@ mod tests {
         );
         assert_eq!(
             transport.status_body,
-            "{\"errorCode\":\"probe_uninstall_service_disable_failed\",\"message\":\"Probe uninstall cleanup failed while disabling the service: disable failed\",\"status\":\"failed\",\"token\":\"probe-operation-token\"}"
+            "{\"errorCode\":\"probe_uninstall_service_disable_failed\",\"message\":\"Probe uninstall failed.\",\"status\":\"failed\",\"token\":\"probe-operation-token\"}"
         );
         assert_eq!(systemd.calls, ["stop enoki-probe", "disable enoki-probe"]);
     }
@@ -6613,7 +6948,7 @@ mod tests {
     #[test]
     fn install_metadata_rejects_unsupported_schema_version_with_stable_repair_code() {
         let contents = [
-            "schema_version = 4",
+            "schema_version = 5",
             "hub_url = \"https://hub.example\"",
             "",
         ]
@@ -6624,6 +6959,55 @@ mod tests {
         let repair_error = ProbeRepairRunError::from(error);
 
         assert_eq!(repair_error.code(), "probe_repair_metadata_unsupported");
+    }
+
+    #[test]
+    fn schema_four_metadata_closes_over_lifecycle_receipts_and_fixed_role_inventory() {
+        let contents = [
+            "schema_version = 4".to_owned(),
+            "hub_url = \"https://hub.example\"".to_owned(),
+            "identity_path = \"/var/lib/enoki-probe/identity/probe-bootstrap.toml\"".to_owned(),
+            "install_path = \"/usr/local/bin/enoki-probe\"".to_owned(),
+            format!("observation_runtime_path = \"{OBSERVATION_RUNTIME_BINARY_PATH}\""),
+            format!("cpu_provider_path = \"{CPU_PROVIDER_BINARY_PATH}\""),
+            format!("disk_health_provider_path = \"{DISK_HEALTH_PROVIDER_BINARY_PATH}\""),
+            format!("lifecycle_companion_path = \"{LIFECYCLE_COMPANION_BINARY_PATH}\""),
+            format!("observation_ipc_group = \"{OBSERVATION_IPC_GROUP}\""),
+            "operation_status_path = \"/var/lib/enoki-probe/probe-operation-status.toml\"".to_owned(),
+            "state_dir = \"/var/lib/enoki-probe\"".to_owned(),
+            format!("probe_distribution_root_sha256 = \"{}\"", "a".repeat(64)),
+            format!("install_state_sha256 = \"{}\"", "b".repeat(64)),
+            format!("target_manifest_sha256 = \"{}\"", "c".repeat(64)),
+            "bundle_version = \"1.2.3\"".to_owned(),
+            format!("bootstrap_acquirer_path = \"{PRODUCTION_BOOTSTRAP_ACQUIRER_PATH}\""),
+            format!("bootstrap_activator_path = \"{PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH}\""),
+            format!("bootstrap_state_dir = \"{PRODUCTION_BOOTSTRAP_STATE_DIR}\""),
+            "service_name = \"enoki-probe\"".to_owned(),
+            "service_user = \"enoki-probe\"".to_owned(),
+            "service_group = \"enoki-probe\"".to_owned(),
+            "service_unit_path = \"/etc/systemd/system/enoki-probe.service\"".to_owned(),
+            format!("observation_runtime_service_unit_path = \"{OBSERVATION_RUNTIME_SERVICE_UNIT_PATH}\""),
+            format!("observation_runtime_socket_unit_path = \"{OBSERVATION_RUNTIME_SOCKET_UNIT_PATH}\""),
+            format!("cpu_provider_service_unit_path = \"{CPU_PROVIDER_SERVICE_UNIT_PATH}\""),
+            format!("cpu_provider_socket_unit_path = \"{CPU_PROVIDER_SOCKET_UNIT_PATH}\""),
+            format!("disk_health_provider_service_unit_path = \"{DISK_HEALTH_PROVIDER_SERVICE_UNIT_PATH}\""),
+            format!("disk_health_provider_socket_unit_path = \"{DISK_HEALTH_PROVIDER_SOCKET_UNIT_PATH}\""),
+            format!("lifecycle_companion_service_unit_path = \"{LIFECYCLE_COMPANION_SERVICE_UNIT_PATH}\""),
+            format!("lifecycle_companion_socket_unit_path = \"{LIFECYCLE_COMPANION_SOCKET_UNIT_PATH}\""),
+            format!("collector_helper_sudoers_path = \"{PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH}\""),
+        ]
+        .join("\n");
+
+        let metadata = parse_trusted_probe_install_metadata(&contents)
+            .expect("schema four metadata is accepted");
+
+        assert_eq!(metadata.schema_version, 4);
+        assert_eq!(
+            metadata.lifecycle_companion_path.as_deref(),
+            Some(Path::new(LIFECYCLE_COMPANION_BINARY_PATH))
+        );
+        assert_eq!(metadata.observation_unit_paths.len(), 8);
+        assert_eq!(metadata.install_state_sha256, Some("b".repeat(64)));
     }
 
     #[test]
@@ -8103,7 +8487,7 @@ printf '%s\n' '{}'
         files: HashMap<String, Vec<u8>>,
         manifest: Vec<u8>,
         root_fingerprint: String,
-        target_units: [Vec<u8>; 6],
+        target_units: Vec<Vec<u8>>,
     }
 
     fn complete_bundle_assets(version: &str) -> CompleteBundleAssets {
@@ -8229,7 +8613,7 @@ printf '%s\n' '{}'
             files,
             manifest,
             root_fingerprint: root_id,
-            target_units,
+            target_units: target_units.to_vec(),
         }
     }
 
@@ -8768,8 +9152,12 @@ printf '%s\n' '{}'
             observation_runtime_path: None,
             cpu_provider_path: None,
             disk_health_provider_path: None,
+            lifecycle_companion_path: None,
             observation_unit_paths: Vec::new(),
             observation_ipc_group: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
         }
     }
 

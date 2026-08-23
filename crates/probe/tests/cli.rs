@@ -21,14 +21,19 @@ fn renders_help_without_remote_administration_language() {
 }
 
 #[test]
-fn unavailable_local_operations_do_not_claim_a_replacement_migration() {
-    for command in [ProbeCommand::Uninstall, ProbeCommand::Repair] {
-        let output = render_probe_output(command);
-        assert!(output.contains("unsupported"));
-        for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
-            assert!(!output.contains(unsupported_guidance));
-        }
+fn unavailable_repair_does_not_claim_a_replacement_migration() {
+    let output = render_probe_output(ProbeCommand::Repair);
+    assert!(output.contains("unsupported"));
+    for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
+        assert!(!output.contains(unsupported_guidance));
     }
+}
+
+#[test]
+fn help_lists_the_delivered_argument_free_local_uninstall() {
+    let output = render_probe_output(ProbeCommand::Help);
+    assert!(output.contains("sudo enoki-probe uninstall"));
+    assert!(render_probe_output(ProbeCommand::Uninstall).contains("lifecycle service"));
 }
 
 #[test]

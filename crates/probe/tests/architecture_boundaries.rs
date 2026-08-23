@@ -7,6 +7,8 @@ const SYSTEM_STATE_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-cpu-resource-provider.rs");
 const DISK_HEALTH_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-disk-health-resource-provider.rs");
+const LIFECYCLE_COMPANION_BINARY: &str =
+    include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
@@ -119,6 +121,21 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         assert!(
             !bootstrap.contains(forbidden),
             "新安装不得创建旧 operation 权限入口：{forbidden}",
+        );
+    }
+
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("LifecycleRequest::decode"));
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_lifecycle_companion"));
+    for forbidden in [
+        "Command::new",
+        "internal-upgrader",
+        "internal-uninstaller",
+        "launch_systemd",
+        "std::env::var",
+    ] {
+        assert!(
+            !LIFECYCLE_COMPANION_BINARY.contains(forbidden),
+            "Lifecycle Companion 入口不得接受或启动通用执行责任：{forbidden}",
         );
     }
 
@@ -247,5 +264,23 @@ fn built_binaries_enforce_both_observation_dependency_directions() {
             "local_privilege_boundary",
         ],
         "enoki-observation-runtime",
+    );
+
+    let companion = linked_symbols(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"));
+    assert_linked(
+        &companion,
+        "run_lifecycle_companion",
+        "enoki-probe-lifecycle-companion",
+    );
+    assert_not_linked(
+        &companion,
+        &[
+            "run_probe_upgrader",
+            "execute_probe_upgrade",
+            "run_probe_repair",
+            "run_probe_local_install",
+            "launch_systemd_probe",
+        ],
+        "enoki-probe-lifecycle-companion",
     );
 }

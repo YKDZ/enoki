@@ -54,6 +54,7 @@ pub struct VerificationPolicy<'a> {
 pub struct VerifiedBundle {
     pub version: String,
     pub target: String,
+    pub manifest_sha256: String,
     pub delegation_generation: u64,
     pub component_len: u64,
     pub(crate) bootstrap_assets: Vec<BundleComponent>,
@@ -61,6 +62,25 @@ pub struct VerifiedBundle {
 impl VerifiedBundle {
     pub fn delegation_generation(&self) -> u64 {
         self.delegation_generation
+    }
+
+    pub fn install_state_sha256(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"enoki.install-state.v1\0");
+        hash.update(self.version.as_bytes());
+        hash.update(b"\0");
+        hash.update(self.target.as_bytes());
+        hash.update(b"\0");
+        hash.update(self.manifest_sha256.as_bytes());
+        for component in &self.bootstrap_assets {
+            hash.update(b"\0");
+            hash.update(component.role.as_bytes());
+            hash.update(b"\0");
+            hash.update(component.sha256.as_bytes());
+            hash.update(b"\0");
+            hash.update(component.size.to_be_bytes());
+        }
+        format!("{:x}", hash.finalize())
     }
     #[cfg(all(test, feature = "activator"))]
     pub(crate) fn with_test_observation_receipts(mut self, size: u64) -> Self {
@@ -242,8 +262,9 @@ pub fn verify_archive_and_extract(
     )
 }
 
-/// 可信升级路径使用与首次安装相同的三组件 archive verifier；调用者不能提供角色表。
+/// 可信转换路径使用与首次安装相同的固定角色 archive verifier；调用者不能提供角色表。
 #[cfg(feature = "acquirer")]
+#[allow(clippy::too_many_arguments)]
 pub fn verify_archive_and_extract_upgrade_roles(
     archive: &mut File,
     handoff: &Handoff,
@@ -268,7 +289,7 @@ pub fn verify_archive_and_extract_upgrade_roles(
     )
 }
 
-/// 升级生命周期一次提取并校验三个运行时角色与两个 Bootstrap 角色。
+/// 生命周期转换一次提取并校验全部运行时角色与两个 Bootstrap 角色。
 #[cfg(feature = "acquirer")]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_archive_and_extract_lifecycle_roles(
@@ -867,6 +888,7 @@ fn verify_bundle_manifest(
     Ok(VerifiedBundle {
         version: version.to_owned(),
         target: a.target.clone(),
+        manifest_sha256: sha256_hex(bytes),
         delegation_generation: generation,
         component_len: probe_size,
         bootstrap_assets: roles,

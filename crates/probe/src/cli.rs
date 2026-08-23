@@ -116,12 +116,15 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "Usage:\n",
             "  enoki-probe --help\n",
             "  enoki-probe --version\n",
+            "  sudo enoki-probe uninstall\n",
             "  enoki-probe register --hub-url <url> ",
             "--enrollment-token <token> --config <path>\n",
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
-        ProbeCommand::Uninstall => "Probe uninstall is unsupported in this version.\n".to_string(),
+        ProbeCommand::Uninstall => {
+            "Probe uninstall is coordinated by the installed lifecycle service.\n".to_string()
+        }
         ProbeCommand::Repair => "Probe repair is unsupported in this version.\n".to_string(),
         ProbeCommand::Rejected { code } => format!("Probe command rejected: code={code}\n"),
         ProbeCommand::Register { .. } => {

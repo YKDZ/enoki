@@ -246,6 +246,7 @@ mod tests {
         VerifiedBundle {
             version: "1.2.3".into(),
             target: "x86_64-unknown-linux-gnu".into(),
+            manifest_sha256: "b".repeat(64),
             delegation_generation: 1,
             component_len: 5,
             bootstrap_assets: Vec::new(),
@@ -889,6 +890,17 @@ mod tests {
         assert!(disk_health.contains("BindReadOnlyPaths=-/usr/sbin/smartctl"));
         assert!(!disk_health.contains("ReadOnlyPaths=/proc/stat"));
 
+        let lifecycle = lifecycle_companion_unit();
+        assert!(lifecycle.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion"));
+        assert!(lifecycle.contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"));
+        assert!(lifecycle.contains("SocketBindDeny=ipv4:any"));
+        assert!(lifecycle.contains("ReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d"));
+        assert!(!lifecycle.contains("Environment="));
+        assert!(!lifecycle.contains("PrivateNetwork=true"));
+        let lifecycle_socket = lifecycle_companion_socket_unit();
+        assert!(lifecycle_socket.contains("SocketGroup=enoki-probe-ipc"));
+        assert!(lifecycle_socket.contains("Accept=yes"));
+
         assert!(observation_runtime_socket_unit().contains("SocketGroup=enoki-probe-ipc"));
         for socket in [
             cpu_provider_socket_unit(),
@@ -900,9 +912,10 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_omits_the_retired_operation_launcher_and_authority_path() {
+    fn schema_four_omits_the_retired_operation_launcher_and_authority_path() {
         let config = bootstrap_config(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
             &trust(),
         );
         assert!(!config.contains("upgrader_launch"));
@@ -910,6 +923,7 @@ mod tests {
 
         let metadata = install_metadata(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle(),
             &trust(),
             true,
         );
