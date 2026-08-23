@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "c5e5b6eb-5d4a-4220-8d90-dce2a238ae2c",
-  "prevIds": ["747e5490-c69c-4bdd-b0dd-61c6ef9b8653"],
+  "id": "aae15f2f-edcf-4a64-8163-f899b2e05acb",
+  "prevIds": ["c5e5b6eb-5d4a-4220-8d90-dce2a238ae2c"],
   "ddl": [
     {
       "name": "metric_collector_outcomes",
@@ -103,7 +103,7 @@
       "table": "metric_collector_outcomes"
     },
     {
-      "type": "integer",
+      "type": "text",
       "notNull": false,
       "autoincrement": false,
       "default": null,

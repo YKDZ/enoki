@@ -7456,6 +7456,893 @@ export const enoki = $root.enoki = (() => {
             return DiskHealthMetric;
         })();
 
+        v1.CpuCounterResourceFact = (function() {
+
+            /**
+             * Properties of a CpuCounterResourceFact.
+             * @memberof enoki.v1
+             * @interface ICpuCounterResourceFact
+             * @property {string|null} [name] CpuCounterResourceFact name
+             * @property {Long|null} [user] CpuCounterResourceFact user
+             * @property {Long|null} [nice] CpuCounterResourceFact nice
+             * @property {Long|null} [system] CpuCounterResourceFact system
+             * @property {Long|null} [idle] CpuCounterResourceFact idle
+             * @property {Long|null} [iowait] CpuCounterResourceFact iowait
+             * @property {Long|null} [irq] CpuCounterResourceFact irq
+             * @property {Long|null} [softirq] CpuCounterResourceFact softirq
+             * @property {Long|null} [steal] CpuCounterResourceFact steal
+             */
+
+            /**
+             * Constructs a new CpuCounterResourceFact.
+             * @memberof enoki.v1
+             * @classdesc Represents a CpuCounterResourceFact.
+             * @implements ICpuCounterResourceFact
+             * @constructor
+             * @param {enoki.v1.ICpuCounterResourceFact=} [properties] Properties to set
+             */
+            function CpuCounterResourceFact(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * CpuCounterResourceFact name.
+             * @member {string} name
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.name = "";
+
+            /**
+             * CpuCounterResourceFact user.
+             * @member {Long} user
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.user = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact nice.
+             * @member {Long} nice
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.nice = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact system.
+             * @member {Long} system
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.system = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact idle.
+             * @member {Long} idle
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.idle = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact iowait.
+             * @member {Long} iowait
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.iowait = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact irq.
+             * @member {Long} irq
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.irq = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact softirq.
+             * @member {Long} softirq
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.softirq = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * CpuCounterResourceFact steal.
+             * @member {Long} steal
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             */
+            CpuCounterResourceFact.prototype.steal = $util.Long ? $util.Long.fromBits(0,0,true) : 0;
+
+            /**
+             * Creates a new CpuCounterResourceFact instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {enoki.v1.ICpuCounterResourceFact=} [properties] Properties to set
+             * @returns {enoki.v1.CpuCounterResourceFact} CpuCounterResourceFact instance
+             */
+            CpuCounterResourceFact.create = function create(properties) {
+                return new CpuCounterResourceFact(properties);
+            };
+
+            /**
+             * Encodes the specified CpuCounterResourceFact message. Does not implicitly {@link enoki.v1.CpuCounterResourceFact.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {enoki.v1.ICpuCounterResourceFact} message CpuCounterResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CpuCounterResourceFact.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.name != null && Object.hasOwnProperty.call(message, "name"))
+                    writer.uint32(/* id 1, wireType 2 =*/10).string(message.name);
+                if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                    writer.uint32(/* id 2, wireType 0 =*/16).uint64(message.user);
+                if (message.nice != null && Object.hasOwnProperty.call(message, "nice"))
+                    writer.uint32(/* id 3, wireType 0 =*/24).uint64(message.nice);
+                if (message.system != null && Object.hasOwnProperty.call(message, "system"))
+                    writer.uint32(/* id 4, wireType 0 =*/32).uint64(message.system);
+                if (message.idle != null && Object.hasOwnProperty.call(message, "idle"))
+                    writer.uint32(/* id 5, wireType 0 =*/40).uint64(message.idle);
+                if (message.iowait != null && Object.hasOwnProperty.call(message, "iowait"))
+                    writer.uint32(/* id 6, wireType 0 =*/48).uint64(message.iowait);
+                if (message.irq != null && Object.hasOwnProperty.call(message, "irq"))
+                    writer.uint32(/* id 7, wireType 0 =*/56).uint64(message.irq);
+                if (message.softirq != null && Object.hasOwnProperty.call(message, "softirq"))
+                    writer.uint32(/* id 8, wireType 0 =*/64).uint64(message.softirq);
+                if (message.steal != null && Object.hasOwnProperty.call(message, "steal"))
+                    writer.uint32(/* id 9, wireType 0 =*/72).uint64(message.steal);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified CpuCounterResourceFact message, length delimited. Does not implicitly {@link enoki.v1.CpuCounterResourceFact.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {enoki.v1.ICpuCounterResourceFact} message CpuCounterResourceFact message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            CpuCounterResourceFact.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a CpuCounterResourceFact message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.CpuCounterResourceFact} CpuCounterResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CpuCounterResourceFact.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.CpuCounterResourceFact();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.name = reader.string();
+                            break;
+                        }
+                    case 2: {
+                            message.user = reader.uint64();
+                            break;
+                        }
+                    case 3: {
+                            message.nice = reader.uint64();
+                            break;
+                        }
+                    case 4: {
+                            message.system = reader.uint64();
+                            break;
+                        }
+                    case 5: {
+                            message.idle = reader.uint64();
+                            break;
+                        }
+                    case 6: {
+                            message.iowait = reader.uint64();
+                            break;
+                        }
+                    case 7: {
+                            message.irq = reader.uint64();
+                            break;
+                        }
+                    case 8: {
+                            message.softirq = reader.uint64();
+                            break;
+                        }
+                    case 9: {
+                            message.steal = reader.uint64();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a CpuCounterResourceFact message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.CpuCounterResourceFact} CpuCounterResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            CpuCounterResourceFact.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a CpuCounterResourceFact message.
+             * @function verify
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            CpuCounterResourceFact.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.name != null && Object.hasOwnProperty.call(message, "name"))
+                    if (!$util.isString(message.name))
+                        return "name: string expected";
+                if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                    if (!$util.isInteger(message.user) && !(message.user && $util.isInteger(message.user.low) && $util.isInteger(message.user.high)))
+                        return "user: integer|Long expected";
+                if (message.nice != null && Object.hasOwnProperty.call(message, "nice"))
+                    if (!$util.isInteger(message.nice) && !(message.nice && $util.isInteger(message.nice.low) && $util.isInteger(message.nice.high)))
+                        return "nice: integer|Long expected";
+                if (message.system != null && Object.hasOwnProperty.call(message, "system"))
+                    if (!$util.isInteger(message.system) && !(message.system && $util.isInteger(message.system.low) && $util.isInteger(message.system.high)))
+                        return "system: integer|Long expected";
+                if (message.idle != null && Object.hasOwnProperty.call(message, "idle"))
+                    if (!$util.isInteger(message.idle) && !(message.idle && $util.isInteger(message.idle.low) && $util.isInteger(message.idle.high)))
+                        return "idle: integer|Long expected";
+                if (message.iowait != null && Object.hasOwnProperty.call(message, "iowait"))
+                    if (!$util.isInteger(message.iowait) && !(message.iowait && $util.isInteger(message.iowait.low) && $util.isInteger(message.iowait.high)))
+                        return "iowait: integer|Long expected";
+                if (message.irq != null && Object.hasOwnProperty.call(message, "irq"))
+                    if (!$util.isInteger(message.irq) && !(message.irq && $util.isInteger(message.irq.low) && $util.isInteger(message.irq.high)))
+                        return "irq: integer|Long expected";
+                if (message.softirq != null && Object.hasOwnProperty.call(message, "softirq"))
+                    if (!$util.isInteger(message.softirq) && !(message.softirq && $util.isInteger(message.softirq.low) && $util.isInteger(message.softirq.high)))
+                        return "softirq: integer|Long expected";
+                if (message.steal != null && Object.hasOwnProperty.call(message, "steal"))
+                    if (!$util.isInteger(message.steal) && !(message.steal && $util.isInteger(message.steal.low) && $util.isInteger(message.steal.high)))
+                        return "steal: integer|Long expected";
+                return null;
+            };
+
+            /**
+             * Creates a CpuCounterResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.CpuCounterResourceFact} CpuCounterResourceFact
+             */
+            CpuCounterResourceFact.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.CpuCounterResourceFact)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.CpuCounterResourceFact: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.CpuCounterResourceFact();
+                if (object.name != null)
+                    message.name = String(object.name);
+                if (object.user != null)
+                    if ($util.Long)
+                        message.user = $util.Long.fromValue(object.user, true);
+                    else if (typeof object.user === "string")
+                        message.user = parseInt(object.user, 10);
+                    else if (typeof object.user === "number")
+                        message.user = object.user;
+                    else if (typeof object.user === "object")
+                        message.user = new $util.LongBits(object.user.low >>> 0, object.user.high >>> 0).toNumber(true);
+                if (object.nice != null)
+                    if ($util.Long)
+                        message.nice = $util.Long.fromValue(object.nice, true);
+                    else if (typeof object.nice === "string")
+                        message.nice = parseInt(object.nice, 10);
+                    else if (typeof object.nice === "number")
+                        message.nice = object.nice;
+                    else if (typeof object.nice === "object")
+                        message.nice = new $util.LongBits(object.nice.low >>> 0, object.nice.high >>> 0).toNumber(true);
+                if (object.system != null)
+                    if ($util.Long)
+                        message.system = $util.Long.fromValue(object.system, true);
+                    else if (typeof object.system === "string")
+                        message.system = parseInt(object.system, 10);
+                    else if (typeof object.system === "number")
+                        message.system = object.system;
+                    else if (typeof object.system === "object")
+                        message.system = new $util.LongBits(object.system.low >>> 0, object.system.high >>> 0).toNumber(true);
+                if (object.idle != null)
+                    if ($util.Long)
+                        message.idle = $util.Long.fromValue(object.idle, true);
+                    else if (typeof object.idle === "string")
+                        message.idle = parseInt(object.idle, 10);
+                    else if (typeof object.idle === "number")
+                        message.idle = object.idle;
+                    else if (typeof object.idle === "object")
+                        message.idle = new $util.LongBits(object.idle.low >>> 0, object.idle.high >>> 0).toNumber(true);
+                if (object.iowait != null)
+                    if ($util.Long)
+                        message.iowait = $util.Long.fromValue(object.iowait, true);
+                    else if (typeof object.iowait === "string")
+                        message.iowait = parseInt(object.iowait, 10);
+                    else if (typeof object.iowait === "number")
+                        message.iowait = object.iowait;
+                    else if (typeof object.iowait === "object")
+                        message.iowait = new $util.LongBits(object.iowait.low >>> 0, object.iowait.high >>> 0).toNumber(true);
+                if (object.irq != null)
+                    if ($util.Long)
+                        message.irq = $util.Long.fromValue(object.irq, true);
+                    else if (typeof object.irq === "string")
+                        message.irq = parseInt(object.irq, 10);
+                    else if (typeof object.irq === "number")
+                        message.irq = object.irq;
+                    else if (typeof object.irq === "object")
+                        message.irq = new $util.LongBits(object.irq.low >>> 0, object.irq.high >>> 0).toNumber(true);
+                if (object.softirq != null)
+                    if ($util.Long)
+                        message.softirq = $util.Long.fromValue(object.softirq, true);
+                    else if (typeof object.softirq === "string")
+                        message.softirq = parseInt(object.softirq, 10);
+                    else if (typeof object.softirq === "number")
+                        message.softirq = object.softirq;
+                    else if (typeof object.softirq === "object")
+                        message.softirq = new $util.LongBits(object.softirq.low >>> 0, object.softirq.high >>> 0).toNumber(true);
+                if (object.steal != null)
+                    if ($util.Long)
+                        message.steal = $util.Long.fromValue(object.steal, true);
+                    else if (typeof object.steal === "string")
+                        message.steal = parseInt(object.steal, 10);
+                    else if (typeof object.steal === "number")
+                        message.steal = object.steal;
+                    else if (typeof object.steal === "object")
+                        message.steal = new $util.LongBits(object.steal.low >>> 0, object.steal.high >>> 0).toNumber(true);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a CpuCounterResourceFact message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {enoki.v1.CpuCounterResourceFact} message CpuCounterResourceFact
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            CpuCounterResourceFact.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.name = "";
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.user = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.user = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.nice = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.nice = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.system = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.system = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.idle = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.idle = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.iowait = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.iowait = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.irq = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.irq = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.softirq = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.softirq = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                    if ($util.Long) {
+                        let long = new $util.Long(0, 0, true);
+                        object.steal = options.longs === String ? long.toString() : options.longs === Number ? long.toNumber() : typeof BigInt !== "undefined" && options.longs === BigInt ? long.toBigInt() : long;
+                    } else
+                        object.steal = options.longs === String ? "0" : typeof BigInt !== "undefined" && options.longs === BigInt ? BigInt("0") : 0;
+                }
+                if (message.name != null && Object.hasOwnProperty.call(message, "name"))
+                    object.name = message.name;
+                if (message.user != null && Object.hasOwnProperty.call(message, "user"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.user = typeof message.user === "number" ? BigInt(message.user) : $util.Long.fromBits(message.user.low >>> 0, message.user.high >>> 0, true).toBigInt();
+                    else if (typeof message.user === "number")
+                        object.user = options.longs === String ? String(message.user) : message.user;
+                    else
+                        object.user = options.longs === String ? $util.Long.prototype.toString.call(message.user) : options.longs === Number ? new $util.LongBits(message.user.low >>> 0, message.user.high >>> 0).toNumber(true) : message.user;
+                if (message.nice != null && Object.hasOwnProperty.call(message, "nice"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.nice = typeof message.nice === "number" ? BigInt(message.nice) : $util.Long.fromBits(message.nice.low >>> 0, message.nice.high >>> 0, true).toBigInt();
+                    else if (typeof message.nice === "number")
+                        object.nice = options.longs === String ? String(message.nice) : message.nice;
+                    else
+                        object.nice = options.longs === String ? $util.Long.prototype.toString.call(message.nice) : options.longs === Number ? new $util.LongBits(message.nice.low >>> 0, message.nice.high >>> 0).toNumber(true) : message.nice;
+                if (message.system != null && Object.hasOwnProperty.call(message, "system"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.system = typeof message.system === "number" ? BigInt(message.system) : $util.Long.fromBits(message.system.low >>> 0, message.system.high >>> 0, true).toBigInt();
+                    else if (typeof message.system === "number")
+                        object.system = options.longs === String ? String(message.system) : message.system;
+                    else
+                        object.system = options.longs === String ? $util.Long.prototype.toString.call(message.system) : options.longs === Number ? new $util.LongBits(message.system.low >>> 0, message.system.high >>> 0).toNumber(true) : message.system;
+                if (message.idle != null && Object.hasOwnProperty.call(message, "idle"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.idle = typeof message.idle === "number" ? BigInt(message.idle) : $util.Long.fromBits(message.idle.low >>> 0, message.idle.high >>> 0, true).toBigInt();
+                    else if (typeof message.idle === "number")
+                        object.idle = options.longs === String ? String(message.idle) : message.idle;
+                    else
+                        object.idle = options.longs === String ? $util.Long.prototype.toString.call(message.idle) : options.longs === Number ? new $util.LongBits(message.idle.low >>> 0, message.idle.high >>> 0).toNumber(true) : message.idle;
+                if (message.iowait != null && Object.hasOwnProperty.call(message, "iowait"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.iowait = typeof message.iowait === "number" ? BigInt(message.iowait) : $util.Long.fromBits(message.iowait.low >>> 0, message.iowait.high >>> 0, true).toBigInt();
+                    else if (typeof message.iowait === "number")
+                        object.iowait = options.longs === String ? String(message.iowait) : message.iowait;
+                    else
+                        object.iowait = options.longs === String ? $util.Long.prototype.toString.call(message.iowait) : options.longs === Number ? new $util.LongBits(message.iowait.low >>> 0, message.iowait.high >>> 0).toNumber(true) : message.iowait;
+                if (message.irq != null && Object.hasOwnProperty.call(message, "irq"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.irq = typeof message.irq === "number" ? BigInt(message.irq) : $util.Long.fromBits(message.irq.low >>> 0, message.irq.high >>> 0, true).toBigInt();
+                    else if (typeof message.irq === "number")
+                        object.irq = options.longs === String ? String(message.irq) : message.irq;
+                    else
+                        object.irq = options.longs === String ? $util.Long.prototype.toString.call(message.irq) : options.longs === Number ? new $util.LongBits(message.irq.low >>> 0, message.irq.high >>> 0).toNumber(true) : message.irq;
+                if (message.softirq != null && Object.hasOwnProperty.call(message, "softirq"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.softirq = typeof message.softirq === "number" ? BigInt(message.softirq) : $util.Long.fromBits(message.softirq.low >>> 0, message.softirq.high >>> 0, true).toBigInt();
+                    else if (typeof message.softirq === "number")
+                        object.softirq = options.longs === String ? String(message.softirq) : message.softirq;
+                    else
+                        object.softirq = options.longs === String ? $util.Long.prototype.toString.call(message.softirq) : options.longs === Number ? new $util.LongBits(message.softirq.low >>> 0, message.softirq.high >>> 0).toNumber(true) : message.softirq;
+                if (message.steal != null && Object.hasOwnProperty.call(message, "steal"))
+                    if (typeof BigInt !== "undefined" && options.longs === BigInt)
+                        object.steal = typeof message.steal === "number" ? BigInt(message.steal) : $util.Long.fromBits(message.steal.low >>> 0, message.steal.high >>> 0, true).toBigInt();
+                    else if (typeof message.steal === "number")
+                        object.steal = options.longs === String ? String(message.steal) : message.steal;
+                    else
+                        object.steal = options.longs === String ? $util.Long.prototype.toString.call(message.steal) : options.longs === Number ? new $util.LongBits(message.steal.low >>> 0, message.steal.high >>> 0).toNumber(true) : message.steal;
+                return object;
+            };
+
+            /**
+             * Converts this CpuCounterResourceFact to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            CpuCounterResourceFact.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for CpuCounterResourceFact
+             * @function getTypeUrl
+             * @memberof enoki.v1.CpuCounterResourceFact
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            CpuCounterResourceFact.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.CpuCounterResourceFact";
+            };
+
+            return CpuCounterResourceFact;
+        })();
+
+        v1.SystemStateResourceResult = (function() {
+
+            /**
+             * Properties of a SystemStateResourceResult.
+             * @memberof enoki.v1
+             * @interface ISystemStateResourceResult
+             * @property {Array.<enoki.v1.ICpuCounterResourceFact>|null} [cpuCounters] SystemStateResourceResult cpuCounters
+             * @property {string|null} [procLoadavg] SystemStateResourceResult procLoadavg
+             * @property {string|null} [procMeminfo] SystemStateResourceResult procMeminfo
+             * @property {string|null} [procUptime] SystemStateResourceResult procUptime
+             * @property {enoki.v1.IHostProfileResourceFacts|null} [hostProfile] SystemStateResourceResult hostProfile
+             */
+
+            /**
+             * Constructs a new SystemStateResourceResult.
+             * @memberof enoki.v1
+             * @classdesc Represents a SystemStateResourceResult.
+             * @implements ISystemStateResourceResult
+             * @constructor
+             * @param {enoki.v1.ISystemStateResourceResult=} [properties] Properties to set
+             */
+            function SystemStateResourceResult(properties) {
+                this.cpuCounters = [];
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * SystemStateResourceResult cpuCounters.
+             * @member {Array.<enoki.v1.ICpuCounterResourceFact>} cpuCounters
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.cpuCounters = $util.emptyArray;
+
+            /**
+             * SystemStateResourceResult procLoadavg.
+             * @member {string} procLoadavg
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procLoadavg = "";
+
+            /**
+             * SystemStateResourceResult procMeminfo.
+             * @member {string} procMeminfo
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procMeminfo = "";
+
+            /**
+             * SystemStateResourceResult procUptime.
+             * @member {string} procUptime
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.procUptime = "";
+
+            /**
+             * SystemStateResourceResult hostProfile.
+             * @member {enoki.v1.IHostProfileResourceFacts|null|undefined} hostProfile
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             */
+            SystemStateResourceResult.prototype.hostProfile = null;
+
+            /**
+             * Creates a new SystemStateResourceResult instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {enoki.v1.ISystemStateResourceResult=} [properties] Properties to set
+             * @returns {enoki.v1.SystemStateResourceResult} SystemStateResourceResult instance
+             */
+            SystemStateResourceResult.create = function create(properties) {
+                return new SystemStateResourceResult(properties);
+            };
+
+            /**
+             * Encodes the specified SystemStateResourceResult message. Does not implicitly {@link enoki.v1.SystemStateResourceResult.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {enoki.v1.ISystemStateResourceResult} message SystemStateResourceResult message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            SystemStateResourceResult.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.cpuCounters != null && message.cpuCounters.length)
+                    for (let i = 0; i < message.cpuCounters.length; ++i)
+                        $root.enoki.v1.CpuCounterResourceFact.encode(message.cpuCounters[i], writer.uint32(/* id 1, wireType 2 =*/10).fork(), q + 1).ldelim();
+                if (message.procLoadavg != null && Object.hasOwnProperty.call(message, "procLoadavg"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.procLoadavg);
+                if (message.procMeminfo != null && Object.hasOwnProperty.call(message, "procMeminfo"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.procMeminfo);
+                if (message.procUptime != null && Object.hasOwnProperty.call(message, "procUptime"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.procUptime);
+                if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile"))
+                    $root.enoki.v1.HostProfileResourceFacts.encode(message.hostProfile, writer.uint32(/* id 5, wireType 2 =*/42).fork(), q + 1).ldelim();
+                return writer;
+            };
+
+            /**
+             * Encodes the specified SystemStateResourceResult message, length delimited. Does not implicitly {@link enoki.v1.SystemStateResourceResult.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {enoki.v1.ISystemStateResourceResult} message SystemStateResourceResult message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            SystemStateResourceResult.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a SystemStateResourceResult message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.SystemStateResourceResult} SystemStateResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            SystemStateResourceResult.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.SystemStateResourceResult();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            if (!(message.cpuCounters && message.cpuCounters.length))
+                                message.cpuCounters = [];
+                            message.cpuCounters.push($root.enoki.v1.CpuCounterResourceFact.decode(reader, reader.uint32(), undefined, long + 1));
+                            break;
+                        }
+                    case 2: {
+                            message.procLoadavg = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.procMeminfo = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.procUptime = reader.string();
+                            break;
+                        }
+                    case 5: {
+                            message.hostProfile = $root.enoki.v1.HostProfileResourceFacts.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a SystemStateResourceResult message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.SystemStateResourceResult} SystemStateResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            SystemStateResourceResult.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a SystemStateResourceResult message.
+             * @function verify
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            SystemStateResourceResult.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.cpuCounters != null && Object.hasOwnProperty.call(message, "cpuCounters")) {
+                    if (!Array.isArray(message.cpuCounters))
+                        return "cpuCounters: array expected";
+                    for (let i = 0; i < message.cpuCounters.length; ++i) {
+                        let error = $root.enoki.v1.CpuCounterResourceFact.verify(message.cpuCounters[i], long + 1);
+                        if (error)
+                            return "cpuCounters." + error;
+                    }
+                }
+                if (message.procLoadavg != null && Object.hasOwnProperty.call(message, "procLoadavg"))
+                    if (!$util.isString(message.procLoadavg))
+                        return "procLoadavg: string expected";
+                if (message.procMeminfo != null && Object.hasOwnProperty.call(message, "procMeminfo"))
+                    if (!$util.isString(message.procMeminfo))
+                        return "procMeminfo: string expected";
+                if (message.procUptime != null && Object.hasOwnProperty.call(message, "procUptime"))
+                    if (!$util.isString(message.procUptime))
+                        return "procUptime: string expected";
+                if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile")) {
+                    let error = $root.enoki.v1.HostProfileResourceFacts.verify(message.hostProfile, long + 1);
+                    if (error)
+                        return "hostProfile." + error;
+                }
+                return null;
+            };
+
+            /**
+             * Creates a SystemStateResourceResult message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.SystemStateResourceResult} SystemStateResourceResult
+             */
+            SystemStateResourceResult.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.SystemStateResourceResult)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.SystemStateResourceResult: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.SystemStateResourceResult();
+                if (object.cpuCounters) {
+                    if (!Array.isArray(object.cpuCounters))
+                        throw TypeError(".enoki.v1.SystemStateResourceResult.cpuCounters: array expected");
+                    message.cpuCounters = [];
+                    for (let i = 0; i < object.cpuCounters.length; ++i) {
+                        if (!$util.isObject(object.cpuCounters[i]))
+                            throw TypeError(".enoki.v1.SystemStateResourceResult.cpuCounters: object expected");
+                        message.cpuCounters[i] = $root.enoki.v1.CpuCounterResourceFact.fromObject(object.cpuCounters[i], long + 1);
+                    }
+                }
+                if (object.procLoadavg != null)
+                    message.procLoadavg = String(object.procLoadavg);
+                if (object.procMeminfo != null)
+                    message.procMeminfo = String(object.procMeminfo);
+                if (object.procUptime != null)
+                    message.procUptime = String(object.procUptime);
+                if (object.hostProfile != null) {
+                    if (!$util.isObject(object.hostProfile))
+                        throw TypeError(".enoki.v1.SystemStateResourceResult.hostProfile: object expected");
+                    message.hostProfile = $root.enoki.v1.HostProfileResourceFacts.fromObject(object.hostProfile, long + 1);
+                }
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a SystemStateResourceResult message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {enoki.v1.SystemStateResourceResult} message SystemStateResourceResult
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            SystemStateResourceResult.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.arrays || options.defaults)
+                    object.cpuCounters = [];
+                if (options.defaults) {
+                    object.procLoadavg = "";
+                    object.procMeminfo = "";
+                    object.procUptime = "";
+                    object.hostProfile = null;
+                }
+                if (message.cpuCounters && message.cpuCounters.length) {
+                    object.cpuCounters = [];
+                    for (let j = 0; j < message.cpuCounters.length; ++j)
+                        object.cpuCounters[j] = $root.enoki.v1.CpuCounterResourceFact.toObject(message.cpuCounters[j], options, q + 1);
+                }
+                if (message.procLoadavg != null && Object.hasOwnProperty.call(message, "procLoadavg"))
+                    object.procLoadavg = message.procLoadavg;
+                if (message.procMeminfo != null && Object.hasOwnProperty.call(message, "procMeminfo"))
+                    object.procMeminfo = message.procMeminfo;
+                if (message.procUptime != null && Object.hasOwnProperty.call(message, "procUptime"))
+                    object.procUptime = message.procUptime;
+                if (message.hostProfile != null && Object.hasOwnProperty.call(message, "hostProfile"))
+                    object.hostProfile = $root.enoki.v1.HostProfileResourceFacts.toObject(message.hostProfile, options, q + 1);
+                return object;
+            };
+
+            /**
+             * Converts this SystemStateResourceResult to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            SystemStateResourceResult.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for SystemStateResourceResult
+             * @function getTypeUrl
+             * @memberof enoki.v1.SystemStateResourceResult
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            SystemStateResourceResult.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.SystemStateResourceResult";
+            };
+
+            return SystemStateResourceResult;
+        })();
+
         v1.MetricSample = (function() {
 
             /**
@@ -8964,7 +9851,8 @@ export const enoki = $root.enoki = (() => {
              * @memberof enoki.v1
              * @interface ICollectorFailure
              * @property {enoki.v1.CollectorFailurePhase|null} [phase] CollectorFailure phase
-             * @property {enoki.v1.CollectorFailureCode|null} [code] CollectorFailure code
+             * @property {number|null} [legacyCode] CollectorFailure legacyCode
+             * @property {string|null} [code] CollectorFailure code
              */
 
             /**
@@ -8991,12 +9879,20 @@ export const enoki = $root.enoki = (() => {
             CollectorFailure.prototype.phase = 0;
 
             /**
-             * CollectorFailure code.
-             * @member {enoki.v1.CollectorFailureCode} code
+             * CollectorFailure legacyCode.
+             * @member {number} legacyCode
              * @memberof enoki.v1.CollectorFailure
              * @instance
              */
-            CollectorFailure.prototype.code = 0;
+            CollectorFailure.prototype.legacyCode = 0;
+
+            /**
+             * CollectorFailure code.
+             * @member {string} code
+             * @memberof enoki.v1.CollectorFailure
+             * @instance
+             */
+            CollectorFailure.prototype.code = "";
 
             /**
              * Creates a new CollectorFailure instance using the specified properties.
@@ -9028,8 +9924,10 @@ export const enoki = $root.enoki = (() => {
                     throw Error("max depth exceeded");
                 if (message.phase != null && Object.hasOwnProperty.call(message, "phase"))
                     writer.uint32(/* id 1, wireType 0 =*/8).int32(message.phase);
+                if (message.legacyCode != null && Object.hasOwnProperty.call(message, "legacyCode"))
+                    writer.uint32(/* id 2, wireType 0 =*/16).uint32(message.legacyCode);
                 if (message.code != null && Object.hasOwnProperty.call(message, "code"))
-                    writer.uint32(/* id 2, wireType 0 =*/16).int32(message.code);
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.code);
                 return writer;
             };
 
@@ -9075,7 +9973,11 @@ export const enoki = $root.enoki = (() => {
                             break;
                         }
                     case 2: {
-                            message.code = reader.int32();
+                            message.legacyCode = reader.uint32();
+                            break;
+                        }
+                    case 3: {
+                            message.code = reader.string();
                             break;
                         }
                     default:
@@ -9126,23 +10028,12 @@ export const enoki = $root.enoki = (() => {
                     case 2:
                         break;
                     }
+                if (message.legacyCode != null && Object.hasOwnProperty.call(message, "legacyCode"))
+                    if (!$util.isInteger(message.legacyCode))
+                        return "legacyCode: integer expected";
                 if (message.code != null && Object.hasOwnProperty.call(message, "code"))
-                    switch (message.code) {
-                    default:
-                        return "code: enum value expected";
-                    case 0:
-                    case 1:
-                    case 2:
-                    case 3:
-                    case 4:
-                    case 5:
-                    case 6:
-                    case 7:
-                    case 8:
-                    case 9:
-                    case 10:
-                        break;
-                    }
+                    if (!$util.isString(message.code))
+                        return "code: string expected";
                 return null;
             };
 
@@ -9184,58 +10075,10 @@ export const enoki = $root.enoki = (() => {
                     message.phase = 2;
                     break;
                 }
-                switch (object.code) {
-                default:
-                    if (typeof object.code === "number") {
-                        message.code = object.code;
-                        break;
-                    }
-                    break;
-                case "COLLECTOR_FAILURE_CODE_UNSPECIFIED":
-                case 0:
-                    message.code = 0;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE":
-                case 1:
-                    message.code = 1;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED":
-                case 2:
-                    message.code = 2;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED":
-                case 3:
-                    message.code = 3;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED":
-                case 4:
-                    message.code = 4;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED":
-                case 5:
-                    message.code = 5;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED":
-                case 6:
-                    message.code = 6;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED":
-                case 7:
-                    message.code = 7;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED":
-                case 8:
-                    message.code = 8;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE":
-                case 9:
-                    message.code = 9;
-                    break;
-                case "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED":
-                case 10:
-                    message.code = 10;
-                    break;
-                }
+                if (object.legacyCode != null)
+                    message.legacyCode = object.legacyCode >>> 0;
+                if (object.code != null)
+                    message.code = String(object.code);
                 return message;
             };
 
@@ -9258,12 +10101,15 @@ export const enoki = $root.enoki = (() => {
                 let object = {};
                 if (options.defaults) {
                     object.phase = options.enums === String ? "COLLECTOR_FAILURE_PHASE_UNSPECIFIED" : 0;
-                    object.code = options.enums === String ? "COLLECTOR_FAILURE_CODE_UNSPECIFIED" : 0;
+                    object.legacyCode = 0;
+                    object.code = "";
                 }
                 if (message.phase != null && Object.hasOwnProperty.call(message, "phase"))
                     object.phase = options.enums === String ? $root.enoki.v1.CollectorFailurePhase[message.phase] === undefined ? message.phase : $root.enoki.v1.CollectorFailurePhase[message.phase] : message.phase;
+                if (message.legacyCode != null && Object.hasOwnProperty.call(message, "legacyCode"))
+                    object.legacyCode = message.legacyCode;
                 if (message.code != null && Object.hasOwnProperty.call(message, "code"))
-                    object.code = options.enums === String ? $root.enoki.v1.CollectorFailureCode[message.code] === undefined ? message.code : $root.enoki.v1.CollectorFailureCode[message.code] : message.code;
+                    object.code = message.code;
                 return object;
             };
 
@@ -9309,38 +10155,6 @@ export const enoki = $root.enoki = (() => {
             values[valuesById[0] = "COLLECTOR_FAILURE_PHASE_UNSPECIFIED"] = 0;
             values[valuesById[1] = "COLLECTOR_FAILURE_PHASE_RESOURCE"] = 1;
             values[valuesById[2] = "COLLECTOR_FAILURE_PHASE_CALCULATION"] = 2;
-            return values;
-        })();
-
-        /**
-         * CollectorFailureCode enum.
-         * @name enoki.v1.CollectorFailureCode
-         * @enum {number}
-         * @property {number} COLLECTOR_FAILURE_CODE_UNSPECIFIED=0 COLLECTOR_FAILURE_CODE_UNSPECIFIED value
-         * @property {number} COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE=1 COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE value
-         * @property {number} COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED=2 COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED value
-         * @property {number} COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED=3 COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED value
-         * @property {number} COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED=4 COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED value
-         * @property {number} COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED=5 COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED value
-         * @property {number} COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED=6 COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED value
-         * @property {number} COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED=7 COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED value
-         * @property {number} COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED=8 COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED value
-         * @property {number} COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE=9 COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE value
-         * @property {number} COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED=10 COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED value
-         */
-        v1.CollectorFailureCode = (function() {
-            const valuesById = {}, values = Object.create(valuesById);
-            values[valuesById[0] = "COLLECTOR_FAILURE_CODE_UNSPECIFIED"] = 0;
-            values[valuesById[1] = "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE"] = 1;
-            values[valuesById[2] = "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED"] = 2;
-            values[valuesById[3] = "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED"] = 3;
-            values[valuesById[4] = "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED"] = 4;
-            values[valuesById[5] = "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED"] = 5;
-            values[valuesById[6] = "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED"] = 6;
-            values[valuesById[7] = "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED"] = 7;
-            values[valuesById[8] = "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED"] = 8;
-            values[valuesById[9] = "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE"] = 9;
-            values[valuesById[10] = "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED"] = 10;
             return values;
         })();
 

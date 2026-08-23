@@ -298,8 +298,7 @@ pub fn host_profile_hash(host_profile: &HostProfileSnapshot) -> String {
 }
 
 pub fn stable_host_profile(mut host_profile: HostProfileSnapshot) -> HostProfileSnapshot {
-    // Bundle identity is transport coherence evidence, not part of the
-    // long-standing Host Profile canonical hash.
+    // Bundle 身份是传输一致性证据，不属于既有 Host Profile canonical hash。
     host_profile.probe_asset_bundle_version.clear();
     host_profile.filesystems.sort_by(|left, right| {
         left.mount_point

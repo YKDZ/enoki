@@ -101,9 +101,33 @@ impl ObservationWindowClient for FailedHostProfileObservationRuntime {
                 state: enoki_probe::protocol::enoki::v1::CollectorOutcomeState::Failed as i32,
                 failure: Some(enoki_probe::protocol::enoki::v1::CollectorFailure {
                     phase: enoki_probe::protocol::enoki::v1::CollectorFailurePhase::Resource as i32,
-                    code: enoki_probe::protocol::enoki::v1::CollectorFailureCode::HostProfileFactsMalformed as i32,
+                    legacy_code: 9,
+                    code: "official.host-profile.resource-malformed".to_owned(),
                 }),
             });
+        Ok(result)
+    }
+}
+
+struct ChangingHostProfileObservationRuntime;
+
+impl ObservationWindowClient for ChangingHostProfileObservationRuntime {
+    fn request_finalized_window(
+        &self,
+        cadence: Duration,
+        sequence_start: u64,
+    ) -> Result<ObservationWindowResult, ObservationClientError> {
+        let mut result =
+            FixedObservationRuntime.request_finalized_window(cadence, sequence_start)?;
+        result.host_profile = Some(HostProfileSnapshot {
+            hostname: if sequence_start < 5 {
+                "before-change"
+            } else {
+                "after-change"
+            }
+            .to_owned(),
+            ..host_profile_with_disk_capability(true)
+        });
         Ok(result)
     }
 }
@@ -836,6 +860,62 @@ fn probe_run_reuses_the_triggering_observation_batch_end_for_snapshot_replay() {
         Some(enoki_probe::protocol::enoki::v1::snapshot::Payload::HostProfile(_))
     ));
     assert!(reports[2].metrics.is_empty());
+}
+
+#[test]
+fn changed_profile_is_compact_then_exactly_replayed_when_hub_requests_it() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "",
+        ]
+        .join("\n"),
+    );
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response(1, false),
+            report_response(4, false),
+            report_response(7, true),
+            report_response(7, false),
+        ],
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper::default();
+
+    run_probe_with_loop_control_and_observation_client(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(4),
+        },
+        &ChangingHostProfileObservationRuntime,
+    )
+    .expect("变化后的 Snapshot 可以按 hash 精确回放");
+
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    let first = &reports[1].snapshots[0];
+    let changed = &reports[2].snapshots[0];
+    let replay = &reports[3].snapshots[0];
+    assert!(first.payload.is_some());
+    assert!(changed.payload.is_none());
+    assert_ne!(first.snapshot_hash, changed.snapshot_hash);
+    assert_eq!(changed.snapshot_hash, replay.snapshot_hash);
+    assert!(matches!(
+        replay.payload,
+        Some(snapshot::Payload::HostProfile(ref profile)) if profile.hostname == "after-change"
+    ));
 }
 
 #[test]

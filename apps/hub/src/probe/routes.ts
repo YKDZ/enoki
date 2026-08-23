@@ -452,7 +452,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           report: validatedReport,
           reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
           request,
-        }) || hasProducedHostProfile(request))
+        }) ||
+          hasProducedHostProfile(request))
           ? services.enrollments.resolveStartupReport({
               enrollmentId: nonemptyString(request.enrollmentId),
               hostId: host.id,
@@ -2297,16 +2298,26 @@ function validatedCollectorOutcomes(sample: ProtoMessage) {
     const state = Number(outcome.state ?? 0);
     const failure = outcome.failure as ProtoMessage | null | undefined;
     const failurePhase = failure ? Number(failure.phase ?? 0) : null;
-    const failureCode = failure ? Number(failure.code ?? 0) : null;
+    const encodedFailureCode = failure ? String(failure.code ?? "") : null;
+    const legacyFailureCode = failure ? Number(failure.legacyCode ?? 0) : 0;
+    const normalizedLegacyFailureCode = legacyCollectorFailureCode(
+      collectorId,
+      failurePhase,
+      legacyFailureCode,
+    );
+    const failureCode = encodedFailureCode
+      ? encodedFailureCode
+      : normalizedLegacyFailureCode;
     if (
       !officialOutcomeCollectors.has(collectorId) ||
       seen.has(collectorId) ||
       ![1, 2, 3].includes(state) ||
       (state === 3
         ? ![1, 2].includes(failurePhase ?? 0) ||
-          !Number.isInteger(failureCode) ||
-          (failureCode ?? 0) < 1 ||
-          (failureCode ?? 0) > 65_535
+          !validCollectorFailureCode(failureCode) ||
+          !failureCode?.startsWith(`${collectorId}.`) ||
+          (legacyFailureCode !== 0 &&
+            normalizedLegacyFailureCode !== failureCode)
         : failure !== null && failure !== undefined)
     ) {
       throw new ReportBusinessRejection("malformed_probe_report", 400);
@@ -2321,6 +2332,44 @@ function validatedCollectorOutcomes(sample: ProtoMessage) {
   });
 }
 
+function legacyCollectorFailureCode(
+  collectorId: string,
+  phase: number | null,
+  code: number,
+): string | null {
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(code)) return null;
+  if (code === 1) return `${collectorId}.resource-unavailable`;
+  if (code === 2) return `${collectorId}.resource-malformed`;
+  if (code === 3) return `${collectorId}.activation-budget-exhausted`;
+  if (code === 4 && collectorId === "official.cpu")
+    return "official.cpu.counters-malformed";
+  if (code === 5 && collectorId === "official.load")
+    return "official.load.facts-malformed";
+  if (code === 6 && collectorId === "official.memory")
+    return "official.memory.facts-malformed";
+  if (code === 7 && collectorId === "official.uptime")
+    return "official.uptime.facts-malformed";
+  if (code === 8 && collectorId === "official.host-profile") {
+    return phase === 1
+      ? "official.host-profile.resource-malformed"
+      : "official.host-profile.facts-malformed";
+  }
+  if (code === 9 && collectorId === "official.host-profile")
+    return "official.host-profile.resource-unavailable";
+  if (code === 10 && collectorId === "official.host-profile")
+    return "official.host-profile.activation-budget-exhausted";
+  return null;
+}
+
+function validCollectorFailureCode(code: string | null): code is string {
+  return (
+    code !== null &&
+    code.length >= 3 &&
+    code.length <= 96 &&
+    /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(code)
+  );
+}
+
 function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
   const samples = (request.metrics ?? []) as ProtoMessage[];
   const snapshots = ((request.snapshots ?? []) as ProtoMessage[]).filter(
@@ -2331,12 +2380,20 @@ function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
     const matches = ((sample.collectorOutcomes ?? []) as ProtoMessage[]).filter(
       (candidate) => candidate.collectorId === hostProfileCollectorId,
     );
-    if (matches.length > 1 || (matches.length === 1 && index !== 0)) return false;
+    if (matches.length > 1 || (matches.length === 1 && index !== 0))
+      return false;
     outcome ??= matches[0];
   }
   if (!outcome) return true;
   if (Number(outcome.state) === 1 && !outcome.failure) {
-    return snapshots.length === 1 && Boolean(snapshots[0]?.snapshotHash);
+    return (
+      snapshots.length === 1 &&
+      Boolean(snapshots[0]?.snapshotHash) &&
+      Boolean(snapshots[0]?.hostProfile) &&
+      Boolean(
+        nonemptyString(snapshots[0]?.hostProfile?.probeAssetBundleVersion),
+      )
+    );
   }
   return snapshots.length === 0 && [2, 3].includes(Number(outcome.state));
 }

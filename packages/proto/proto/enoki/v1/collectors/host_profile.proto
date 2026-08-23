@@ -22,12 +22,12 @@ message HostProfileSnapshot {
   uint32 cpu_socket_count = 15;
   uint32 cpu_physical_count = 16;
   CollectorCapabilities collector_capabilities = 17;
-  // Runtime-produced bundle evidence; Resource Providers cannot set it.
+  // Runtime 生成的 Bundle 证据；Resource Provider 无权设置。
   string probe_asset_bundle_version = 18;
 }
 
-// Internal immutable facts returned by the fixed Host Profile Resource pull.
-// This message never crosses the authenticated Probe--Hub reporting boundary.
+// 固定 Host Profile Resource pull 返回的内部不可变事实。
+// 此消息不会越过已认证的 Probe--Hub 报告边界。
 message HostProfileResourceFacts {
   string hostname = 1;
   string os = 2;

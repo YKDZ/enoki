@@ -287,7 +287,7 @@ function createArchiveSchema(database: DatabaseSync) {
       collector_id text not null,
       state integer not null,
       failure_phase integer,
-      failure_code integer
+      failure_code text
     );
 
     create table report_observations (

@@ -11,6 +11,7 @@ use enoki_probe::{
     host_profile::collect_local_host_profile_resource_facts_with_memory_total,
     metrics::{collect_memory_metrics_from_proc_meminfo, parse_linux_proc_stat_cpu_counters},
     observation_runtime::{MAX_SYSTEM_STATE_BYTES, SYSTEM_STATE_PULL, require_peer_uid},
+    protocol::enoki::v1::{CpuCounterResourceFact, SystemStateResourceResult},
     system_state_resource_sandbox::enforce_system_state_resource_read_allowlist,
 };
 use prost::Message;
@@ -67,30 +68,36 @@ fn run(input: impl Read, mut output: impl Write) -> Result<(), ()> {
     if proc_stat.len() > MAX_SYSTEM_STATE_BYTES {
         return Err(());
     }
-    let counters = parse_linux_proc_stat_cpu_counters(&proc_stat).unwrap_or_default();
-    let cpu = encode_records(&counters)?;
+    let cpu_counters = parse_linux_proc_stat_cpu_counters(&proc_stat)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| CpuCounterResourceFact {
+            name: record.name,
+            user: record.user,
+            nice: record.nice,
+            system: record.system,
+            idle: record.idle,
+            iowait: record.iowait,
+            irq: record.irq,
+            softirq: record.softirq,
+            steal: record.steal,
+        })
+        .collect();
     let load = fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let memory = fs::read_to_string("/proc/meminfo").unwrap_or_default();
     let uptime = fs::read_to_string("/proc/uptime").unwrap_or_default();
-    let mut encoded = Vec::with_capacity(cpu.len() + load.len() + memory.len() + uptime.len() + 6);
-    encoded.extend_from_slice(&u32::try_from(cpu.len()).map_err(|_| ())?.to_be_bytes());
-    encoded.extend_from_slice(&cpu);
-    encoded.extend_from_slice(load.as_bytes());
-    encoded.push(0);
-    encoded.extend_from_slice(memory.as_bytes());
-    encoded.push(0);
-    encoded.extend_from_slice(uptime.as_bytes());
-    encoded.push(0);
     let memory_total_bytes =
         collect_memory_metrics_from_proc_meminfo(&memory).map_or(0, |metrics| metrics.total_bytes);
-    let host_profile_facts =
-        collect_local_host_profile_resource_facts_with_memory_total(memory_total_bytes)
-            .encode_to_vec();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in host_profile_facts {
-        encoded.push(HEX[(byte >> 4) as usize]);
-        encoded.push(HEX[(byte & 0x0f) as usize]);
+    let encoded = SystemStateResourceResult {
+        cpu_counters,
+        proc_loadavg: load,
+        proc_meminfo: memory,
+        proc_uptime: uptime,
+        host_profile: Some(collect_local_host_profile_resource_facts_with_memory_total(
+            memory_total_bytes,
+        )),
     }
+    .encode_to_vec();
     if encoded.len() > MAX_SYSTEM_STATE_BYTES {
         return Err(());
     }
@@ -98,35 +105,4 @@ fn run(input: impl Read, mut output: impl Write) -> Result<(), ()> {
     output.write_all(&length.to_be_bytes()).map_err(|_| ())?;
     output.write_all(&encoded).map_err(|_| ())?;
     output.flush().map_err(|_| ())
-}
-
-fn encode_records(records: &[enoki_probe::metrics::CpuCounterRecord]) -> Result<Vec<u8>, ()> {
-    if records.len() > 4096 {
-        return Err(());
-    }
-    let mut bytes = Vec::with_capacity(records.len() * 80);
-    bytes.extend_from_slice(&(records.len() as u16).to_be_bytes());
-    for record in records {
-        let name = record.name.as_bytes();
-        if name.is_empty() || name.len() > 32 {
-            return Err(());
-        }
-        bytes.push(name.len() as u8);
-        bytes.extend_from_slice(name);
-        for value in [
-            record.user,
-            record.nice,
-            record.system,
-            record.idle,
-            record.iowait,
-            record.irq,
-            record.softirq,
-            record.steal,
-        ] {
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-    (bytes.len() <= MAX_SYSTEM_STATE_BYTES)
-        .then_some(bytes)
-        .ok_or(())
 }

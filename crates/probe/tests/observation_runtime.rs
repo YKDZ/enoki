@@ -1,7 +1,12 @@
 use enoki_probe::observation_runtime::{
     ObservationRuntime, ObservationWindowRequest, ResourceAccess, SYSTEM_STATE_RESOURCE,
-    SystemStateProvider, SystemStateResourceResult, static_collector_registry,
+    SystemStateProvider, SystemStateResourceResult, decode_system_state_resource_result,
+    static_collector_registry,
 };
+use enoki_probe::protocol::enoki::v1::{
+    CpuCounterResourceFact, SystemStateResourceResult as WireSystemStateResourceResult,
+};
+use prost::Message;
 use std::time::Duration;
 
 #[test]
@@ -81,6 +86,81 @@ fn one_immutable_provider_result_populates_load_memory_and_uptime() {
     assert_eq!(sample.memory_used_bytes, Some(4_096));
     assert_eq!(sample.uptime_seconds, Some(123));
     assert_eq!(runtime.into_provider().calls, 1);
+}
+
+#[test]
+fn typed_system_state_envelope_round_trips_all_independent_facts() {
+    let wire = WireSystemStateResourceResult {
+        cpu_counters: vec![CpuCounterResourceFact {
+            name: "cpu".into(),
+            user: 100,
+            idle: 900,
+            ..Default::default()
+        }],
+        proc_loadavg: "1.00 2.00 3.00 1/2 3\n".into(),
+        proc_meminfo:
+            "MemTotal: 8 kB\nMemAvailable: 4 kB\nCached: 1 kB\nSwapTotal: 2 kB\nSwapFree: 1 kB\n"
+                .into(),
+        proc_uptime: "123.50 0.0\n".into(),
+        host_profile: None,
+    };
+    let decoded = decode_system_state_resource_result(&wire.encode_to_vec()).unwrap();
+    let mut runtime = ObservationRuntime::new(OneResultProvider(Some(decoded)));
+    let sample = runtime
+        .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
+        .unwrap();
+
+    assert_eq!(
+        (sample.load_1, sample.load_5, sample.load_15),
+        (Some(1.0), Some(2.0), Some(3.0))
+    );
+    assert_eq!(sample.memory_total_bytes, Some(8 * 1024));
+    assert_eq!(sample.uptime_seconds, Some(123));
+    assert_eq!(sample.cpu_percent, Some(0.0));
+}
+
+#[test]
+fn malformed_typed_envelope_is_rejected() {
+    assert!(decode_system_state_resource_result(&[0xff]).is_none());
+    assert!(decode_system_state_resource_result(&[0xa0, 0x06, 0x01]).is_none());
+}
+
+#[test]
+fn malformed_cpu_fact_does_not_discard_valid_memory_fact() {
+    let wire = WireSystemStateResourceResult {
+        cpu_counters: vec![CpuCounterResourceFact {
+            name: "x".repeat(33),
+            ..Default::default()
+        }],
+        proc_meminfo: "MemTotal: 8 kB\nMemAvailable: 4 kB\n".into(),
+        ..Default::default()
+    };
+    let decoded = decode_system_state_resource_result(&wire.encode_to_vec()).unwrap();
+    let mut runtime = ObservationRuntime::new(OneResultProvider(Some(decoded)));
+    let sample = runtime
+        .observe(ObservationWindowRequest::new(Duration::from_secs(5)).unwrap())
+        .unwrap();
+
+    assert_eq!(sample.memory_total_bytes, Some(8 * 1024));
+    assert_eq!(sample.cpu_percent, None);
+    assert_eq!(
+        sample.collector_outcomes[0].failure.as_ref().unwrap().code,
+        "official.cpu.counters-malformed"
+    );
+}
+
+struct OneResultProvider(Option<SystemStateResourceResult>);
+
+impl SystemStateProvider for OneResultProvider {
+    fn pull_system_state(
+        &mut self,
+        _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+    ) -> Result<
+        SystemStateResourceResult,
+        enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+    > {
+        Ok(self.0.take().unwrap())
+    }
 }
 
 struct FixedSystemStateProvider {
@@ -234,7 +314,113 @@ fn malformed_host_profile_facts_are_a_typed_collector_failure_not_a_window_failu
         .find(|outcome| outcome.collector_id == "official.host-profile")
         .unwrap();
     assert_eq!(outcome.state, 3);
-    assert_eq!(outcome.failure.as_ref().unwrap().code, 8);
+    assert_eq!(
+        outcome.failure.as_ref().unwrap().code,
+        "official.host-profile.facts-malformed"
+    );
+}
+
+#[test]
+fn later_attempt_success_cannot_contradict_the_due_host_profile_failure() {
+    struct Provider {
+        call: usize,
+    }
+    impl SystemStateProvider for Provider {
+        fn pull_system_state(
+            &mut self,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            self.call += 1;
+            if self.call == 1 {
+                return Err(
+                    enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure::Unavailable,
+                );
+            }
+            Ok(system_state_with_host("later-host"))
+        }
+    }
+    let result = ObservationRuntime::new(Provider { call: 0 }).collect_next_window(
+        ObservationWindowRequest::new(Duration::from_secs(1)).unwrap(),
+        &mut RecordingSleeper::default(),
+    );
+
+    assert!(result.host_profile.is_none());
+    assert!(
+        result.attempts[0]
+            .sample
+            .as_ref()
+            .unwrap()
+            .collector_outcomes
+            .iter()
+            .any(|outcome| outcome.collector_id == "official.host-profile" && outcome.state == 3)
+    );
+    assert!(result.attempts[1..].iter().all(|attempt| {
+        attempt
+            .sample
+            .as_ref()
+            .unwrap()
+            .collector_outcomes
+            .iter()
+            .all(|outcome| outcome.collector_id != "official.host-profile")
+    }));
+}
+
+#[test]
+fn each_window_refreshes_the_current_host_profile_snapshot() {
+    struct Provider {
+        call: usize,
+    }
+    impl SystemStateProvider for Provider {
+        fn pull_system_state(
+            &mut self,
+            _request: enoki_probe::observation_runtime::SystemStatePullRequest,
+        ) -> Result<
+            SystemStateResourceResult,
+            enoki_probe::observation_runtime::SystemStateResourceAcquisitionFailure,
+        > {
+            self.call += 1;
+            Ok(system_state_with_host(if self.call <= 3 {
+                "first-host"
+            } else {
+                "changed-host"
+            }))
+        }
+    }
+    let mut runtime = ObservationRuntime::new(Provider { call: 0 });
+    let request = ObservationWindowRequest::new(Duration::from_secs(1)).unwrap();
+    let first = runtime.collect_next_window(request, &mut RecordingSleeper::default());
+    let second = runtime.collect_next_window(request, &mut RecordingSleeper::default());
+
+    assert_eq!(first.host_profile.unwrap().hostname, "first-host");
+    assert_eq!(second.host_profile.unwrap().hostname, "changed-host");
+    assert!(
+        second.attempts[0]
+            .sample
+            .as_ref()
+            .unwrap()
+            .collector_outcomes
+            .iter()
+            .any(|outcome| outcome.collector_id == "official.host-profile" && outcome.state == 1)
+    );
+}
+
+fn system_state_with_host(hostname: &str) -> SystemStateResourceResult {
+    SystemStateResourceResult::from_records(
+        enoki_probe::metrics::parse_linux_proc_stat_cpu_counters("cpu 100 0 0 900 0 0 0 0\n")
+            .unwrap(),
+    )
+    .unwrap()
+    .with_host_profile_facts(enoki_probe::protocol::enoki::v1::HostProfileResourceFacts {
+        architecture: "x86_64".to_owned(),
+        cpu_count: 1,
+        hostname: hostname.to_owned(),
+        kernel: "6.8.0".to_owned(),
+        os: "linux".to_owned(),
+        ..Default::default()
+    })
 }
 
 struct RecordingCpuProvider {

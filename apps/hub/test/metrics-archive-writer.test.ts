@@ -59,12 +59,14 @@ describe("Metrics Archive file writer", () => {
       sample: {
         bootId: "boot-archive",
         collectedAtMs: archivedCollectedAtMs,
-        collectorOutcomes: [{
-          collectorId: "official.memory",
-          failureCode: null,
-          failurePhase: null,
-          state: 1,
-        }],
+        collectorOutcomes: [
+          {
+            collectorId: "official.memory",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+        ],
         cpuCores: [
           {
             idle: 80,

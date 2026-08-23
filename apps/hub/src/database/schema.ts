@@ -380,7 +380,7 @@ export const metricCollectorOutcomes = sqliteTable(
     collectorId: text("collector_id").notNull(),
     state: integer().notNull(),
     failurePhase: integer("failure_phase"),
-    failureCode: integer("failure_code"),
+    failureCode: text("failure_code"),
   },
   (table) => [
     uniqueIndex("metric_collector_outcomes_sample_collector_idx").on(

@@ -538,10 +538,10 @@ fn run_reporting_loop(
             }
         };
 
-        if let Some(profile) = runtime_host_profile {
-            host_profile = Some(profile);
+        if let Some(profile) = runtime_host_profile.as_ref() {
+            host_profile = Some(profile.clone());
         }
-        let send_full_host_profile = host_profile.is_some() && !full_host_profile_reported;
+        let send_full_host_profile = runtime_host_profile.is_some() && !full_host_profile_reported;
 
         let request = observation_batch_report(ObservationBatchInput {
             boot_id: &boot_id,
@@ -550,7 +550,7 @@ fn run_reporting_loop(
                 .as_deref()
                 .unwrap_or_default(),
             cpu_resource_collection_outcomes,
-            host_profile: host_profile.as_ref(),
+            host_profile: runtime_host_profile.as_ref(),
             host_profile_is_full: send_full_host_profile,
             metrics,
             observation_window_failure,
@@ -1658,6 +1658,7 @@ mod tests {
                             sample: Some(crate::protocol::enoki::v1::MetricSample {
                                 collected_at_ms,
                                 cpu_percent: Some(12.5),
+                                memory_used_bytes: Some(42),
                                 ..Default::default()
                             }),
                             cpu_resource_outcome: None,
@@ -1707,6 +1708,34 @@ mod tests {
                 .all(|sample| sample.memory_used_bytes == Some(42))
         );
         assert!(outcome.is_empty());
+    }
+
+    struct RuntimeMetricsWindowClient;
+
+    impl ObservationWindowClient for RuntimeMetricsWindowClient {
+        fn request_finalized_window(
+            &self,
+            cadence: Duration,
+            sequence_start: u64,
+        ) -> Result<ObservationWindowResult, ObservationClientError> {
+            Ok(ObservationWindowResult {
+                host_profile: None,
+                attempts: (0..REPORTING_WINDOW_TICKS)
+                    .map(
+                        |tick| crate::observation_runtime::ObservationAttemptResult {
+                            sequence: sequence_start + tick,
+                            sample: Some(crate::protocol::enoki::v1::MetricSample {
+                                collected_at_ms: cadence.as_millis() as i64 * (tick as i64 + 1),
+                                load_1: Some(1.0),
+                                memory_used_bytes: Some(42),
+                                ..Default::default()
+                            }),
+                            cpu_resource_outcome: None,
+                        },
+                    )
+                    .collect(),
+            })
+        }
     }
 
     #[test]
@@ -1777,7 +1806,7 @@ mod tests {
     use std::os::unix::{fs::PermissionsExt, fs::symlink};
 
     #[test]
-    fn observation_batch_keeps_low_frequency_collectors_off_high_frequency_ticks() {
+    fn observation_batch_uses_runtime_finalized_system_state_on_every_due_tick() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(5),
             metrics_config: MetricsCollectionConfig::from_enabled_collectors([
@@ -1807,7 +1836,7 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-            &UnixObservationRuntimeClient::production(),
+            &RuntimeMetricsWindowClient,
         )
         .expect("non-CPU Observation Batch succeeds");
 
@@ -1823,11 +1852,11 @@ mod tests {
                 .iter()
                 .all(|sample| sample.memory_used_bytes == Some(42))
         );
-        assert!(metrics.iter().all(|sample| sample.load_1.is_none()));
+        assert!(metrics.iter().all(|sample| sample.load_1 == Some(1.0)));
     }
 
     #[test]
-    fn observation_batch_collects_low_frequency_metrics_every_four_reporting_windows() {
+    fn observation_batch_does_not_reapply_probe_local_cadence_to_runtime_results() {
         let active_configuration = ActiveProbeConfiguration {
             metrics_collection_interval: Duration::from_secs(7),
             metrics_config: MetricsCollectionConfig::from_enabled_collectors([CollectorId::Load]),
@@ -1849,7 +1878,7 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-            &UnixObservationRuntimeClient::production(),
+            &RuntimeMetricsWindowClient,
         )
         .expect("first non-CPU Observation Batch succeeds");
         let (_, _, second_metrics, _, _) = collect_observation_batch(
@@ -1857,7 +1886,7 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-            &UnixObservationRuntimeClient::production(),
+            &RuntimeMetricsWindowClient,
         )
         .expect("second non-CPU Observation Batch succeeds");
         let (_, _, third_metrics, _, _) = collect_observation_batch(
@@ -1865,7 +1894,7 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-            &UnixObservationRuntimeClient::production(),
+            &RuntimeMetricsWindowClient,
         )
         .expect("third non-CPU Observation Batch succeeds");
         let (_, _, fourth_metrics, _, _) = collect_observation_batch(
@@ -1873,7 +1902,7 @@ mod tests {
             &active_configuration,
             &mut sequence,
             &mut metrics_collector,
-            &UnixObservationRuntimeClient::production(),
+            &RuntimeMetricsWindowClient,
         )
         .expect("fourth non-CPU Observation Batch succeeds");
 
@@ -1890,19 +1919,15 @@ mod tests {
             .collect::<Vec<_>>(),
             (1..=12).collect::<Vec<_>>(),
         );
-        assert!(
+        assert_eq!(
             first_metrics
                 .iter()
                 .chain(&second_metrics)
                 .chain(&third_metrics)
-                .all(|sample| sample.load_1.is_none())
-        );
-        assert_eq!(
-            fourth_metrics
-                .iter()
+                .chain(&fourth_metrics)
                 .filter_map(|sample| sample.load_1)
                 .collect::<Vec<_>>(),
-            vec![1.0],
+            vec![1.0; 12],
         );
     }
 
@@ -2133,13 +2158,7 @@ mod tests {
         assert_eq!(startup.sequence_start, 1);
         assert_eq!(startup.sequence_end, 1);
         assert!(startup.metrics.is_empty());
-        assert_eq!(startup.snapshots.len(), 1);
-        assert!(matches!(
-            startup.snapshots[0].payload,
-            Some(crate::protocol::enoki::v1::snapshot::Payload::HostProfile(
-                _
-            ))
-        ));
+        assert!(startup.snapshots.is_empty());
     }
 
     #[test]
@@ -2423,7 +2442,7 @@ mod tests {
                 }
                 .encode_to_vec(),
                 ProbeReportResponse {
-                    accepted_sequence_end: 2,
+                    accepted_sequence_end: 4,
                     current_probe_configuration_version: "default-v1".to_string(),
                     pending_operation: None,
                     requested_snapshot_collector_ids: Vec::new(),

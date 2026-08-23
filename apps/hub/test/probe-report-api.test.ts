@@ -490,54 +490,321 @@ describe("Probe report API", () => {
   it("persists typed collector outcomes idempotently with their exact sample", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
-      auth: { failureDelayMs: 0, ownerPassword: "correct horse battery staple", sessionCookieName: "enoki_owner_session" },
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
       database,
     });
     const ownerSession = await loginOwner(app);
-    const registration = await registerProbe(app, await createEnrollmentToken(app, ownerSession));
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
-    const runtimeProfile = sampleHostProfileSnapshot({ probeAssetBundleVersion: "1.2.3" });
-    const boot = ReportRequest.encode(ReportRequest.create({
-      bootId: "boot-collector-outcomes",
-      metrics: [],
+    const runtimeProfile = sampleHostProfileSnapshot({
       probeAssetBundleVersion: "1.2.3",
-      probeConfigurationVersion: "default-v1",
-      probeId: registration.probeId,
-      sequenceStart: 1,
-      sequenceEnd: 1,
-    })).finish();
-    expect((await app.request("/api/probe/report", signedProbeRequest(registration, "/api/probe/report", boot))).status).toBe(200);
-    const body = ReportRequest.encode(ReportRequest.create({
-      bootId: "boot-collector-outcomes",
-      metrics: [{
-        collectedAtMs: 1_725_000_000_000,
-        collectorOutcomes: [
+    });
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-collector-outcomes",
+        metrics: [],
+        probeAssetBundleVersion: "1.2.3",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceStart: 1,
+        sequenceEnd: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+    const body = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-collector-outcomes",
+        metrics: [
           {
-            collectorId: "official.memory",
-            state: 3,
-            failure: { phase: 2, code: 6 },
+            collectedAtMs: 1_725_000_000_000,
+            collectorOutcomes: [
+              {
+                collectorId: "official.memory",
+                state: 3,
+                failure: { phase: 2, code: "official.memory.future-code" },
+              },
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
           },
-          { collectorId: "official.host-profile", state: 1 },
         ],
-        sequence: 2,
-      }],
-      probeId: registration.probeId,
-      sequenceStart: 2,
-      sequenceEnd: 2,
-      snapshots: [{
-        collectorId: "official.host-profile",
-        hostProfile: runtimeProfile,
-        snapshotHash: hashStableHostProfile(runtimeProfile),
-      }],
-    })).finish();
+        probeId: registration.probeId,
+        sequenceStart: 2,
+        sequenceEnd: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            hostProfile: runtimeProfile,
+            snapshotHash: hashStableHostProfile(runtimeProfile),
+          },
+        ],
+      }),
+    ).finish();
     for (let retry = 0; retry < 2; retry += 1) {
-      const response = await app.request("/api/probe/report", signedProbeRequest(registration, "/api/probe/report", body));
+      const response = await app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
       expect(response.status).toBe(200);
     }
-    expect(database.sqlite.prepare("select collector_id, state, failure_phase, failure_code from metric_collector_outcomes order by collector_id").all()).toEqual([
-      { collector_id: "official.host-profile", state: 1, failure_phase: null, failure_code: null },
-      { collector_id: "official.memory", state: 3, failure_phase: 2, failure_code: 6 },
+    expect(
+      database.sqlite
+        .prepare(
+          "select collector_id, state, failure_phase, failure_code from metric_collector_outcomes order by collector_id",
+        )
+        .all(),
+    ).toEqual([
+      {
+        collector_id: "official.host-profile",
+        state: 1,
+        failure_phase: null,
+        failure_code: null,
+      },
+      {
+        collector_id: "official.memory",
+        state: 3,
+        failure_phase: 2,
+        failure_code: "official.memory.future-code",
+      },
     ]);
+    database.close();
+  });
+
+  it("bounds collector-owned failure codes while keeping unknown valid codes inert", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+
+    for (const [index, code] of [
+      "x",
+      "Official.memory.bad",
+      "official.cpu.wrong-owner",
+      `official.memory.${"x".repeat(81)}`,
+    ].entries()) {
+      const bootId = `boot-invalid-outcome-${index}`;
+      const boot = ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          metrics: [],
+          probeAssetBundleVersion: "1.2.3",
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceStart: 1,
+          sequenceEnd: 1,
+        }),
+      ).finish();
+      expect(
+        (
+          await app.request(
+            "/api/probe/report",
+            signedProbeRequest(registration, "/api/probe/report", boot),
+          )
+        ).status,
+      ).toBe(200);
+      const malformed = ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_000,
+              collectorOutcomes: [
+                {
+                  collectorId: "official.memory",
+                  state: 3,
+                  failure: { phase: 2, code },
+                },
+              ],
+              sequence: 2,
+            },
+          ],
+          probeId: registration.probeId,
+          sequenceStart: 2,
+          sequenceEnd: 2,
+        }),
+      ).finish();
+      expect(
+        (
+          await app.request(
+            "/api/probe/report",
+            signedProbeRequest(registration, "/api/probe/report", malformed),
+          )
+        ).status,
+      ).toBe(400);
+    }
+    database.close();
+  });
+
+  it("normalizes the frozen N-1 numeric failure slot without extending it", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-legacy-outcome",
+        metrics: [],
+        probeAssetBundleVersion: "1.2.3",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceStart: 1,
+        sequenceEnd: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+    const legacy = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-legacy-outcome",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            collectorOutcomes: [
+              {
+                collectorId: "official.memory",
+                state: 3,
+                failure: { phase: 2, legacyCode: 6 },
+              },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceStart: 2,
+        sequenceEnd: 2,
+      }),
+    ).finish();
+
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", legacy),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      database.sqlite
+        .prepare("select failure_code from metric_collector_outcomes")
+        .get(),
+    ).toEqual({
+      failure_code: "official.memory.facts-malformed",
+    });
+    database.close();
+  });
+
+  it("rejects hash-only Host Profile Produced without satisfying readiness", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const boot = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-hash-only-readiness",
+        metrics: [],
+        probeAssetBundleVersion: "1.2.3",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceStart: 1,
+        sequenceEnd: 1,
+      }),
+    ).finish();
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", boot),
+        )
+      ).status,
+    ).toBe(200);
+    const hashOnly = ReportRequest.encode(
+      ReportRequest.create({
+        bootId: "boot-hash-only-readiness",
+        metrics: [
+          {
+            collectedAtMs: 1_725_000_000_000,
+            collectorOutcomes: [
+              { collectorId: "official.host-profile", state: 1 },
+            ],
+            sequence: 2,
+          },
+        ],
+        probeId: registration.probeId,
+        sequenceStart: 2,
+        sequenceEnd: 2,
+        snapshots: [
+          {
+            collectorId: "official.host-profile",
+            snapshotHash: hashStableHostProfile(sampleHostProfileSnapshot()),
+          },
+        ],
+      }),
+    ).finish();
+
+    expect(
+      (
+        await app.request(
+          "/api/probe/report",
+          signedProbeRequest(registration, "/api/probe/report", hashOnly),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      database.sqlite.prepare("select status from enrollment_tokens").get(),
+    ).toEqual({ status: "verifying" });
     database.close();
   });
 
@@ -2021,7 +2288,9 @@ describe("Probe report API", () => {
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const ReportResponse = root.enoki.v1.ProbeReportResponse;
     const hostProfile = hostProfileCrossRuntimeCanonicalFixture();
-    expect(hashStableHostProfile(hostProfile)).toBe(hostProfileCrossRuntimeCanonicalHash);
+    expect(hashStableHostProfile(hostProfile)).toBe(
+      hostProfileCrossRuntimeCanonicalHash,
+    );
     const body = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-cross-runtime-host-profile",

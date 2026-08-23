@@ -28,7 +28,7 @@ export type RawMetricSampleInput = {
   collectorOutcomes?: Array<{
     collectorId: string;
     state: 1 | 2 | 3;
-    failureCode: number | null;
+    failureCode: string | null;
     failurePhase: 1 | 2 | null;
   }>;
   cpuCores?: Array<{

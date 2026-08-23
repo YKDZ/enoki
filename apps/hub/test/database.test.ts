@@ -1167,7 +1167,8 @@ function createHost(
   database: ReturnType<typeof initializeHubDatabase>,
   input: { id: number; probeId: string },
 ) {
-  database.sqlite.prepare(`insert into managed_hosts (
+  database.sqlite
+    .prepare(`insert into managed_hosts (
     id, probe_id, probe_secret_hash, display_name, display_name_edited,
     connect_address, created_at_ms, clock_skew_detected, last_clock_skew_ms,
     probe_configuration_version

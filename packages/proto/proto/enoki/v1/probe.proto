@@ -4,6 +4,7 @@ package enoki.v1;
 
 import "enoki/v1/configuration.proto";
 import "enoki/v1/collectors/host_profile.proto";
+import "enoki/v1/collectors/system_state.proto";
 import "enoki/v1/metrics.proto";
 import "enoki/v1/operations.proto";
 
@@ -66,7 +67,7 @@ message ProbeReportRequest {
   string enrollment_id = 13;
   ObservationWindowFailure observation_window_failure = 14;
   repeated CpuResourceCollectionOutcome cpu_resource_collection_outcomes = 15;
-  // Present on the observation-free sequence-one Boot Report.
+  // 出现在不含 Observation 的 sequence-one Boot Report。
   string probe_asset_bundle_version = 16;
 }
 

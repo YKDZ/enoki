@@ -2561,6 +2561,272 @@ export namespace enoki {
             public static getTypeUrl(typeUrlPrefix?: string): string;
         }
 
+        /** Properties of a CpuCounterResourceFact. */
+        interface ICpuCounterResourceFact {
+
+            /** CpuCounterResourceFact name */
+            name?: (string|null);
+
+            /** CpuCounterResourceFact user */
+            user?: (number|Long|null);
+
+            /** CpuCounterResourceFact nice */
+            nice?: (number|Long|null);
+
+            /** CpuCounterResourceFact system */
+            system?: (number|Long|null);
+
+            /** CpuCounterResourceFact idle */
+            idle?: (number|Long|null);
+
+            /** CpuCounterResourceFact iowait */
+            iowait?: (number|Long|null);
+
+            /** CpuCounterResourceFact irq */
+            irq?: (number|Long|null);
+
+            /** CpuCounterResourceFact softirq */
+            softirq?: (number|Long|null);
+
+            /** CpuCounterResourceFact steal */
+            steal?: (number|Long|null);
+        }
+
+        /** Represents a CpuCounterResourceFact. */
+        class CpuCounterResourceFact implements ICpuCounterResourceFact {
+
+            /**
+             * Constructs a new CpuCounterResourceFact.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ICpuCounterResourceFact);
+
+            /** CpuCounterResourceFact name. */
+            public name: string;
+
+            /** CpuCounterResourceFact user. */
+            public user: (number|Long);
+
+            /** CpuCounterResourceFact nice. */
+            public nice: (number|Long);
+
+            /** CpuCounterResourceFact system. */
+            public system: (number|Long);
+
+            /** CpuCounterResourceFact idle. */
+            public idle: (number|Long);
+
+            /** CpuCounterResourceFact iowait. */
+            public iowait: (number|Long);
+
+            /** CpuCounterResourceFact irq. */
+            public irq: (number|Long);
+
+            /** CpuCounterResourceFact softirq. */
+            public softirq: (number|Long);
+
+            /** CpuCounterResourceFact steal. */
+            public steal: (number|Long);
+
+            /**
+             * Creates a new CpuCounterResourceFact instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns CpuCounterResourceFact instance
+             */
+            public static create(properties?: enoki.v1.ICpuCounterResourceFact): enoki.v1.CpuCounterResourceFact;
+
+            /**
+             * Encodes the specified CpuCounterResourceFact message. Does not implicitly {@link enoki.v1.CpuCounterResourceFact.verify|verify} messages.
+             * @param message CpuCounterResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ICpuCounterResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified CpuCounterResourceFact message, length delimited. Does not implicitly {@link enoki.v1.CpuCounterResourceFact.verify|verify} messages.
+             * @param message CpuCounterResourceFact message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ICpuCounterResourceFact, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a CpuCounterResourceFact message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns CpuCounterResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.CpuCounterResourceFact;
+
+            /**
+             * Decodes a CpuCounterResourceFact message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns CpuCounterResourceFact
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.CpuCounterResourceFact;
+
+            /**
+             * Verifies a CpuCounterResourceFact message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a CpuCounterResourceFact message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns CpuCounterResourceFact
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.CpuCounterResourceFact;
+
+            /**
+             * Creates a plain object from a CpuCounterResourceFact message. Also converts values to other types if specified.
+             * @param message CpuCounterResourceFact
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.CpuCounterResourceFact, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this CpuCounterResourceFact to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for CpuCounterResourceFact
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a SystemStateResourceResult. */
+        interface ISystemStateResourceResult {
+
+            /** SystemStateResourceResult cpuCounters */
+            cpuCounters?: (enoki.v1.ICpuCounterResourceFact[]|null);
+
+            /** SystemStateResourceResult procLoadavg */
+            procLoadavg?: (string|null);
+
+            /** SystemStateResourceResult procMeminfo */
+            procMeminfo?: (string|null);
+
+            /** SystemStateResourceResult procUptime */
+            procUptime?: (string|null);
+
+            /** SystemStateResourceResult hostProfile */
+            hostProfile?: (enoki.v1.IHostProfileResourceFacts|null);
+        }
+
+        /** Represents a SystemStateResourceResult. */
+        class SystemStateResourceResult implements ISystemStateResourceResult {
+
+            /**
+             * Constructs a new SystemStateResourceResult.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.ISystemStateResourceResult);
+
+            /** SystemStateResourceResult cpuCounters. */
+            public cpuCounters: enoki.v1.ICpuCounterResourceFact[];
+
+            /** SystemStateResourceResult procLoadavg. */
+            public procLoadavg: string;
+
+            /** SystemStateResourceResult procMeminfo. */
+            public procMeminfo: string;
+
+            /** SystemStateResourceResult procUptime. */
+            public procUptime: string;
+
+            /** SystemStateResourceResult hostProfile. */
+            public hostProfile?: (enoki.v1.IHostProfileResourceFacts|null);
+
+            /**
+             * Creates a new SystemStateResourceResult instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns SystemStateResourceResult instance
+             */
+            public static create(properties?: enoki.v1.ISystemStateResourceResult): enoki.v1.SystemStateResourceResult;
+
+            /**
+             * Encodes the specified SystemStateResourceResult message. Does not implicitly {@link enoki.v1.SystemStateResourceResult.verify|verify} messages.
+             * @param message SystemStateResourceResult message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.ISystemStateResourceResult, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified SystemStateResourceResult message, length delimited. Does not implicitly {@link enoki.v1.SystemStateResourceResult.verify|verify} messages.
+             * @param message SystemStateResourceResult message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.ISystemStateResourceResult, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a SystemStateResourceResult message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns SystemStateResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.SystemStateResourceResult;
+
+            /**
+             * Decodes a SystemStateResourceResult message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns SystemStateResourceResult
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.SystemStateResourceResult;
+
+            /**
+             * Verifies a SystemStateResourceResult message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a SystemStateResourceResult message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns SystemStateResourceResult
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.SystemStateResourceResult;
+
+            /**
+             * Creates a plain object from a SystemStateResourceResult message. Also converts values to other types if specified.
+             * @param message SystemStateResourceResult
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.SystemStateResourceResult, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this SystemStateResourceResult to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for SystemStateResourceResult
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
         /** Properties of a MetricSample. */
         interface IMetricSample {
 
@@ -2925,8 +3191,11 @@ export namespace enoki {
             /** CollectorFailure phase */
             phase?: (enoki.v1.CollectorFailurePhase|null);
 
+            /** CollectorFailure legacyCode */
+            legacyCode?: (number|null);
+
             /** CollectorFailure code */
-            code?: (enoki.v1.CollectorFailureCode|null);
+            code?: (string|null);
         }
 
         /** Represents a CollectorFailure. */
@@ -2941,8 +3210,11 @@ export namespace enoki {
             /** CollectorFailure phase. */
             public phase: enoki.v1.CollectorFailurePhase;
 
+            /** CollectorFailure legacyCode. */
+            public legacyCode: number;
+
             /** CollectorFailure code. */
-            public code: enoki.v1.CollectorFailureCode;
+            public code: string;
 
             /**
              * Creates a new CollectorFailure instance using the specified properties.
@@ -3027,21 +3299,6 @@ export namespace enoki {
             COLLECTOR_FAILURE_PHASE_UNSPECIFIED = 0,
             COLLECTOR_FAILURE_PHASE_RESOURCE = 1,
             COLLECTOR_FAILURE_PHASE_CALCULATION = 2
-        }
-
-        /** CollectorFailureCode enum. */
-        enum CollectorFailureCode {
-            COLLECTOR_FAILURE_CODE_UNSPECIFIED = 0,
-            COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE = 1,
-            COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED = 2,
-            COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED = 3,
-            COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED = 4,
-            COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED = 5,
-            COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED = 6,
-            COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED = 7,
-            COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED = 8,
-            COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE = 9,
-            COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED = 10
         }
 
         /** Properties of a CpuCoreMetric. */

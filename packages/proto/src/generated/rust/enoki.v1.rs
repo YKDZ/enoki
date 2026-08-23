@@ -166,12 +166,12 @@ pub struct HostProfileSnapshot {
     pub cpu_physical_count: u32,
     #[prost(message, optional, tag = "17")]
     pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
-    /// Runtime-produced bundle evidence; Resource Providers cannot set it.
+    /// Runtime 生成的 Bundle 证据；Resource Provider 无权设置。
     #[prost(string, tag = "18")]
     pub probe_asset_bundle_version: ::prost::alloc::string::String,
 }
-/// Internal immutable facts returned by the fixed Host Profile Resource pull.
-/// This message never crosses the authenticated Probe--Hub reporting boundary.
+/// 固定 Host Profile Resource pull 返回的内部不可变事实。
+/// 此消息不会越过已认证的 Probe--Hub 报告边界。
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HostProfileResourceFacts {
     #[prost(string, tag = "1")]
@@ -239,6 +239,43 @@ pub struct NetworkInterfaceProfile {
     pub name: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "2")]
     pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Provider 读取的一组不可变 CPU counter 事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CpuCounterResourceFact {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub user: u64,
+    #[prost(uint64, tag = "3")]
+    pub nice: u64,
+    #[prost(uint64, tag = "4")]
+    pub system: u64,
+    #[prost(uint64, tag = "5")]
+    pub idle: u64,
+    #[prost(uint64, tag = "6")]
+    pub iowait: u64,
+    #[prost(uint64, tag = "7")]
+    pub irq: u64,
+    #[prost(uint64, tag = "8")]
+    pub softirq: u64,
+    #[prost(uint64, tag = "9")]
+    pub steal: u64,
+}
+/// 一次固定 pull 的完整 typed Resource Result。
+/// procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SystemStateResourceResult {
+    #[prost(message, repeated, tag = "1")]
+    pub cpu_counters: ::prost::alloc::vec::Vec<CpuCounterResourceFact>,
+    #[prost(string, tag = "2")]
+    pub proc_loadavg: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub proc_meminfo: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub proc_uptime: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub host_profile: ::core::option::Option<HostProfileResourceFacts>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuCoreMetric {
@@ -363,12 +400,16 @@ pub struct CollectorOutcome {
     #[prost(message, optional, tag = "3")]
     pub failure: ::core::option::Option<CollectorFailure>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CollectorFailure {
     #[prost(enumeration = "CollectorFailurePhase", tag = "1")]
     pub phase: i32,
-    #[prost(enumeration = "CollectorFailureCode", tag = "2")]
-    pub code: i32,
+    /// 冻结的旧 wire 兼容槽；不得新增数值或用于新 Collector。
+    #[prost(uint32, tag = "2")]
+    pub legacy_code: u32,
+    /// Collector 自有、namespaced 的稳定失败码。
+    #[prost(string, tag = "3")]
+    pub code: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -427,89 +468,6 @@ impl CollectorFailurePhase {
             "COLLECTOR_FAILURE_PHASE_UNSPECIFIED" => Some(Self::Unspecified),
             "COLLECTOR_FAILURE_PHASE_RESOURCE" => Some(Self::Resource),
             "COLLECTOR_FAILURE_PHASE_CALCULATION" => Some(Self::Calculation),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum CollectorFailureCode {
-    Unspecified = 0,
-    SystemStateUnavailable = 1,
-    SystemStateMalformed = 2,
-    SystemStateActivationBudgetExhausted = 3,
-    CpuCountersMalformed = 4,
-    LoadFactsMalformed = 5,
-    MemoryFactsMalformed = 6,
-    UptimeFactsMalformed = 7,
-    HostProfileFactsMalformed = 8,
-    HostProfileResourceUnavailable = 9,
-    HostProfileActivationBudgetExhausted = 10,
-}
-impl CollectorFailureCode {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "COLLECTOR_FAILURE_CODE_UNSPECIFIED",
-            Self::SystemStateUnavailable => {
-                "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE"
-            }
-            Self::SystemStateMalformed => "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED",
-            Self::SystemStateActivationBudgetExhausted => {
-                "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED"
-            }
-            Self::CpuCountersMalformed => "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED",
-            Self::LoadFactsMalformed => "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED",
-            Self::MemoryFactsMalformed => "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED",
-            Self::UptimeFactsMalformed => "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED",
-            Self::HostProfileFactsMalformed => {
-                "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED"
-            }
-            Self::HostProfileResourceUnavailable => {
-                "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE"
-            }
-            Self::HostProfileActivationBudgetExhausted => {
-                "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED"
-            }
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "COLLECTOR_FAILURE_CODE_UNSPECIFIED" => Some(Self::Unspecified),
-            "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_UNAVAILABLE" => {
-                Some(Self::SystemStateUnavailable)
-            }
-            "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_MALFORMED" => {
-                Some(Self::SystemStateMalformed)
-            }
-            "COLLECTOR_FAILURE_CODE_SYSTEM_STATE_ACTIVATION_BUDGET_EXHAUSTED" => {
-                Some(Self::SystemStateActivationBudgetExhausted)
-            }
-            "COLLECTOR_FAILURE_CODE_CPU_COUNTERS_MALFORMED" => {
-                Some(Self::CpuCountersMalformed)
-            }
-            "COLLECTOR_FAILURE_CODE_LOAD_FACTS_MALFORMED" => {
-                Some(Self::LoadFactsMalformed)
-            }
-            "COLLECTOR_FAILURE_CODE_MEMORY_FACTS_MALFORMED" => {
-                Some(Self::MemoryFactsMalformed)
-            }
-            "COLLECTOR_FAILURE_CODE_UPTIME_FACTS_MALFORMED" => {
-                Some(Self::UptimeFactsMalformed)
-            }
-            "COLLECTOR_FAILURE_CODE_HOST_PROFILE_FACTS_MALFORMED" => {
-                Some(Self::HostProfileFactsMalformed)
-            }
-            "COLLECTOR_FAILURE_CODE_HOST_PROFILE_RESOURCE_UNAVAILABLE" => {
-                Some(Self::HostProfileResourceUnavailable)
-            }
-            "COLLECTOR_FAILURE_CODE_HOST_PROFILE_ACTIVATION_BUDGET_EXHAUSTED" => {
-                Some(Self::HostProfileActivationBudgetExhausted)
-            }
             _ => None,
         }
     }
@@ -670,7 +628,7 @@ pub struct ProbeReportRequest {
     pub cpu_resource_collection_outcomes: ::prost::alloc::vec::Vec<
         CpuResourceCollectionOutcome,
     >,
-    /// Present on the observation-free sequence-one Boot Report.
+    /// 出现在不含 Observation 的 sequence-one Boot Report。
     #[prost(string, tag = "16")]
     pub probe_asset_bundle_version: ::prost::alloc::string::String,
 }
