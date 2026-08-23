@@ -347,8 +347,9 @@ function validPostactivationProgress(evidence: ProbeRepairEligibility) {
   }
   switch (evidence.journalPhase) {
     case "activation-started":
-    case "repair-required":
       return evidence.finalizedTargets === 0;
+    case "repair-required":
+      return evidence.finalizedTargets <= evidence.activatedTargets;
     case "finalizing":
       return evidence.activatedTargets === targetCount;
     case "stage-cleanup-required":

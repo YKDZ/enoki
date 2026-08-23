@@ -1,13 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::account::{
-        account_records_match_transaction, create_probe_ipc_group_with_commands,
-        classify_gshadow_lookup, create_transaction_identity_with_commands,
-        owned_ipc_group_record_matches,
-        remove_owned_ipc_group_with_commands,
+        account_records_match_transaction, classify_gshadow_lookup,
+        create_probe_ipc_group_with_commands, create_transaction_identity_with_commands,
+        owned_ipc_group_record_matches, remove_owned_ipc_group_with_commands,
     };
     use super::upgrade::{upgrade_destinations, write_operation_status};
+    use super::*;
     use crate::handoff::Enrollment;
     use crate::lifecycle::UpgradeCompletion;
     use crate::trust::BootstrapRole;
@@ -29,7 +28,9 @@ mod tests {
         assert!(provider.contains("ProtectHome=read-only"));
         assert!(provider.contains("BindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts"));
-        assert!(provider.contains("/proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats"));
+        assert!(
+            provider.contains("/proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats")
+        );
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("SocketBindDeny=ipv4:any"));
     }
@@ -235,6 +236,34 @@ mod tests {
             Ok(())
         }
     }
+
+    fn write_authority_upgrade_journal(
+        paths: &FixedInstallPaths,
+        schema_version: u16,
+        phase: &str,
+        activation_started: Option<bool>,
+        activated_targets: usize,
+        finalized_targets: usize,
+    ) -> String {
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        let marker = activation_started
+            .map(|started| format!("activation_started = {started}\n"))
+            .unwrap_or_default();
+        let journal = format!(
+            "schema_version = {schema_version}\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = {phase:?}\n{marker}activated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\n",
+            unsafe { libc::geteuid() },
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            format!("sha256:{}", "d".repeat(64)),
+            "e".repeat(64),
+            "f".repeat(64),
+        );
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        fs::write(&journal_path, &journal).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        journal
+    }
     fn trust() -> BuildTrust {
         BuildTrust {
             distribution: "enoki",
@@ -427,9 +456,9 @@ mod tests {
                     "/usr/sbin/groupadd" => Ok(()),
                     "/usr/sbin/useradd" => Err(InstallError::Account),
                     "/usr/sbin/groupdel" => Ok(()),
-                    "/usr/sbin/userdel" => panic!(
-                        "a failed useradd does not prove ownership of the visible user"
-                    ),
+                    "/usr/sbin/userdel" => {
+                        panic!("a failed useradd does not prove ownership of the visible user")
+                    }
                     _ => unreachable!(),
                 }
             },
@@ -463,10 +492,16 @@ mod tests {
 
         assert_eq!(identity, ServiceIdentity { uid: 123, gid: 456 });
         assert_eq!(calls.len(), 2);
-        assert!(calls[0]
-            .1
-            .contains("--password !enoki-bootstrap-0123456789abcdef"));
-        assert!(calls[1].1.contains("--comment enoki-bootstrap-0123456789abcdef"));
+        assert!(
+            calls[0]
+                .1
+                .contains("--password !enoki-bootstrap-0123456789abcdef")
+        );
+        assert!(
+            calls[1]
+                .1
+                .contains("--comment enoki-bootstrap-0123456789abcdef")
+        );
     }
 
     #[test]
@@ -476,7 +511,9 @@ mod tests {
             "!enoki-bootstrap-current",
             Some("enoki-probe:x:456:"),
             Some("enoki-probe:!enoki-bootstrap-previous::"),
-            Some("enoki-probe:x:123:456:enoki-bootstrap-previous:/var/lib/enoki-probe:/usr/sbin/nologin"),
+            Some(
+                "enoki-probe:x:123:456:enoki-bootstrap-previous:/var/lib/enoki-probe:/usr/sbin/nologin"
+            ),
             Some(ServiceIdentity { uid: 123, gid: 456 }),
         ));
     }
@@ -689,8 +726,15 @@ mod tests {
         }
         let paths = FixedInstallPaths::under(temporary.path());
         let source_bundle = bundle().with_test_complete_receipts(5);
-        let [mut source_probe, mut source_runtime, mut source_system_state, mut source_disk_health, mut source_lifecycle, mut source_acquirer, mut source_activator] =
-            std::array::from_fn(|_| component());
+        let [
+            mut source_probe,
+            mut source_runtime,
+            mut source_system_state,
+            mut source_disk_health,
+            mut source_lifecycle,
+            mut source_acquirer,
+            mut source_activator,
+        ] = std::array::from_fn(|_| component());
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
         activate_complete_fresh_current_probe(
@@ -721,8 +765,15 @@ mod tests {
         target_bundle.version = "1.2.4".to_owned();
         target_bundle.manifest_sha256 = "d".repeat(64);
         target_bundle.asset_set_manifest_sha256 = "e".repeat(64);
-        let [mut target_probe, mut target_runtime, mut target_system_state, mut target_disk_health, mut target_lifecycle, mut target_acquirer, mut target_activator] =
-            std::array::from_fn(|_| component());
+        let [
+            mut target_probe,
+            mut target_runtime,
+            mut target_system_state,
+            mut target_disk_health,
+            mut target_lifecycle,
+            mut target_acquirer,
+            mut target_activator,
+        ] = std::array::from_fn(|_| component());
         systemd.calls.clear();
         let attempt = consume_probe_upgrade_authority(
             &paths,
@@ -787,10 +838,7 @@ mod tests {
             "install_state_sha256 = {:?}",
             target_bundle.install_state_sha256()
         )));
-        assert!(identity_after.contains(&format!(
-            "target_manifest_sha256 = {:?}",
-            "d".repeat(64)
-        )));
+        assert!(identity_after.contains(&format!("target_manifest_sha256 = {:?}", "d".repeat(64))));
         let metadata = fs::read_to_string(paths.metadata()).unwrap();
         assert!(metadata.contains("schema_version = 5"));
         assert!(metadata.contains("bundle_version = \"1.2.4\""));
@@ -812,7 +860,7 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"41\""));
         assert!(journal.contains("phase = \"activated\""));
-        assert!(journal.contains("schema_version = 2"));
+        assert!(journal.contains("schema_version = 3"));
         assert!(journal.contains("activation_started = true"));
 
         let next_source = inspect_installed_probe_for_upgrade(&paths).unwrap();
@@ -820,8 +868,15 @@ mod tests {
         failed_target.version = "1.2.5".to_owned();
         failed_target.manifest_sha256 = "f".repeat(64);
         failed_target.asset_set_manifest_sha256 = "9".repeat(64);
-        let [mut failed_probe, mut failed_runtime, mut failed_system_state, mut failed_disk_health, mut failed_lifecycle, mut failed_acquirer, mut failed_activator] =
-            std::array::from_fn(|_| component());
+        let [
+            mut failed_probe,
+            mut failed_runtime,
+            mut failed_system_state,
+            mut failed_disk_health,
+            mut failed_lifecycle,
+            mut failed_acquirer,
+            mut failed_activator,
+        ] = std::array::from_fn(|_| component());
         systemd.fail_start = true;
         let failed_attempt = consume_probe_upgrade_authority(
             &paths,
@@ -882,7 +937,7 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"42\""));
         assert!(journal.contains("phase = \"repair-required\""));
-        assert!(journal.contains("schema_version = 2"));
+        assert!(journal.contains("schema_version = 3"));
         assert!(journal.contains("activation_started = true"));
 
         systemd.fail_start = false;
@@ -935,8 +990,15 @@ mod tests {
         }
         let paths = FixedInstallPaths::under(temporary.path());
         let source_bundle = bundle().with_test_complete_receipts(5);
-        let [mut source_probe, mut source_runtime, mut source_system_state, mut source_disk_health, mut source_lifecycle, mut source_acquirer, mut source_activator] =
-            std::array::from_fn(|_| component());
+        let [
+            mut source_probe,
+            mut source_runtime,
+            mut source_system_state,
+            mut source_disk_health,
+            mut source_lifecycle,
+            mut source_acquirer,
+            mut source_activator,
+        ] = std::array::from_fn(|_| component());
         activate_complete_fresh_current_probe(
             VerifiedCompleteFreshComponents {
                 probe: &mut source_probe,
@@ -970,8 +1032,15 @@ mod tests {
             authority_sha256: None,
         };
 
-        let [mut invalid_probe, mut invalid_runtime, mut invalid_system_state, mut invalid_disk_health, mut invalid_lifecycle, mut invalid_acquirer, mut invalid_activator] =
-            std::array::from_fn(|_| component());
+        let [
+            mut invalid_probe,
+            mut invalid_runtime,
+            mut invalid_system_state,
+            mut invalid_disk_health,
+            mut invalid_lifecycle,
+            mut invalid_acquirer,
+            mut invalid_activator,
+        ] = std::array::from_fn(|_| component());
         invalid_probe.set_len(4).unwrap();
         assert_eq!(
             upgrade_current_probe_for_operation(
@@ -992,14 +1061,19 @@ mod tests {
             ),
             Err(InstallError::InvalidVerifiedComponent)
         );
-        let journal_path = paths
-            .bootstrap_state()
-            .join("probe-upgrade-attempt.toml");
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
         let admitted = fs::read_to_string(&journal_path).unwrap();
         assert!(admitted.contains("phase = \"admitted\""));
 
-        let [mut retry_probe, mut retry_runtime, mut retry_system_state, mut retry_disk_health, mut retry_lifecycle, mut retry_acquirer, mut retry_activator] =
-            std::array::from_fn(|_| component());
+        let [
+            mut retry_probe,
+            mut retry_runtime,
+            mut retry_system_state,
+            mut retry_disk_health,
+            mut retry_lifecycle,
+            mut retry_acquirer,
+            mut retry_activator,
+        ] = std::array::from_fn(|_| component());
         assert_eq!(
             upgrade_current_probe_for_operation(
                 VerifiedUpgradeComponents {
@@ -1021,8 +1095,11 @@ mod tests {
             "the consumed authority cannot be replayed after pre-activation failure"
         );
 
-        fs::write(&journal_path, admitted.replace("phase = \"admitted\"", "phase = \"prepared\""))
-            .unwrap();
+        fs::write(
+            &journal_path,
+            admitted.replace("phase = \"admitted\"", "phase = \"prepared\""),
+        )
+        .unwrap();
         fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
         for destination in upgrade_destinations(&paths) {
             let name = destination.file_name().unwrap().to_str().unwrap();
@@ -1050,9 +1127,11 @@ mod tests {
         );
         let recovered = fs::read_to_string(&journal_path).unwrap();
         assert!(recovered.contains("phase = \"aborted\""));
-        assert!(upgrade_destinations(&paths).iter().all(|destination| {
-            fs::metadata(destination).unwrap().nlink() == 1
-        }));
+        assert!(
+            upgrade_destinations(&paths)
+                .iter()
+                .all(|destination| { fs::metadata(destination).unwrap().nlink() == 1 })
+        );
     }
 
     #[test]
@@ -1154,10 +1233,8 @@ mod tests {
         )
         .unwrap();
 
-        let journal = fs::read_to_string(
-            paths.bootstrap_state().join("probe-upgrade-attempt.toml"),
-        )
-        .unwrap();
+        let journal =
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
         assert!(journal.contains(&format!(
             "authority_sha256 = {:?}",
             format!("{:x}", Sha256::digest(canonical))
@@ -1216,9 +1293,10 @@ mod tests {
         assert_eq!(signed.evidence.expires_at_ms, 1_725_000_060_000);
         assert_eq!(signed.evidence.request_nonce, "request-nonce-1");
         assert_eq!(signed.signature.len(), 64);
+        let migrated_journal = fs::read_to_string(&journal_path).unwrap();
         assert_eq!(
             signed.evidence.journal_sha256,
-            format!("{:x}", Sha256::digest(journal.as_bytes()))
+            format!("{:x}", Sha256::digest(migrated_journal.as_bytes()))
         );
 
         let eligibility = issue_probe_repair_eligibility(&paths).unwrap();
@@ -1270,7 +1348,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
         let prepared = format!(
-            "schema_version = 2\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"prepared\"\nactivation_started = false\nactivated_targets = 0\nfinalized_targets = 0\n",
+            "schema_version = 3\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"prepared\"\nactivation_started = false\nactivated_targets = 0\nfinalized_targets = 0\n",
             "a".repeat(64),
             "b".repeat(64),
             "c".repeat(64),
@@ -1293,9 +1371,11 @@ mod tests {
             ),
             Err(InstallError::Io),
         );
-        assert!(fs::read_to_string(&journal_path)
-            .unwrap()
-            .contains("phase = \"prepared\""));
+        assert!(
+            fs::read_to_string(&journal_path)
+                .unwrap()
+                .contains("phase = \"prepared\"")
+        );
         assert_eq!(
             upgrade::transition_upgrade_attempt_phase(
                 &paths,
@@ -1354,6 +1434,156 @@ mod tests {
             0,
             "the durable boundary precedes systemd stop and the first target rename",
         );
+    }
+
+    #[test]
+    fn legacy_schema2_journals_migrate_only_with_proven_postactivation_progress() {
+        for (phase, activated, finalized, accepted) in [
+            ("activation-started", 0, 0, true),
+            ("finalizing", 20, 7, true),
+            ("repair-required", 0, 0, false),
+        ] {
+            let temporary = tempdir().unwrap();
+            let paths = FixedInstallPaths::under(temporary.path());
+            fs::create_dir_all(paths.bootstrap_state()).unwrap();
+            fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+            fs::write(
+                paths.metadata(),
+                format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+            )
+            .unwrap();
+            fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+            let journal = format!(
+                "schema_version = 2\noperation_id = \"legacy-v2\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = {phase:?}\nactivated_targets = {activated}\nfinalized_targets = {finalized}\n",
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                format!("sha256:{}", "d".repeat(64)),
+                "e".repeat(64),
+                "f".repeat(64),
+            );
+            let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+            fs::write(&journal_path, journal).unwrap();
+            fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+            let result = issue_probe_repair_eligibility(&paths);
+            assert_eq!(result.is_ok(), accepted, "legacy phase {phase}");
+            let persisted = fs::read_to_string(journal_path).unwrap();
+            if accepted {
+                assert!(persisted.contains("schema_version = 3"));
+                assert!(persisted.contains("activation_started = true"));
+            } else {
+                assert!(persisted.contains("schema_version = 2"));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_migration_failure_and_incoherent_schema3_are_zero_side_effect() {
+        for (schema, phase, marker, activated, finalized, fail_migration) in [
+            (2, "activation-started", None, 0, 0, true),
+            (1, "repair-required", None, 0, 0, false),
+            (3, "activation-started", Some(false), 0, 0, false),
+            (3, "finalizing", Some(true), 19, 7, false),
+        ] {
+            let temporary = tempdir().unwrap();
+            let paths = FixedInstallPaths::under(temporary.path());
+            let original = write_authority_upgrade_journal(
+                &paths, schema, phase, marker, activated, finalized,
+            );
+            let destinations = upgrade_destinations(&paths);
+            fs::create_dir_all(destinations[0].parent().unwrap()).unwrap();
+            fs::write(&destinations[0], b"unchanged").unwrap();
+            let staged = destinations[0].with_file_name(format!(
+                ".{}.enoki-upgrade-new",
+                destinations[0].file_name().unwrap().to_str().unwrap(),
+            ));
+            fs::write(&staged, b"staged").unwrap();
+            if fail_migration {
+                upgrade::fail_next_atomic_write_containing("schema_version = 3");
+            }
+
+            let mut systemd = Systemd::default();
+            assert!(recover_incomplete_probe_upgrade(&paths, &mut systemd).is_err());
+            assert!(systemd.calls.is_empty());
+            assert_eq!(fs::read(&destinations[0]).unwrap(), b"unchanged");
+            assert_eq!(fs::read(&staged).unwrap(), b"staged");
+            assert_eq!(
+                fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml"))
+                    .unwrap(),
+                original,
+            );
+        }
+    }
+
+    #[test]
+    fn finalizing_recovery_never_reactivates_and_preserves_progress_on_a_second_failure() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        fs::write(
+            paths.metadata(),
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+        )
+        .unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        write_authority_upgrade_journal(&paths, 3, "finalizing", Some(true), 20, 7);
+        let destinations = upgrade_destinations(&paths);
+        for destination in &destinations {
+            fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        }
+        let blocked_backup = destinations[7].with_file_name(format!(
+            ".{}.enoki-upgrade-old",
+            destinations[7].file_name().unwrap().to_str().unwrap(),
+        ));
+        fs::create_dir(&blocked_backup).unwrap();
+
+        let mut systemd = Systemd::default();
+        assert_eq!(
+            recover_incomplete_probe_upgrade(&paths, &mut systemd),
+            Err(InstallError::Io),
+        );
+        assert!(systemd.calls.is_empty());
+        let failed =
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
+        assert!(failed.contains("phase = \"repair-required\""));
+        assert!(failed.contains("activated_targets = 20"));
+        assert!(failed.contains("finalized_targets = 7"));
+        assert_eq!(
+            issue_probe_repair_eligibility(&paths)
+                .unwrap()
+                .evidence
+                .finalized_targets,
+            7,
+        );
+
+        assert_eq!(
+            recover_incomplete_probe_upgrade(&paths, &mut systemd),
+            Err(InstallError::Io),
+        );
+        assert!(systemd.calls.is_empty());
+        let failed_again =
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
+        assert!(failed_again.contains("phase = \"repair-required\""));
+        assert!(failed_again.contains("activated_targets = 20"));
+        assert!(failed_again.contains("finalized_targets = 7"));
+    }
+
+    #[test]
+    fn stale_upgrade_attempt_cas_cannot_overwrite_a_newer_tuple() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        let stale = write_authority_upgrade_journal(&paths, 3, "prepared", Some(false), 0, 0);
+        upgrade::write_upgrade_attempt_from_journal(&paths, &stale, "activation-started", 0, 0)
+            .unwrap();
+
+        assert_eq!(
+            upgrade::write_upgrade_attempt_from_journal(&paths, &stale, "activation-started", 1, 0,),
+            Err(InstallError::ExistingResidue),
+        );
+        let current =
+            fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
+        assert!(current.contains("activated_targets = 0"));
     }
 
     #[test]
@@ -1424,19 +1654,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(consumed.repair_operation_id, "repair-operation-1");
-        let repair_journal = fs::read_to_string(
-            paths.bootstrap_state().join("probe-repair-attempt.toml"),
-        )
-        .unwrap();
+        let repair_journal =
+            fs::read_to_string(paths.bootstrap_state().join("probe-repair-attempt.toml")).unwrap();
         assert!(repair_journal.contains("state = \"consumed\""));
         assert!(repair_journal.contains("repair_evidence_sha256 = "));
         assert!(repair_journal.contains("capsule_mac = "));
         fs::write(
             paths.bootstrap_state().join("probe-repair-attempt.toml"),
-            repair_journal.replace(
-                "state = \"consumed\"",
-                "state = \"completion-pending\"",
-            ),
+            repair_journal.replace("state = \"consumed\"", "state = \"completion-pending\""),
         )
         .unwrap();
         assert_eq!(
@@ -1467,7 +1692,10 @@ mod tests {
             .replace("finalized_targets = 0", "finalized_targets = 20");
         fs::write(&journal_path, &progressed).unwrap();
         fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(resume_probe_repair_intent(&paths).unwrap(), Some(consumed.clone()));
+        assert_eq!(
+            resume_probe_repair_intent(&paths).unwrap(),
+            Some(consumed.clone())
+        );
         mark_probe_repair_unresolved(&paths, &consumed).unwrap();
         assert!(
             fs::read_to_string(paths.bootstrap_state().join("probe-repair-attempt.toml"))
@@ -1479,23 +1707,16 @@ mod tests {
         assert!(status.contains("status = \"failed\""));
         assert!(status.contains("error_code = \"lifecycle.repair_unresolved\""));
         assert!(resume_probe_repair_intent(&paths).unwrap().is_none());
-        let repair_journal_path = paths
-            .bootstrap_state()
-            .join("probe-repair-attempt.toml");
+        let repair_journal_path = paths.bootstrap_state().join("probe-repair-attempt.toml");
         let unresolved_capsule = fs::read_to_string(&repair_journal_path).unwrap();
         let unresolved_status = status.clone();
         let mut rejected_systemd = Systemd::default();
         let mut rejected_cleanup = false;
         assert_eq!(
-            execute_authorized_probe_repair(
-                &paths,
-                &consumed,
-                &mut rejected_systemd,
-                |_, _| {
-                    rejected_cleanup = true;
-                    Ok(())
-                },
-            ),
+            execute_authorized_probe_repair(&paths, &consumed, &mut rejected_systemd, |_, _| {
+                rejected_cleanup = true;
+                Ok(())
+            },),
             Err(InstallError::ExistingResidue),
         );
         assert_eq!(
@@ -1567,7 +1788,10 @@ mod tests {
         .unwrap();
         assert_eq!(resumed.repair_operation_id, "repair-operation-2");
         let cleanup_required = repair_required
-            .replace("phase = \"repair-required\"", "phase = \"stage-cleanup-required\"")
+            .replace(
+                "phase = \"repair-required\"",
+                "phase = \"stage-cleanup-required\"",
+            )
             .replace("activated_targets = 3", "activated_targets = 20")
             .replace("finalized_targets = 0", "finalized_targets = 20");
         fs::write(&journal_path, cleanup_required).unwrap();
@@ -1577,15 +1801,11 @@ mod tests {
             .join(".probe-repair-attempt.toml.enoki-write");
         fs::create_dir(&repair_write).unwrap();
         fs::write(repair_write.join("blocks-replace"), b"fault").unwrap();
-        let repair_running_status = fs::read_to_string(
-            paths.state().join("probe-operation-status.toml"),
-        )
-        .unwrap();
+        let repair_running_status =
+            fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap();
         let mut systemd = Systemd::default();
         assert_eq!(
-            execute_authorized_probe_repair(&paths, &resumed, &mut systemd, |_, _| {
-                Ok(())
-            }),
+            execute_authorized_probe_repair(&paths, &resumed, &mut systemd, |_, _| { Ok(()) }),
             Err(InstallError::Io),
         );
         assert_eq!(
@@ -1593,9 +1813,11 @@ mod tests {
             repair_running_status,
             "Repair finalization must not republish the failed Upgrade status",
         );
-        assert!(fs::read_to_string(&journal_path)
-            .unwrap()
-            .contains("phase = \"activated\""));
+        assert!(
+            fs::read_to_string(&journal_path)
+                .unwrap()
+                .contains("phase = \"activated\"")
+        );
         persist_probe_repair_execution_failure(&paths, &resumed).unwrap();
         let resumed = resume_probe_repair_intent(&paths).unwrap().unwrap();
         assert_eq!(resumed.state, RepairIntentState::Consumed);
@@ -1701,9 +1923,7 @@ mod tests {
                 recover_incomplete_probe_upgrade(&paths, &mut systemd),
                 Err(InstallError::Io),
             );
-            let journal_path = paths
-                .bootstrap_state()
-                .join("probe-upgrade-attempt.toml");
+            let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
             let failed_phase = fs::read_to_string(&journal_path).unwrap();
             match failure {
                 Failure::Status => assert!(failed_phase.contains("phase = \"aborted\"")),
@@ -1719,13 +1939,17 @@ mod tests {
                 .expect("explicit retry must complete the preactivation cleanup");
             assert!(!receipt.activated);
             assert!(systemd.calls.is_empty());
-            assert!(fs::read_to_string(&journal_path)
-                .unwrap()
-                .contains("phase = \"aborted\""));
+            assert!(
+                fs::read_to_string(&journal_path)
+                    .unwrap()
+                    .contains("phase = \"aborted\"")
+            );
             finalize_probe_upgrade_stage_cleanup(&paths, &receipt).unwrap();
-            assert!(destinations
-                .iter()
-                .all(|destination| fs::read(destination).unwrap() == b"old-source"));
+            assert!(
+                destinations
+                    .iter()
+                    .all(|destination| fs::read(destination).unwrap() == b"old-source")
+            );
         }
     }
 
@@ -1747,7 +1971,9 @@ mod tests {
         assert!(probe.contains("SupplementaryGroups=enoki-probe-ipc"));
         assert!(probe.contains("StateDirectory=enoki-probe"));
         assert!(probe.contains("StateDirectoryMode=0700"));
-        assert!(probe.contains("Wants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket"));
+        assert!(probe.contains(
+            "Wants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket"
+        ));
         assert!(runtime_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(runtime.contains("User=enoki-observation-runtime"));
         assert!(runtime.contains("PrivateNetwork=true"));
@@ -1768,11 +1994,15 @@ mod tests {
             "CPU Provider 必须能读取非进程类顶层 /proc/stat"
         );
         assert!(!provider.contains('%'));
-        assert!(runtime.contains("Requires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket"));
+        assert!(runtime.contains(
+            "Requires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket"
+        ));
         assert!(disk_provider_socket.contains("SocketGroup=enoki-observation-ipc"));
         assert!(disk_provider_socket.contains("MaxConnections=1"));
         assert!(disk_provider_socket.contains("TriggerLimitBurst=2"));
-        assert!(disk_provider.contains("ExecStart=/usr/local/bin/enoki-disk-health-resource-provider"));
+        assert!(
+            disk_provider.contains("ExecStart=/usr/local/bin/enoki-disk-health-resource-provider")
+        );
         assert!(disk_provider.contains("RuntimeMaxSec=10s"));
         assert!(disk_provider.contains("KillMode=control-group"));
         assert!(disk_provider.contains("CapabilityBoundingSet=CAP_SYS_RAWIO"));
@@ -1783,7 +2013,9 @@ mod tests {
         assert!(disk_provider.contains("BindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl"));
         assert!(upgrade_socket.contains("ListenStream=/run/enoki-probe-lifecycle-upgrade.sock"));
         assert!(upgrade_socket.contains("SocketGroup=enoki-probe-ipc"));
-        assert!(upgrade.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade"));
+        assert!(
+            upgrade.contains("ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion --upgrade")
+        );
         assert!(upgrade.contains("PrivateNetwork=true"));
         assert!(upgrade.contains("RestrictAddressFamilies=AF_UNIX"));
         assert!(upgrade.contains("IPAddressDeny=any"));
@@ -1830,7 +2062,11 @@ mod tests {
             assert!(unit.contains("MemoryMax="), "{role} 缺少内存上限");
         }
 
-        for unit in [service_unit(), observation_runtime_unit(), cpu_provider_unit()] {
+        for unit in [
+            service_unit(),
+            observation_runtime_unit(),
+            cpu_provider_unit(),
+        ] {
             assert!(unit.contains("PrivateDevices=true"));
         }
         for provider in [cpu_provider_unit(), disk_health_provider_unit()] {
@@ -1866,12 +2102,8 @@ mod tests {
     fn probe_startup_does_not_propagate_runtime_crash_budget_exhaustion() {
         let probe = service_unit();
 
-        assert!(probe.contains(
-            "After=network-online.target enoki-observation-runtime.socket\n"
-        ));
-        assert!(probe.contains(
-            "Wants=network-online.target enoki-observation-runtime.socket\n"
-        ));
+        assert!(probe.contains("After=network-online.target enoki-observation-runtime.socket\n"));
+        assert!(probe.contains("Wants=network-online.target enoki-observation-runtime.socket\n"));
         assert!(!probe.contains("Requires=enoki-observation-runtime.socket\n"));
     }
 
@@ -1891,7 +2123,11 @@ mod tests {
                 "TriggerLimitBurst=2",
             ),
         ];
-        assert_eq!(sockets.len(), 2, "签名角色闭包固定全局最多两个 Provider 实例");
+        assert_eq!(
+            sockets.len(),
+            2,
+            "签名角色闭包固定全局最多两个 Provider 实例"
+        );
         for (socket, service, interval, burst) in sockets {
             for property in [
                 "Accept=true",
@@ -1917,7 +2153,10 @@ mod tests {
                 "SendSIGKILL=yes",
                 "OOMPolicy=kill",
             ] {
-                assert!(service.contains(property), "Provider service 缺少 {property}");
+                assert!(
+                    service.contains(property),
+                    "Provider service 缺少 {property}"
+                );
             }
         }
     }
@@ -2043,16 +2282,23 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(accounts.ipc_calls, ["create", "remove"]);
-        assert!(!temporary
-            .path()
-            .join("usr/local/bin/enoki-observation-runtime")
-            .exists());
+        assert!(
+            !temporary
+                .path()
+                .join("usr/local/bin/enoki-observation-runtime")
+                .exists()
+        );
     }
 
     #[test]
     fn complete_fresh_install_does_not_publish_the_retired_operation_entrypoint() {
         let temporary = tempdir().unwrap();
-        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
         let mut probe = component();
@@ -2084,19 +2330,23 @@ mod tests {
         .unwrap();
 
         let config = fs::read_to_string(
-            temporary.path().join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+            temporary
+                .path()
+                .join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
         )
         .unwrap();
-        let metadata = fs::read_to_string(temporary.path().join("etc/enoki/probe-install.toml"))
-            .unwrap();
+        let metadata =
+            fs::read_to_string(temporary.path().join("etc/enoki/probe-install.toml")).unwrap();
         assert!(metadata.contains("probe_ipc_group = \"enoki-probe-ipc\""));
         assert!(metadata.contains("probe_ipc_group_ownership = \"!enoki-bootstrap-"));
         assert!(!config.contains("upgrader_launch"));
         assert!(!config.contains("operation_sudoers_path"));
-        assert!(!temporary
-            .path()
-            .join("etc/sudoers.d/enoki-probe-operations")
-            .exists());
+        assert!(
+            !temporary
+                .path()
+                .join("etc/sudoers.d/enoki-probe-operations")
+                .exists()
+        );
 
         let installed_probe_unit = fs::read(
             temporary
@@ -2129,7 +2379,12 @@ mod tests {
     #[test]
     fn second_bootstrap_role_failure_cleans_the_first_receipt_and_allows_retry() {
         let temporary = tempdir().unwrap();
-        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
         let paths = FixedInstallPaths::under(temporary.path());
@@ -2162,7 +2417,12 @@ mod tests {
         );
         assert!(!paths.bootstrap_acquirer().exists());
         assert!(!paths.bootstrap_activator().exists());
-        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(
+            !paths
+                .bootstrap_state()
+                .join("activation-journal.json")
+                .exists()
+        );
 
         activate_fresh_current_probe(
             VerifiedFreshComponents {
@@ -2183,7 +2443,12 @@ mod tests {
     #[test]
     fn early_abort_preserves_a_replaced_role_and_restart_reports_closed_residue() {
         let temporary = tempdir().unwrap();
-        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
         let paths = FixedInstallPaths::under(temporary.path());
@@ -2223,7 +2488,10 @@ mod tests {
                 )],
             }
         );
-        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"replacement");
+        assert_eq!(
+            fs::read(paths.bootstrap_acquirer()).unwrap(),
+            b"replacement"
+        );
         assert_eq!(accounts.calls, ["absent", "remove"]);
         assert!(
             fs::read_dir(paths.bootstrap_state())
@@ -2235,7 +2503,12 @@ mod tests {
                     .starts_with("activation-stage-")),
             "a path ownership failure must not skip later staging compensation"
         );
-        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(
+            paths
+                .bootstrap_state()
+                .join("activation-journal.json")
+                .exists()
+        );
 
         assert!(matches!(
             activate_fresh_current_probe(
@@ -2257,7 +2530,10 @@ mod tests {
                     InstallErrorKind::ExistingResidue,
                 ))
         ));
-        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"replacement");
+        assert_eq!(
+            fs::read(paths.bootstrap_acquirer()).unwrap(),
+            b"replacement"
+        );
     }
 
     #[test]
@@ -2289,7 +2565,12 @@ mod tests {
         }
 
         let temporary = tempdir().unwrap();
-        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
         let paths = FixedInstallPaths::under(temporary.path());
@@ -2317,7 +2598,12 @@ mod tests {
         assert_eq!(accounts.calls, ["absent", "create", "remove"]);
         assert!(!paths.bootstrap_acquirer().exists());
         assert!(!paths.bootstrap_activator().exists());
-        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(
+            !paths
+                .bootstrap_state()
+                .join("activation-journal.json")
+                .exists()
+        );
 
         activate_fresh_current_probe(
             VerifiedFreshComponents {
@@ -2386,9 +2672,17 @@ mod tests {
             }
         }
 
-        for failure in [PreparedFailure::RecordIdentity, PreparedFailure::StageLayout] {
+        for failure in [
+            PreparedFailure::RecordIdentity,
+            PreparedFailure::StageLayout,
+        ] {
             let temporary = tempdir().unwrap();
-            for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            for parent in [
+                "usr/local/bin",
+                "var/lib",
+                "etc/systemd/system",
+                "etc/sudoers.d",
+            ] {
                 fs::create_dir_all(temporary.path().join(parent)).unwrap();
             }
             let paths = FixedInstallPaths::under(temporary.path());
@@ -2420,7 +2714,10 @@ mod tests {
             assert!(!paths.bootstrap_acquirer().exists(), "{failure:?}");
             assert!(!paths.bootstrap_activator().exists(), "{failure:?}");
             assert!(
-                !paths.bootstrap_state().join("activation-journal.json").exists(),
+                !paths
+                    .bootstrap_state()
+                    .join("activation-journal.json")
+                    .exists(),
                 "{failure:?}"
             );
 
@@ -2481,7 +2778,12 @@ mod tests {
         );
         assert!(!paths.bootstrap_acquirer().exists());
         assert!(!paths.bootstrap_activator().exists());
-        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(
+            !paths
+                .bootstrap_state()
+                .join("activation-journal.json")
+                .exists()
+        );
 
         systemd.fail_start = false;
         activate_fresh_current_probe(
@@ -2533,7 +2835,10 @@ mod tests {
             ),
             Err(InstallError::ExistingResidue)
         );
-        assert_eq!(fs::read(paths.bootstrap_acquirer()).unwrap(), b"preexisting");
+        assert_eq!(
+            fs::read(paths.bootstrap_acquirer()).unwrap(),
+            b"preexisting"
+        );
         assert!(!paths.bootstrap_activator().exists());
     }
 
@@ -2658,7 +2963,12 @@ mod tests {
                 )],
             }
         );
-        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(
+            paths
+                .bootstrap_state()
+                .join("activation-journal.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -2739,7 +3049,12 @@ mod tests {
         }
 
         let temporary = tempdir().unwrap();
-        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
         write_bootstrap_roles(temporary.path());

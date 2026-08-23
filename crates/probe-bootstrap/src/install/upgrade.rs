@@ -587,51 +587,261 @@ pub fn issue_probe_repair_eligibility(
 fn repair_eligibility_from_postactivation_journal(
     paths: &FixedInstallPaths,
 ) -> Result<RepairEligibilityV1, InstallError> {
-    let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
-    let journal = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
-    if metadata_scalar(&journal, "schema_version").as_deref() != Some("2") {
+    let state = load_validated_upgrade_attempt(paths)?;
+    if state.schema_version != 3 || !state.activation_started {
         return Err(InstallError::ExistingResidue);
     }
-    if metadata_scalar(&journal, "activation_started").as_deref() != Some("true") {
-        return Err(InstallError::ExistingResidue);
-    }
-    let phase = journal_string(&journal, "phase")?;
+    let journal = state.contents;
+    let phase = state.phase.as_str();
     if !matches!(
         phase,
         "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
     ) {
         return Err(InstallError::ExistingResidue);
     }
-    let activated_targets = journal_usize(&journal, "activated_targets")?;
-    let finalized_targets = journal_usize(&journal, "finalized_targets")?;
-    let target_count = upgrade_destinations(paths).len();
-    let valid_progress = match phase {
-        "activation-started" | "repair-required" => finalized_targets == 0,
-        "finalizing" => activated_targets == target_count,
-        "stage-cleanup-required" => {
-            activated_targets == target_count && finalized_targets == target_count
-        }
-        _ => false,
-    };
-    if !valid_progress || activated_targets > target_count || finalized_targets > target_count {
-        return Err(InstallError::ExistingResidue);
-    }
+    let activated_targets = state.activated_targets;
+    let finalized_targets = state.finalized_targets;
+    let authority_scope = state
+        .binding
+        .authority_scope
+        .as_ref()
+        .ok_or(InstallError::ExistingResidue)?;
     Ok(RepairEligibilityV1 {
         schema_version: 1,
-        hub_origin: journal_string(&journal, "hub_origin")?.to_owned(),
-        host_id: journal_string(&journal, "host_id")?.to_owned(),
-        probe_id: journal_string(&journal, "source_probe_id")?.to_owned(),
-        failed_operation_id: journal_string(&journal, "operation_id")?.to_owned(),
-        failed_authority_sha256: journal_string(&journal, "authority_sha256")?.to_owned(),
+        hub_origin: authority_scope.hub_origin.clone(),
+        host_id: authority_scope.host_id.clone(),
+        probe_id: state.binding.source_probe_id.clone(),
+        failed_operation_id: state.binding.operation_id.clone(),
+        failed_authority_sha256: state.binding.authority_sha256.clone(),
         journal_sha256: format!("{:x}", Sha256::digest(journal.as_bytes())),
         journal_phase: phase.to_owned(),
         activated_targets,
         finalized_targets,
-        target_bundle_version: journal_string(&journal, "target_bundle_version")?.to_owned(),
-        target_asset_set_digest: journal_string(&journal, "target_asset_set_digest")?.to_owned(),
-        target_manifest_sha256: journal_string(&journal, "target_manifest_sha256")?.to_owned(),
-        verified_stage_sha256: journal_string(&journal, "verified_stage_sha256")?.to_owned(),
+        target_bundle_version: state.binding.target_bundle_version.clone(),
+        target_asset_set_digest: authority_scope.target_asset_set_digest.clone(),
+        target_manifest_sha256: state.binding.target_manifest_sha256.clone(),
+        verified_stage_sha256: authority_scope.verified_stage_sha256.clone(),
     })
+}
+
+struct ValidatedUpgradeAttemptJournal {
+    contents: String,
+    schema_version: u16,
+    binding: ValidatedUpgradeAttemptBinding,
+    phase: String,
+    activation_started: bool,
+    activated_targets: usize,
+    finalized_targets: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidatedUpgradeAttemptBinding {
+    operation_id: String,
+    stage_owner_uid: u32,
+    authority_sha256: String,
+    source_probe_id: String,
+    source_bundle_version: String,
+    source_install_state_sha256: String,
+    source_manifest_sha256: String,
+    target_bundle_version: String,
+    target_manifest_sha256: String,
+    authority_scope: Option<ValidatedUpgradeAuthorityScope>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValidatedUpgradeAuthorityScope {
+    hub_origin: String,
+    host_id: String,
+    target_asset_set_digest: String,
+    verified_stage_sha256: String,
+}
+
+fn load_validated_upgrade_attempt(
+    paths: &FixedInstallPaths,
+) -> Result<ValidatedUpgradeAttemptJournal, InstallError> {
+    let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
+    let mut contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
+    let schema_version = metadata_scalar(&contents, "schema_version")
+        .as_deref()
+        .ok_or(InstallError::ExistingResidue)?
+        .parse::<u16>()
+        .map_err(|_| InstallError::ExistingResidue)?;
+    if !matches!(schema_version, 1 | 2 | 3) {
+        return Err(InstallError::ExistingResidue);
+    }
+    let operation_id = journal_string(&contents, "operation_id")?.to_owned();
+    let stage_owner_uid = journal_usize(&contents, "stage_owner_uid")?
+        .try_into()
+        .map_err(|_| InstallError::ExistingResidue)?;
+    let authority_sha256 = journal_string(&contents, "authority_sha256")?.to_owned();
+    let source_probe_id = journal_string(&contents, "source_probe_id")?.to_owned();
+    let source_bundle_version = journal_string(&contents, "source_bundle_version")?.to_owned();
+    let source_install_state_sha256 =
+        journal_string(&contents, "source_install_state_sha256")?.to_owned();
+    let source_manifest_sha256 = journal_string(&contents, "source_manifest_sha256")?.to_owned();
+    let target_bundle_version = journal_string(&contents, "target_bundle_version")?.to_owned();
+    let target_manifest_sha256 = journal_string(&contents, "target_manifest_sha256")?.to_owned();
+    if !valid_upgrade_identifier(&operation_id)
+        || !valid_upgrade_identifier(&source_probe_id)
+        || !valid_sha256(&authority_sha256)
+        || !valid_upgrade_version(&source_bundle_version)
+        || !valid_upgrade_version(&target_bundle_version)
+        || !valid_sha256(&source_install_state_sha256)
+        || !valid_sha256(&source_manifest_sha256)
+        || !valid_sha256(&target_manifest_sha256)
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let has_authority_scope = metadata_scalar(&contents, "hub_origin").is_some()
+        || metadata_scalar(&contents, "host_id").is_some()
+        || metadata_scalar(&contents, "target_asset_set_digest").is_some()
+        || metadata_scalar(&contents, "verified_stage_sha256").is_some();
+    let authority_scope = if has_authority_scope {
+        let hub_origin = journal_string(&contents, "hub_origin")?.to_owned();
+        let host_id = journal_string(&contents, "host_id")?.to_owned();
+        let target_asset_set_digest =
+            journal_string(&contents, "target_asset_set_digest")?.to_owned();
+        let verified_stage_sha256 = journal_string(&contents, "verified_stage_sha256")?.to_owned();
+        if hub_origin.is_empty()
+            || !valid_upgrade_identifier(&host_id)
+            || target_asset_set_digest
+                .strip_prefix("sha256:")
+                .is_none_or(|digest| !valid_sha256(digest))
+            || !valid_sha256(&verified_stage_sha256)
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        Some(ValidatedUpgradeAuthorityScope {
+            hub_origin,
+            host_id,
+            target_asset_set_digest,
+            verified_stage_sha256,
+        })
+    } else if schema_version == 2 {
+        return Err(InstallError::ExistingResidue);
+    } else {
+        None
+    };
+    let binding = ValidatedUpgradeAttemptBinding {
+        operation_id,
+        stage_owner_uid,
+        authority_sha256,
+        source_probe_id,
+        source_bundle_version,
+        source_install_state_sha256,
+        source_manifest_sha256,
+        target_bundle_version,
+        target_manifest_sha256,
+        authority_scope,
+    };
+    let phase = journal_string(&contents, "phase")?.to_owned();
+    let activated_targets = journal_usize(&contents, "activated_targets")?;
+    let finalized_targets = journal_usize(&contents, "finalized_targets")?;
+    let target_count = upgrade_destinations(paths).len();
+    let activation_started = match schema_version {
+        3 => match metadata_scalar(&contents, "activation_started").as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            _ => return Err(InstallError::ExistingResidue),
+        },
+        2 => match metadata_scalar(&contents, "activation_started").as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            None => infer_legacy_activation_started(
+                &phase,
+                activated_targets,
+                finalized_targets,
+                target_count,
+            )?,
+            _ => return Err(InstallError::ExistingResidue),
+        },
+        1 => infer_legacy_activation_started(
+            &phase,
+            activated_targets,
+            finalized_targets,
+            target_count,
+        )?,
+        _ => unreachable!(),
+    };
+    validate_upgrade_attempt_tuple(
+        &phase,
+        activation_started,
+        activated_targets,
+        finalized_targets,
+        target_count,
+    )?;
+    if schema_version == 2 {
+        let mut migrated = contents.replacen("schema_version = 2", "schema_version = 3", 1);
+        if metadata_scalar(&contents, "activation_started").is_none() {
+            migrated = migrated.replacen(
+                &format!("phase = {phase:?}\n"),
+                &format!("phase = {phase:?}\nactivation_started = {activation_started}\n"),
+                1,
+            );
+        }
+        if migrated == contents {
+            return Err(InstallError::ExistingResidue);
+        }
+        atomic_durable_write(&journal_path, migrated.as_bytes(), 0o600)?;
+        contents = migrated;
+    }
+    Ok(ValidatedUpgradeAttemptJournal {
+        contents,
+        schema_version: if schema_version == 2 {
+            3
+        } else {
+            schema_version
+        },
+        binding,
+        phase,
+        activation_started,
+        activated_targets,
+        finalized_targets,
+    })
+}
+
+fn infer_legacy_activation_started(
+    phase: &str,
+    activated: usize,
+    finalized: usize,
+    target_count: usize,
+) -> Result<bool, InstallError> {
+    match phase {
+        "consumed" | "admitted" | "prepared" | "aborted" => Ok(false),
+        "activation-started" => Ok(true),
+        "finalizing" | "stage-cleanup-required" | "activated" => Ok(true),
+        "repair-required" if activated > 0 || finalized > 0 => Ok(true),
+        "repair-required" => Err(InstallError::ExistingResidue),
+        _ => {
+            let _ = target_count;
+            Err(InstallError::ExistingResidue)
+        }
+    }
+}
+
+fn validate_upgrade_attempt_tuple(
+    phase: &str,
+    activation_started: bool,
+    activated: usize,
+    finalized: usize,
+    target_count: usize,
+) -> Result<(), InstallError> {
+    if finalized > activated || activated > target_count {
+        return Err(InstallError::ExistingResidue);
+    }
+    let valid = match phase {
+        "consumed" | "admitted" | "prepared" | "aborted" => {
+            !activation_started && activated == 0 && finalized == 0
+        }
+        "activation-started" => activation_started && finalized == 0,
+        "repair-required" => activation_started,
+        "finalizing" => activation_started && activated == target_count,
+        "stage-cleanup-required" | "activated" => {
+            activation_started && activated == target_count && finalized == target_count
+        }
+        _ => false,
+    };
+    valid.then_some(()).ok_or(InstallError::ExistingResidue)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1135,23 +1345,17 @@ pub(super) fn transition_upgrade_attempt_phase(
     paths: &FixedInstallPaths,
     transition: UpgradeAttemptTerminalTransition,
 ) -> Result<(), InstallError> {
-    let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
-    let contents = trusted_text(&journal, paths.expected_root_uid(), 0o600)?;
-    let current_phase = journal_string(&contents, "phase")?;
-    let schema2 = metadata_scalar(&contents, "schema_version").as_deref() == Some("2");
-    let activation_started =
-        metadata_scalar(&contents, "activation_started").as_deref() == Some("true");
-    let postactivation_proven = !schema2 || activation_started;
+    let state = load_validated_upgrade_attempt(paths)?;
     let phase = match transition {
         UpgradeAttemptTerminalTransition::AbortPreactivation
-            if matches!(current_phase, "consumed" | "admitted" | "prepared") =>
+            if matches!(state.phase.as_str(), "consumed" | "admitted" | "prepared") =>
         {
             "aborted"
         }
         UpgradeAttemptTerminalTransition::RequireRepair
-            if postactivation_proven
+            if state.activation_started
                 && matches!(
-                    current_phase,
+                    state.phase.as_str(),
                     "activation-started"
                         | "repair-required"
                         | "finalizing"
@@ -1161,27 +1365,19 @@ pub(super) fn transition_upgrade_attempt_phase(
             "repair-required"
         }
         UpgradeAttemptTerminalTransition::MarkActivated
-            if postactivation_proven && current_phase == "stage-cleanup-required" =>
+            if state.activation_started && state.phase == "stage-cleanup-required" =>
         {
             "activated"
         }
         _ => return Err(InstallError::ExistingResidue),
     };
-    let mut replacements = 0_u8;
-    let mut updated = String::new();
-    for line in contents.lines() {
-        if line.starts_with("phase = ") {
-            replacements += 1;
-            updated.push_str(&format!("phase = {phase:?}\n"));
-        } else {
-            updated.push_str(line);
-            updated.push('\n');
-        }
-    }
-    if replacements != 1 {
-        return Err(InstallError::ExistingResidue);
-    }
-    atomic_durable_write(&journal, updated.as_bytes(), 0o600)
+    write_upgrade_attempt_from_journal(
+        paths,
+        &state.contents,
+        phase,
+        state.activated_targets,
+        state.finalized_targets,
+    )
 }
 
 fn verify_component_lengths(
@@ -1498,23 +1694,20 @@ fn begin_upgrade_attempt(
         );
     }
     let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
-    if let Ok(contents) = fs::read_to_string(&journal) {
-        let prior_operation = journal_string(&contents, "operation_id")?;
-        let phase = journal_string(&contents, "phase")?;
-        if prior_operation == attempt.operation_id
+    if journal.exists() {
+        let prior = load_validated_upgrade_attempt(paths)?;
+        if prior.binding.operation_id == attempt.operation_id
             || matches!(
-                phase,
+                prior.phase.as_str(),
                 "activation-started" | "repair-required" | "finalizing" | "stage-cleanup-required"
             )
         {
             return Err(InstallError::ExistingResidue);
         }
-        if !matches!(phase, "activated" | "aborted") {
+        if !matches!(prior.phase.as_str(), "activated" | "aborted") {
             return Err(InstallError::ExistingResidue);
         }
         cleanup_pre_activation_residue(paths)?;
-    } else if journal.exists() {
-        return Err(InstallError::ExistingResidue);
     }
     write_upgrade_attempt(paths, attempt, source, bundle, "admitted", 0, 0)
 }
@@ -1554,16 +1747,16 @@ fn consume_probe_upgrade_authority_with_sha256(
     }
     let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
     if journal.exists() {
-        let contents = trusted_text(&journal, paths.expected_root_uid(), 0o600)?;
-        let prior_operation = journal_string(&contents, "operation_id")?;
-        let phase = journal_string(&contents, "phase")?;
-        if prior_operation == authority.operation_id || !matches!(phase, "aborted" | "activated") {
+        let prior = load_validated_upgrade_attempt(paths)?;
+        if prior.binding.operation_id == authority.operation_id
+            || !matches!(prior.phase.as_str(), "aborted" | "activated")
+        {
             return Err(InstallError::ExistingResidue);
         }
         cleanup_pre_activation_residue(paths)?;
     }
     let contents = format!(
-        "schema_version = 2\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"consumed\"\nactivation_started = false\nactivated_targets = 0\nfinalized_targets = 0\n",
+        "schema_version = 3\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"consumed\"\nactivation_started = false\nactivated_targets = 0\nfinalized_targets = 0\n",
         authority.operation_id,
         authority.stage_owner_uid,
         authority_sha256,
@@ -1612,29 +1805,29 @@ fn confirm_consumed_upgrade_authority(
     source: &InstalledUpgradeBinding,
     bundle: &VerifiedBundle,
 ) -> Result<(), InstallError> {
-    let contents = trusted_text(
-        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
-        paths.expected_root_uid(),
-        0o600,
-    )?;
-    if journal_string(&contents, "operation_id")? != attempt.operation_id
-        || journal_usize(&contents, "stage_owner_uid")? != attempt.stage_owner_uid as usize
-        || journal_string(&contents, "authority_sha256")? != authority_sha256
-        || journal_string(&contents, "phase")? != "consumed"
-        || journal_string(&contents, "hub_origin")? != source.hub_origin
-        || journal_string(&contents, "source_probe_id")? != source.probe_id
-        || journal_string(&contents, "source_bundle_version")? != source.source_bundle_version
-        || journal_string(&contents, "source_install_state_sha256")?
-            != source.source_install_state_sha256
-        || journal_string(&contents, "source_manifest_sha256")? != source.source_manifest_sha256
-        || journal_string(&contents, "target_bundle_version")? != bundle.version
-        || journal_string(&contents, "target_asset_set_digest")?
+    let state = load_validated_upgrade_attempt(paths)?;
+    let authority_scope = state
+        .binding
+        .authority_scope
+        .as_ref()
+        .ok_or(InstallError::ExistingResidue)?;
+    if state.binding.operation_id != attempt.operation_id
+        || state.binding.stage_owner_uid != attempt.stage_owner_uid
+        || state.binding.authority_sha256 != authority_sha256
+        || state.phase != "consumed"
+        || authority_scope.hub_origin != source.hub_origin
+        || state.binding.source_probe_id != source.probe_id
+        || state.binding.source_bundle_version != source.source_bundle_version
+        || state.binding.source_install_state_sha256 != source.source_install_state_sha256
+        || state.binding.source_manifest_sha256 != source.source_manifest_sha256
+        || state.binding.target_bundle_version != bundle.version
+        || authority_scope.target_asset_set_digest
             != format!("sha256:{}", bundle.asset_set_manifest_sha256)
-        || journal_string(&contents, "target_manifest_sha256")? != bundle.manifest_sha256
+        || state.binding.target_manifest_sha256 != bundle.manifest_sha256
     {
         return Err(InstallError::ExistingResidue);
     }
-    write_upgrade_attempt_from_journal(paths, &contents, "admitted", 0, 0)
+    write_upgrade_attempt_from_journal(paths, &state.contents, "admitted", 0, 0)
 }
 
 fn valid_upgrade_identifier(value: &str) -> bool {
@@ -1747,27 +1940,16 @@ fn recover_incomplete_probe_upgrade_with_status(
     if !journal_path.exists() {
         return Ok(None);
     }
-    let contents = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
-    if !matches!(
-        metadata_scalar(&contents, "schema_version").as_deref(),
-        Some("1" | "2")
-    ) {
-        return Err(InstallError::ExistingResidue);
-    }
-    let operation_id = journal_string(&contents, "operation_id")?.to_owned();
-    let probe_id = journal_string(&contents, "source_probe_id")?.to_owned();
-    let target_bundle_version = journal_string(&contents, "target_bundle_version")?.to_owned();
-    let source_bundle_version = journal_string(&contents, "source_bundle_version")?.to_owned();
-    let stage_owner_uid = journal_usize(&contents, "stage_owner_uid")?
-        .try_into()
-        .map_err(|_| InstallError::ExistingResidue)?;
-    let phase = journal_string(&contents, "phase")?;
+    let state = load_validated_upgrade_attempt(paths)?;
+    let operation_id = state.binding.operation_id.clone();
+    let probe_id = state.binding.source_probe_id.clone();
+    let target_bundle_version = state.binding.target_bundle_version.clone();
+    let source_bundle_version = state.binding.source_bundle_version.clone();
+    let stage_owner_uid = state.binding.stage_owner_uid;
+    let phase = state.phase.as_str();
     let destinations = upgrade_destinations(paths);
-    let activated_targets = journal_usize(&contents, "activated_targets")?;
-    let finalized_targets = journal_usize(&contents, "finalized_targets")?;
-    if activated_targets > destinations.len() || finalized_targets > destinations.len() {
-        return Err(InstallError::ExistingResidue);
-    }
+    let activated_targets = state.activated_targets;
+    let finalized_targets = state.finalized_targets;
     let receipt = UpgradeRecoveryReceipt {
         operation_id: operation_id.clone(),
         probe_id,
@@ -1779,7 +1961,7 @@ fn recover_incomplete_probe_upgrade_with_status(
     let attempt = UpgradeAttempt {
         operation_id,
         stage_owner_uid,
-        authority_sha256: Some(journal_string(&contents, "authority_sha256")?.to_owned()),
+        authority_sha256: Some(state.binding.authority_sha256.clone()),
     };
 
     let recovered = (|| {
@@ -1801,40 +1983,39 @@ fn recover_incomplete_probe_upgrade_with_status(
                 }
             }
             "aborted" => {}
-            "activation-started" | "repair-required" | "finalizing" => {
-                systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
-                systemd.stop()?;
-                for (index, destination) in destinations.iter().enumerate() {
-                    let name = destination
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .ok_or(InstallError::Io)?;
-                    let staged = destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
-                    if staged.exists() {
-                        fs::rename(&staged, destination).map_err(|_| InstallError::Io)?;
-                        sync_directory(destination.parent().ok_or(InstallError::Io)?)?;
-                    } else if !destination.exists() {
-                        return Err(InstallError::ExistingResidue);
+            "activation-started" | "repair-required" => {
+                if activated_targets < destinations.len() || finalized_targets == 0 {
+                    systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
+                    systemd.stop()?;
+                    for (index, destination) in
+                        destinations.iter().enumerate().skip(activated_targets)
+                    {
+                        let name = destination
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .ok_or(InstallError::Io)?;
+                        let staged =
+                            destination.with_file_name(format!(".{name}.enoki-upgrade-new"));
+                        if staged.exists() {
+                            fs::rename(&staged, destination).map_err(|_| InstallError::Io)?;
+                            sync_directory(destination.parent().ok_or(InstallError::Io)?)?;
+                        } else if !destination.exists() {
+                            return Err(InstallError::ExistingResidue);
+                        }
+                        advance_upgrade_attempt(paths, phase, index + 1, finalized_targets)?;
                     }
-                    write_upgrade_attempt_from_journal(
-                        paths,
-                        &contents,
-                        "activation-started",
-                        index + 1,
-                        finalized_targets,
-                    )?;
+                    systemd.daemon_reload()?;
+                    systemd.start()?;
+                    systemd.wait_local_activated()?;
                 }
-                systemd.daemon_reload()?;
-                systemd.start()?;
-                systemd.wait_local_activated()?;
-                write_upgrade_attempt_from_journal(
+                advance_upgrade_attempt(
                     paths,
-                    &contents,
                     "finalizing",
                     destinations.len(),
                     finalized_targets,
                 )?;
-                for (index, destination) in destinations.iter().enumerate() {
+                for (index, destination) in destinations.iter().enumerate().skip(finalized_targets)
+                {
                     let name = destination
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -1845,17 +2026,10 @@ fn recover_incomplete_probe_upgrade_with_status(
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                         Err(_) => return Err(InstallError::Io),
                     }
-                    write_upgrade_attempt_from_journal(
-                        paths,
-                        &contents,
-                        "finalizing",
-                        destinations.len(),
-                        index + 1,
-                    )?;
+                    advance_upgrade_attempt(paths, "finalizing", destinations.len(), index + 1)?;
                 }
-                write_upgrade_attempt_from_journal(
+                advance_upgrade_attempt(
                     paths,
-                    &contents,
                     "stage-cleanup-required",
                     destinations.len(),
                     destinations.len(),
@@ -1869,6 +2043,28 @@ fn recover_incomplete_probe_upgrade_with_status(
                         Some("lifecycle.upgrade_repair_required"),
                     )?;
                 }
+            }
+            "finalizing" => {
+                for (index, destination) in destinations.iter().enumerate().skip(finalized_targets)
+                {
+                    let name = destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or(InstallError::Io)?;
+                    let backup = destination.with_file_name(format!(".{name}.enoki-upgrade-old"));
+                    match fs::remove_file(&backup) {
+                        Ok(()) => sync_directory(backup.parent().ok_or(InstallError::Io)?)?,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(_) => return Err(InstallError::Io),
+                    }
+                    advance_upgrade_attempt(paths, "finalizing", destinations.len(), index + 1)?;
+                }
+                advance_upgrade_attempt(
+                    paths,
+                    "stage-cleanup-required",
+                    destinations.len(),
+                    destinations.len(),
+                )?;
             }
             "stage-cleanup-required" => {}
             "activated" => return Ok(None),
@@ -1973,24 +2169,25 @@ pub(super) fn write_upgrade_attempt_from_journal(
     activated_targets: usize,
     finalized_targets: usize,
 ) -> Result<(), InstallError> {
-    let current = trusted_text(
-        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
-        paths.expected_root_uid(),
-        0o600,
-    )?;
-    if journal_string(&current, "operation_id")? != journal_string(expected, "operation_id")?
-        || journal_string(&current, "authority_sha256")?
-            != journal_string(expected, "authority_sha256")?
-    {
+    let state = load_validated_upgrade_attempt(paths)?;
+    let current = state.contents;
+    if current != expected {
         return Err(InstallError::ExistingResidue);
     }
-    let current_phase = journal_string(&current, "phase")?;
-    if !valid_upgrade_attempt_transition(current_phase, phase) {
+    if !valid_upgrade_attempt_transition(
+        &state.phase,
+        phase,
+        state.activated_targets,
+        state.finalized_targets,
+        activated_targets,
+        finalized_targets,
+        upgrade_destinations(paths).len(),
+    ) {
         return Err(InstallError::ExistingResidue);
     }
     let prior = current.as_str();
     let schema_version = metadata_scalar(prior, "schema_version");
-    let schema2 = schema_version.as_deref() == Some("2");
+    let marker_required = schema_version.as_deref() == Some("3");
     let mut counts = [0_u8; 4];
     let mut output = String::new();
     for line in prior.lines() {
@@ -2013,7 +2210,10 @@ pub(super) fn write_upgrade_attempt_from_journal(
             output.push('\n');
         }
     }
-    if counts[..3] != [1, 1, 1] || (schema2 && counts[3] != 1) || (!schema2 && counts[3] != 0) {
+    if counts[..3] != [1, 1, 1]
+        || (marker_required && counts[3] != 1)
+        || (!marker_required && counts[3] != 0)
+    {
         return Err(InstallError::ExistingResidue);
     }
     atomic_durable_write(
@@ -2023,19 +2223,61 @@ pub(super) fn write_upgrade_attempt_from_journal(
     )
 }
 
-fn valid_upgrade_attempt_transition(current: &str, next: &str) -> bool {
-    matches!(
+fn advance_upgrade_attempt(
+    paths: &FixedInstallPaths,
+    phase: &str,
+    activated_targets: usize,
+    finalized_targets: usize,
+) -> Result<(), InstallError> {
+    let current = load_validated_upgrade_attempt(paths)?;
+    write_upgrade_attempt_from_journal(
+        paths,
+        &current.contents,
+        phase,
+        activated_targets,
+        finalized_targets,
+    )
+}
+
+fn valid_upgrade_attempt_transition(
+    current: &str,
+    next: &str,
+    current_activated: usize,
+    current_finalized: usize,
+    next_activated: usize,
+    next_finalized: usize,
+    target_count: usize,
+) -> bool {
+    if next_activated < current_activated || next_finalized < current_finalized {
+        return false;
+    }
+    let phase_allowed = matches!(
         (current, next),
         ("consumed", "admitted")
             | ("admitted", "prepared")
+            | ("consumed" | "admitted" | "prepared", "aborted")
             | ("prepared", "activation-started")
-            | ("activation-started", "activation-started" | "finalizing")
-            | ("repair-required", "activation-started")
+            | (
+                "activation-started",
+                "activation-started" | "repair-required" | "finalizing"
+            )
+            | ("repair-required", "repair-required" | "finalizing")
             | (
                 "finalizing",
-                "activation-started" | "finalizing" | "stage-cleanup-required"
+                "finalizing" | "repair-required" | "stage-cleanup-required"
             )
-    )
+            | ("stage-cleanup-required", "repair-required" | "activated")
+    );
+    let marker = !matches!(next, "consumed" | "admitted" | "prepared" | "aborted");
+    phase_allowed
+        && validate_upgrade_attempt_tuple(
+            next,
+            marker,
+            next_activated,
+            next_finalized,
+            target_count,
+        )
+        .is_ok()
 }
 
 fn write_upgrade_attempt(
@@ -2065,8 +2307,31 @@ fn write_upgrade_attempt(
         .authority_sha256
         .clone()
         .unwrap_or_else(|| upgrade_authority_sha256(attempt, source, bundle));
+    if phase != "admitted" {
+        let state = load_validated_upgrade_attempt(paths)?;
+        if state.binding.operation_id != attempt.operation_id
+            || state.binding.stage_owner_uid != attempt.stage_owner_uid
+            || state.binding.authority_sha256 != authority_sha256
+            || state.binding.source_probe_id != source.probe_id
+            || state.binding.source_bundle_version != source.source_bundle_version
+            || state.binding.source_install_state_sha256 != source.source_install_state_sha256
+            || state.binding.source_manifest_sha256 != source.source_manifest_sha256
+            || state.binding.target_bundle_version != bundle.version
+            || state.binding.target_manifest_sha256 != bundle.manifest_sha256
+            || state.binding.authority_scope.is_some()
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        return write_upgrade_attempt_from_journal(
+            paths,
+            &state.contents,
+            phase,
+            activated_targets,
+            finalized_targets,
+        );
+    }
     let contents = format!(
-        "schema_version = 1\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_install_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nphase = {:?}\nactivated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\n",
+        "schema_version = 3\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_install_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nphase = {:?}\nactivation_started = false\nactivated_targets = {activated_targets}\nfinalized_targets = {finalized_targets}\n",
         attempt.operation_id,
         attempt.stage_owner_uid,
         authority_sha256,

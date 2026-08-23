@@ -91,6 +91,31 @@ describe("Probe Repair authority", () => {
       signature: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
 
+    const partialFinalization = {
+      ...evidence,
+      activatedTargets: 20,
+      finalizedTargets: 7,
+      requestNonce: "request_nonce_partial",
+    };
+    expect(
+      authorizeProbeRepair({
+        authorityExpiresAtMs: 1_725_000_061_000,
+        evidence: partialFinalization,
+        evidenceSignature: signProbeRepairEvidence(
+          canonicalProbeRepairEvidence(partialFinalization),
+          installKey,
+        ),
+        expectedHubOrigin: "https://hub.example",
+        expectedProbeId: "probe_01",
+        failedUpgrade,
+        installKey,
+        nowMs: 1_725_000_001_000,
+        repairNonce: "repair_nonce_partial",
+        repairOperationId: "44",
+        targetManifestSha256: "d".repeat(64),
+      }).disposition,
+    ).toBe("probe_repair");
+
     expect(
       authorizeProbeRepair({
         authorityExpiresAtMs: 1_725_000_061_000,
