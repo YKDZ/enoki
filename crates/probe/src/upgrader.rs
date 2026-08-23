@@ -1159,6 +1159,9 @@ fn run_probe_repair_with_current_version_and_systemd_runner(
     if effective_uid != 0 {
         return Err(ProbeRepairRunError::RootRequired);
     }
+    if install_metadata.schema_version == 3 {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+    }
     let failed_upgrade = read_probe_repair_failure_marker_with_owner(
         install_metadata,
         trusted_failure_marker_owner_uid,
@@ -1185,28 +1188,6 @@ fn run_probe_repair_with_current_version_and_systemd_runner(
             &request_auth,
         )
         .map_err(|error| ProbeRepairRunError::IdentityRejected(error.to_string()))?;
-
-    if install_metadata.schema_version == 3 {
-        let repair_operation = ProbeUpgraderOperationMetadata {
-            operation_id: "local-repair".to_string(),
-            target_asset_set_digest: String::new(),
-            target_probe_version: failed_upgrade.target_probe_version.clone(),
-            token: "local-repair".to_string(),
-        };
-        execute_schema_three_probe_upgrade(
-            &repair_operation,
-            &install_metadata.identity_path,
-            install_metadata,
-            transport,
-            systemd,
-            current_probe_version,
-            false,
-        )?;
-        return Ok(ProbeRepairResult {
-            probe_id: request_auth.probe_id.to_string(),
-            repaired_version: normalized_probe_version(current_probe_version).to_string(),
-        });
-    }
 
     let manifest_bytes = download_hub_asset(transport, &install_metadata.hub_url, "manifest.json")?;
     let signature_bytes =
@@ -1565,6 +1546,9 @@ fn run_probe_upgrader_with_systemd_runner_and_install_metadata(
     let operation = read_operation_metadata(stdin)?;
     if operation.token.is_empty() {
         return Err(ProbeUpgraderRunError::MissingToken);
+    }
+    if install_metadata.schema_version == 3 {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired);
     }
 
     validate_identity_path(&input.bootstrap_config_path, install_metadata)?;
@@ -9090,35 +9074,24 @@ printf '%s\n' '{}'
             temporary.path().join("provider.socket"),
         ];
         metadata.observation_ipc_group = Some(OBSERVATION_IPC_GROUP.to_string());
-        let operation = ProbeUpgraderOperationMetadata {
-            operation_id: "42".into(),
-            target_asset_set_digest: format!("sha256:{}", "0".repeat(64)),
-            target_probe_version: "0.2.0".into(),
-            token: "token".into(),
-        };
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
 
-        let error = execute_schema_three_probe_upgrade(
-            &operation,
-            &temporary.path().join("identity.toml"),
-            &metadata,
+        let error = run_probe_upgrader_with_systemd_runner_and_install_metadata(
+            ProbeUpgraderRunInput {
+                bootstrap_config_path: temporary.path().join("identity.toml"),
+            },
+            &operation_stdin(),
             &mut transport,
             &mut systemd,
-            "0.1.0",
-            true,
+            &metadata,
         )
         .expect_err("旧闭包不能被当作同合同原地升级");
 
-        assert!(
-            matches!(
-                error,
-                ProbeUpgraderRunError::InvalidInstallMetadata(
-                    "schema 3 Disk Health Provider path is missing"
-                )
-            ),
-            "unexpected error: {error:?}"
-        );
+        assert!(matches!(
+            error,
+            ProbeUpgraderRunError::ManualProbeReinstallRequired
+        ));
         assert!(transport.downloads.is_empty());
         assert!(systemd.calls.is_empty());
     }
