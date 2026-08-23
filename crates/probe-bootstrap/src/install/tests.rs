@@ -2,7 +2,8 @@
 mod tests {
     use super::*;
     use super::account::{
-        account_records_match_transaction, create_transaction_identity_with_commands,
+        account_records_match_transaction, create_probe_ipc_group_with_commands,
+        create_transaction_identity_with_commands,
     };
     use crate::handoff::Enrollment;
     use crate::trust::BootstrapRole;
@@ -17,7 +18,7 @@ mod tests {
             assert!(unit.contains("/sys/class/block"));
         }
         let provider = cpu_provider_unit();
-        assert!(provider.contains("RestrictAddressFamilies=AF_NETLINK"));
+        assert!(provider.contains("RestrictAddressFamilies=AF_UNIX AF_NETLINK"));
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("ProtectHome=read-only"));
         assert!(provider.contains("BindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block"));
@@ -25,6 +26,23 @@ mod tests {
         assert!(provider.contains("/proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats"));
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("SocketBindDeny=ipv4:any"));
+    }
+
+    #[test]
+    fn fresh_dynamic_probe_creates_only_its_static_ipc_group() {
+        let mut calls = Vec::new();
+        let identity = create_probe_ipc_group_with_commands("tx-1", &mut |program, arguments| {
+            calls.push(format!("{program} {}", arguments.join(" ")));
+            Ok(())
+        })
+        .expect("创建 Probe IPC 组");
+
+        assert_eq!(identity, ServiceIdentity { uid: 0, gid: 0 });
+        assert_eq!(
+            calls,
+            ["/usr/sbin/groupadd --system --password !enoki-bootstrap-tx-1 enoki-probe-ipc"]
+        );
+        assert!(calls.iter().all(|call| !call.contains("useradd")));
     }
 
     #[derive(Default)]
@@ -40,20 +58,28 @@ mod tests {
                 .then_some(())
                 .ok_or(InstallError::ExistingResidue)
         }
-        fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
+        fn create_transaction_identity(
+            &mut self,
+            _transaction_id: &str,
+        ) -> Result<ServiceIdentity, InstallError> {
             self.calls.push("create");
             Ok(ServiceIdentity {
                 uid: unsafe { libc::geteuid() },
                 gid: unsafe { libc::getegid() },
             })
         }
-        fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
+        fn remove_transaction_identity(
+            &mut self,
+            _transaction_id: &str,
+            _identity: Option<ServiceIdentity>,
+        ) -> Result<(), InstallError> {
             self.calls.push("remove");
             Ok(())
         }
-        fn owns_static_service_identity(
+        fn owns_transaction_identity(
             &mut self,
-            _identity: ServiceIdentity,
+            _transaction_id: &str,
+            _identity: Option<ServiceIdentity>,
         ) -> Result<bool, InstallError> {
             self.calls.push("owns");
             Ok(true)
@@ -562,8 +588,13 @@ mod tests {
         let disk_provider_socket = disk_health_provider_socket_unit();
         let disk_provider = disk_health_provider_unit();
 
-        assert!(probe.contains("Requires=enoki-observation-runtime.socket enoki-cpu-resource-provider.socket"));
-        assert!(runtime_socket.contains("SocketGroup=enoki-probe"));
+        assert!(probe.contains("Requires=enoki-observation-runtime.socket\n"));
+        assert!(!probe.contains("Requires=enoki-cpu-resource-provider.socket"));
+        assert!(probe.contains("DynamicUser=true"));
+        assert!(probe.contains("SupplementaryGroups=enoki-probe-ipc"));
+        assert!(probe.contains("StateDirectory=enoki-probe"));
+        assert!(probe.contains("StateDirectoryMode=0700"));
+        assert!(runtime_socket.contains("SocketGroup=enoki-probe-ipc"));
         assert!(runtime.contains("User=enoki-observation-runtime"));
         assert!(runtime.contains("PrivateNetwork=true"));
         assert!(runtime.contains("SupplementaryGroups=enoki-observation-ipc"));
@@ -573,7 +604,7 @@ mod tests {
         assert!(provider.contains("ExecStart=/usr/local/bin/enoki-cpu-resource-provider\n"));
         assert!(provider.contains("RuntimeMaxSec=3s"));
         assert!(provider.contains("KillMode=control-group"));
-        assert!(provider.contains("RestrictAddressFamilies=AF_NETLINK"));
+        assert!(provider.contains("RestrictAddressFamilies=AF_UNIX AF_NETLINK"));
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("SocketBindDeny=ipv4:any"));
         assert!(provider.contains("SocketBindDeny=ipv6:any"));
@@ -604,10 +635,10 @@ mod tests {
         assert_eq!(
             role_units.each_ref().map(|(profile, _)| *profile),
             [
-                "probe-v2",
-                "observation-runtime-v2",
-                "system-state-provider-v4",
-                "disk-health-provider-v2",
+                "probe-v3",
+                "observation-runtime-v3",
+                "system-state-provider-v5",
+                "disk-health-provider-v3",
             ],
         );
         for (role, unit) in &role_units {
@@ -723,17 +754,18 @@ mod tests {
 
         let system_state = cpu_provider_unit();
         assert!(system_state.contains("CapabilityBoundingSet=\n"));
-        assert!(system_state.contains("RestrictAddressFamilies=AF_NETLINK"));
+        assert!(system_state.contains("RestrictAddressFamilies=AF_UNIX AF_NETLINK"));
         assert!(system_state.contains("ReadOnlyPaths=/proc/stat"));
         assert!(!system_state.contains("DeviceAllow=block-*"));
 
         let disk_health = disk_health_provider_unit();
         assert!(disk_health.contains("CapabilityBoundingSet=CAP_SYS_RAWIO"));
-        assert!(disk_health.contains("RestrictAddressFamilies=\n"));
+        assert!(disk_health.contains("RestrictAddressFamilies=AF_UNIX\n"));
+        assert!(!disk_health.contains("RestrictAddressFamilies=\n"));
         assert!(disk_health.contains("BindReadOnlyPaths=-/usr/sbin/smartctl"));
         assert!(!disk_health.contains("ReadOnlyPaths=/proc/stat"));
 
-        assert!(observation_runtime_socket_unit().contains("SocketGroup=enoki-probe"));
+        assert!(observation_runtime_socket_unit().contains("SocketGroup=enoki-probe-ipc"));
         for socket in [
             cpu_provider_socket_unit(),
             disk_health_provider_socket_unit(),
@@ -1021,18 +1053,12 @@ mod tests {
                 self.calls.push("absent");
                 Ok(())
             }
-            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
-                unreachable!()
-            }
             fn create_transaction_identity(
                 &mut self,
                 _transaction_id: &str,
             ) -> Result<ServiceIdentity, InstallError> {
                 self.calls.push("create");
                 Err(InstallError::Account)
-            }
-            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
-                unreachable!()
             }
             fn remove_transaction_identity(
                 &mut self,
@@ -1107,9 +1133,6 @@ mod tests {
             fn require_absent(&mut self) -> Result<(), InstallError> {
                 Ok(())
             }
-            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
-                unreachable!()
-            }
             fn create_transaction_identity(
                 &mut self,
                 transaction_id: &str,
@@ -1133,9 +1156,6 @@ mod tests {
                     uid: unsafe { libc::geteuid() },
                     gid: unsafe { libc::getegid() },
                 })
-            }
-            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
-                unreachable!()
             }
             fn remove_transaction_identity(
                 &mut self,
@@ -1410,9 +1430,6 @@ mod tests {
             fn require_absent(&mut self) -> Result<(), InstallError> {
                 Ok(())
             }
-            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
-                unreachable!()
-            }
             fn create_transaction_identity(
                 &mut self,
                 transaction_id: &str,
@@ -1422,9 +1439,6 @@ mod tests {
                 assert!(text.contains(transaction_id));
                 self.checked = true;
                 Err(InstallError::Account)
-            }
-            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
-                unreachable!()
             }
             fn remove_transaction_identity(
                 &mut self,
@@ -1669,14 +1683,21 @@ mod tests {
                 self.calls.push("absent");
                 Ok(())
             }
-            fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError> {
+            fn create_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+            ) -> Result<ServiceIdentity, InstallError> {
                 self.calls.push("create");
                 Ok(ServiceIdentity {
                     uid: unsafe { libc::geteuid() },
                     gid: unsafe { libc::getegid() },
                 })
             }
-            fn remove_static_service_identity(&mut self) -> Result<(), InstallError> {
+            fn remove_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+                _identity: Option<ServiceIdentity>,
+            ) -> Result<(), InstallError> {
                 self.calls.push("remove");
                 Err(InstallError::Account)
             }

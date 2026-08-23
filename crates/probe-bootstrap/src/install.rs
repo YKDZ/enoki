@@ -38,6 +38,7 @@ const COMMAND_STEP_BUDGET: Duration = Duration::from_secs(15);
 const SERVICE_NAME: &str = "enoki-probe";
 const SERVICE_USER: &str = "enoki-probe";
 const SERVICE_GROUP: &str = "enoki-probe";
+const PROBE_IPC_GROUP: &str = "enoki-probe-ipc";
 const OBSERVATION_IPC_GROUP: &str = "enoki-observation-ipc";
 const BINARY: &str = "/usr/local/bin/enoki-probe";
 const OBSERVATION_RUNTIME_BINARY: &str = "/usr/local/bin/enoki-observation-runtime";
@@ -209,36 +210,21 @@ impl RollbackStep {
 pub trait AccountPort {
     fn set_command_deadline(&mut self, _deadline: Instant) {}
     fn require_absent(&mut self) -> Result<(), InstallError>;
-    fn create_static_service_identity(&mut self) -> Result<ServiceIdentity, InstallError>;
-    fn remove_static_service_identity(&mut self) -> Result<(), InstallError>;
-    fn owns_static_service_identity(
-        &mut self,
-        _identity: ServiceIdentity,
-    ) -> Result<bool, InstallError> {
-        Ok(false)
-    }
     fn create_transaction_identity(
         &mut self,
         _transaction_id: &str,
-    ) -> Result<ServiceIdentity, InstallError> {
-        self.create_static_service_identity()
-    }
+    ) -> Result<ServiceIdentity, InstallError>;
     fn remove_transaction_identity(
         &mut self,
         _transaction_id: &str,
         _identity: Option<ServiceIdentity>,
-    ) -> Result<(), InstallError> {
-        self.remove_static_service_identity()
-    }
+    ) -> Result<(), InstallError>;
     fn owns_transaction_identity(
         &mut self,
         _transaction_id: &str,
-        identity: Option<ServiceIdentity>,
+        _identity: Option<ServiceIdentity>,
     ) -> Result<bool, InstallError> {
-        match identity {
-            Some(identity) => self.owns_static_service_identity(identity),
-            None => Ok(false),
-        }
+        Ok(false)
     }
     fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
         Ok(())
@@ -1254,12 +1240,12 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nWants=network-online.target\nRequires=enoki-observation-runtime.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0700\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
 fn observation_runtime_socket_unit() -> &'static str {
-    "[Unit]\nDescription=Enoki Observation Runtime socket\n\n[Socket]\nListenStream=/run/enoki-observation-runtime.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
+    "[Unit]\nDescription=Enoki Observation Runtime socket\n\n[Socket]\nListenStream=/run/enoki-observation-runtime.sock\nSocketMode=0660\nSocketUser=root\nSocketGroup=enoki-probe-ipc\nRemoveOnStop=true\n\n[Install]\nWantedBy=sockets.target\n"
 }
 
 fn observation_runtime_unit() -> String {
@@ -1274,7 +1260,7 @@ fn cpu_provider_socket_unit() -> &'static str {
 
 fn cpu_provider_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki one-shot System State Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStartSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=read-only\nProtectProc=ptraceable\nMemoryMax=256M\nRestrictAddressFamilies=AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
+        "[Unit]\nDescription=Enoki one-shot System State Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStartSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=read-only\nProtectProc=ptraceable\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
     )
 }
 
@@ -1284,7 +1270,7 @@ fn disk_health_provider_socket_unit() -> &'static str {
 
 fn disk_health_provider_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki one-shot Disk Health Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-disk-health-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=10s\nTimeoutStartSec=10s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=CAP_SYS_RAWIO\nDevicePolicy=closed\nDeviceAllow=block-* rw\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=128M\nRestrictAddressFamilies=\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/boot /home /media /mnt /opt /root /srv\nBindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl -/var/local/emhttp/disks.ini\n"
+        "[Unit]\nDescription=Enoki one-shot Disk Health Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-disk-health-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=10s\nTimeoutStartSec=10s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=CAP_SYS_RAWIO\nDevicePolicy=closed\nDeviceAllow=block-* rw\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=128M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/boot /home /media /mnt /opt /root /srv\nBindReadOnlyPaths=-/usr/sbin/smartctl -/usr/bin/smartctl -/var/local/emhttp/disks.ini\n"
     )
 }
 
@@ -1364,23 +1350,6 @@ fn require_success(
     )?;
     output.status.success().then_some(()).ok_or(error)
 }
-fn numeric_id(flag: &str, deadline: Instant) -> Result<u32, InstallError> {
-    let output = run_bounded(
-        "/usr/bin/id",
-        &[flag, SERVICE_USER],
-        InstallError::Account,
-        deadline,
-        COMMAND_STEP_BUDGET,
-    )?;
-    if !output.status.success() {
-        return Err(InstallError::Account);
-    }
-    std::str::from_utf8(&output.stdout)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .ok_or(InstallError::Account)
-}
-
 fn single_systemd_value(bytes: &[u8]) -> Result<&str, InstallError> {
     let value = std::str::from_utf8(bytes).map_err(|_| InstallError::Systemd)?;
     let value = value.strip_suffix('\n').unwrap_or(value);

@@ -906,7 +906,7 @@ with open(os.devnull, "rb") as input_stream:
           components: expect.arrayContaining([
             expect.objectContaining({
               path: "enoki-probe",
-              permissionProfile: "probe-v2",
+              permissionProfile: "probe-v3",
               resourceContract: "hub-reporting-v1",
               role: "probe",
               size: expect.any(Number),
@@ -2131,7 +2131,7 @@ async function writeProbeArchive(
     components: [
       {
         path: "enoki-probe",
-        permissionProfile: "probe-v2",
+        permissionProfile: "probe-v3",
         resourceContract: "hub-reporting-v1",
         role: "probe",
         sha256: sha256(binary),
@@ -2140,7 +2140,7 @@ async function writeProbeArchive(
       },
       {
         path: "enoki-observation-runtime",
-        permissionProfile: "observation-runtime-v2",
+        permissionProfile: "observation-runtime-v3",
         resourceContract: "official-observation-v2",
         role: "observation-runtime",
         sha256: sha256(binary),
@@ -2149,7 +2149,7 @@ async function writeProbeArchive(
       },
       {
         path: "enoki-cpu-resource-provider",
-        permissionProfile: "system-state-provider-v4",
+        permissionProfile: "system-state-provider-v5",
         resourceContract: "system-state-v3",
         role: "system-state-provider",
         sha256: sha256(binary),
@@ -2158,7 +2158,7 @@ async function writeProbeArchive(
       },
       {
         path: "enoki-disk-health-resource-provider",
-        permissionProfile: "disk-health-provider-v2",
+        permissionProfile: "disk-health-provider-v3",
         resourceContract: "disk-health-v1",
         role: "disk-health-provider",
         sha256: sha256(binary),
