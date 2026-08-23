@@ -24,6 +24,8 @@ export type ProbeUpgradeRequest = {
   id: number | null;
   kind: ProbeOperationKind;
   repairAuthorityExpiresAtMs?: number | null;
+  repairEligibilityEvidenceJson?: string | null;
+  repairEligibilityEvidenceSha256?: string | null;
   repairEvidenceSha256?: string | null;
   repairFailedOperationId?: number | null;
   repairNonce?: string | null;
@@ -111,6 +113,7 @@ export function createProbeRepairRequest(input: {
     targetManifestSha256: input.targetManifestSha256,
     targetProbeVersion: input.failedOperation.targetProbeVersion,
     updatedAtMs: input.nowMs,
+    upgradeAuthoritySha256: input.failedOperation.upgradeAuthoritySha256,
     verifiedStageSha256: input.verifiedStageSha256,
   };
 }
@@ -391,6 +394,10 @@ export function failReportedProbeUpgradeRequest(input: {
   message: string;
   nowMs: number;
   operation: ProbeUpgradeRequest;
+  repairEligibility?: {
+    evidenceJson: string;
+    evidenceSha256: string;
+  } | null;
 }): {
   error: "probe_operation_status_invalid" | null;
   operation: ProbeUpgradeRequest;
@@ -406,21 +413,25 @@ export function failReportedProbeUpgradeRequest(input: {
     input.operation.state === "accepted" ||
     input.operation.state === "running"
   ) {
+    const failed = failProbeUpgradeRequest({
+      code: input.code,
+      message: input.message,
+      nowMs: input.nowMs,
+      operation: input.operation,
+    });
     return {
       error: null,
-      operation: failProbeUpgradeRequest({
-        code: input.code,
-        message: input.message,
-        nowMs: input.nowMs,
-        operation: input.operation,
-      }),
+      operation: withRepairEligibility(failed, input.repairEligibility),
     };
   }
 
   if (input.operation.state === "failed") {
     return {
       error: null,
-      operation: input.operation,
+      operation: withRepairEligibility(
+        input.operation,
+        input.repairEligibility,
+      ),
     };
   }
 
@@ -428,6 +439,22 @@ export function failReportedProbeUpgradeRequest(input: {
     error: "probe_operation_status_invalid",
     operation: input.operation,
   };
+}
+
+function withRepairEligibility(
+  operation: ProbeUpgradeRequest,
+  repairEligibility:
+    | { evidenceJson: string; evidenceSha256: string }
+    | null
+    | undefined,
+) {
+  return repairEligibility
+    ? {
+        ...operation,
+        repairEligibilityEvidenceJson: repairEligibility.evidenceJson,
+        repairEligibilityEvidenceSha256: repairEligibility.evidenceSha256,
+      }
+    : operation;
 }
 
 export function succeedReportedProbeOperation(input: {

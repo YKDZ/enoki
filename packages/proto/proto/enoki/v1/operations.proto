@@ -45,4 +45,8 @@ message ProbeOperationSucceeded {}
 message ProbeOperationFailed {
   string error_code = 1;
   string message = 2;
+  // Root-owned, domain-separated post-activation evidence. The Probe only
+  // forwards these opaque values; the Hub verifies them before persistence.
+  string repair_eligibility_evidence = 3;
+  string repair_eligibility_signature = 4;
 }

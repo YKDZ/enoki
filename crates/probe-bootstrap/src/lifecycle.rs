@@ -11,6 +11,8 @@ const LIFECYCLE_AUTHORITY_SIGNING_DOMAIN: &[u8] =
     b"enoki/lifecycle-upgrade-authority/hmac-sha256/v1\0";
 const LIFECYCLE_REPAIR_EVIDENCE_SIGNING_DOMAIN: &[u8] =
     b"enoki/lifecycle-repair-evidence/hmac-sha256/v1\0";
+const LIFECYCLE_REPAIR_ELIGIBILITY_SIGNING_DOMAIN: &[u8] =
+    b"enoki/lifecycle-repair-eligibility/hmac-sha256/v1\0";
 const LIFECYCLE_REPAIR_AUTHORITY_SIGNING_DOMAIN: &[u8] =
     b"enoki/lifecycle-repair-authority/hmac-sha256/v1\0";
 
@@ -85,6 +87,52 @@ pub struct RepairEvidenceV1 {
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     pub request_nonce: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairEligibilityV1 {
+    pub schema_version: u16,
+    pub hub_origin: String,
+    pub host_id: String,
+    pub probe_id: String,
+    pub failed_operation_id: String,
+    pub failed_authority_sha256: String,
+    pub journal_sha256: String,
+    pub journal_phase: String,
+    pub activated_targets: usize,
+    pub finalized_targets: usize,
+    pub target_bundle_version: String,
+    pub target_asset_set_digest: String,
+    pub target_manifest_sha256: String,
+    pub verified_stage_sha256: String,
+}
+
+impl RepairEligibilityV1 {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("fixed Repair Eligibility serializes")
+    }
+
+    pub fn sha256(&self) -> String {
+        format!("{:x}", Sha256::digest(self.canonical_bytes()))
+    }
+
+    pub fn sign(&self, install_key: &[u8; 32]) -> String {
+        sign_lifecycle_repair_facts(
+            install_key,
+            LIFECYCLE_REPAIR_ELIGIBILITY_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+        )
+    }
+
+    pub fn verify(&self, install_key: &[u8; 32], signature_hex: &str) -> bool {
+        verify_lifecycle_repair_facts(
+            install_key,
+            LIFECYCLE_REPAIR_ELIGIBILITY_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+            signature_hex,
+        )
+    }
 }
 
 impl RepairEvidenceV1 {

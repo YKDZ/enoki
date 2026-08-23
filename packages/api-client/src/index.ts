@@ -236,6 +236,8 @@ export type ProbeUpgradeStatus = {
     recoveryDisposition: ProbeUpgradeRecoveryDisposition | null;
   } | null;
   id: number;
+  /** Always projected by Hub; optional only for clients decoding older responses. */
+  kind?: "probe_upgrade" | "probe_repair" | "probe_uninstall";
   runningAtMs: number | null;
   state:
     | "pending"

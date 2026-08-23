@@ -1,7 +1,8 @@
 use super::*;
 use crate::lifecycle::{
-    RepairAuthorityV1, RepairEvidenceV1, UpgradeCompletion, UpgradeLifecycleEffects,
-    execute_upgrade_lifecycle, verify_lifecycle_upgrade_authority_signature,
+    RepairAuthorityV1, RepairEligibilityV1, RepairEvidenceV1, UpgradeCompletion,
+    UpgradeLifecycleEffects, execute_upgrade_lifecycle,
+    verify_lifecycle_upgrade_authority_signature,
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -16,6 +17,12 @@ const REPAIR_CAPSULE_SIGNING_DOMAIN: &[u8] = b"enoki/lifecycle-repair-capsule/hm
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedRepairEvidence {
     pub evidence: RepairEvidenceV1,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedRepairEligibility {
+    pub evidence: RepairEligibilityV1,
     pub signature: String,
 }
 
@@ -531,6 +538,55 @@ pub fn issue_probe_repair_evidence(
     {
         return Err(InstallError::ExistingResidue);
     }
+    let eligibility = repair_eligibility_from_postactivation_journal(paths)?;
+    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
+    let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
+        .as_deref()
+        .and_then(decode_lower_sha256)
+        .ok_or(InstallError::ExistingResidue)?;
+    let evidence = RepairEvidenceV1 {
+        schema_version: 1,
+        hub_origin: eligibility.hub_origin,
+        host_id: eligibility.host_id,
+        probe_id: eligibility.probe_id,
+        failed_operation_id: eligibility.failed_operation_id,
+        failed_authority_sha256: eligibility.failed_authority_sha256,
+        journal_sha256: eligibility.journal_sha256,
+        journal_phase: eligibility.journal_phase,
+        activated_targets: eligibility.activated_targets,
+        finalized_targets: eligibility.finalized_targets,
+        target_bundle_version: eligibility.target_bundle_version,
+        target_asset_set_digest: eligibility.target_asset_set_digest,
+        target_manifest_sha256: eligibility.target_manifest_sha256,
+        verified_stage_sha256: eligibility.verified_stage_sha256,
+        issued_at_ms,
+        expires_at_ms,
+        request_nonce: request_nonce.to_owned(),
+    };
+    Ok(SignedRepairEvidence {
+        signature: evidence.sign(&install_key),
+        evidence,
+    })
+}
+
+pub fn issue_probe_repair_eligibility(
+    paths: &FixedInstallPaths,
+) -> Result<SignedRepairEligibility, InstallError> {
+    let evidence = repair_eligibility_from_postactivation_journal(paths)?;
+    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
+    let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
+        .as_deref()
+        .and_then(decode_lower_sha256)
+        .ok_or(InstallError::ExistingResidue)?;
+    Ok(SignedRepairEligibility {
+        signature: evidence.sign(&install_key),
+        evidence,
+    })
+}
+
+fn repair_eligibility_from_postactivation_journal(
+    paths: &FixedInstallPaths,
+) -> Result<RepairEligibilityV1, InstallError> {
     let journal_path = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
     let journal = trusted_text(&journal_path, paths.expected_root_uid(), 0o600)?;
     if metadata_scalar(&journal, "schema_version").as_deref() != Some("2") {
@@ -557,12 +613,7 @@ pub fn issue_probe_repair_evidence(
     if !valid_progress || activated_targets > target_count || finalized_targets > target_count {
         return Err(InstallError::ExistingResidue);
     }
-    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
-    let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
-        .as_deref()
-        .and_then(decode_lower_sha256)
-        .ok_or(InstallError::ExistingResidue)?;
-    let evidence = RepairEvidenceV1 {
+    Ok(RepairEligibilityV1 {
         schema_version: 1,
         hub_origin: journal_string(&journal, "hub_origin")?.to_owned(),
         host_id: journal_string(&journal, "host_id")?.to_owned(),
@@ -577,13 +628,6 @@ pub fn issue_probe_repair_evidence(
         target_asset_set_digest: journal_string(&journal, "target_asset_set_digest")?.to_owned(),
         target_manifest_sha256: journal_string(&journal, "target_manifest_sha256")?.to_owned(),
         verified_stage_sha256: journal_string(&journal, "verified_stage_sha256")?.to_owned(),
-        issued_at_ms,
-        expires_at_ms,
-        request_nonce: request_nonce.to_owned(),
-    };
-    Ok(SignedRepairEvidence {
-        signature: evidence.sign(&install_key),
-        evidence,
     })
 }
 
@@ -1915,7 +1959,7 @@ fn upgrade_authority_sha256(
     format!("{:x}", Sha256::digest(canonical.as_bytes()))
 }
 
-fn write_operation_status(
+pub(crate) fn write_operation_status(
     paths: &FixedInstallPaths,
     attempt: &UpgradeAttempt,
     target_version: &str,
@@ -1928,6 +1972,15 @@ fn write_operation_status(
     );
     if let Some(code) = error_code {
         contents.push_str(&format!("error_code = {:?}\nmessage = \"\"\n", code));
+        if code == "lifecycle.upgrade_repair_required"
+            && let Ok(eligibility) = issue_probe_repair_eligibility(paths)
+            && let Ok(canonical) = String::from_utf8(eligibility.evidence.canonical_bytes())
+        {
+            contents.push_str(&format!(
+                "repair_eligibility_evidence = {:?}\nrepair_eligibility_signature = {:?}\n",
+                canonical, eligibility.signature,
+            ));
+        }
     }
     atomic_durable_write(
         &paths.state().join(OPERATION_STATUS_FILE),

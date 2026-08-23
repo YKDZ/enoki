@@ -35,6 +35,19 @@ describe("Probe Upgrade current problem", () => {
     expect(wrapper.emitted("retryProbeUpgrade")).toHaveLength(1);
   });
 
+  it.each([
+    ["pending", "探针修复请求等待中"],
+    ["accepted", "探针已接收修复请求"],
+    ["running", "探针修复进行中"],
+  ] as const)("renders the Repair %s current state", (state, title) => {
+    const wrapper = mount(ProbeUpgradeStatusAlert, {
+      props: {
+        status: probeUpgradeStatus({ kind: "probe_repair", state }),
+      },
+    });
+    expect(wrapper.text()).toContain(title);
+  });
+
   it("shows the fixed local repair command only for the Hub repair disposition", () => {
     const wrapper = mount(ProbeUpgradeStatusAlert, {
       props: { status: failedProbeUpgradeStatus("probe_repair") },
@@ -67,6 +80,20 @@ describe("Probe Upgrade current problem", () => {
     expect(wrapper.find("button").exists()).toBe(false);
     expect(wrapper.text()).not.toContain("sudo");
     expect(wrapper.text()).not.toContain("http");
+  });
+
+  it("uses a closed Repair presentation without exposing failure text", () => {
+    const wrapper = mount(ProbeUpgradeStatusAlert, {
+      props: {
+        status: probeUpgradeStatus({
+          failure: { recoveryDisposition: null },
+          kind: "probe_repair",
+          state: "failed",
+        }),
+      },
+    });
+    expect(wrapper.text()).toContain("探针修复失败：未知问题");
+    expect(wrapper.text()).not.toContain("sudo");
   });
 
   it.each(["succeeded", "canceled", "superseded"] as const)(
@@ -103,6 +130,7 @@ function probeUpgradeStatus(
     createdAtMs: 1_725_000_000_000,
     failure: null,
     id: 9,
+    kind: "probe_upgrade",
     runningAtMs: null,
     state: "pending",
     targetProbeVersion: "0.2.0",

@@ -5143,6 +5143,12 @@ export namespace enoki {
 
             /** ProbeOperationFailed message */
             message?: (string|null);
+
+            /** ProbeOperationFailed repairEligibilityEvidence */
+            repairEligibilityEvidence?: (string|null);
+
+            /** ProbeOperationFailed repairEligibilitySignature */
+            repairEligibilitySignature?: (string|null);
         }
 
         /** Represents a ProbeOperationFailed. */
@@ -5159,6 +5165,12 @@ export namespace enoki {
 
             /** ProbeOperationFailed message. */
             public message: string;
+
+            /** ProbeOperationFailed repairEligibilityEvidence. */
+            public repairEligibilityEvidence: string;
+
+            /** ProbeOperationFailed repairEligibilitySignature. */
+            public repairEligibilitySignature: string;
 
             /**
              * Creates a new ProbeOperationFailed instance using the specified properties.

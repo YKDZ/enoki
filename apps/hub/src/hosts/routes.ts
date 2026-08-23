@@ -284,7 +284,14 @@ export function createHostRoutes(services: HostRouteServices) {
           ...probeUpgradeEligibility,
           ...(manualReinstall ? { manualReinstall } : {}),
         },
-        probeUpgradeStatus: probeUpgradeStatus(currentOperation),
+        probeUpgradeStatus: probeUpgradeStatus(
+          currentOperation,
+          currentOperation?.kind === "probe_repair"
+            ? (services.probeOperations?.findBoundFailedUpgradeForRepair(
+                currentOperation,
+              ) ?? null)
+            : null,
+        ),
         warnings: warningList(host),
       },
     } satisfies HostDetailResponse;
@@ -754,7 +761,14 @@ export function createProbeOperationRoutes(
 
     return context.json({
       probeOperation: {
-        ...probeUpgradeStatus(operation),
+        ...probeUpgradeStatus(
+          operation,
+          operation.kind === "probe_repair"
+            ? (services.probeOperations?.findBoundFailedUpgradeForRepair(
+                operation,
+              ) ?? null)
+            : null,
+        ),
         hostId: operation.hostId,
         kind: operation.kind,
       },
@@ -856,13 +870,18 @@ function readProbeUpgradeReleaseContext(services: HostRouteServices) {
     : Promise.resolve(unavailableProbeReleaseContext());
 }
 
-function probeUpgradeStatus(operation: ProbeUpgradeRequest): ProbeUpgradeStatus;
-function probeUpgradeStatus(operation: null): null;
+function probeUpgradeStatus(
+  operation: ProbeUpgradeRequest,
+  failedUpgrade?: ProbeUpgradeRequest | null,
+): ProbeUpgradeStatus;
+function probeUpgradeStatus(operation: null, failedUpgrade?: null): null;
 function probeUpgradeStatus(
   operation: ProbeUpgradeRequest | null,
+  failedUpgrade?: ProbeUpgradeRequest | null,
 ): ProbeUpgradeStatus | null;
 function probeUpgradeStatus(
   operation: ProbeUpgradeRequest | null,
+  failedUpgrade: ProbeUpgradeRequest | null = null,
 ): ProbeUpgradeStatus | null {
   if (!operation) {
     return null;
@@ -874,10 +893,14 @@ function probeUpgradeStatus(
     createdAtMs: operation.createdAtMs,
     failure: operation.failureCode
       ? {
-          recoveryDisposition: probeUpgradeRecoveryDisposition(operation),
+          recoveryDisposition: probeUpgradeRecoveryDisposition(
+            operation,
+            failedUpgrade,
+          ),
         }
       : null,
     id: requiredOperationId(operation),
+    kind: operation.kind,
     runningAtMs: operation.runningAtMs,
     state: operation.state,
     targetProbeVersion: operation.targetProbeVersion,

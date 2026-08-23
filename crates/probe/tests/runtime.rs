@@ -657,8 +657,10 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
             "operation_id = \"42\"",
             "target_probe_version = \"0.2.0\"",
             "status = \"failed\"",
-            "error_code = \"post_replacement_restart_failure\"",
-            "message = \"Probe binary was replaced, but restart failed\"",
+            "error_code = \"lifecycle.upgrade_repair_required\"",
+            "message = \"\"",
+            "repair_eligibility_evidence = \"{\\\"schemaVersion\\\":1}\"",
+            "repair_eligibility_signature = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
             "",
         ]
         .join("\n"),
@@ -708,8 +710,10 @@ fn probe_run_reports_post_replacement_upgrade_failure_status_on_startup() {
             operation_id,
             status: Some(Status::Failed(failed)),
         } if operation_id == "42"
-            && failed.error_code == "post_replacement_restart_failure"
-            && failed.message == "Probe binary was replaced, but restart failed"
+            && failed.error_code == "lifecycle.upgrade_repair_required"
+            && failed.message.is_empty()
+            && failed.repair_eligibility_evidence == "{\"schemaVersion\":1}"
+            && failed.repair_eligibility_signature == "a".repeat(64)
     ));
 }
 

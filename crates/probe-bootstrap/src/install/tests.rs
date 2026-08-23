@@ -7,7 +7,7 @@ mod tests {
         owned_ipc_group_record_matches,
         remove_owned_ipc_group_with_commands,
     };
-    use super::upgrade::upgrade_destinations;
+    use super::upgrade::{upgrade_destinations, write_operation_status};
     use crate::handoff::Enrollment;
     use crate::lifecycle::UpgradeCompletion;
     use crate::trust::BootstrapRole;
@@ -1180,6 +1180,40 @@ mod tests {
             signed.evidence.journal_sha256,
             format!("{:x}", Sha256::digest(journal.as_bytes()))
         );
+
+        let eligibility = issue_probe_repair_eligibility(&paths).unwrap();
+        assert_eq!(eligibility.evidence.failed_operation_id, "failed-upgrade-1");
+        assert_eq!(eligibility.evidence.journal_phase, "repair-required");
+        assert_eq!(
+            eligibility.evidence.target_asset_set_digest,
+            format!("sha256:{}", "d".repeat(64))
+        );
+        assert_eq!(eligibility.signature.len(), 64);
+        assert_ne!(eligibility.signature, signed.signature);
+
+        write_operation_status(
+            &paths,
+            &UpgradeAttempt {
+                operation_id: "failed-upgrade-1".to_owned(),
+                stage_owner_uid: 1000,
+                authority_sha256: Some("a".repeat(64)),
+            },
+            "1.2.4",
+            "failed",
+            Some("lifecycle.upgrade_repair_required"),
+        )
+        .unwrap();
+        let status = fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap();
+        let eligibility_canonical =
+            String::from_utf8(eligibility.evidence.canonical_bytes()).unwrap();
+        assert!(status.contains(&format!(
+            "repair_eligibility_evidence = {:?}",
+            eligibility_canonical
+        )));
+        assert!(status.contains(&format!(
+            "repair_eligibility_signature = {:?}",
+            eligibility.signature
+        )));
     }
 
     #[test]

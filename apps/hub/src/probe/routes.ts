@@ -67,6 +67,7 @@ import {
 import { readProbeReleaseContextFromDirectory } from "./release-context.js";
 import {
   authorizeProbeRepair,
+  verifyProbeRepairEligibility,
   verifyProbeRepairEvidence,
   type ProbeRepairEvidence,
 } from "./repair-authority.js";
@@ -414,6 +415,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       acknowledgements: request.operationAcknowledgements ?? [],
       hostId: host.id,
       nowMs: reportReceivedAtMs,
+      probeId: host.probeId,
       services,
       statuses: request.operationStatuses ?? [],
     });
@@ -542,6 +544,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         acknowledgements: request.operationAcknowledgements ?? [],
         hostId: host.id,
         nowMs: reportReceivedAtMs,
+        probeId: host.probeId,
         services,
         statuses: request.operationStatuses ?? [],
       });
@@ -1822,6 +1825,7 @@ function planProbeOperationReportApplication(input: {
   acknowledgements: ProtoMessage[];
   hostId: number;
   nowMs: number;
+  probeId: string;
   services: ProbeRouteServices;
   statuses: ProtoMessage[];
 }):
@@ -1898,11 +1902,23 @@ function planProbeOperationReportApplication(input: {
       };
     }
 
-    if (isClosedProbeOperation(operation)) {
+    const repairEligibility = verifiedRepairEligibilityForStatus({
+      operation,
+      probeId: input.probeId,
+      services: input.services,
+      status,
+    });
+
+    if (isClosedProbeOperation(operation) && !repairEligibility) {
       continue;
     }
 
-    const result = applyProbeOperationStatus(status, operation, input.nowMs);
+    const result = applyProbeOperationStatus(
+      status,
+      operation,
+      input.nowMs,
+      repairEligibility,
+    );
 
     if (result.error) {
       return {
@@ -1983,6 +1999,10 @@ function applyProbeOperationStatus(
   status: ProtoMessage,
   operation: ProbeUpgradeRequest,
   nowMs: number,
+  repairEligibility?: {
+    evidenceJson: string;
+    evidenceSha256: string;
+  } | null,
 ) {
   if (status.running && !status.failed) {
     return startProbeUpgradeRequest({
@@ -1997,6 +2017,7 @@ function applyProbeOperationStatus(
       message: status.failed.message ?? "",
       nowMs,
       operation,
+      repairEligibility,
     });
   }
 
@@ -2011,6 +2032,42 @@ function applyProbeOperationStatus(
     error: "probe_operation_status_invalid" as const,
     operation,
   };
+}
+
+function verifiedRepairEligibilityForStatus(input: {
+  operation: ProbeUpgradeRequest;
+  probeId: string;
+  services: ProbeRouteServices;
+  status: ProtoMessage;
+}) {
+  if (
+    input.status.failed?.errorCode !== "lifecycle.upgrade_repair_required" ||
+    typeof input.status.failed.repairEligibilityEvidence !== "string" ||
+    !input.status.failed.repairEligibilityEvidence ||
+    typeof input.status.failed.repairEligibilitySignature !== "string" ||
+    !input.status.failed.repairEligibilitySignature
+  ) {
+    return null;
+  }
+  const tokenHash =
+    input.services.enrollments.lifecycleAuthorityTokenHashForHost(
+      input.operation.hostId,
+    );
+  const hubOrigin = input.services.probeApiOrigin ?? "";
+  if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+    return null;
+  }
+  return verifyProbeRepairEligibility({
+    canonicalEvidence: input.status.failed.repairEligibilityEvidence,
+    evidenceSignature: input.status.failed.repairEligibilitySignature,
+    expectedHubOrigin: hubOrigin,
+    expectedProbeId: input.probeId,
+    failedUpgrade: input.operation,
+    installKey: deriveLifecycleAuthorityKey(
+      Buffer.from(tokenHash, "hex"),
+      hubOrigin,
+    ),
+  });
 }
 
 function completeProbeUninstallIfSucceeded(input: {

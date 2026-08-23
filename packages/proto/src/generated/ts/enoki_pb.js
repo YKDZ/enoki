@@ -15627,6 +15627,8 @@ export const enoki = $root.enoki = (() => {
              * @interface IProbeOperationFailed
              * @property {string|null} [errorCode] ProbeOperationFailed errorCode
              * @property {string|null} [message] ProbeOperationFailed message
+             * @property {string|null} [repairEligibilityEvidence] ProbeOperationFailed repairEligibilityEvidence
+             * @property {string|null} [repairEligibilitySignature] ProbeOperationFailed repairEligibilitySignature
              */
 
             /**
@@ -15661,6 +15663,22 @@ export const enoki = $root.enoki = (() => {
             ProbeOperationFailed.prototype.message = "";
 
             /**
+             * ProbeOperationFailed repairEligibilityEvidence.
+             * @member {string} repairEligibilityEvidence
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @instance
+             */
+            ProbeOperationFailed.prototype.repairEligibilityEvidence = "";
+
+            /**
+             * ProbeOperationFailed repairEligibilitySignature.
+             * @member {string} repairEligibilitySignature
+             * @memberof enoki.v1.ProbeOperationFailed
+             * @instance
+             */
+            ProbeOperationFailed.prototype.repairEligibilitySignature = "";
+
+            /**
              * Creates a new ProbeOperationFailed instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeOperationFailed
@@ -15692,6 +15710,10 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 1, wireType 2 =*/10).string(message.errorCode);
                 if (message.message != null && Object.hasOwnProperty.call(message, "message"))
                     writer.uint32(/* id 2, wireType 2 =*/18).string(message.message);
+                if (message.repairEligibilityEvidence != null && Object.hasOwnProperty.call(message, "repairEligibilityEvidence"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.repairEligibilityEvidence);
+                if (message.repairEligibilitySignature != null && Object.hasOwnProperty.call(message, "repairEligibilitySignature"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.repairEligibilitySignature);
                 return writer;
             };
 
@@ -15740,6 +15762,14 @@ export const enoki = $root.enoki = (() => {
                             message.message = reader.string();
                             break;
                         }
+                    case 3: {
+                            message.repairEligibilityEvidence = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.repairEligibilitySignature = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -15785,6 +15815,12 @@ export const enoki = $root.enoki = (() => {
                 if (message.message != null && Object.hasOwnProperty.call(message, "message"))
                     if (!$util.isString(message.message))
                         return "message: string expected";
+                if (message.repairEligibilityEvidence != null && Object.hasOwnProperty.call(message, "repairEligibilityEvidence"))
+                    if (!$util.isString(message.repairEligibilityEvidence))
+                        return "repairEligibilityEvidence: string expected";
+                if (message.repairEligibilitySignature != null && Object.hasOwnProperty.call(message, "repairEligibilitySignature"))
+                    if (!$util.isString(message.repairEligibilitySignature))
+                        return "repairEligibilitySignature: string expected";
                 return null;
             };
 
@@ -15810,6 +15846,10 @@ export const enoki = $root.enoki = (() => {
                     message.errorCode = String(object.errorCode);
                 if (object.message != null)
                     message.message = String(object.message);
+                if (object.repairEligibilityEvidence != null)
+                    message.repairEligibilityEvidence = String(object.repairEligibilityEvidence);
+                if (object.repairEligibilitySignature != null)
+                    message.repairEligibilitySignature = String(object.repairEligibilitySignature);
                 return message;
             };
 
@@ -15833,11 +15873,17 @@ export const enoki = $root.enoki = (() => {
                 if (options.defaults) {
                     object.errorCode = "";
                     object.message = "";
+                    object.repairEligibilityEvidence = "";
+                    object.repairEligibilitySignature = "";
                 }
                 if (message.errorCode != null && Object.hasOwnProperty.call(message, "errorCode"))
                     object.errorCode = message.errorCode;
                 if (message.message != null && Object.hasOwnProperty.call(message, "message"))
                     object.message = message.message;
+                if (message.repairEligibilityEvidence != null && Object.hasOwnProperty.call(message, "repairEligibilityEvidence"))
+                    object.repairEligibilityEvidence = message.repairEligibilityEvidence;
+                if (message.repairEligibilitySignature != null && Object.hasOwnProperty.call(message, "repairEligibilitySignature"))
+                    object.repairEligibilitySignature = message.repairEligibilitySignature;
                 return object;
             };
 

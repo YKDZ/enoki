@@ -15,37 +15,45 @@ const emit = defineEmits<{
 }>();
 
 const presentation = computed(() => {
+  const repair = props.status.kind === "probe_repair";
   switch (props.status.state) {
     case "pending":
       return {
         action: null,
-        description: "Hub 正在等待探针接收升级请求。",
+        description: repair
+          ? "Hub 正在等待探针接收修复请求。"
+          : "Hub 正在等待探针接收升级请求。",
         icon: LoaderCircle,
         iconClass: "animate-spin",
-        title: "探针升级等待中",
+        title: repair ? "探针修复请求等待中" : "探针升级等待中",
         variant: "default" as const,
       };
     case "accepted":
       return {
         action: null,
-        description: "探针已接收请求，正在等待升级开始。",
+        description: repair
+          ? "探针已接收请求，正在等待修复开始。"
+          : "探针已接收请求，正在等待升级开始。",
         icon: LoaderCircle,
         iconClass: "animate-spin",
-        title: "探针已接收升级请求",
+        title: repair ? "探针已接收修复请求" : "探针已接收升级请求",
         variant: "default" as const,
       };
     case "running":
       return {
         action: null,
-        description: "探针正在安装并切换到目标版本。",
+        description: repair
+          ? "探针正在恢复目标版本。"
+          : "探针正在安装并切换到目标版本。",
         icon: LoaderCircle,
         iconClass: "animate-spin",
-        title: "探针升级进行中",
+        title: repair ? "探针修复进行中" : "探针升级进行中",
         variant: "default" as const,
       };
     case "failed":
       return failedPresentation(
         props.status.failure?.recoveryDisposition ?? null,
+        repair,
       );
     case "succeeded":
     case "canceled":
@@ -60,7 +68,7 @@ type RecoveryDisposition = NonNullable<
   NonNullable<HostDetail["probeUpgradeStatus"]>["failure"]
 >["recoveryDisposition"];
 
-function failedPresentation(disposition: RecoveryDisposition) {
+function failedPresentation(disposition: RecoveryDisposition, repair: boolean) {
   const base = {
     icon: CircleX,
     iconClass: "",
@@ -98,7 +106,7 @@ function failedPresentation(disposition: RecoveryDisposition) {
         action: null,
         description:
           "Hub 无法安全判断恢复方式。请检查 Hub 与探针状态后再决定下一步。",
-        title: "探针升级失败：未知问题",
+        title: repair ? "探针修复失败：未知问题" : "探针升级失败：未知问题",
       };
   }
 }

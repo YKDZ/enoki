@@ -241,6 +241,8 @@ export const probeOperations = sqliteTable(
     failureCode: text(),
     failureMessage: text(),
     repairAuthorityExpiresAtMs: integer("repair_authority_expires_at_ms"),
+    repairEligibilityEvidenceJson: text("repair_eligibility_evidence_json"),
+    repairEligibilityEvidenceSha256: text("repair_eligibility_evidence_sha256"),
     repairEvidenceSha256: text("repair_evidence_sha256"),
     repairFailedOperationId: integer("repair_failed_operation_id"),
     repairNonce: text("repair_nonce"),

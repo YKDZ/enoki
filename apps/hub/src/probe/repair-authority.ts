@@ -5,6 +5,9 @@ import type { ProbeUpgradeRequest } from "./operation.js";
 const repairEvidenceSigningDomain = Buffer.from(
   "enoki/lifecycle-repair-evidence/hmac-sha256/v1\0",
 );
+const repairEligibilitySigningDomain = Buffer.from(
+  "enoki/lifecycle-repair-eligibility/hmac-sha256/v1\0",
+);
 const repairAuthoritySigningDomain = Buffer.from(
   "enoki/lifecycle-repair-authority/hmac-sha256/v1\0",
 );
@@ -40,6 +43,17 @@ export type ProbeRepairEvidence = {
   requestNonce: string;
 };
 
+export type ProbeRepairEligibility = Omit<
+  ProbeRepairEvidence,
+  "expiresAtMs" | "issuedAtMs" | "requestNonce"
+>;
+
+export type VerifiedProbeRepairEligibility = {
+  evidence: ProbeRepairEligibility;
+  evidenceJson: string;
+  evidenceSha256: string;
+};
+
 export type ProbeRepairAuthority = {
   schemaVersion: 1;
   hubOrigin: string;
@@ -73,6 +87,12 @@ export function canonicalProbeRepairEvidence(evidence: ProbeRepairEvidence) {
   return Buffer.from(JSON.stringify(evidence), "utf8");
 }
 
+export function canonicalProbeRepairEligibility(
+  evidence: ProbeRepairEligibility,
+) {
+  return Buffer.from(JSON.stringify(evidence), "utf8");
+}
+
 export function canonicalProbeRepairAuthority(authority: ProbeRepairAuthority) {
   return Buffer.from(JSON.stringify(authority), "utf8");
 }
@@ -86,6 +106,65 @@ export function signProbeRepairEvidence(
     canonicalEvidence,
     installKey,
   );
+}
+
+export function signProbeRepairEligibility(
+  canonicalEvidence: Uint8Array,
+  installKey: Uint8Array,
+) {
+  return signRepairFacts(
+    repairEligibilitySigningDomain,
+    canonicalEvidence,
+    installKey,
+  );
+}
+
+export function verifyProbeRepairEligibility(input: {
+  canonicalEvidence: string;
+  evidenceSignature: string;
+  expectedHubOrigin: string;
+  expectedProbeId: string;
+  failedUpgrade: ProbeUpgradeRequest;
+  installKey: Uint8Array;
+}): VerifiedProbeRepairEligibility | null {
+  let evidence: ProbeRepairEligibility;
+  try {
+    evidence = JSON.parse(input.canonicalEvidence) as ProbeRepairEligibility;
+  } catch {
+    return null;
+  }
+  const canonical = canonicalProbeRepairEligibility(evidence);
+  if (
+    canonical.toString("utf8") !== input.canonicalEvidence ||
+    !verifyRepairFacts(
+      repairEligibilitySigningDomain,
+      canonical,
+      input.evidenceSignature,
+      input.installKey,
+    ) ||
+    !validRepairEligibility(evidence) ||
+    input.failedUpgrade.kind !== "probe_upgrade" ||
+    input.failedUpgrade.id === null ||
+    evidence.hubOrigin !== input.expectedHubOrigin ||
+    evidence.hostId !== String(input.failedUpgrade.hostId) ||
+    evidence.probeId !== input.expectedProbeId ||
+    evidence.failedOperationId !== String(input.failedUpgrade.id) ||
+    evidence.failedAuthoritySha256 !==
+      input.failedUpgrade.upgradeAuthoritySha256 ||
+    evidence.targetBundleVersion !== input.failedUpgrade.targetProbeVersion ||
+    evidence.targetAssetSetDigest !==
+      input.failedUpgrade.targetAssetSetDigest ||
+    evidence.targetManifestSha256 !==
+      input.failedUpgrade.targetManifestSha256 ||
+    evidence.verifiedStageSha256 !== input.failedUpgrade.verifiedStageSha256
+  ) {
+    return null;
+  }
+  return {
+    evidence,
+    evidenceJson: input.canonicalEvidence,
+    evidenceSha256: createHash("sha256").update(canonical).digest("hex"),
+  };
 }
 
 export function signProbeRepairAuthority(
@@ -230,6 +309,15 @@ function verifyRepairFacts(
 
 function validRepairEvidence(evidence: ProbeRepairEvidence) {
   return (
+    validRepairEligibility(evidence) &&
+    Number.isSafeInteger(evidence.issuedAtMs) &&
+    Number.isSafeInteger(evidence.expiresAtMs) &&
+    validIdentifier(evidence.requestNonce)
+  );
+}
+
+function validRepairEligibility(evidence: ProbeRepairEligibility) {
+  return (
     evidence.schemaVersion === 1 &&
     validIdentifier(evidence.hostId) &&
     validIdentifier(evidence.probeId) &&
@@ -245,14 +333,11 @@ function validRepairEvidence(evidence: ProbeRepairEvidence) {
     isSha256(evidence.targetAssetSetDigest.slice("sha256:".length)) &&
     isSha256(evidence.targetManifestSha256) &&
     isSha256(evidence.verifiedStageSha256) &&
-    Number.isSafeInteger(evidence.issuedAtMs) &&
-    Number.isSafeInteger(evidence.expiresAtMs) &&
-    validIdentifier(evidence.requestNonce) &&
     validPostactivationProgress(evidence)
   );
 }
 
-function validPostactivationProgress(evidence: ProbeRepairEvidence) {
+function validPostactivationProgress(evidence: ProbeRepairEligibility) {
   const targetCount = 20;
   if (
     evidence.activatedTargets > targetCount ||

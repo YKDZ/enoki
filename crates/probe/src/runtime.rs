@@ -1127,6 +1127,7 @@ fn lifecycle_companion_failure(code: &str) -> ProbeUpgradeRunnerOutcome {
     ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
         error_code: code.to_owned(),
         message: "The local Probe lifecycle operation failed.".to_owned(),
+        ..ProbeOperationFailed::default()
     })
 }
 
@@ -1523,6 +1524,7 @@ mod operation_report_tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "insufficient_privilege".to_string(),
                     message: "sudo denied".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             }
 
@@ -1533,6 +1535,7 @@ mod operation_report_tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "insufficient_privilege".to_string(),
                     message: "sudo denied".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             }
         }
@@ -2042,6 +2045,16 @@ fn read_local_operation_statuses(bootstrap_config: &BootstrapConfig) -> Vec<Prob
                 error_code: local_status_string(&value, "error_code")
                     .unwrap_or_else(|| "probe_upgrader_failed".to_string()),
                 message: local_status_string(&value, "message").unwrap_or_default(),
+                repair_eligibility_evidence: local_status_string(
+                    &value,
+                    "repair_eligibility_evidence",
+                )
+                .unwrap_or_default(),
+                repair_eligibility_signature: local_status_string(
+                    &value,
+                    "repair_eligibility_signature",
+                )
+                .unwrap_or_default(),
             })),
         }],
         _ => Vec::new(),
@@ -2443,6 +2456,7 @@ mod tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "unsupported_installation".to_string(),
                     message: "not installed".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             })
         }
@@ -2458,6 +2472,7 @@ mod tests {
                 ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                     error_code: "unsupported_installation".to_string(),
                     message: "not installed".to_string(),
+                    ..ProbeOperationFailed::default()
                 })
             })
         }
@@ -2906,6 +2921,7 @@ mod tests {
             outcome: Some(ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "insufficient_privilege".to_string(),
                 message: "sudoers rule is missing".to_string(),
+                ..ProbeOperationFailed::default()
             })),
             ..RecordingOperationRunner::default()
         };
@@ -3137,6 +3153,7 @@ mod tests {
             ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "probe_upgrader_noop".to_string(),
                 message: "fake no-op launch".to_string(),
+                ..ProbeOperationFailed::default()
             })
         }
 
@@ -3152,6 +3169,7 @@ mod tests {
             ProbeUpgradeRunnerOutcome::Failed(ProbeOperationFailed {
                 error_code: "probe_uninstaller_noop".to_string(),
                 message: "fake no-op launch".to_string(),
+                ..ProbeOperationFailed::default()
             })
         }
     }

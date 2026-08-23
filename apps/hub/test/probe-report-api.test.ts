@@ -25,8 +25,11 @@ import {
   validateProbeOperationToken,
 } from "../src/probe/operation-token";
 import {
+  canonicalProbeRepairEligibility,
   canonicalProbeRepairEvidence,
+  signProbeRepairEligibility,
   signProbeRepairEvidence,
+  type ProbeRepairEligibility,
 } from "../src/probe/repair-authority";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import {
@@ -3319,7 +3322,7 @@ describe("Probe report API", () => {
         },
       }).operation,
     );
-    const failed = database.probeOperations.updateProbeUpgradeRequest({
+    let failed = database.probeOperations.updateProbeUpgradeRequest({
       ...failedUpgrade,
       acceptedAtMs: 1_725_000_000_100,
       completedAtMs: 1_725_000_001_000,
@@ -3355,6 +3358,58 @@ describe("Probe report API", () => {
       createHash("sha256").update(enrollmentToken).digest(),
       "https://hub.example",
     );
+    const eligibilityEvidence: ProbeRepairEligibility = {
+      activatedTargets: evidence.activatedTargets,
+      failedAuthoritySha256: evidence.failedAuthoritySha256,
+      failedOperationId: evidence.failedOperationId,
+      finalizedTargets: evidence.finalizedTargets,
+      hostId: evidence.hostId,
+      hubOrigin: evidence.hubOrigin,
+      journalPhase: evidence.journalPhase,
+      journalSha256: evidence.journalSha256,
+      probeId: evidence.probeId,
+      schemaVersion: 1,
+      targetAssetSetDigest: evidence.targetAssetSetDigest,
+      targetBundleVersion: evidence.targetBundleVersion,
+      targetManifestSha256: evidence.targetManifestSha256,
+      verifiedStageSha256: evidence.verifiedStageSha256,
+    };
+    const canonicalEligibility =
+      canonicalProbeRepairEligibility(eligibilityEvidence);
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const eligibilityReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "repair-eligibility-boot",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "lifecycle.upgrade_repair_required",
+                  message: "root status",
+                  repairEligibilityEvidence:
+                    canonicalEligibility.toString("utf8"),
+                  repairEligibilitySignature: signProbeRepairEligibility(
+                    canonicalEligibility,
+                    installKey,
+                  ),
+                },
+                operationId: String(failed.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(eligibilityReport.status).toBe(200);
+    failed = database.probeOperations.findById(failed.id!)!;
     const requestPath = `/api/probe/operations/${failed.id}/repair-authorize`;
     const requestBody = JSON.stringify({
       evidence,
@@ -3468,13 +3523,43 @@ describe("Probe report API", () => {
     const renewedOperation = database.probeOperations.findById(
       Number(renewedBody.authority.repairOperationId),
     )!;
-    database.probeOperations.updateProbeUpgradeRequest({
-      ...renewedOperation,
-      completedAtMs: repairNowMs,
-      failureCode: "lifecycle.repair_unresolved",
-      failureMessage: null,
-      state: "failed",
-      updatedAtMs: repairNowMs,
+    const unresolvedReport = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "repair-unresolved-boot",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "lifecycle.repair_unresolved",
+                  message: "root status",
+                },
+                operationId: String(renewedOperation.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 2,
+            sequenceStart: 2,
+          }),
+        ).finish(),
+      ),
+    );
+    expect(unresolvedReport.status).toBe(200);
+    const unresolvedDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(unresolvedDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "probe_repair" },
+          kind: "probe_repair",
+          state: "failed",
+        }),
+      }),
     });
     const freshEvidence = {
       ...renewedEvidence,
@@ -3781,6 +3866,123 @@ describe("Probe report API", () => {
       }),
     });
 
+    database.close();
+  });
+
+  it("persists only root-signed postactivation Repair eligibility with the failed Upgrade", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+      probeApiOrigin: "https://hub.example",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.hosts.findByProbeId(registration.probeId)!;
+    const targetAssetSetDigest = `sha256:${"a".repeat(64)}`;
+    const targetManifestSha256 = "b".repeat(64);
+    const upgradeAuthoritySha256 = "c".repeat(64);
+    const verifiedStageSha256 = "d".repeat(64);
+    const pending = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: nowMs - 1_000,
+        target: { assetSetDigest: targetAssetSetDigest, version: "0.2.0" },
+      }).operation,
+    );
+    const operation = database.probeOperations.admitPendingProbeUpgradeRequest(
+      pending.id!,
+      nowMs - 500,
+      targetManifestSha256,
+      upgradeAuthoritySha256,
+      verifiedStageSha256,
+    )!;
+    const evidence: ProbeRepairEligibility = {
+      activatedTargets: 3,
+      failedAuthoritySha256: upgradeAuthoritySha256,
+      failedOperationId: String(operation.id),
+      finalizedTargets: 0,
+      hostId: String(host.id),
+      hubOrigin: "https://hub.example",
+      journalPhase: "repair-required",
+      journalSha256: "e".repeat(64),
+      probeId: registration.probeId,
+      schemaVersion: 1,
+      targetAssetSetDigest,
+      targetBundleVersion: "0.2.0",
+      targetManifestSha256,
+      verifiedStageSha256,
+    };
+    const canonicalEvidence = canonicalProbeRepairEligibility(evidence);
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(
+        registration,
+        "https://hub.example/api/probe/report",
+        ReportRequest.encode(
+          ReportRequest.create({
+            bootId: "boot-postactivation-failure",
+            operationStatuses: [
+              {
+                failed: {
+                  errorCode: "lifecycle.upgrade_repair_required",
+                  message: "untrusted diagnostic",
+                  repairEligibilityEvidence: canonicalEvidence.toString("utf8"),
+                  repairEligibilitySignature: signProbeRepairEligibility(
+                    canonicalEvidence,
+                    installKey,
+                  ),
+                },
+                operationId: String(operation.id),
+              },
+            ],
+            probeConfigurationVersion: "default-v1",
+            probeId: registration.probeId,
+            sequenceEnd: 1,
+            sequenceStart: 1,
+          }),
+        ).finish(),
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(database.probeOperations.findById(operation.id!)).toEqual(
+      expect.objectContaining({
+        failureCode: "lifecycle.upgrade_repair_required",
+        repairEligibilityEvidenceJson: canonicalEvidence.toString("utf8"),
+        repairEligibilityEvidenceSha256: createHash("sha256")
+          .update(canonicalEvidence)
+          .digest("hex"),
+        state: "failed",
+      }),
+    );
+    const detail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    expect(detail.status).toBe(200);
+    await expect(detail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "probe_repair" },
+          kind: "probe_upgrade",
+          state: "failed",
+        }),
+      }),
+    });
     database.close();
   });
 

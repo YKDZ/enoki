@@ -27,6 +27,9 @@ export type ProbeOperationRepository = {
   findActiveForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findById: (id: number) => ProbeUpgradeRequest | null;
   findByRepairEvidenceSha256: (sha256: string) => ProbeUpgradeRequest | null;
+  findBoundFailedUpgradeForRepair: (
+    repair: ProbeUpgradeRequest,
+  ) => ProbeUpgradeRequest | null;
   findLatestForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findLatestForHosts: (hostIds: number[]) => Map<number, ProbeUpgradeRequest>;
   renewOrCreateProbeRepairRequest: (
@@ -114,6 +117,58 @@ export function createProbeOperationRepository(
           .where(eq(probeOperations.repairEvidenceSha256, sha256))
           .get() ?? null;
       return row ? rowToProbeUpgradeRequest(row) : null;
+    },
+    findBoundFailedUpgradeForRepair(repair) {
+      if (
+        repair.id === null ||
+        repair.kind !== "probe_repair" ||
+        repair.repairFailedOperationId === null ||
+        repair.repairFailedOperationId === undefined ||
+        repair.repairFailedOperationId === repair.id
+      ) {
+        return null;
+      }
+      const failedUpgrade = alias(probeOperations, "failed_probe_upgrade");
+      const row = database
+        .select({ failedUpgrade })
+        .from(probeOperations)
+        .innerJoin(
+          failedUpgrade,
+          and(
+            eq(failedUpgrade.id, probeOperations.repairFailedOperationId),
+            eq(failedUpgrade.managedHostId, probeOperations.managedHostId),
+            eq(
+              failedUpgrade.targetProbeVersion,
+              probeOperations.targetProbeVersion,
+            ),
+            eq(
+              failedUpgrade.targetAssetSetDigest,
+              probeOperations.targetAssetSetDigest,
+            ),
+            eq(
+              failedUpgrade.targetManifestSha256,
+              probeOperations.targetManifestSha256,
+            ),
+            eq(
+              failedUpgrade.verifiedStageSha256,
+              probeOperations.verifiedStageSha256,
+            ),
+            eq(
+              failedUpgrade.upgradeAuthoritySha256,
+              probeOperations.upgradeAuthoritySha256,
+            ),
+          ),
+        )
+        .where(
+          and(
+            eq(probeOperations.id, repair.id),
+            eq(probeOperations.kind, "probe_repair"),
+            eq(failedUpgrade.kind, "probe_upgrade"),
+            eq(failedUpgrade.state, "failed"),
+          ),
+        )
+        .get();
+      return row ? rowToProbeUpgradeRequest(row.failedUpgrade) : null;
     },
     findLatestForHost(hostId) {
       const row =
@@ -283,6 +338,8 @@ function probeUpgradeRequestToRow(
     kind: operation.kind,
     managedHostId: operation.hostId,
     repairAuthorityExpiresAtMs: operation.repairAuthorityExpiresAtMs,
+    repairEligibilityEvidenceJson: operation.repairEligibilityEvidenceJson,
+    repairEligibilityEvidenceSha256: operation.repairEligibilityEvidenceSha256,
     repairEvidenceSha256: operation.repairEvidenceSha256,
     repairFailedOperationId: operation.repairFailedOperationId,
     repairNonce: operation.repairNonce,
@@ -311,6 +368,8 @@ function rowToProbeUpgradeRequest(row: ProbeOperationRow): ProbeUpgradeRequest {
     id: row.id,
     kind: row.kind as ProbeUpgradeRequest["kind"],
     repairAuthorityExpiresAtMs: row.repairAuthorityExpiresAtMs,
+    repairEligibilityEvidenceJson: row.repairEligibilityEvidenceJson,
+    repairEligibilityEvidenceSha256: row.repairEligibilityEvidenceSha256,
     repairEvidenceSha256: row.repairEvidenceSha256,
     repairFailedOperationId: row.repairFailedOperationId,
     repairNonce: row.repairNonce,

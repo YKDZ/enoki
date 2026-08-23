@@ -1258,6 +1258,7 @@ describe("Host detail API", () => {
         createdAtMs: 1_725_000_000_000,
         failure: null,
         id: expect.any(Number),
+        kind: "probe_upgrade",
         runningAtMs: null,
         state: "pending",
         targetProbeVersion: "0.2.0",
@@ -1302,6 +1303,7 @@ describe("Host detail API", () => {
         createdAtMs: 1_725_000_000_000,
         failure: null,
         id: createdBody.probeUpgradeRequest.id,
+        kind: "probe_upgrade",
         runningAtMs: null,
         state: "pending",
         targetProbeVersion: "0.2.0",
@@ -1324,6 +1326,7 @@ describe("Host detail API", () => {
           createdAtMs: 1_725_000_000_000,
           failure: null,
           id: expect.any(Number),
+          kind: "probe_upgrade",
           runningAtMs: null,
           state: "pending",
           targetProbeVersion: "0.2.0",
@@ -1390,6 +1393,7 @@ describe("Host detail API", () => {
             recoveryDisposition: "manual_reinstall_required",
           },
           id: expect.any(Number),
+          kind: "probe_upgrade",
           runningAtMs: 1_725_000_000_200,
           state: "failed",
           targetProbeVersion: "0.2.0",
@@ -1431,7 +1435,7 @@ describe("Host detail API", () => {
         false,
       ],
       ["signing_key_untrusted", "retry_probe_upgrade", true],
-      ["lifecycle.upgrade_repair_required", "probe_repair", true],
+      ["lifecycle.upgrade_repair_required", "manual_reinstall_required", true],
       ["lifecycle.upgrade_repair_required", "manual_reinstall_required", false],
       ["lifecycle.authority_mismatch", null, true],
       ["running_timeout", "manual_reinstall_required", true],
@@ -1499,7 +1503,7 @@ describe("Host detail API", () => {
     expect(unresolvedRepairBody).toEqual({
       host: expect.objectContaining({
         probeUpgradeStatus: expect.objectContaining({
-          failure: { recoveryDisposition: "probe_repair" },
+          failure: { recoveryDisposition: "manual_reinstall_required" },
           state: "failed",
         }),
       }),
@@ -1540,7 +1544,7 @@ describe("Host detail API", () => {
     expect(operationHistoryResponse.status).toBe(200);
     await expect(operationHistoryResponse.json()).resolves.toEqual({
       probeOperation: expect.objectContaining({
-        failure: { recoveryDisposition: "probe_repair" },
+        failure: { recoveryDisposition: "manual_reinstall_required" },
         id: createdBody.probeUpgradeRequest.id,
         kind: "probe_repair",
         state: "failed",
@@ -1578,7 +1582,10 @@ describe("Host detail API", () => {
     expect(repairedDetailResponse.status).toBe(200);
     await expect(repairedDetailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
-        probeUpgradeStatus: null,
+        probeUpgradeStatus: expect.objectContaining({
+          failure: { recoveryDisposition: "manual_reinstall_required" },
+          state: "failed",
+        }),
       }),
     });
     const repairedOverviewResponse = await app.request("/api/web/hosts", {
@@ -1588,7 +1595,7 @@ describe("Host detail API", () => {
       hosts: [
         expect.objectContaining({
           id: hostId,
-          probeUpgradeProblem: null,
+          probeUpgradeProblem: { status: "failed" },
         }),
       ],
     });
@@ -1700,7 +1707,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("keeps a failed Probe Upgrade current until target-version Host Profile evidence is newer", async () => {
+  it("keeps a failed Probe Upgrade current despite newer target-version Host Profile evidence", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1792,7 +1799,12 @@ describe("Host detail API", () => {
     );
     expect(recoveredDetailResponse.status).toBe(200);
     await expect(recoveredDetailResponse.json()).resolves.toEqual({
-      host: expect.objectContaining({ probeUpgradeStatus: null }),
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
+      }),
     });
     const recoveredOverviewResponse = await app.request("/api/web/hosts", {
       headers: { cookie: ownerSession },
@@ -1802,7 +1814,7 @@ describe("Host detail API", () => {
       hosts: [
         expect.objectContaining({
           id: hostId,
-          probeUpgradeProblem: null,
+          probeUpgradeProblem: { status: "failed" },
         }),
       ],
     });

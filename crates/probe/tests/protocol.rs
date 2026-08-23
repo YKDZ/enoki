@@ -255,6 +255,7 @@ fn generated_rust_protocol_encodes_probe_operation_delivery_and_status() {
             status: Some(Status::Failed(ProbeOperationFailed {
                 error_code: "unsupported_installation".to_string(),
                 message: "systemd is unavailable".to_string(),
+                ..ProbeOperationFailed::default()
             })),
         }],
         cpu_resource_collection_outcomes: Vec::new(),
