@@ -29,7 +29,7 @@ use rsa::{
     pkcs8::DecodePublicKey,
     signature::Verifier,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -264,21 +264,25 @@ const PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH: &str =
 const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
-const UNINSTALL_INTENT_FILE_NAME: &str = "probe-uninstall.intent";
+const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
+const MAX_UNINSTALL_CAPSULE_BYTES: u64 = 64 * 1024;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum UninstallIntentPhase {
+enum UninstallCapsulePhase {
+    Verified,
     Prepared,
     TerminalAcknowledged,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct UninstallIntent {
+struct UninstallRecoveryCapsule {
     schema_version: u16,
     authority_sha256: String,
-    phase: UninstallIntentPhase,
+    phase: UninstallCapsulePhase,
+    request_json: String,
+    install_metadata: TrustedProbeInstallMetadata,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1687,7 +1691,8 @@ pub fn run_lifecycle_companion(
         transport,
         &mut systemd,
     ) {
-        Ok(()) => LifecycleResponse::succeeded(),
+        Ok(true) => LifecycleResponse::succeeded(),
+        Ok(false) => LifecycleResponse::recovery_pending(),
         Err(error) => LifecycleResponse::failed(error.code()),
     }
 }
@@ -1699,22 +1704,24 @@ fn execute_lifecycle_uninstall(
     install_metadata_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    let intent_path = uninstall_intent_path(install_metadata_path)?;
+) -> Result<bool, ProbeUpgraderRunError> {
+    let capsule_path = uninstall_capsule_path(install_metadata_path)?;
     let authority_sha256 = lifecycle_authority_sha256(request)?;
-    let mut intent = read_uninstall_intent(&intent_path)?;
-    if let Some(existing) = &intent
-        && existing.authority_sha256 != authority_sha256
-    {
-        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "uninstall intent belongs to another authority",
-        ));
+    let mut capsule = read_uninstall_capsule(&capsule_path)?;
+    if let Some(existing) = &capsule {
+        if existing.authority_sha256 != authority_sha256
+            || existing.install_metadata != *install_metadata
+        {
+            return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "uninstall capsule belongs to another authority",
+            ));
+        }
     }
     let plan = plan_probe_uninstall_cleanup(
         input,
         install_metadata,
         install_metadata_path,
-        intent.is_some(),
+        capsule.is_some(),
     )?;
     let hub_operation = match request.authority() {
         LifecycleRequestAuthority::HubOperation {
@@ -1724,25 +1731,31 @@ fn execute_lifecycle_uninstall(
         } => Some((operation_id.as_str(), operation_token.as_str())),
         LifecycleRequestAuthority::LocalRoot { .. } => None,
     };
-    let bootstrap_config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
-    validate_identity_path(&input.bootstrap_config_path, install_metadata)?;
-    validate_bootstrap_config_matches_trusted_install_metadata(
-        &bootstrap_config,
-        install_metadata,
-    )?;
-    let request_auth = probe_request_auth_from_bootstrap_config(&bootstrap_config)?;
+    let terminal_was_acknowledged = matches!(
+        capsule.as_ref().map(|capsule| capsule.phase),
+        Some(UninstallCapsulePhase::TerminalAcknowledged)
+    );
+    let bootstrap_config = if terminal_was_acknowledged {
+        None
+    } else {
+        validate_identity_path(&input.bootstrap_config_path, install_metadata)?;
+        let config = read_upgrader_bootstrap_config(&input.bootstrap_config_path)?;
+        validate_bootstrap_config_matches_trusted_install_metadata(&config, install_metadata)?;
+        Some(config)
+    };
+    let request_auth = bootstrap_config
+        .as_ref()
+        .map(probe_request_auth_from_bootstrap_config)
+        .transpose()?;
     let mut lifecycle = LifecycleExecution::begin(request.transition()).map_err(|_| {
         ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle transition is not enabled")
     })?;
-    let hub_was_acknowledged = matches!(
-        intent.as_ref().map(|intent| intent.phase),
-        Some(UninstallIntentPhase::TerminalAcknowledged)
-    );
-    let mut hub_is_acknowledged = hub_was_acknowledged;
+    let mut terminal_is_acknowledged = terminal_was_acknowledged;
 
+    let mut recovery_pending = false;
     lifecycle.run_uninstall(|phase| match phase {
         LifecyclePhase::Verified => {
-            if intent.is_none()
+            if capsule.is_none()
                 && let Some((operation_id, operation_token)) = hub_operation
             {
                 let token_body = format!(
@@ -1751,49 +1764,89 @@ fn execute_lifecycle_uninstall(
                 );
                 transport.post_token_validation(
                     &operation_token_validation_url(&install_metadata.hub_url, operation_id)?,
-                    &request_auth,
+                    request_auth
+                        .as_ref()
+                        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+                            "uninstall capsule lost report identity",
+                        ))?,
                     &token_body,
                 )?;
+            }
+            if capsule.is_none() {
+                persist_uninstall_capsule(
+                    &capsule_path,
+                    request,
+                    install_metadata,
+                    UninstallCapsulePhase::Verified,
+                )?;
+                capsule = read_uninstall_capsule(&capsule_path)?;
             }
             Ok(())
         }
         LifecyclePhase::Cleaning => {
-            if !hub_is_acknowledged {
+            if !terminal_is_acknowledged {
                 execute_probe_uninstall_cleanup(&plan, systemd, UninstallCleanupExtent::Prepare)?;
-                persist_uninstall_intent(
-                    &intent_path,
-                    &authority_sha256,
-                    UninstallIntentPhase::Prepared,
+                persist_uninstall_capsule(
+                    &capsule_path,
+                    request,
+                    install_metadata,
+                    UninstallCapsulePhase::Prepared,
                 )?;
-                intent = read_uninstall_intent(&intent_path)?;
+                capsule = read_uninstall_capsule(&capsule_path)?;
             }
             Ok(())
         }
         LifecyclePhase::Reporting => {
-            if !hub_is_acknowledged && let Some((operation_id, operation_token)) = hub_operation {
+            if !terminal_is_acknowledged
+                && let Some((operation_id, operation_token)) = hub_operation
+            {
                 let body = render_operation_status_body(operation_token, "succeeded", None, None);
                 transport.post_operation_status(
                     &operation_status_url(&install_metadata.hub_url, operation_id)?,
-                    &request_auth,
+                    request_auth
+                        .as_ref()
+                        .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
+                            "uninstall capsule lost report identity",
+                        ))?,
                     &body,
                 )?;
             }
             Ok(())
         }
         LifecyclePhase::Committing => {
-            persist_uninstall_intent(
-                &intent_path,
-                &authority_sha256,
-                UninstallIntentPhase::TerminalAcknowledged,
+            persist_uninstall_capsule(
+                &capsule_path,
+                request,
+                install_metadata,
+                UninstallCapsulePhase::TerminalAcknowledged,
             )?;
-            hub_is_acknowledged = true;
+            terminal_is_acknowledged = true;
             Ok(())
         }
         LifecyclePhase::Finalizing => {
-            match execute_probe_uninstall_cleanup(&plan, systemd, UninstallCleanupExtent::Complete)
-            {
-                Ok(()) => remove_path_if_exists(&intent_path),
-                Err(_error) if hub_operation.is_some() && hub_is_acknowledged => Ok(()),
+            let result = (|| {
+                let companion_binary = install_metadata.lifecycle_companion_path.as_deref().ok_or(
+                    ProbeUpgraderRunError::InvalidInstallMetadata(
+                        "schema v4 metadata is missing lifecycle companion",
+                    ),
+                )?;
+                execute_probe_uninstall_cleanup(
+                    &plan,
+                    systemd,
+                    UninstallCleanupExtent::RecoverableFinalize,
+                )?;
+                commit_lifecycle_self_removal_with(
+                    &capsule_path,
+                    companion_binary,
+                    remove_path_if_exists,
+                )
+            })();
+            match result {
+                Ok(()) => Ok(()),
+                Err(_error) if hub_operation.is_some() && terminal_is_acknowledged => {
+                    recovery_pending = true;
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         }
@@ -1804,7 +1857,66 @@ fn execute_lifecycle_uninstall(
 
     // Hub 已确认 terminal 状态后，本机 finalizer 失败不能反转远端事实；
     // 固定 Companion 入口与 intent 会保留给同一 authority 的显式重入。
-    Ok(())
+    Ok(!recovery_pending)
+}
+
+fn commit_lifecycle_self_removal_with(
+    capsule_path: &Path,
+    companion_binary: &Path,
+    mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    remove(capsule_path)?;
+    // capsule 删除后，这是最后一个可失败动作；成功后不得再执行
+    // filesystem、systemd、network 或验证操作。
+    remove(companion_binary)
+}
+
+/// 固定恢复入口不接受运行时参数；它只消费安装目录中的 root-owned
+/// canonical capsule。capsule 已提交删除时，唯一剩余动作是自删除固定
+/// Companion binary。
+pub fn resume_lifecycle_companion(
+    transport: &mut impl ProbeUpgraderValidationTransport,
+) -> LifecycleResponse {
+    if unsafe { libc::geteuid() } != 0 {
+        return LifecycleResponse::failed("lifecycle.root_required");
+    }
+    match resume_lifecycle_companion_at(
+        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+        Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
+        transport,
+        &mut SystemProbeUpgraderSystemdRunner,
+    ) {
+        Ok(true) => LifecycleResponse::succeeded(),
+        Ok(false) => LifecycleResponse::recovery_pending(),
+        Err(error) => LifecycleResponse::failed(error.code()),
+    }
+}
+
+fn resume_lifecycle_companion_at(
+    install_metadata_path: &Path,
+    companion_binary_path: &Path,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> Result<bool, ProbeUpgraderRunError> {
+    let capsule_path = uninstall_capsule_path(install_metadata_path)?;
+    let Some(capsule) = read_uninstall_capsule(&capsule_path)? else {
+        remove_path_if_exists(companion_binary_path)?;
+        return Ok(true);
+    };
+    let request = LifecycleRequest::decode(capsule.request_json.as_bytes()).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("uninstall capsule request is invalid")
+    })?;
+    let input = ProbeUninstallerRunInput {
+        bootstrap_config_path: capsule.install_metadata.identity_path.clone(),
+    };
+    execute_lifecycle_uninstall(
+        &request,
+        &input,
+        &capsule.install_metadata,
+        install_metadata_path,
+        transport,
+        systemd,
+    )
 }
 
 pub fn run_local_lifecycle_companion(
@@ -1997,6 +2109,7 @@ struct ProbeUninstallCleanupPlan<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UninstallCleanupExtent {
     Prepare,
+    RecoverableFinalize,
     Complete,
 }
 
@@ -2076,7 +2189,6 @@ fn execute_probe_uninstall_cleanup(
 ) -> Result<(), ProbeUpgraderRunError> {
     let input = plan.input;
     let install_metadata = plan.install_metadata;
-    let install_metadata_path = plan.install_metadata_path;
     if matches!(install_metadata.schema_version, 3 | 4) {
         for service in observation_services(install_metadata.schema_version)
             .iter()
@@ -2290,7 +2402,9 @@ fn execute_probe_uninstall_cleanup(
         {
             remove_path_if_exists(path)?;
         }
-        if let Some(path) = install_metadata.lifecycle_companion_path.as_deref() {
+        if extent == UninstallCleanupExtent::Complete
+            && let Some(path) = install_metadata.lifecycle_companion_path.as_deref()
+        {
             remove_path_if_exists(path)?;
         }
         systemd.daemon_reload().map_err(|error| {
@@ -2318,17 +2432,25 @@ fn execute_probe_uninstall_cleanup(
             })?;
     }
 
-    remove_path_if_exists(install_metadata_path)?;
-    remove_path_if_exists(&input.bootstrap_config_path)?;
+    remove_uninstall_local_state_with(plan, |path| remove_path_if_exists(path))?;
     remove_empty_parent_dir(&input.bootstrap_config_path)?;
-    remove_path_if_exists(&install_metadata.state_dir)?;
 
-    verify_probe_uninstall_cleanup(plan, systemd)
+    verify_probe_uninstall_cleanup(plan, systemd, extent)
+}
+
+fn remove_uninstall_local_state_with(
+    plan: &ProbeUninstallCleanupPlan<'_>,
+    mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
+) -> Result<(), ProbeUpgraderRunError> {
+    remove(plan.install_metadata_path)?;
+    remove(&plan.input.bootstrap_config_path)?;
+    remove(&plan.install_metadata.state_dir)
 }
 
 fn verify_probe_uninstall_cleanup(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
+    extent: UninstallCleanupExtent,
 ) -> Result<(), ProbeUpgraderRunError> {
     let metadata = plan.install_metadata;
     for (path, code, action) in [
@@ -2397,6 +2519,11 @@ fn verify_probe_uninstall_cleanup(
     .into_iter()
     .flatten()
     {
+        if extent == UninstallCleanupExtent::RecoverableFinalize
+            && is_lifecycle_companion_path(path)
+        {
+            continue;
+        }
         verify_path_absent(
             path,
             "probe_uninstall_binary_residue",
@@ -2781,7 +2908,8 @@ struct ProbeUpgraderBootstrapConfig {
     state_dir: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct TrustedProbeInstallMetadata {
     schema_version: u32,
     hub_url: String,
@@ -4939,13 +5067,13 @@ fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn uninstall_intent_path(install_metadata_path: &Path) -> Result<PathBuf, ProbeUpgraderRunError> {
+fn uninstall_capsule_path(install_metadata_path: &Path) -> Result<PathBuf, ProbeUpgraderRunError> {
     let Some(parent) = install_metadata_path.parent() else {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "install metadata path has no parent",
         ));
     };
-    Ok(parent.join(UNINSTALL_INTENT_FILE_NAME))
+    Ok(parent.join(UNINSTALL_CAPSULE_FILE_NAME))
 }
 
 fn lifecycle_authority_sha256(request: &LifecycleRequest) -> Result<String, ProbeUpgraderRunError> {
@@ -4955,7 +5083,9 @@ fn lifecycle_authority_sha256(request: &LifecycleRequest) -> Result<String, Prob
         .map_err(|_| ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority invalid"))
 }
 
-fn read_uninstall_intent(path: &Path) -> Result<Option<UninstallIntent>, ProbeUpgraderRunError> {
+fn read_uninstall_capsule(
+    path: &Path,
+) -> Result<Option<UninstallRecoveryCapsule>, ProbeUpgraderRunError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -4965,67 +5095,119 @@ fn read_uninstall_intent(path: &Path) -> Result<Option<UninstallIntent>, ProbeUp
         || metadata.nlink() != 1
         || metadata.uid() != 0
         || metadata.mode() & 0o777 != 0o600
-        || metadata.len() > 1024
+        || metadata.len() > MAX_UNINSTALL_CAPSULE_BYTES
     {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "uninstall intent is not a root-owned regular 0600 file",
+            "uninstall capsule is not a root-owned regular 0600 file",
         ));
     }
     let contents = fs::read_to_string(path).map_err(ProbeUpgraderRunError::Io)?;
-    let intent: UninstallIntent = toml::from_str(&contents).map_err(|_| {
-        ProbeUpgraderRunError::InvalidInstallMetadata("uninstall intent is malformed")
+    let capsule: UninstallRecoveryCapsule = toml::from_str(&contents).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("uninstall capsule is malformed")
     })?;
-    if intent.schema_version != 1 || !is_sha256_hex(&intent.authority_sha256) {
+    let request = LifecycleRequest::decode(capsule.request_json.as_bytes()).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("uninstall capsule request is invalid")
+    })?;
+    let canonical = toml::to_string(&capsule).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("uninstall capsule is malformed")
+    })?;
+    if capsule.schema_version != 1
+        || canonical != contents
+        || lifecycle_authority_sha256(&request)? != capsule.authority_sha256
+        || !capsule_receipt_matches_request(&capsule.install_metadata, &request)
+    {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "uninstall intent is malformed",
+            "uninstall capsule is malformed",
         ));
     }
-    Ok(Some(intent))
+    Ok(Some(capsule))
 }
 
-fn persist_uninstall_intent(
+fn persist_uninstall_capsule(
     path: &Path,
-    authority_sha256: &str,
-    phase: UninstallIntentPhase,
+    request: &LifecycleRequest,
+    install_metadata: &TrustedProbeInstallMetadata,
+    phase: UninstallCapsulePhase,
 ) -> Result<(), ProbeUpgraderRunError> {
-    if !is_sha256_hex(authority_sha256) {
+    let authority_sha256 = lifecycle_authority_sha256(request)?;
+    if !capsule_receipt_matches_request(install_metadata, request) {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "lifecycle authority digest is invalid",
+            "uninstall capsule receipt does not match authority",
         ));
     }
-    if let Some(existing) = read_uninstall_intent(path)? {
+    if let Some(existing) = read_uninstall_capsule(path)? {
         if existing.authority_sha256 != authority_sha256 {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "uninstall intent belongs to another authority",
+                "uninstall capsule belongs to another authority",
             ));
         }
-        if existing.phase == UninstallIntentPhase::TerminalAcknowledged
-            && phase == UninstallIntentPhase::Prepared
-        {
+        if uninstall_capsule_phase_rank(phase) < uninstall_capsule_phase_rank(existing.phase) {
             return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "uninstall intent phase cannot move backward",
+                "uninstall capsule phase cannot move backward",
             ));
         }
     }
     let parent = path
         .parent()
         .ok_or(ProbeUpgraderRunError::InvalidInstallMetadata(
-            "uninstall intent path has no parent",
+            "uninstall capsule path has no parent",
         ))?;
-    let temporary = parent.join(".probe-uninstall.intent.tmp");
-    let phase = match phase {
-        UninstallIntentPhase::Prepared => "prepared",
-        UninstallIntentPhase::TerminalAcknowledged => "terminal-acknowledged",
+    let temporary = parent.join(".probe-uninstall.capsule.tmp");
+    let request_json = String::from_utf8(request.encode().map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority invalid")
+    })?)
+    .map_err(|_| ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority invalid"))?;
+    let capsule = UninstallRecoveryCapsule {
+        schema_version: 1,
+        authority_sha256,
+        phase,
+        request_json,
+        install_metadata: install_metadata.clone(),
     };
-    let contents = format!(
-        "schema_version = 1\nauthority_sha256 = {}\nphase = {}\n",
-        toml_string(authority_sha256),
-        toml_string(phase),
-    );
+    let contents = toml::to_string(&capsule).map_err(|_| {
+        ProbeUpgraderRunError::InvalidInstallMetadata("uninstall capsule is malformed")
+    })?;
+    if contents.len() as u64 > MAX_UNINSTALL_CAPSULE_BYTES {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "uninstall capsule is too large",
+        ));
+    }
     let _ = fs::remove_file(&temporary);
     write_new_synced_file(&temporary, contents.as_bytes(), 0o600)?;
     fs::rename(&temporary, path).map_err(ProbeUpgraderRunError::Io)?;
     sync_directory(parent)
+}
+
+fn uninstall_capsule_phase_rank(phase: UninstallCapsulePhase) -> u8 {
+    match phase {
+        UninstallCapsulePhase::Verified => 0,
+        UninstallCapsulePhase::Prepared => 1,
+        UninstallCapsulePhase::TerminalAcknowledged => 2,
+    }
+}
+
+fn capsule_receipt_matches_request(
+    metadata: &TrustedProbeInstallMetadata,
+    request: &LifecycleRequest,
+) -> bool {
+    let (install_state, manifest, version) = match request.authority() {
+        LifecycleRequestAuthority::HubOperation {
+            install_state_sha256,
+            target_manifest_sha256,
+            bundle_version,
+            ..
+        }
+        | LifecycleRequestAuthority::LocalRoot {
+            install_state_sha256,
+            target_manifest_sha256,
+            bundle_version,
+            ..
+        } => (install_state_sha256, target_manifest_sha256, bundle_version),
+    };
+    metadata.schema_version == 4
+        && metadata.install_state_sha256.as_deref() == Some(install_state)
+        && metadata.target_manifest_sha256.as_deref() == Some(manifest)
+        && metadata.bundle_version.as_deref() == Some(version)
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -6472,44 +6654,6 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_intent_is_bound_to_one_authority_and_advances_monotonically() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let path = temporary.path().join(UNINSTALL_INTENT_FILE_NAME);
-        let first = "a".repeat(64);
-        let second = "b".repeat(64);
-
-        persist_uninstall_intent(&path, &first, UninstallIntentPhase::Prepared)
-            .expect("prepared intent");
-        let prepared = read_uninstall_intent(&path)
-            .expect("read prepared intent")
-            .expect("intent exists");
-        assert_eq!(prepared.authority_sha256, first);
-        assert_eq!(prepared.phase, UninstallIntentPhase::Prepared);
-
-        persist_uninstall_intent(&path, &first, UninstallIntentPhase::TerminalAcknowledged)
-            .expect("same authority advances");
-        assert_eq!(
-            read_uninstall_intent(&path)
-                .expect("read acknowledged intent")
-                .expect("intent exists")
-                .phase,
-            UninstallIntentPhase::TerminalAcknowledged,
-        );
-        assert!(matches!(
-            persist_uninstall_intent(&path, &first, UninstallIntentPhase::Prepared),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "uninstall intent phase cannot move backward"
-            ))
-        ));
-        assert!(matches!(
-            persist_uninstall_intent(&path, &second, UninstallIntentPhase::Prepared),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
-                "uninstall intent belongs to another authority"
-            ))
-        ));
-    }
-
-    #[test]
     fn hub_uninstall_report_failure_keeps_exact_reentry_until_acknowledged_cleanup() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let root = temporary.path();
@@ -6627,13 +6771,15 @@ mod tests {
             first,
             Err(ProbeUpgraderRunError::UninstallStatusReportFailure(_))
         ));
-        let intent_path = uninstall_intent_path(&metadata_path).expect("intent path");
+        let capsule_path = uninstall_capsule_path(&metadata_path).expect("capsule path");
+        let prepared_capsule = read_uninstall_capsule(&capsule_path)
+            .expect("read capsule")
+            .expect("prepared capsule");
+        assert_eq!(prepared_capsule.phase, UninstallCapsulePhase::Prepared);
         assert_eq!(
-            read_uninstall_intent(&intent_path)
-                .expect("read intent")
-                .expect("prepared intent")
-                .phase,
-            UninstallIntentPhase::Prepared,
+            LifecycleRequest::decode(prepared_capsule.request_json.as_bytes())
+                .expect("capsule request"),
+            request,
         );
         for path in [
             identity_path.as_path(),
@@ -6647,7 +6793,7 @@ mod tests {
 
         let mut retry_transport = RecordingValidationTransport::default();
         systemd.failure_step = Some("remove-account");
-        execute_lifecycle_uninstall(
+        let completed = execute_lifecycle_uninstall(
             &request,
             &input,
             &metadata,
@@ -6656,9 +6802,10 @@ mod tests {
             &mut systemd,
         )
         .expect("Hub acknowledgement stays terminal when finalization pauses");
+        assert!(!completed, "Hub ACK exposes stable recovery-pending");
         assert!(
             retry_transport.url.is_empty(),
-            "trusted intent skips revalidation"
+            "trusted capsule skips revalidation"
         );
         assert!(
             retry_transport
@@ -6666,33 +6813,106 @@ mod tests {
                 .contains("\"status\":\"succeeded\"")
         );
         assert_eq!(
-            read_uninstall_intent(&intent_path)
-                .expect("read acknowledged intent")
-                .expect("acknowledged intent")
+            read_uninstall_capsule(&capsule_path)
+                .expect("read acknowledged capsule")
+                .expect("acknowledged capsule")
                 .phase,
-            UninstallIntentPhase::TerminalAcknowledged,
+            UninstallCapsulePhase::TerminalAcknowledged,
         );
         assert!(metadata_path.exists());
         assert!(identity_path.exists());
         assert!(companion_path.exists());
 
+        let recovery_plan = plan_probe_uninstall_cleanup(&input, &metadata, &metadata_path, true)
+            .expect("recovery cleanup plan");
+        let mut final_state_calls = Vec::new();
+        let final_state_error = remove_uninstall_local_state_with(&recovery_plan, |path| {
+            final_state_calls.push(path.to_path_buf());
+            if path == metadata.state_dir {
+                return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                    "injected ordinary state cleanup failure",
+                )));
+            }
+            Ok(())
+        });
+        assert!(final_state_error.is_err());
+        assert_eq!(
+            final_state_calls,
+            [
+                metadata_path.clone(),
+                identity_path.clone(),
+                metadata.state_dir.clone(),
+            ]
+        );
+        assert!(capsule_path.exists(), "commit capsule remains recoverable");
+        assert!(
+            companion_path.exists(),
+            "fixed resume entry remains recoverable"
+        );
+
         systemd.failure_step = None;
         let mut recovery_transport = RecordingValidationTransport::default();
-        execute_lifecycle_uninstall(
-            &request,
-            &input,
-            &metadata,
+        let completed = resume_lifecycle_companion_at(
             &metadata_path,
+            &companion_path,
             &mut recovery_transport,
             &mut systemd,
         )
-        .expect("acknowledged finalization reenters without Hub traffic");
+        .expect("new process resumes only from the on-disk capsule");
+        assert!(completed);
         assert!(recovery_transport.url.is_empty());
         assert!(recovery_transport.status_url.is_empty());
-        assert!(!intent_path.exists());
+        assert!(!capsule_path.exists());
         assert!(!metadata_path.exists());
         assert!(!identity_path.exists());
         assert!(!companion_path.exists());
+    }
+
+    #[test]
+    fn lifecycle_commit_tail_keeps_binary_until_capsule_delete_and_has_no_late_work() {
+        let capsule = Path::new("/etc/enoki/probe-uninstall.capsule");
+        let binary = Path::new("/usr/local/bin/enoki-probe-lifecycle-companion");
+        for failed in [capsule, binary] {
+            let mut calls = Vec::new();
+            let result = commit_lifecycle_self_removal_with(capsule, binary, |path| {
+                calls.push(path.to_path_buf());
+                if path == failed {
+                    return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                        "injected ordinary transaction failure",
+                    )));
+                }
+                Ok(())
+            });
+            assert!(result.is_err());
+            if failed == capsule {
+                assert_eq!(calls, [capsule]);
+            } else {
+                assert_eq!(calls, [capsule, binary]);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_resume_without_capsule_only_self_finalizes_the_fixed_binary() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = temporary.path().join("etc/enoki/probe-install.toml");
+        let binary = temporary
+            .path()
+            .join("usr/local/bin/enoki-probe-lifecycle-companion");
+        fs::create_dir_all(metadata.parent().expect("metadata parent")).expect("metadata parent");
+        fs::create_dir_all(binary.parent().expect("binary parent")).expect("binary parent");
+        fs::write(&binary, "companion").expect("companion binary");
+        let mut transport = RecordingValidationTransport::default();
+        let mut systemd = RecordingSystemdRunner::default();
+
+        assert!(
+            resume_lifecycle_companion_at(&metadata, &binary, &mut transport, &mut systemd)
+                .expect("self finalization")
+        );
+        assert!(!binary.exists());
+        assert!(transport.url.is_empty());
+        assert!(transport.status_url.is_empty());
+        assert!(systemd.calls.is_empty());
     }
 
     #[cfg(unix)]

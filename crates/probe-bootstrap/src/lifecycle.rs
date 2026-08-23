@@ -69,6 +69,15 @@ impl LifecycleResponse {
     }
 
     #[must_use]
+    pub fn recovery_pending() -> Self {
+        Self {
+            schema_version: 1,
+            status: LifecycleResultStatus::Succeeded,
+            code: "lifecycle.recovery_pending".to_owned(),
+        }
+    }
+
+    #[must_use]
     pub fn failed(code: &str) -> Self {
         Self {
             schema_version: 1,

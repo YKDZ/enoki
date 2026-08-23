@@ -3,7 +3,7 @@
 use std::{io::Read, process::ExitCode};
 
 use enoki_probe::upgrader::{
-    HttpProbeUpgraderValidationTransport, run_lifecycle_companion, run_local_lifecycle_companion,
+    HttpProbeUpgraderValidationTransport, resume_lifecycle_companion, run_lifecycle_companion,
 };
 use enoki_probe_bootstrap::lifecycle::{
     LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse, MAX_LIFECYCLE_REQUEST_BYTES,
@@ -29,7 +29,7 @@ fn main() -> ExitCode {
         if peer_uid.is_some() || process_uid != 0 {
             return write_response(LifecycleResponse::failed("lifecycle.invalid_authority"));
         }
-        return write_response(run_local_lifecycle_companion(&mut transport));
+        return write_response(resume_lifecycle_companion(&mut transport));
     }
     let Ok(request) = LifecycleRequest::decode(&bytes) else {
         return write_response(LifecycleResponse::failed("lifecycle.invalid_request"));
