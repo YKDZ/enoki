@@ -1751,15 +1751,20 @@ fn run_probe_replacement_migration(
     else {
         return LifecycleResponse::failed("lifecycle.authority_rejected");
     };
-    if !replacement_authority_matches(
+    let authority_match = replacement_authority_matches(
         hub_origin,
         target_asset_set_digest,
         bundle_version,
         &authority,
         metadata,
         identity,
-    ) {
-        return LifecycleResponse::failed("lifecycle.authority_mismatch");
+    );
+    if authority_match != ReplacementAuthorityMatch::Matches {
+        return LifecycleResponse::failed(match authority_match {
+            ReplacementAuthorityMatch::UnprovableSource => "lifecycle.authority_invalid",
+            ReplacementAuthorityMatch::Mismatch => "lifecycle.authority_mismatch",
+            ReplacementAuthorityMatch::Matches => unreachable!(),
+        });
     }
     match cleanup_trusted_probe_install_for_reenrollment(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
@@ -1770,6 +1775,13 @@ fn run_probe_replacement_migration(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplacementAuthorityMatch {
+    Matches,
+    Mismatch,
+    UnprovableSource,
+}
+
 fn replacement_authority_matches(
     hub_origin: &str,
     target_asset_set_digest: &str,
@@ -1777,17 +1789,22 @@ fn replacement_authority_matches(
     authority: &crate::registration::ProbeReplacementAuthorization,
     metadata: &TrustedProbeInstallMetadata,
     identity: &TrustedProbeInstallPreflight,
-) -> bool {
-    authority.expected_hub_origin == hub_origin
+) -> ReplacementAuthorityMatch {
+    let Some(installed_version) = metadata.bundle_version.as_deref() else {
+        return ReplacementAuthorityMatch::UnprovableSource;
+    };
+    if authority.expected_hub_origin == hub_origin
         && identity.hub_url == hub_origin
         && metadata.hub_url == hub_origin
         && authority.expected_probe_id == identity.probe_id
-        && metadata
-            .bundle_version
-            .as_deref()
-            .is_none_or(|installed| installed == authority.source_probe_version)
+        && installed_version == authority.source_probe_version
         && authority.target_asset_set_digest == target_asset_set_digest
         && authority.target_probe_version == bundle_version
+    {
+        ReplacementAuthorityMatch::Matches
+    } else {
+        ReplacementAuthorityMatch::Mismatch
+    }
 }
 
 fn execute_lifecycle_uninstall(
@@ -5627,23 +5644,42 @@ mod tests {
             target_probe_version: "1.2.3".to_string(),
         };
 
-        assert!(replacement_authority_matches(
-            "https://hub.example",
-            &format!("sha256:{}", "b".repeat(64)),
-            "1.2.3",
-            &authority,
-            &metadata,
-            &identity,
-        ));
+        assert_eq!(
+            replacement_authority_matches(
+                "https://hub.example",
+                &format!("sha256:{}", "b".repeat(64)),
+                "1.2.3",
+                &authority,
+                &metadata,
+                &identity,
+            ),
+            ReplacementAuthorityMatch::Matches
+        );
         metadata.bundle_version = Some("1.2.1".to_string());
-        assert!(!replacement_authority_matches(
-            "https://hub.example",
-            &format!("sha256:{}", "b".repeat(64)),
-            "1.2.3",
-            &authority,
-            &metadata,
-            &identity,
-        ));
+        assert_eq!(
+            replacement_authority_matches(
+                "https://hub.example",
+                &format!("sha256:{}", "b".repeat(64)),
+                "1.2.3",
+                &authority,
+                &metadata,
+                &identity,
+            ),
+            ReplacementAuthorityMatch::Mismatch
+        );
+        metadata.schema_version = 3;
+        metadata.bundle_version = None;
+        assert_eq!(
+            replacement_authority_matches(
+                "https://hub.example",
+                &format!("sha256:{}", "b".repeat(64)),
+                "1.2.3",
+                &authority,
+                &metadata,
+                &identity,
+            ),
+            ReplacementAuthorityMatch::UnprovableSource
+        );
     }
 
     #[test]
