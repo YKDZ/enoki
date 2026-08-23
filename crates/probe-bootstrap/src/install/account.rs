@@ -86,10 +86,9 @@ impl AccountPort for SystemAccounts {
             deadline,
             COMMAND_STEP_BUDGET,
         )?;
-        if output.status.code() == Some(2) {
+        let Some(record) = classify_gshadow_lookup(output.status.code(), output.stdout)? else {
             return Ok(());
-        }
-        let record = String::from_utf8(output.stdout).map_err(|_| InstallError::Account)?;
+        };
         let fields = record.trim_end().split(':').collect::<Vec<_>>();
         if fields.len() != 4
             || fields[0] != OBSERVATION_IPC_GROUP
@@ -123,10 +122,9 @@ fn inspect_owned_ipc_group(
         deadline,
         COMMAND_STEP_BUDGET,
     )?;
-    if output.status.code() == Some(2) {
+    let Some(record) = classify_gshadow_lookup(output.status.code(), output.stdout)? else {
         return Ok(false);
-    }
-    let record = String::from_utf8(output.stdout).map_err(|_| InstallError::Account)?;
+    };
     Ok(owned_ipc_group_record_matches(
         group_name,
         transaction_id,
@@ -171,17 +169,25 @@ fn remove_owned_ipc_group(
                 deadline,
                 COMMAND_STEP_BUDGET,
             )?;
-            if output.status.code() == Some(2) {
-                return Ok(None);
-            }
-            String::from_utf8(output.stdout)
-                .map(Some)
-                .map_err(|_| InstallError::Account)
+            classify_gshadow_lookup(output.status.code(), output.stdout)
         },
         &mut |program, arguments| {
             require_success(program, arguments, InstallError::Account, deadline)
         },
     )
+}
+
+pub(super) fn classify_gshadow_lookup(
+    status: Option<i32>,
+    stdout: Vec<u8>,
+) -> Result<Option<String>, InstallError> {
+    match status {
+        Some(0) => String::from_utf8(stdout)
+            .map(Some)
+            .map_err(|_| InstallError::Account),
+        Some(2) => Ok(None),
+        Some(_) | None => Err(InstallError::Account),
+    }
 }
 
 pub(super) fn remove_owned_ipc_group_with_commands(

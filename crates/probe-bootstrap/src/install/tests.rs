@@ -3,7 +3,8 @@ mod tests {
     use super::*;
     use super::account::{
         account_records_match_transaction, create_probe_ipc_group_with_commands,
-        create_transaction_identity_with_commands, owned_ipc_group_record_matches,
+        classify_gshadow_lookup, create_transaction_identity_with_commands,
+        owned_ipc_group_record_matches,
         remove_owned_ipc_group_with_commands,
     };
     use crate::handoff::Enrollment;
@@ -115,6 +116,25 @@ mod tests {
             Some(ServiceIdentity { uid: 1, gid: 1 }),
             record,
         ));
+    }
+
+    #[test]
+    fn gshadow_lookup_accepts_only_record_or_absent_exit_status() {
+        assert_eq!(
+            classify_gshadow_lookup(Some(0), b"enoki-probe-ipc:marker::\n".to_vec()),
+            Ok(Some("enoki-probe-ipc:marker::\n".to_owned())),
+        );
+        assert_eq!(classify_gshadow_lookup(Some(2), Vec::new()), Ok(None));
+        assert_eq!(
+            classify_gshadow_lookup(Some(0), vec![0xff]),
+            Err(InstallError::Account),
+        );
+        for status in [Some(1), Some(3), None] {
+            assert_eq!(
+                classify_gshadow_lookup(status, b"plausible:but:unauthenticated:\n".to_vec()),
+                Err(InstallError::Account),
+            );
+        }
     }
 
     #[derive(Default)]
@@ -1445,6 +1465,78 @@ mod tests {
     }
 
     #[test]
+    fn abnormal_recovery_account_lookup_keeps_the_journal_for_retry() {
+        struct LookupFailureAccounts;
+        impl AccountPort for LookupFailureAccounts {
+            fn require_absent(&mut self) -> Result<(), InstallError> {
+                unreachable!()
+            }
+            fn create_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+            ) -> Result<ServiceIdentity, InstallError> {
+                unreachable!()
+            }
+            fn remove_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+                _identity: Option<ServiceIdentity>,
+            ) -> Result<(), InstallError> {
+                unreachable!()
+            }
+            fn owns_transaction_identity(
+                &mut self,
+                _transaction_id: &str,
+                identity: Option<ServiceIdentity>,
+            ) -> Result<bool, InstallError> {
+                assert_eq!(identity, None);
+                Err(InstallError::Account)
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib/enoki-probe-bootstrap",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        fs::set_permissions(
+            temporary.path().join("var/lib/enoki-probe-bootstrap"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        write_bootstrap_roles(temporary.path());
+        let paths = FixedInstallPaths::under(temporary.path());
+        drop(TransactionJournal::begin(&paths.bootstrap_state()).unwrap());
+
+        let error = activate_current_probe(
+            &mut component(),
+            &Enrollment::new("https://hub.example", "enk_enroll_restart").unwrap(),
+            &bundle(),
+            &trust(),
+            &paths,
+            &mut LookupFailureAccounts,
+            &mut Systemd::default(),
+        )
+        .expect_err("异常 account lookup 必须中止 recovery");
+
+        assert_eq!(
+            error,
+            InstallError::Rollback {
+                cause: InstallErrorKind::Io,
+                failures: vec![RollbackFailure::new(
+                    RollbackStep::RemoveServiceIdentity,
+                    InstallErrorKind::Account,
+                )],
+            }
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+    }
+
+    #[test]
     fn fresh_retry_recovers_journal_owned_bootstrap_roles() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -1894,6 +1986,13 @@ mod tests {
                 .path()
                 .join("etc/enoki/probe-install.toml")
                 .exists()
+        );
+        assert!(
+            temporary
+                .path()
+                .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
+                .exists(),
+            "account removal 异常时保留 journal 供补偿重试"
         );
     }
 
