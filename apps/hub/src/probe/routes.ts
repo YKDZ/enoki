@@ -971,6 +971,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       context.req.raw,
       requestBody,
       services.probeApiOrigin,
+      true,
     );
 
     if (!host) {
@@ -997,6 +998,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const tokenResult = validateProbeOperationToken({
+      allowSucceededUninstallReplay: body.status === "succeeded",
       nowMs: now(),
       operation,
       probeId: host.probeId,
@@ -1788,12 +1790,14 @@ function authenticateProbe(
   request: Request,
   body: Uint8Array,
   probeApiOrigin = "http://localhost",
+  includeDeleted = false,
 ) {
   const signedAuthentication = authenticateSignedProbeRequest(
     hosts,
     request,
     body,
     probeApiOrigin,
+    includeDeleted,
   );
   if (signedAuthentication.kind === "authenticated") {
     return signedAuthentication.host;
@@ -1807,6 +1811,7 @@ function authenticateSignedProbeRequest(
   request: Request,
   body: Uint8Array,
   probeApiOrigin = "http://localhost",
+  includeDeleted = false,
 ): SignedProbeAuthentication {
   const headers = request.headers;
   const probeId = headers.get("x-enoki-probe-id")?.trim() ?? "";
@@ -1829,7 +1834,9 @@ function authenticateSignedProbeRequest(
     return { kind: "invalid" };
   }
 
-  const host = hosts.findByProbeId(probeId);
+  const host = includeDeleted
+    ? hosts.findByProbeIdIncludingDeleted(probeId)
+    : hosts.findByProbeId(probeId);
   if (!host?.probePublicKeyPem) {
     return { kind: "invalid" };
   }

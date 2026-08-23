@@ -145,6 +145,7 @@ export type HostRepository = {
   exists: (id: number) => boolean;
   findActiveById: (id: number) => HostRow | null;
   findByProbeId: (probeId: string) => HostRow | null;
+  findByProbeIdIncludingDeleted: (probeId: string) => HostRow | null;
   insertProbeRequestNonce: (input: {
     probeId: string;
     nonce: string;
@@ -226,6 +227,12 @@ export function createHostRepository(database: HostDatabase): HostRepository {
           .from(hosts)
           .where(and(eq(hosts.probeId, probeId), isNull(hosts.deletedAtMs)))
           .get() ?? null
+      );
+    },
+    findByProbeIdIncludingDeleted(probeId) {
+      return (
+        database.select().from(hosts).where(eq(hosts.probeId, probeId)).get() ??
+        null
       );
     },
     insertProbeRequestNonce(input) {

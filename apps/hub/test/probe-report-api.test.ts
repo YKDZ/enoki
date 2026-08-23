@@ -5304,6 +5304,20 @@ describe("Probe report API", () => {
     expect(status.status).toBe(200);
     expect(removedHostIds).toEqual([host.id]);
 
+    const repeatedStatus = await app.request(
+      `/api/probe/operations/${operation.id}/status`,
+      signedJsonProbeRequest(
+        registration,
+        `/api/probe/operations/${operation.id}/status`,
+        JSON.stringify({
+          status: "succeeded",
+          token,
+        }),
+      ),
+    );
+    expect(repeatedStatus.status).toBe(200);
+    expect(removedHostIds).toEqual([host.id]);
+
     const hostsResponse = await app.request("/api/web/hosts", {
       headers: {
         cookie: ownerSession,

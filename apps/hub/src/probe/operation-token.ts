@@ -69,6 +69,7 @@ export function issueProbeOperationToken(input: {
 }
 
 export function validateProbeOperationToken(input: {
+  allowSucceededUninstallReplay?: boolean;
   nowMs: number;
   operation: ProbeUpgradeRequest;
   probeId: string;
@@ -109,7 +110,14 @@ export function validateProbeOperationToken(input: {
     return { error: "probe_operation_token_expired" };
   }
 
-  if (closedStates.includes(input.operation.state)) {
+  if (
+    closedStates.includes(input.operation.state) &&
+    !(
+      input.allowSucceededUninstallReplay === true &&
+      input.operation.kind === "probe_uninstall" &&
+      input.operation.state === "succeeded"
+    )
+  ) {
     return { error: "probe_operation_token_operation_closed" };
   }
 
