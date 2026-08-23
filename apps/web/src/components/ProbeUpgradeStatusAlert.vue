@@ -88,9 +88,12 @@ function failedPresentation(disposition: RecoveryDisposition, repair: boolean) {
       return {
         ...base,
         action: "repair" as const,
-        description:
-          "升级已进入激活阶段，请在受影响主机上以 root 权限修复探针。",
-        title: "探针升级失败：需要修复探针",
+        description: repair
+          ? "本次探针修复未完成，请在受影响主机上以 root 权限重新修复探针。"
+          : "升级已进入激活阶段，请在受影响主机上以 root 权限修复探针。",
+        title: repair
+          ? "探针修复失败：需要重新修复探针"
+          : "探针升级失败：需要修复探针",
       };
     case "manual_reinstall_required":
       return {
@@ -98,7 +101,9 @@ function failedPresentation(disposition: RecoveryDisposition, repair: boolean) {
         action: null,
         description:
           "当前安装无法安全原地恢复。主机离线且 Hub 验证迁移目标后，会提供一次手动重装操作。",
-        title: "探针升级失败：需要手动重新安装探针",
+        title: repair
+          ? "探针修复失败：需要手动重新安装探针"
+          : "探针升级失败：需要手动重新安装探针",
       };
     default:
       return {

@@ -96,6 +96,35 @@ describe("Probe Upgrade current problem", () => {
     expect(wrapper.text()).not.toContain("sudo");
   });
 
+  it.each([
+    ["probe_repair", "探针修复失败：需要重新修复探针", true],
+    [
+      "manual_reinstall_required",
+      "探针修复失败：需要手动重新安装探针",
+      false,
+    ],
+    [null, "探针修复失败：未知问题", false],
+  ] as const)(
+    "renders the fixed failed Repair presentation for %s",
+    (recoveryDisposition, title, showsCommand) => {
+      const wrapper = mount(ProbeUpgradeStatusAlert, {
+        props: {
+          status: probeUpgradeStatus({
+            failure: { recoveryDisposition },
+            kind: "probe_repair",
+            state: "failed",
+          }),
+        },
+      });
+      expect(wrapper.text()).toContain(title);
+      expect(wrapper.text()).not.toContain("探针升级失败");
+      expect(wrapper.text().includes("sudo enoki-probe repair")).toBe(
+        showsCommand,
+      );
+      expect(wrapper.text()).not.toContain("server-private-failure");
+    },
+  );
+
   it.each(["succeeded", "canceled", "superseded"] as const)(
     "does not render the historical %s terminal state inline",
     (state) => {

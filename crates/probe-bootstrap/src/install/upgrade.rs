@@ -1,7 +1,7 @@
 use super::*;
 use crate::lifecycle::{
-    RepairAuthorityV1, RepairEligibilityV1, RepairEvidenceV1, UpgradeCompletion,
-    UpgradeLifecycleEffects, execute_upgrade_lifecycle,
+    RepairAuthorityV1, RepairEligibilityV1, RepairEvidenceV1, UpgradeActivationFailure,
+    UpgradeCompletion, UpgradeLifecycleEffects, execute_upgrade_lifecycle,
     verify_lifecycle_upgrade_authority_signature,
 };
 use hmac::{Hmac, Mac};
@@ -592,6 +592,9 @@ fn repair_eligibility_from_postactivation_journal(
     if metadata_scalar(&journal, "schema_version").as_deref() != Some("2") {
         return Err(InstallError::ExistingResidue);
     }
+    if metadata_scalar(&journal, "activation_started").as_deref() != Some("true") {
+        return Err(InstallError::ExistingResidue);
+    }
     let phase = journal_string(&journal, "phase")?;
     if !matches!(
         phase,
@@ -978,10 +981,13 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         Ok(())
     }
 
-    fn activate_complete_bundle(&mut self) -> Result<(), Self::Error> {
-        let mut prepared = self.prepared.take().ok_or(InstallError::Io)?;
+    fn activate_complete_bundle(&mut self) -> Result<(), UpgradeActivationFailure<Self::Error>> {
+        let mut prepared = self
+            .prepared
+            .take()
+            .ok_or(UpgradeActivationFailure::Preactivation(InstallError::Io))?;
         prepared.retain_for_repair = true;
-        let activated = (|| {
+        let activated: Result<(), InstallError> = (|| {
             if let Some(attempt) = self.attempt {
                 write_upgrade_attempt(
                     self.paths,
@@ -1067,25 +1073,100 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             prepared.retain_for_repair = false;
             Ok(())
         })();
-        if activated.is_err()
-            && let Some(attempt) = self.attempt
-        {
-            let _ = write_operation_status(
+        let error = match activated {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        let Some(attempt) = self.attempt else {
+            return Err(UpgradeActivationFailure::Postactivation(error));
+        };
+        let journal = trusted_text(
+            &self.paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+            self.paths.expected_root_uid(),
+            0o600,
+        )
+        .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+        let phase = journal_string(&journal, "phase")
+            .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+        if matches!(phase, "consumed" | "admitted" | "prepared") {
+            prepared.retain_for_repair = false;
+            cleanup_pre_activation_residue(self.paths)
+                .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+            transition_upgrade_attempt_phase(
+                self.paths,
+                UpgradeAttemptTerminalTransition::AbortPreactivation,
+            )
+            .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+            write_operation_status(
                 self.paths,
                 attempt,
                 &self.bundle.version,
                 "failed",
-                Some("lifecycle.upgrade_repair_required"),
-            );
-            let _ = mark_upgrade_attempt_phase(self.paths, "repair-required");
+                Some("lifecycle.upgrade_failed_before_activation"),
+            )
+            .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+            return Err(UpgradeActivationFailure::Preactivation(error));
         }
-        activated
+        transition_upgrade_attempt_phase(
+            self.paths,
+            UpgradeAttemptTerminalTransition::RequireRepair,
+        )
+        .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+        write_operation_status(
+            self.paths,
+            attempt,
+            &self.bundle.version,
+            "failed",
+            Some("lifecycle.upgrade_repair_required"),
+        )
+        .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
+        Err(UpgradeActivationFailure::Postactivation(error))
     }
 }
 
-fn mark_upgrade_attempt_phase(paths: &FixedInstallPaths, phase: &str) -> Result<(), InstallError> {
+#[derive(Clone, Copy)]
+pub(super) enum UpgradeAttemptTerminalTransition {
+    AbortPreactivation,
+    RequireRepair,
+    MarkActivated,
+}
+
+pub(super) fn transition_upgrade_attempt_phase(
+    paths: &FixedInstallPaths,
+    transition: UpgradeAttemptTerminalTransition,
+) -> Result<(), InstallError> {
     let journal = paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE);
-    let contents = fs::read_to_string(&journal).map_err(|_| InstallError::Io)?;
+    let contents = trusted_text(&journal, paths.expected_root_uid(), 0o600)?;
+    let current_phase = journal_string(&contents, "phase")?;
+    let schema2 = metadata_scalar(&contents, "schema_version").as_deref() == Some("2");
+    let activation_started =
+        metadata_scalar(&contents, "activation_started").as_deref() == Some("true");
+    let postactivation_proven = !schema2 || activation_started;
+    let phase = match transition {
+        UpgradeAttemptTerminalTransition::AbortPreactivation
+            if matches!(current_phase, "consumed" | "admitted" | "prepared") =>
+        {
+            "aborted"
+        }
+        UpgradeAttemptTerminalTransition::RequireRepair
+            if postactivation_proven
+                && matches!(
+                    current_phase,
+                    "activation-started"
+                        | "repair-required"
+                        | "finalizing"
+                        | "stage-cleanup-required"
+                ) =>
+        {
+            "repair-required"
+        }
+        UpgradeAttemptTerminalTransition::MarkActivated
+            if postactivation_proven && current_phase == "stage-cleanup-required" =>
+        {
+            "activated"
+        }
+        _ => return Err(InstallError::ExistingResidue),
+    };
     let mut replacements = 0_u8;
     let mut updated = String::new();
     for line in contents.lines() {
@@ -1482,7 +1563,7 @@ fn consume_probe_upgrade_authority_with_sha256(
         cleanup_pre_activation_residue(paths)?;
     }
     let contents = format!(
-        "schema_version = 2\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"consumed\"\nactivated_targets = 0\nfinalized_targets = 0\n",
+        "schema_version = 2\noperation_id = {:?}\nstage_owner_uid = {}\nauthority_sha256 = {:?}\nhub_origin = {:?}\nhost_id = {:?}\nsource_probe_id = {:?}\nsource_bundle_version = {:?}\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = {:?}\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"consumed\"\nactivation_started = false\nactivated_targets = 0\nfinalized_targets = 0\n",
         authority.operation_id,
         authority.stage_owner_uid,
         authority_sha256,
@@ -1521,7 +1602,7 @@ pub fn abort_consumed_probe_upgrade_authority(
     {
         return Err(InstallError::ExistingResidue);
     }
-    mark_upgrade_attempt_phase(paths, "aborted")
+    transition_upgrade_attempt_phase(paths, UpgradeAttemptTerminalTransition::AbortPreactivation)
 }
 
 fn confirm_consumed_upgrade_authority(
@@ -1705,14 +1786,17 @@ fn recover_incomplete_probe_upgrade_with_status(
         match phase {
             "consumed" | "admitted" | "prepared" => {
                 cleanup_pre_activation_residue(paths)?;
-                mark_upgrade_attempt_phase(paths, "aborted")?;
+                transition_upgrade_attempt_phase(
+                    paths,
+                    UpgradeAttemptTerminalTransition::AbortPreactivation,
+                )?;
                 if publish_upgrade_status {
                     write_operation_status(
                         paths,
                         &attempt,
                         &target_bundle_version,
                         "failed",
-                        Some("lifecycle.upgrade_repair_required"),
+                        Some("lifecycle.upgrade_failed_before_activation"),
                     )?;
                 }
             }
@@ -1792,19 +1876,28 @@ fn recover_incomplete_probe_upgrade_with_status(
         }
         Ok(Some(receipt))
     })();
-    if recovered.is_err() && !matches!(phase, "consumed" | "admitted" | "prepared" | "aborted") {
-        let _ = mark_upgrade_attempt_phase(paths, "repair-required");
-        if publish_upgrade_status {
-            let _ = write_operation_status(
+    match recovered {
+        Ok(receipt) => Ok(receipt),
+        Err(error) => {
+            if matches!(phase, "consumed" | "admitted" | "prepared" | "aborted") {
+                return Err(error);
+            }
+            transition_upgrade_attempt_phase(
                 paths,
-                &attempt,
-                &target_bundle_version,
-                "failed",
-                Some("lifecycle.upgrade_repair_required"),
-            );
+                UpgradeAttemptTerminalTransition::RequireRepair,
+            )?;
+            if publish_upgrade_status {
+                write_operation_status(
+                    paths,
+                    &attempt,
+                    &target_bundle_version,
+                    "failed",
+                    Some("lifecycle.upgrade_repair_required"),
+                )?;
+            }
+            Err(error)
         }
     }
-    recovered
 }
 
 pub fn finalize_probe_upgrade_stage_cleanup(
@@ -1839,7 +1932,7 @@ fn finalize_probe_upgrade_stage_cleanup_with_status(
         if phase != "stage-cleanup-required" {
             return Err(InstallError::ExistingResidue);
         }
-        mark_upgrade_attempt_phase(paths, "activated")?;
+        transition_upgrade_attempt_phase(paths, UpgradeAttemptTerminalTransition::MarkActivated)?;
         if publish_upgrade_status {
             write_operation_status(
                 paths,
@@ -1873,14 +1966,32 @@ fn finalize_probe_upgrade_stage_cleanup_with_status(
     }
 }
 
-fn write_upgrade_attempt_from_journal(
+pub(super) fn write_upgrade_attempt_from_journal(
     paths: &FixedInstallPaths,
-    prior: &str,
+    expected: &str,
     phase: &str,
     activated_targets: usize,
     finalized_targets: usize,
 ) -> Result<(), InstallError> {
-    let mut counts = [0_u8; 3];
+    let current = trusted_text(
+        &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    if journal_string(&current, "operation_id")? != journal_string(expected, "operation_id")?
+        || journal_string(&current, "authority_sha256")?
+            != journal_string(expected, "authority_sha256")?
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let current_phase = journal_string(&current, "phase")?;
+    if !valid_upgrade_attempt_transition(current_phase, phase) {
+        return Err(InstallError::ExistingResidue);
+    }
+    let prior = current.as_str();
+    let schema_version = metadata_scalar(prior, "schema_version");
+    let schema2 = schema_version.as_deref() == Some("2");
+    let mut counts = [0_u8; 4];
     let mut output = String::new();
     for line in prior.lines() {
         if line.starts_with("phase = ") {
@@ -1892,18 +2003,38 @@ fn write_upgrade_attempt_from_journal(
         } else if line.starts_with("finalized_targets = ") {
             counts[2] += 1;
             output.push_str(&format!("finalized_targets = {finalized_targets}\n"));
+        } else if line.starts_with("activation_started = ") {
+            counts[3] += 1;
+            let started = phase == "activation-started"
+                || metadata_scalar(prior, "activation_started").as_deref() == Some("true");
+            output.push_str(&format!("activation_started = {started}\n"));
         } else {
             output.push_str(line);
             output.push('\n');
         }
     }
-    if counts != [1, 1, 1] {
+    if counts[..3] != [1, 1, 1] || (schema2 && counts[3] != 1) || (!schema2 && counts[3] != 0) {
         return Err(InstallError::ExistingResidue);
     }
     atomic_durable_write(
         &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
         output.as_bytes(),
         0o600,
+    )
+}
+
+fn valid_upgrade_attempt_transition(current: &str, next: &str) -> bool {
+    matches!(
+        (current, next),
+        ("consumed", "admitted")
+            | ("admitted", "prepared")
+            | ("prepared", "activation-started")
+            | ("activation-started", "activation-started" | "finalizing")
+            | ("repair-required", "activation-started")
+            | (
+                "finalizing",
+                "activation-started" | "finalizing" | "stage-cleanup-required"
+            )
     )
 }
 
@@ -1916,6 +2047,20 @@ fn write_upgrade_attempt(
     activated_targets: usize,
     finalized_targets: usize,
 ) -> Result<(), InstallError> {
+    if attempt.authority_sha256.is_some() {
+        let prior = trusted_text(
+            &paths.bootstrap_state().join(UPGRADE_ATTEMPT_FILE),
+            paths.expected_root_uid(),
+            0o600,
+        )?;
+        return write_upgrade_attempt_from_journal(
+            paths,
+            &prior,
+            phase,
+            activated_targets,
+            finalized_targets,
+        );
+    }
     let authority_sha256 = attempt
         .authority_sha256
         .clone()
@@ -1990,6 +2135,10 @@ pub(crate) fn write_operation_status(
 }
 
 fn atomic_durable_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), InstallError> {
+    #[cfg(test)]
+    if fail_atomic_write_for_test(bytes) {
+        return Err(InstallError::Io);
+    }
     let parent = path.parent().ok_or(InstallError::Io)?;
     let parent_metadata = fs::symlink_metadata(parent).map_err(|_| InstallError::Io)?;
     if parent_metadata.file_type().is_symlink() || !parent_metadata.file_type().is_dir() {
@@ -2014,6 +2163,37 @@ fn atomic_durable_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Inst
     file.sync_all().map_err(|_| InstallError::Io)?;
     fs::rename(&temporary, path).map_err(|_| InstallError::Io)?;
     sync_directory(parent)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_ATOMIC_WRITE_CONTAINING: std::cell::RefCell<Option<String>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_atomic_write_containing(needle: &str) {
+    FAIL_NEXT_ATOMIC_WRITE_CONTAINING.with(|configured| {
+        *configured.borrow_mut() = Some(needle.to_owned());
+    });
+}
+
+#[cfg(test)]
+fn fail_atomic_write_for_test(bytes: &[u8]) -> bool {
+    FAIL_NEXT_ATOMIC_WRITE_CONTAINING.with(|configured| {
+        let mut configured = configured.borrow_mut();
+        if configured.as_deref().is_some_and(|needle| {
+            bytes
+                .windows(needle.len())
+                .any(|part| part == needle.as_bytes())
+        }) {
+            configured.take();
+            true
+        } else {
+            false
+        }
+    })
 }
 
 fn sync_destination_directories(paths: &[PathBuf]) -> Result<(), InstallError> {

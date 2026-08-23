@@ -811,14 +811,21 @@ pub enum UpgradeCompletion {
     RepairRequired,
 }
 
+pub enum UpgradeActivationFailure<E> {
+    Preactivation(E),
+    Postactivation(E),
+    RecoveryPersistence(E),
+}
+
 pub trait UpgradeLifecycleEffects {
     type Error;
 
     /// 校验 Hub authority、当前 root-owned 安装收据与固定 stage；不得产生安装变更。
     fn verify_and_prepare(&mut self) -> Result<(), Self::Error>;
 
-    /// 此调用即不可逆的激活分界；返回错误时调用方只能进入 Repair。
-    fn activate_complete_bundle(&mut self) -> Result<(), Self::Error>;
+    /// 只有 durable activation boundary 之后的执行错误才能进入 Repair；
+    /// boundary 前或恢复状态持久化错误必须向调用方传播。
+    fn activate_complete_bundle(&mut self) -> Result<(), UpgradeActivationFailure<Self::Error>>;
 }
 
 pub fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
@@ -829,7 +836,11 @@ pub fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
     effects.verify_and_prepare()?;
     match effects.activate_complete_bundle() {
         Ok(()) => Ok(UpgradeCompletion::Activated),
-        Err(_) => Ok(UpgradeCompletion::RepairRequired),
+        Err(UpgradeActivationFailure::Postactivation(_)) => Ok(UpgradeCompletion::RepairRequired),
+        Err(
+            UpgradeActivationFailure::Preactivation(error)
+            | UpgradeActivationFailure::RecoveryPersistence(error),
+        ) => Err(error),
     }
 }
 
@@ -1117,11 +1128,13 @@ mod tests {
                     .then_some(())
                     .ok_or("upgrade-failed")
             }
-            fn activate_complete_bundle(&mut self) -> Result<(), Self::Error> {
+            fn activate_complete_bundle(
+                &mut self,
+            ) -> Result<(), UpgradeActivationFailure<Self::Error>> {
                 self.calls.push("activate-complete-bundle");
                 (self.fail != Some("activate-complete-bundle"))
                     .then_some(())
-                    .ok_or("upgrade-failed")
+                    .ok_or(UpgradeActivationFailure::Postactivation("upgrade-failed"))
             }
         }
 

@@ -724,6 +724,27 @@ mod tests {
         let [mut target_probe, mut target_runtime, mut target_system_state, mut target_disk_health, mut target_lifecycle, mut target_acquirer, mut target_activator] =
             std::array::from_fn(|_| component());
         systemd.calls.clear();
+        let attempt = consume_probe_upgrade_authority(
+            &paths,
+            &UpgradeAuthorityConsumption {
+                operation_id: "41".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                hub_origin: source.hub_origin.clone(),
+                host_id: "host_01".to_owned(),
+                probe_id: source.probe_id.clone(),
+                source_bundle_version: source.source_bundle_version.clone(),
+                source_install_state_sha256: source.source_install_state_sha256.clone(),
+                source_manifest_sha256: source.source_manifest_sha256.clone(),
+                target_bundle_version: target_bundle.version.clone(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    target_bundle.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: target_bundle.manifest_sha256.clone(),
+                verified_stage_sha256: "9".repeat(64),
+            },
+        )
+        .unwrap();
 
         let completion = upgrade_current_probe_for_operation(
             VerifiedUpgradeComponents {
@@ -737,11 +758,7 @@ mod tests {
             },
             &target_bundle,
             &source,
-            &UpgradeAttempt {
-                operation_id: "41".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                authority_sha256: None,
-            },
+            &attempt,
             &paths,
             &mut systemd,
         )
@@ -795,6 +812,8 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"41\""));
         assert!(journal.contains("phase = \"activated\""));
+        assert!(journal.contains("schema_version = 2"));
+        assert!(journal.contains("activation_started = true"));
 
         let next_source = inspect_installed_probe_for_upgrade(&paths).unwrap();
         let mut failed_target = bundle().with_test_complete_receipts(5);
@@ -804,6 +823,27 @@ mod tests {
         let [mut failed_probe, mut failed_runtime, mut failed_system_state, mut failed_disk_health, mut failed_lifecycle, mut failed_acquirer, mut failed_activator] =
             std::array::from_fn(|_| component());
         systemd.fail_start = true;
+        let failed_attempt = consume_probe_upgrade_authority(
+            &paths,
+            &UpgradeAuthorityConsumption {
+                operation_id: "42".to_owned(),
+                stage_owner_uid: unsafe { libc::geteuid() },
+                hub_origin: next_source.hub_origin.clone(),
+                host_id: "host_01".to_owned(),
+                probe_id: next_source.probe_id.clone(),
+                source_bundle_version: next_source.source_bundle_version.clone(),
+                source_install_state_sha256: next_source.source_install_state_sha256.clone(),
+                source_manifest_sha256: next_source.source_manifest_sha256.clone(),
+                target_bundle_version: failed_target.version.clone(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    failed_target.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: failed_target.manifest_sha256.clone(),
+                verified_stage_sha256: "8".repeat(64),
+            },
+        )
+        .unwrap();
 
         let completion = upgrade_current_probe_for_operation(
             VerifiedUpgradeComponents {
@@ -817,11 +857,7 @@ mod tests {
             },
             &failed_target,
             &next_source,
-            &UpgradeAttempt {
-                operation_id: "42".to_owned(),
-                stage_owner_uid: unsafe { libc::geteuid() },
-                authority_sha256: None,
-            },
+            &failed_attempt,
             &paths,
             &mut systemd,
         )
@@ -837,6 +873,7 @@ mod tests {
         assert!(status.contains("operation_id = \"42\""));
         assert!(status.contains("status = \"failed\""));
         assert!(status.contains("error_code = \"lifecycle.upgrade_repair_required\""));
+        assert!(status.contains("repair_eligibility_evidence"));
         let journal = fs::read_to_string(
             temporary
                 .path()
@@ -845,6 +882,8 @@ mod tests {
         .unwrap();
         assert!(journal.contains("operation_id = \"42\""));
         assert!(journal.contains("phase = \"repair-required\""));
+        assert!(journal.contains("schema_version = 2"));
+        assert!(journal.contains("activation_started = true"));
 
         systemd.fail_start = false;
         systemd.calls.clear();
@@ -1154,6 +1193,7 @@ mod tests {
             "target_manifest_sha256 = \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"\n",
             "verified_stage_sha256 = \"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n",
             "phase = \"repair-required\"\n",
+            "activation_started = true\n",
             "activated_targets = 3\n",
             "finalized_targets = 0\n",
         );
@@ -1217,6 +1257,106 @@ mod tests {
     }
 
     #[test]
+    fn failed_activation_boundary_write_cannot_be_laundered_into_repair_eligibility() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::create_dir_all(paths.metadata().parent().unwrap()).unwrap();
+        fs::create_dir_all(paths.state()).unwrap();
+        fs::write(
+            paths.metadata(),
+            format!("lifecycle_authority_install_key = {:?}\n", "11".repeat(32)),
+        )
+        .unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
+        let prepared = format!(
+            "schema_version = 2\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"prepared\"\nactivation_started = false\nactivated_targets = 0\nfinalized_targets = 0\n",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            format!("sha256:{}", "d".repeat(64)),
+            "e".repeat(64),
+            "f".repeat(64),
+        );
+        let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
+        fs::write(&journal_path, &prepared).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        upgrade::fail_next_atomic_write_containing("phase = \"activation-started\"");
+        assert_eq!(
+            upgrade::write_upgrade_attempt_from_journal(
+                &paths,
+                &prepared,
+                "activation-started",
+                0,
+                0,
+            ),
+            Err(InstallError::Io),
+        );
+        assert!(fs::read_to_string(&journal_path)
+            .unwrap()
+            .contains("phase = \"prepared\""));
+        assert_eq!(
+            upgrade::transition_upgrade_attempt_phase(
+                &paths,
+                upgrade::UpgradeAttemptTerminalTransition::RequireRepair,
+            ),
+            Err(InstallError::ExistingResidue),
+        );
+        upgrade::transition_upgrade_attempt_phase(
+            &paths,
+            upgrade::UpgradeAttemptTerminalTransition::AbortPreactivation,
+        )
+        .unwrap();
+        write_operation_status(
+            &paths,
+            &UpgradeAttempt {
+                operation_id: "failed-upgrade-1".to_owned(),
+                stage_owner_uid: 1000,
+                authority_sha256: Some("a".repeat(64)),
+            },
+            "1.2.4",
+            "failed",
+            Some("lifecycle.upgrade_failed_before_activation"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            issue_probe_repair_eligibility(&paths),
+            Err(InstallError::ExistingResidue),
+            "a later writable error tail must not manufacture the activation boundary",
+        );
+        assert_eq!(
+            issue_probe_repair_evidence(
+                &paths,
+                1_725_000_000_000,
+                1_725_000_060_000,
+                "request-nonce-1",
+            ),
+            Err(InstallError::ExistingResidue),
+        );
+        let status = fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap();
+        assert!(status.contains("lifecycle.upgrade_failed_before_activation"));
+        assert!(!status.contains("repair_eligibility"));
+
+        fs::write(
+            &journal_path,
+            prepared
+                .replace("phase = \"prepared\"", "phase = \"activation-started\"")
+                .replace("activation_started = false", "activation_started = true"),
+        )
+        .unwrap();
+        assert_eq!(
+            issue_probe_repair_eligibility(&paths)
+                .unwrap()
+                .evidence
+                .activated_targets,
+            0,
+            "the durable boundary precedes systemd stop and the first target rename",
+        );
+    }
+
+    #[test]
     fn repair_authority_is_offline_verified_and_consumed_once_in_an_independent_journal() {
         let temporary = tempdir().unwrap();
         let paths = FixedInstallPaths::under(temporary.path());
@@ -1231,7 +1371,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
         let journal = format!(
-            "schema_version = 2\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"repair-required\"\nactivated_targets = 3\nfinalized_targets = 0\n",
+            "schema_version = 2\noperation_id = \"failed-upgrade-1\"\nstage_owner_uid = 1000\nauthority_sha256 = {:?}\nhub_origin = \"https://hub.example\"\nhost_id = \"host-1\"\nsource_probe_id = \"probe-1\"\nsource_bundle_version = \"1.2.3\"\nsource_install_state_sha256 = {:?}\nsource_manifest_sha256 = {:?}\ntarget_bundle_version = \"1.2.4\"\ntarget_asset_set_digest = {:?}\ntarget_manifest_sha256 = {:?}\nverified_stage_sha256 = {:?}\nphase = \"repair-required\"\nactivation_started = true\nactivated_targets = 3\nfinalized_targets = 0\n",
             "a".repeat(64),
             "b".repeat(64),
             "c".repeat(64),
