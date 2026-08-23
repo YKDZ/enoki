@@ -86,7 +86,7 @@ OWNER_PASSWORD='请替换为开发密码' \
 pnpm dev
 ```
 
-Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl` 候选路径，并把工具缺失等稳定前置条件作为 Host Profile capability 上报；单次执行失败只形成有界的 Collection Outcome，不会被误记成主机能力变化。Web UI 和远端配置不能启用额外工具或改变 Provider 权限。
+Disk Health Provider 每次到期采集时只检查构建期固定的 `smartctl` 候选路径，并把工具缺失等稳定前置条件作为主机概况 capability 上报；单次执行失败只形成有界的 Collection Outcome，不会被误记成主机能力变化。Web UI 和远端配置不能启用额外工具或改变 Provider 权限。
 
 从对应版本的不可变 GitHub Release 下载 `enoki-probe-bootstrap.py` 与 `enoki-probe-bootstrap-recipe.json`。执行前逐项完成以下对照：
 
