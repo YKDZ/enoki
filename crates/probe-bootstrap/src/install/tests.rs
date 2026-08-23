@@ -542,6 +542,13 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), b"probe");
             assert_eq!(fs::metadata(path).unwrap().mode() & 0o777, 0o755);
         }
+        assert!(
+            !temporary
+                .path()
+                .join("etc/sudoers.d/enoki-probe-collector-helpers")
+                .exists(),
+            "新安装不得创建已退役的采集 helper sudoers",
+        );
     }
 
     #[test]

@@ -1170,7 +1170,7 @@ fn run_probe_repair_with_current_version_and_systemd_runner(
     replace_installed_probe_binary(&archive, &install_metadata.install_path)?;
     write_probe_operation_sudoers(install_metadata, &install_metadata.identity_path)
         .map_err(|error| probe_repair_reconstruction_error("probe_repair_sudoers_failed", error))?;
-    write_collector_helper_sudoers_from_installed_probe(install_metadata)
+    remove_legacy_collector_helper_sudoers(install_metadata)
         .map_err(|error| probe_repair_reconstruction_error("probe_repair_sudoers_failed", error))?;
     remove_old_sudoers_paths(install_metadata)
         .map_err(|error| probe_repair_reconstruction_error("probe_repair_sudoers_failed", error))?;
@@ -3184,7 +3184,7 @@ fn execute_probe_upgrade_with_current_version(
     preflight_local_operation_status_writable(install_metadata)?;
     replace_installed_probe_binary(&archive, &install_metadata.install_path)?;
     write_probe_operation_sudoers(install_metadata, bootstrap_config_path)?;
-    write_collector_helper_sudoers_from_installed_probe(install_metadata)?;
+    remove_legacy_collector_helper_sudoers(install_metadata)?;
     remove_old_sudoers_paths(install_metadata)?;
     write_local_operation_status(operation, install_metadata).map_err(|error| {
         ProbeUpgraderRunError::PostReplacementStatusWriteFailure(error.to_string())
@@ -3377,7 +3377,7 @@ fn execute_schema_three_probe_upgrade(
         transaction.activate()?;
         systemd.daemon_reload()?;
         write_probe_operation_sudoers(install_metadata, bootstrap_config_path)?;
-        write_collector_helper_sudoers_from_installed_probe(install_metadata)?;
+        remove_legacy_collector_helper_sudoers(install_metadata)?;
         write_local_operation_status(operation, install_metadata).map_err(|error| {
             ProbeUpgraderRunError::PostReplacementStatusWriteFailure(error.to_string())
         })?;
@@ -3754,7 +3754,7 @@ fn write_probe_operation_sudoers(
         .map_err(ProbeUpgraderRunError::Io)
 }
 
-fn write_collector_helper_sudoers_from_installed_probe(
+fn remove_legacy_collector_helper_sudoers(
     install_metadata: &TrustedProbeInstallMetadata,
 ) -> Result<(), ProbeUpgraderRunError> {
     let Some(sudoers_path) = &install_metadata.collector_helper_sudoers_path else {

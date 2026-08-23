@@ -68,6 +68,7 @@ Enoki 的安全边界尽量保持简单：
 - 官方版使用本仓库配置的资产签名密钥；如果不想信任我们的发布链，可以 fork 仓库、配置自己的发版密钥并自行发布 Hub 镜像和探针安装包
 - Hub 管理员可以触发探针升级和卸载，因此 Hub 权限、Hub 数据目录、资产签名私钥和容器镜像发布权限都属于高信任边界。
 - 常驻探针不以 root 运行，也不直接读取设备事实或执行 `smartctl`。Observation Runtime 只通过构建期固定的本机 Resource Provider 合同取得结果；Hub、管理员、探针配置、主机概况或指标上报都不能传入路径、命令、参数、权限配置或采集器列表
+- Observation Runtime 独占官方采集器的固定注册、调度、指标计算、delta 状态和有界结果；常驻探针只请求完整观测窗口，按已验证配置筛选已完成字段并沿认证上报路径转发。新安装不会创建已退役的采集 helper sudoers
 - System State Provider 与 Disk Health Provider 是相互独立的一次性 systemd socket 激活进程。两者都有固定调用者身份、激活预算、运行期限和有界 typed response；Disk Health Provider 还使用固定 `smartctl` 绝对候选路径和参数，清空继承环境并仅设置固定的 `LANG=C`，同时固定工作目录以及子进程超时与回收合同
 - Provider 的生产 unit 从 deny-first 配置派生，限制 capability、设备、地址族、文件系统视图和进程视图；文件读取还由构建期固定的 Landlock allowlist 约束。升级和卸载仍通过受限的探针操作入口执行，不支持下发任意系统命令
 

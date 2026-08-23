@@ -8,6 +8,7 @@ const SYSTEM_STATE_PROVIDER_BINARY: &str =
 const DISK_HEALTH_PROVIDER_BINARY: &str =
     include_str!("../src/bin/enoki-disk-health-resource-provider.rs");
 const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
+const UPGRADER: &str = include_str!("../src/upgrader.rs");
 
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -84,4 +85,7 @@ fn fresh_probe_installation_cannot_render_collector_helper_sudoers() {
     assert!(!lifecycle.contains("internal-render-collector-helper-sudoers"));
     assert!(!lifecycle.contains("write_collector_helper_sudoers("));
     assert!(lifecycle.contains("collector_helper_sudoers_path"));
+
+    assert!(!UPGRADER.contains("fn write_collector_helper_sudoers"));
+    assert!(UPGRADER.contains("fn remove_legacy_collector_helper_sudoers"));
 }
