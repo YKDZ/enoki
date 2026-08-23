@@ -372,7 +372,13 @@ pub fn execute_uninstall_lifecycle<E: UninstallLifecycleEffects>(
     effects.verify()?;
     effects.clean()?;
     effects.report()?;
-    effects.commit()?;
+    if let Err(error) = effects.commit() {
+        return if commit_policy == UninstallCommitPolicy::HubTerminal {
+            Ok(LifecycleCompletion::RecoveryPending)
+        } else {
+            Err(error)
+        };
+    }
     match effects.finalize() {
         Ok(()) => Ok(LifecycleCompletion::Complete),
         Err(_) if commit_policy == UninstallCommitPolicy::HubTerminal => {
@@ -545,6 +551,15 @@ mod tests {
             execute_uninstall_lifecycle(&mut remote, UninstallCommitPolicy::HubTerminal),
             Ok(LifecycleCompletion::RecoveryPending)
         );
+        let mut remote_commit = Effects {
+            calls: Vec::new(),
+            fail: Some("commit"),
+        };
+        assert_eq!(
+            execute_uninstall_lifecycle(&mut remote_commit, UninstallCommitPolicy::HubTerminal),
+            Ok(LifecycleCompletion::RecoveryPending)
+        );
+        assert_eq!(remote_commit.calls.last(), Some(&"commit"));
         let mut local = Effects {
             calls: Vec::new(),
             fail: Some("finalize"),
