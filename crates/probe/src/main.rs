@@ -19,13 +19,13 @@ fn main() {
         }
         ProbeCommand::Uninstall => {
             eprintln!(
-                "Probe uninstall is unavailable: code=unsupported_installation; perform a manual Probe replacement."
+                "Probe uninstall is unavailable in this version: code=unsupported_installation."
             );
             std::process::exit(2);
         }
         ProbeCommand::Repair => {
             eprintln!(
-                "Probe repair is unavailable: code=unsupported_installation; perform a manual Probe replacement."
+                "Probe repair is unavailable in this version: code=unsupported_installation."
             );
             std::process::exit(2);
         }

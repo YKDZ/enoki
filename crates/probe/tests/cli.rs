@@ -21,6 +21,17 @@ fn renders_help_without_remote_administration_language() {
 }
 
 #[test]
+fn unavailable_local_operations_do_not_claim_a_replacement_migration() {
+    for command in [ProbeCommand::Uninstall, ProbeCommand::Repair] {
+        let output = render_probe_output(command);
+        assert!(output.contains("unsupported"));
+        for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
+            assert!(!output.contains(unsupported_guidance));
+        }
+    }
+}
+
+#[test]
 fn parses_probe_registration_command_without_putting_secrets_in_urls() {
     let command = parse_probe_command([
         "enoki-probe".to_string(),

@@ -121,12 +121,8 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
-        ProbeCommand::Uninstall => {
-            "Probe uninstall is unsupported; follow the migration guide to reinstall the Probe manually.\n".to_string()
-        }
-        ProbeCommand::Repair => {
-            "Probe repair is unsupported; follow the migration guide to reinstall the Probe manually.\n".to_string()
-        }
+        ProbeCommand::Uninstall => "Probe uninstall is unsupported in this version.\n".to_string(),
+        ProbeCommand::Repair => "Probe repair is unsupported in this version.\n".to_string(),
         ProbeCommand::Rejected { code } => format!("Probe command rejected: code={code}\n"),
         ProbeCommand::Register { .. } => {
             "Probe registration performs network I/O and cannot be rendered.\n".to_string()

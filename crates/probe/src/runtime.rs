@@ -574,18 +574,12 @@ fn run_reporting_loop(
             operation_reports.observe_response(&response, operation_runner);
         }
 
-        if observation_window_failed && !report_limit_reached(reports_sent, control) {
-            sleeper.sleep(active_configuration.metrics_collection_interval);
-        }
-
         if host_profile_snapshot_requested(&response)
             && !report_limit_reached(reports_sent, control)
+            && let Some(host_profile) = host_profile.clone()
         {
             // Replay supplements the accepted Observation Batch and preserves
             // its sequence end; the next collection advances from that batch.
-            let Some(host_profile) = host_profile.clone() else {
-                continue;
-            };
             let request = snapshot_replay_report(SnapshotReplayInput {
                 boot_id: &boot_id,
                 host_profile,
@@ -617,6 +611,10 @@ fn run_reporting_loop(
                 pending_configuration_error = outcome.configuration_error;
                 operation_reports.observe_response(&response, operation_runner);
             }
+        }
+
+        if observation_window_failed && !report_limit_reached(reports_sent, control) {
+            sleeper.sleep(active_configuration.metrics_collection_interval);
         }
     }
 

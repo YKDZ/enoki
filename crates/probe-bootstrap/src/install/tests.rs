@@ -603,7 +603,6 @@ mod tests {
         let config = bootstrap_config(
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &trust(),
-            true,
         );
         assert!(!config.contains("upgrader_launch"));
         assert!(!config.contains("operation_sudoers_path"));

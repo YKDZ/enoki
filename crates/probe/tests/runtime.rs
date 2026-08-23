@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     fs,
     path::Path,
+    rc::Rc,
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
@@ -1529,6 +1531,87 @@ fn unavailable_runtime_advances_one_sequence_and_waits_before_the_next_window() 
 }
 
 #[test]
+fn failed_window_replays_requested_snapshot_before_pacing_the_next_window() {
+    struct SuccessThenUnavailable {
+        calls: AtomicUsize,
+    }
+    impl ObservationWindowClient for SuccessThenUnavailable {
+        fn request_finalized_window(
+            &self,
+            cadence: Duration,
+            sequence_start: u64,
+        ) -> Result<ObservationWindowResult, ObservationClientError> {
+            if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                FixedObservationRuntime.request_finalized_window(cadence, sequence_start)
+            } else {
+                Err(ObservationClientError::Unavailable)
+            }
+        }
+    }
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    write_secure_bootstrap_config(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "probe_id = \"probe_01\"",
+            "probe_configuration_version = \"default-v1\"",
+            "metrics_collection_interval_seconds = 2",
+            "",
+        ]
+        .join("\n"),
+    );
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let mut transport = RecordingProbeTransport {
+        responses: vec![
+            report_response(1, false),
+            report_response(4, false),
+            report_response(5, true),
+            report_response(5, false),
+            report_response(6, false),
+        ],
+        events: Some(Rc::clone(&events)),
+        ..RecordingProbeTransport::default()
+    };
+    let mut sleeper = RecordingSleeper {
+        events: Some(Rc::clone(&events)),
+        ..RecordingSleeper::default()
+    };
+
+    run_probe_with_loop_control_and_observation_client(
+        ProbeRunInput {
+            bootstrap_config_path,
+        },
+        &mut transport,
+        &mut sleeper,
+        RunLoopControl {
+            max_reports: Some(5),
+        },
+        &SuccessThenUnavailable {
+            calls: AtomicUsize::new(0),
+        },
+    )
+    .expect("Snapshot Replay completes before failed-window pacing");
+
+    assert_eq!(
+        events.borrow().as_slice(),
+        ["report", "report", "report", "report", "sleep", "report"],
+    );
+    let reports = transport
+        .observed_report_bodies
+        .iter()
+        .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+        .collect::<Vec<_>>();
+    assert!(reports[2].observation_window_failure.is_some());
+    assert!(matches!(
+        reports[3].snapshots[0].payload,
+        Some(snapshot::Payload::HostProfile(_))
+    ));
+    assert_eq!(sleeper.observed_sleeps, [Duration::from_secs(2)]);
+}
+
+#[test]
 fn probe_run_loop_keeps_reporting_empty_batches_when_metrics_are_disabled() {
     let temp = tempfile::tempdir().expect("temp dir");
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
@@ -2507,6 +2590,7 @@ fn host_profile_with_disk_capability(available: bool) -> HostProfileSnapshot {
 
 #[derive(Default)]
 struct RecordingProbeTransport {
+    events: Option<Rc<RefCell<Vec<&'static str>>>>,
     observed_calls: Vec<ObservedProbeCall>,
     observed_probe_id: String,
     observed_report_bodies: Vec<Vec<u8>>,
@@ -2535,6 +2619,9 @@ impl ReportTransport for RecordingProbeTransport {
         auth: &ProbeRequestAuth<'_>,
         body: Vec<u8>,
     ) -> Result<Vec<u8>, ReportError> {
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("report");
+        }
         self.observed_report_url = url.to_string();
         self.observed_probe_id = auth.probe_id.to_string();
         self.observed_calls.push(ObservedProbeCall {
@@ -2563,11 +2650,15 @@ impl ProbeTransport for RecordingProbeTransport {}
 
 #[derive(Default)]
 struct RecordingSleeper {
+    events: Option<Rc<RefCell<Vec<&'static str>>>>,
     observed_sleeps: Vec<Duration>,
 }
 
 impl ProbeRuntimeSleeper for RecordingSleeper {
     fn sleep(&mut self, duration: Duration) {
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("sleep");
+        }
         self.observed_sleeps.push(duration);
     }
 }

@@ -139,36 +139,113 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         "launch_systemd_probe_upgrader",
         "launch_systemd_probe_uninstaller",
         "SystemProbeUpgraderCommandRunner",
+        "ProbeUpgraderCommandRunner",
+        "runner.run(\"sudo\"",
     ] {
         assert!(
-            !production_source(PROBE_RUNTIME).contains(forbidden),
-            "Probe Runtime 不得调用旧 systemd-run executor：{forbidden}",
+            !PROBE_RUNTIME.contains(forbidden) && !UPGRADER.contains(forbidden),
+            "生产模块不得保留旧 systemd-run launch adapter：{forbidden}",
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linked_symbols(binary: &str) -> Vec<String> {
+    use object::{Object, ObjectSymbol};
+
+    let bytes = std::fs::read(binary).expect("读取测试构建的 ELF binary");
+    let object = object::File::parse(bytes.as_slice()).expect("解析测试构建的 ELF binary");
+    object
+        .symbols()
+        .chain(object.dynamic_symbols())
+        .filter_map(|symbol| symbol.name().ok().map(ToOwned::to_owned))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_linked(symbols: &[String], required: &str, binary: &str) {
+    assert!(
+        symbols.iter().any(|symbol| symbol.contains(required)),
+        "{binary} 必须链接核心入口：{required}",
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn assert_not_linked(symbols: &[String], forbidden: &[&str], binary: &str) {
+    for forbidden in forbidden {
+        assert!(
+            !symbols.iter().any(|symbol| symbol.contains(forbidden)),
+            "{binary} 不得链接越界职责：{forbidden}",
         );
     }
 }
 
 #[test]
-fn built_probe_does_not_link_legacy_lifecycle_execution_symbols() {
-    let output = std::process::Command::new("nm")
-        .arg("-C")
-        .arg(env!("CARGO_BIN_EXE_enoki-probe"))
-        .output()
-        .expect("nm 可读取测试构建的 Probe binary");
-    assert!(output.status.success(), "nm 必须成功");
-    let symbols = String::from_utf8(output.stdout).expect("nm 输出为 UTF-8");
-    for forbidden in [
-        "run_probe_local_install",
-        "run_probe_upgrader",
-        "run_probe_uninstaller",
-        "run_local_probe_uninstall",
-        "run_probe_repair",
-        "launch_systemd_probe_upgrader",
-        "launch_systemd_probe_uninstaller",
-        "SystemProbeUpgraderCommandRunner",
-    ] {
-        assert!(
-            !symbols.contains(forbidden),
-            "Probe binary 不得链接旧 lifecycle 执行符号：{forbidden}",
-        );
-    }
+#[cfg(target_os = "linux")]
+fn built_binaries_enforce_both_observation_dependency_directions() {
+    let probe = linked_symbols(env!("CARGO_BIN_EXE_enoki-probe"));
+    assert_linked(&probe, "run_probe_with_loop_control", "enoki-probe");
+    assert_linked(&probe, "request_finalized_window", "enoki-probe");
+    assert_not_linked(
+        &probe,
+        &[
+            "collect_cpu_metrics_from_counter_records",
+            "collect_memory_metrics_from_proc_meminfo",
+            "collect_disk_metrics_from_mounts",
+            "collect_network_metrics_from_proc_net_dev",
+            "collect_disk_health_metrics_from_smartctl_json",
+            "collect_local_host_profile_resource_facts",
+            "UnixSystemStateProvider",
+            "UnixDiskHealthProvider",
+            "enforce_system_state_resource_read_allowlist",
+            "enforce_disk_health_resource_read_allowlist",
+            "collect_temperature_inputs",
+            "collect_battery_supplies",
+            "privileged_collector_helpers",
+            "local_privilege_boundary",
+        ],
+        "enoki-probe",
+    );
+    assert_not_linked(
+        &probe,
+        &[
+            "run_probe_local_install",
+            "run_probe_upgrader",
+            "run_probe_uninstaller",
+            "run_local_probe_uninstall",
+            "run_probe_repair",
+            "launch_systemd_probe_upgrader",
+            "launch_systemd_probe_uninstaller",
+            "SystemProbeUpgraderCommandRunner",
+        ],
+        "enoki-probe",
+    );
+
+    let runtime = linked_symbols(env!("CARGO_BIN_EXE_enoki-observation-runtime"));
+    assert_linked(
+        &runtime,
+        "ObservationRuntimeServer",
+        "enoki-observation-runtime",
+    );
+    assert_linked(
+        &runtime,
+        "serve_fixed_probe_listener",
+        "enoki-observation-runtime",
+    );
+    assert_not_linked(
+        &runtime,
+        &[
+            "probe_auth",
+            "registration",
+            "HttpRegistrationTransport",
+            "run_probe_with_loop_control",
+            "local_lifecycle",
+            "upgrader",
+            "SystemProbeUpgraderCommandRunner",
+            "launch_systemd_probe",
+            "privileged_collector_helpers",
+            "local_privilege_boundary",
+        ],
+        "enoki-observation-runtime",
+    );
 }

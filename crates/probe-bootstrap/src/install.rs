@@ -1133,10 +1133,7 @@ fn stage_complete_layout(
     let metadata = staging.join("probe-install.toml");
     let unit = staging.join("enoki-probe.service");
     for (path, contents) in [
-        (
-            &identity,
-            bootstrap_config(enrollment, trust, install_observation),
-        ),
+        (&identity, bootstrap_config(enrollment, trust)),
         (
             &metadata,
             install_metadata(enrollment, trust, install_observation),
@@ -1179,11 +1176,7 @@ fn record_rollback(
     }
 }
 
-fn bootstrap_config(
-    enrollment: &Enrollment,
-    trust: &BuildTrust,
-    _install_observation: bool,
-) -> String {
+fn bootstrap_config(enrollment: &Enrollment, trust: &BuildTrust) -> String {
     format!(
         "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nprobe_distribution_root_sha256 = {:?}\nlog_level = \"info\"\n",
         enrollment.hub_origin(),
