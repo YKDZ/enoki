@@ -441,6 +441,9 @@ fn preflight_for_installation_target(
     match target {
         ProbeInstallationTarget::NewHost => preflight_fresh_installation(input).map(|()| false),
         ProbeInstallationTarget::ExistingHost => preflight_existing_host_reenrollment(input),
+        ProbeInstallationTarget::ManualReinstall(_) => Err(ProbeLocalLifecycleError::InvalidInput(
+            "manual reinstall requires Lifecycle Companion",
+        )),
     }
 }
 

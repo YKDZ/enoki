@@ -9,6 +9,11 @@ import type {
   EnrollmentTarget,
 } from "../database/enrollments.js";
 import type { HostStatusThresholds } from "../database/hosts.js";
+import type { HostRepository } from "../database/hosts.js";
+import {
+  readProbeReleaseContextFromDirectory,
+  unavailableProbeReleaseContext,
+} from "../probe/release-context.js";
 import {
   createDefaultInstallationCommandConfig,
   type InstallationCommandConfig,
@@ -22,8 +27,11 @@ export type EnrollmentRouteServices = {
   audit?: AuditRepository;
   enrollments: EnrollmentRepository;
   hostStatus?: HostStatusThresholds;
+  hosts?: HostRepository;
   installation?: InstallationCommandConfig;
   now?: () => number;
+  probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: Buffer | string;
 };
 
 export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
@@ -51,6 +59,48 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
     return createOwnerEnrollment(context, services, installation, now, {
       hostId,
       kind: "existing_host",
+    });
+  });
+
+  routes.post("/manual-reinstall/:hostId", async (context) => {
+    const hostId = positiveInteger(context.req.param("hostId"));
+    if (!hostId || !services.hosts) {
+      return context.json({ error: "manual_reinstall_unavailable" }, 409);
+    }
+    const host = services.hosts.findActiveById(hostId);
+    if (!host) {
+      return context.json({ error: "host_not_found" }, 404);
+    }
+    const releaseContext = services.probeAssetDir
+      ? await readProbeReleaseContextFromDirectory({
+          assetDir: services.probeAssetDir,
+          trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+        })
+      : unavailableProbeReleaseContext();
+    const transition = releaseContext.releaseTransition;
+    if (
+      !transition ||
+      transition.classification !== "replacement-required" ||
+      transition.sourceProbeVersion !== host.probeVersion ||
+      transition.targetProbeVersion !== releaseContext.assetSet.version ||
+      transition.targetAssetSetDigest !==
+        releaseContext.assetSet.targetAssetSetDigest ||
+      !releaseContext.assetSet.targetAssetSetDigest
+    ) {
+      return context.json({ error: "manual_reinstall_not_required" }, 409);
+    }
+    const expectedHubOrigin = installation.probeApiOrigin;
+    if (!expectedHubOrigin) {
+      return context.json({ error: "manual_reinstall_unavailable" }, 409);
+    }
+    return createOwnerEnrollment(context, services, installation, now, {
+      expectedHubOrigin,
+      expectedProbeId: host.probeId,
+      expectedProbeVersion: transition.sourceProbeVersion,
+      hostId,
+      kind: "manual_reinstall",
+      targetAssetSetDigest: transition.targetAssetSetDigest,
+      targetProbeVersion: transition.targetProbeVersion,
     });
   });
 
@@ -185,4 +235,9 @@ function createEnrollmentToken() {
 
 function createEnrollmentId() {
   return `enr_${randomBytes(16).toString("base64url")}`;
+}
+
+function positiveInteger(value: string) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }

@@ -223,8 +223,12 @@ export function createHubApp(options: HubAppOptions = {}) {
           audit: options.database.audit,
           enrollments: options.database.enrollments,
           hostStatus: options.hostStatus,
+          hosts: options.database.hosts,
           installation: options.installation,
           now: options.now,
+          probeAssetDir: options.probeAssets?.assetDir,
+          probeDistributionRootPublicKeyPem:
+            options.probeAssets?.trustedRootPublicKeyPem,
         }),
       );
       app.route("/api/web/hosts", createHostRoutes(hostRouteServices));

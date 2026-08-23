@@ -222,7 +222,8 @@ export namespace enoki {
         enum ProbeEnrollmentTargetKind {
             PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED = 0,
             NEW_HOST = 1,
-            EXISTING_HOST = 2
+            EXISTING_HOST = 2,
+            MANUAL_REINSTALL = 3
         }
 
         /** Properties of a ProbeInstallationInspectionResponse. */
@@ -230,6 +231,21 @@ export namespace enoki {
 
             /** ProbeInstallationInspectionResponse targetKind */
             targetKind?: (enoki.v1.ProbeEnrollmentTargetKind|null);
+
+            /** ProbeInstallationInspectionResponse expectedHubOrigin */
+            expectedHubOrigin?: (string|null);
+
+            /** ProbeInstallationInspectionResponse expectedProbeId */
+            expectedProbeId?: (string|null);
+
+            /** ProbeInstallationInspectionResponse sourceProbeVersion */
+            sourceProbeVersion?: (string|null);
+
+            /** ProbeInstallationInspectionResponse targetProbeVersion */
+            targetProbeVersion?: (string|null);
+
+            /** ProbeInstallationInspectionResponse targetAssetSetDigest */
+            targetAssetSetDigest?: (string|null);
         }
 
         /** Represents a ProbeInstallationInspectionResponse. */
@@ -243,6 +259,21 @@ export namespace enoki {
 
             /** ProbeInstallationInspectionResponse targetKind. */
             public targetKind: enoki.v1.ProbeEnrollmentTargetKind;
+
+            /** ProbeInstallationInspectionResponse expectedHubOrigin. */
+            public expectedHubOrigin: string;
+
+            /** ProbeInstallationInspectionResponse expectedProbeId. */
+            public expectedProbeId: string;
+
+            /** ProbeInstallationInspectionResponse sourceProbeVersion. */
+            public sourceProbeVersion: string;
+
+            /** ProbeInstallationInspectionResponse targetProbeVersion. */
+            public targetProbeVersion: string;
+
+            /** ProbeInstallationInspectionResponse targetAssetSetDigest. */
+            public targetAssetSetDigest: string;
 
             /**
              * Creates a new ProbeInstallationInspectionResponse instance using the specified properties.

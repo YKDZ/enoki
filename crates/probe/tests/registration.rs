@@ -89,6 +89,7 @@ fn installation_inspection_uses_registration_without_generating_an_identity() {
                     target_kind:
                         enoki_probe::protocol::enoki::v1::ProbeEnrollmentTargetKind::ExistingHost
                             as i32,
+                    ..Default::default()
                 },
             ),
             probe_id: String::new(),
@@ -123,6 +124,53 @@ fn installation_inspection_uses_registration_without_generating_an_identity() {
     assert!(request.installation_rejection.is_none());
     assert!(request.probe_public_key_pem.is_empty());
     assert!(request.snapshots.is_empty());
+}
+
+#[test]
+fn manual_reinstall_inspection_returns_the_bounded_hub_authority() {
+    let response = ProbeRegistrationResponse {
+        installation_inspection: Some(
+            enoki_probe::protocol::enoki::v1::ProbeInstallationInspectionResponse {
+                target_kind:
+                    enoki_probe::protocol::enoki::v1::ProbeEnrollmentTargetKind::ManualReinstall
+                        as i32,
+                expected_hub_origin: "https://hub.example".to_string(),
+                expected_probe_id: "probe_old_01".to_string(),
+                source_probe_version: "1.2.2".to_string(),
+                target_probe_version: "1.2.3".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+            },
+        ),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response,
+    };
+
+    let target = inspect_probe_installation(
+        ProbeInstallationInspectionInput {
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("手动重装授权应通过类型化inspection返回");
+
+    assert_eq!(
+        target,
+        ProbeInstallationTarget::ManualReinstall(
+            enoki_probe::registration::ProbeReplacementAuthorization {
+                expected_hub_origin: "https://hub.example".to_string(),
+                expected_probe_id: "probe_old_01".to_string(),
+                source_probe_version: "1.2.2".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "a".repeat(64)),
+                target_probe_version: "1.2.3".to_string(),
+            }
+        )
+    );
 }
 
 #[test]

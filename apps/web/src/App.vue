@@ -662,6 +662,32 @@ async function createExistingHostEnrollment(hostId: number) {
   }
 }
 
+async function createManualReinstallEnrollment(hostId: number) {
+  try {
+    const response = await fetch(
+      `/api/web/enrollments/manual-reinstall/${hostId}`,
+      {
+        credentials: "same-origin",
+        method: "POST",
+      },
+    );
+    if (handleUnauthorizedResponse(response)) return;
+    if (!response.ok) {
+      showExistingHostEnrollmentFailure(
+        hostId,
+        await responseErrorCode(response),
+      );
+      return;
+    }
+    enrollment.value = (await response.json()) as EnrollmentResponse;
+    enrollmentError.value = "";
+    isShowingEnrollmentDialog.value = true;
+    scheduleEnrollmentStatusReconciliation();
+  } catch {
+    showExistingHostEnrollmentFailure(hostId, null);
+  }
+}
+
 async function responseErrorCode(response: Response) {
   try {
     const body = (await response.json()) as { error?: unknown } | null;
@@ -1325,6 +1351,7 @@ function routePath() {
         @back="navigateToOverview"
         @delete-host="deleteHost"
         @manual-probe-reinstall="createExistingHostEnrollment"
+        @replacement-migration-requested="createManualReinstallEnrollment"
         @open-host-configuration="openHostConfiguration"
         @open-host-metadata="openHostMetadata"
         @probe-upgrade-requested="trackProbeUpgradeRequest"

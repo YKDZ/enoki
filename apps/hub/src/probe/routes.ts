@@ -163,7 +163,29 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             targetKind:
               enrollment.targetKind === "new_host"
                 ? enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST
-                : enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST,
+                : enrollment.targetKind === "existing_host"
+                  ? enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST
+                  : 3,
+            expectedHubOrigin:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.expectedHubOrigin
+                : "",
+            expectedProbeId:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.expectedProbeId
+                : "",
+            sourceProbeVersion:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.sourceProbeVersion
+                : "",
+            targetAssetSetDigest:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.targetAssetSetDigest
+                : "",
+            targetProbeVersion:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.targetProbeVersion
+                : "",
           },
         }),
       ).finish();
@@ -273,6 +295,24 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     if (!registration) {
       return probeJsonError("invalid_enrollment_token", 401);
+    }
+
+    if (registration.enrollment.targetKind === "manual_reinstall") {
+      services.audit?.record({
+        action: "probe.manual_reinstall_identity_replaced",
+        actor: "system",
+        details: {
+          enrollmentId: registration.enrollment.enrollmentId,
+          newProbeId: probeId,
+          oldProbeId: registration.enrollment.expectedProbeId,
+          targetAssetSetDigest: registration.enrollment.targetAssetSetDigest,
+          targetProbeVersion: registration.enrollment.targetProbeVersion,
+        },
+        occurredAtMs: registeredAtMs,
+        outcome: "success",
+        subjectId: String(registration.host.id),
+        subjectType: "host",
+      });
     }
 
     const body = RegistrationResponse.encode(

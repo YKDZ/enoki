@@ -17,7 +17,16 @@ type EnrollmentDatabase = NodeSQLiteDatabase<typeof import("./schema.js")>;
 
 export type EnrollmentTarget =
   | { kind: "new_host" }
-  | { hostId: number; kind: "existing_host" };
+  | { hostId: number; kind: "existing_host" }
+  | {
+      expectedHubOrigin: string;
+      expectedProbeId: string;
+      expectedProbeVersion: string;
+      hostId: number;
+      kind: "manual_reinstall";
+      targetAssetSetDigest: string;
+      targetProbeVersion: string;
+    };
 
 export type CreatePendingEnrollmentInput = {
   createdAtMs: number;
@@ -33,9 +42,16 @@ export type PendingEnrollmentCreation =
   | { kind: "existing_host_unavailable" }
   | { kind: "existing_host_verifying" };
 
-export type PendingEnrollmentInspection = {
-  targetKind: "existing_host" | "new_host";
-};
+export type PendingEnrollmentInspection =
+  | { targetKind: "existing_host" | "new_host" }
+  | {
+      expectedHubOrigin: string;
+      expectedProbeId: string;
+      sourceProbeVersion: string;
+      targetAssetSetDigest: string;
+      targetKind: "manual_reinstall";
+      targetProbeVersion: string;
+    };
 
 export type InstallationRejectionResult = {
   enrollment: EnrollmentTokenRow;
@@ -91,8 +107,13 @@ export function createEnrollmentRepository(
     inspectPending(input) {
       const pending = database
         .select({
+          expectedHubOrigin: enrollmentTokens.expectedHubOrigin,
+          expectedProbeId: enrollmentTokens.expectedProbeId,
+          expectedProbeVersion: enrollmentTokens.expectedProbeVersion,
+          targetAssetSetDigest: enrollmentTokens.targetAssetSetDigest,
           targetHostId: enrollmentTokens.targetHostId,
           targetKind: enrollmentTokens.targetKind,
+          targetProbeVersion: enrollmentTokens.targetProbeVersion,
         })
         .from(enrollmentTokens)
         .where(
@@ -109,6 +130,44 @@ export function createEnrollmentRepository(
       }
       if (pending.targetKind === "new_host") {
         return { targetKind: "new_host" };
+      }
+      if (pending.targetKind === "manual_reinstall") {
+        if (
+          pending.targetHostId === null ||
+          !pending.expectedHubOrigin ||
+          !pending.expectedProbeId ||
+          !pending.expectedProbeVersion ||
+          !pending.targetAssetSetDigest ||
+          !pending.targetProbeVersion
+        ) {
+          return null;
+        }
+        const host = database
+          .select({
+            id: hosts.id,
+            probeId: hosts.probeId,
+            probeVersion: hosts.probeVersion,
+          })
+          .from(hosts)
+          .where(
+            and(eq(hosts.id, pending.targetHostId), isNull(hosts.deletedAtMs)),
+          )
+          .get();
+        if (
+          !host ||
+          host.probeId !== pending.expectedProbeId ||
+          host.probeVersion !== pending.expectedProbeVersion
+        ) {
+          return null;
+        }
+        return {
+          expectedHubOrigin: pending.expectedHubOrigin,
+          expectedProbeId: pending.expectedProbeId,
+          sourceProbeVersion: pending.expectedProbeVersion,
+          targetAssetSetDigest: pending.targetAssetSetDigest,
+          targetKind: "manual_reinstall",
+          targetProbeVersion: pending.targetProbeVersion,
+        };
       }
       if (
         pending.targetKind !== "existing_host" ||
@@ -401,6 +460,62 @@ export function createEnrollmentRepository(
           }
         }
 
+        if (input.target.kind === "manual_reinstall") {
+          const target = transaction
+            .select({
+              id: hosts.id,
+              probeId: hosts.probeId,
+              probeVersion: hosts.probeVersion,
+            })
+            .from(hosts)
+            .where(
+              and(eq(hosts.id, input.target.hostId), isNull(hosts.deletedAtMs)),
+            )
+            .get();
+          if (
+            !target ||
+            target.probeId !== input.target.expectedProbeId ||
+            target.probeVersion !== input.target.expectedProbeVersion
+          ) {
+            return { kind: "existing_host_unavailable" };
+          }
+
+          const active = transaction
+            .select()
+            .from(enrollmentTokens)
+            .where(
+              and(
+                eq(enrollmentTokens.targetHostId, input.target.hostId),
+                inArray(enrollmentTokens.targetKind, [
+                  "existing_host",
+                  "manual_reinstall",
+                ]),
+                inArray(enrollmentTokens.status, ["pending", "verifying"]),
+              ),
+            )
+            .get();
+          if (active?.status === "verifying") {
+            return { kind: "existing_host_verifying" };
+          }
+          if (active?.status === "pending") {
+            transaction
+              .update(enrollmentTokens)
+              .set({
+                rejectedAtMs: input.createdAtMs,
+                rejectionCode: "superseded",
+                rejectionMessage: null,
+                status: "rejected",
+              })
+              .where(
+                and(
+                  eq(enrollmentTokens.id, active.id),
+                  eq(enrollmentTokens.status, "pending"),
+                ),
+              )
+              .run();
+          }
+        }
+
         const row = transaction
           .insert(enrollmentTokens)
           .values({
@@ -409,8 +524,29 @@ export function createEnrollmentRepository(
             expiresAtMs: input.expiresAtMs,
             status: "pending",
             targetHostId:
-              input.target.kind === "existing_host"
+              input.target.kind === "existing_host" ||
+              input.target.kind === "manual_reinstall"
                 ? input.target.hostId
+                : null,
+            expectedHubOrigin:
+              input.target.kind === "manual_reinstall"
+                ? input.target.expectedHubOrigin
+                : null,
+            expectedProbeId:
+              input.target.kind === "manual_reinstall"
+                ? input.target.expectedProbeId
+                : null,
+            expectedProbeVersion:
+              input.target.kind === "manual_reinstall"
+                ? input.target.expectedProbeVersion
+                : null,
+            targetAssetSetDigest:
+              input.target.kind === "manual_reinstall"
+                ? input.target.targetAssetSetDigest
+                : null,
+            targetProbeVersion:
+              input.target.kind === "manual_reinstall"
+                ? input.target.targetProbeVersion
                 : null,
             targetKind: input.target.kind,
             tokenHash: input.tokenHash,
@@ -455,7 +591,8 @@ export function createEnrollmentRepository(
           }
 
           const existingHost =
-            pending.targetKind === "existing_host" &&
+            (pending.targetKind === "existing_host" ||
+              pending.targetKind === "manual_reinstall") &&
             pending.targetHostId !== null
               ? transaction
                   .select()
@@ -469,13 +606,31 @@ export function createEnrollmentRepository(
                   .get()
               : null;
 
-          if (pending.targetKind === "existing_host" && !existingHost) {
+          if (
+            (pending.targetKind === "existing_host" ||
+              pending.targetKind === "manual_reinstall") &&
+            !existingHost
+          ) {
             return null;
           }
 
           if (
             pending.targetKind !== "new_host" &&
-            pending.targetKind !== "existing_host"
+            pending.targetKind !== "existing_host" &&
+            pending.targetKind !== "manual_reinstall"
+          ) {
+            return null;
+          }
+
+          if (
+            pending.targetKind === "manual_reinstall" &&
+            (!pending.expectedHubOrigin ||
+              !pending.expectedProbeId ||
+              !pending.expectedProbeVersion ||
+              !pending.targetAssetSetDigest ||
+              !pending.targetProbeVersion ||
+              existingHost?.probeId !== pending.expectedProbeId ||
+              existingHost.probeVersion !== pending.expectedProbeVersion)
           ) {
             return null;
           }

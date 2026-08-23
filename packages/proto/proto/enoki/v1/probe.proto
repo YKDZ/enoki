@@ -27,10 +27,16 @@ enum ProbeEnrollmentTargetKind {
   PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED = 0;
   NEW_HOST = 1;
   EXISTING_HOST = 2;
+  MANUAL_REINSTALL = 3;
 }
 
 message ProbeInstallationInspectionResponse {
   ProbeEnrollmentTargetKind target_kind = 1;
+  string expected_hub_origin = 2;
+  string expected_probe_id = 3;
+  string source_probe_version = 4;
+  string target_probe_version = 5;
+  string target_asset_set_digest = 6;
 }
 
 message ProbeInstallationRejection {

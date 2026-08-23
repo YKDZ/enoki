@@ -51,10 +51,20 @@ pub struct ProbeInstallationInspectionInput {
     pub hub_url: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeInstallationTarget {
     NewHost,
     ExistingHost,
+    ManualReinstall(ProbeReplacementAuthorization),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeReplacementAuthorization {
+    pub expected_hub_origin: String,
+    pub expected_probe_id: String,
+    pub source_probe_version: String,
+    pub target_asset_set_digest: String,
+    pub target_probe_version: String,
 }
 
 pub(crate) struct PreparedInstallationRejection {
@@ -200,19 +210,72 @@ pub fn inspect_probe_installation(
         transport.post_protobuf(&registration_url(&input.hub_url)?, request.encode_to_vec())?;
     let response = ProbeRegistrationResponse::decode(response_body.as_slice())
         .map_err(|error| RegistrationError::Decode(error.to_string()))?;
-    let target_kind = response
+    let inspection = response
         .installation_inspection
         .ok_or(RegistrationError::InvalidResponse(
             "missing installation inspection",
-        ))?
-        .target_kind;
-    match ProbeEnrollmentTargetKind::try_from(target_kind).ok() {
+        ))?;
+    match ProbeEnrollmentTargetKind::try_from(inspection.target_kind).ok() {
         Some(ProbeEnrollmentTargetKind::NewHost) => Ok(ProbeInstallationTarget::NewHost),
         Some(ProbeEnrollmentTargetKind::ExistingHost) => Ok(ProbeInstallationTarget::ExistingHost),
+        Some(ProbeEnrollmentTargetKind::ManualReinstall)
+            if valid_replacement_inspection(&inspection, &input.hub_url) =>
+        {
+            Ok(ProbeInstallationTarget::ManualReinstall(
+                ProbeReplacementAuthorization {
+                    expected_hub_origin: inspection.expected_hub_origin,
+                    expected_probe_id: inspection.expected_probe_id,
+                    source_probe_version: inspection.source_probe_version,
+                    target_asset_set_digest: inspection.target_asset_set_digest,
+                    target_probe_version: inspection.target_probe_version,
+                },
+            ))
+        }
         Some(ProbeEnrollmentTargetKind::Unspecified) | None => Err(
             RegistrationError::InvalidResponse("invalid installation inspection target"),
         ),
+        Some(ProbeEnrollmentTargetKind::ManualReinstall) => Err(
+            RegistrationError::InvalidResponse("invalid manual reinstall authority"),
+        ),
     }
+}
+
+fn valid_replacement_inspection(
+    inspection: &crate::protocol::enoki::v1::ProbeInstallationInspectionResponse,
+    requested_hub_url: &str,
+) -> bool {
+    hub_url::normalized_base(&inspection.expected_hub_origin).ok()
+        == hub_url::normalized_base(requested_hub_url).ok()
+        && bounded_identifier(&inspection.expected_probe_id)
+        && valid_semver(&inspection.source_probe_version)
+        && valid_semver(&inspection.target_probe_version)
+        && inspection
+            .target_asset_set_digest
+            .strip_prefix("sha256:")
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            })
+}
+
+fn bounded_identifier(value: &str) -> bool {
+    (1..=160).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_semver(value: &str) -> bool {
+    let value = value.strip_prefix('v').unwrap_or(value);
+    let mut parts = value.split('.');
+    parts.clone().count() == 3
+        && parts.all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0'))
+        })
 }
 
 /// Uses the existing registration endpoint to terminate the matching pending

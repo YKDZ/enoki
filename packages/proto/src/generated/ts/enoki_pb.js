@@ -573,12 +573,14 @@ export const enoki = $root.enoki = (() => {
          * @property {number} PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED=0 PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED value
          * @property {number} NEW_HOST=1 NEW_HOST value
          * @property {number} EXISTING_HOST=2 EXISTING_HOST value
+         * @property {number} MANUAL_REINSTALL=3 MANUAL_REINSTALL value
          */
         v1.ProbeEnrollmentTargetKind = (function() {
             const valuesById = {}, values = Object.create(valuesById);
             values[valuesById[0] = "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED"] = 0;
             values[valuesById[1] = "NEW_HOST"] = 1;
             values[valuesById[2] = "EXISTING_HOST"] = 2;
+            values[valuesById[3] = "MANUAL_REINSTALL"] = 3;
             return values;
         })();
 
@@ -589,6 +591,11 @@ export const enoki = $root.enoki = (() => {
              * @memberof enoki.v1
              * @interface IProbeInstallationInspectionResponse
              * @property {enoki.v1.ProbeEnrollmentTargetKind|null} [targetKind] ProbeInstallationInspectionResponse targetKind
+             * @property {string|null} [expectedHubOrigin] ProbeInstallationInspectionResponse expectedHubOrigin
+             * @property {string|null} [expectedProbeId] ProbeInstallationInspectionResponse expectedProbeId
+             * @property {string|null} [sourceProbeVersion] ProbeInstallationInspectionResponse sourceProbeVersion
+             * @property {string|null} [targetProbeVersion] ProbeInstallationInspectionResponse targetProbeVersion
+             * @property {string|null} [targetAssetSetDigest] ProbeInstallationInspectionResponse targetAssetSetDigest
              */
 
             /**
@@ -613,6 +620,46 @@ export const enoki = $root.enoki = (() => {
              * @instance
              */
             ProbeInstallationInspectionResponse.prototype.targetKind = 0;
+
+            /**
+             * ProbeInstallationInspectionResponse expectedHubOrigin.
+             * @member {string} expectedHubOrigin
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.expectedHubOrigin = "";
+
+            /**
+             * ProbeInstallationInspectionResponse expectedProbeId.
+             * @member {string} expectedProbeId
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.expectedProbeId = "";
+
+            /**
+             * ProbeInstallationInspectionResponse sourceProbeVersion.
+             * @member {string} sourceProbeVersion
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.sourceProbeVersion = "";
+
+            /**
+             * ProbeInstallationInspectionResponse targetProbeVersion.
+             * @member {string} targetProbeVersion
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.targetProbeVersion = "";
+
+            /**
+             * ProbeInstallationInspectionResponse targetAssetSetDigest.
+             * @member {string} targetAssetSetDigest
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.targetAssetSetDigest = "";
 
             /**
              * Creates a new ProbeInstallationInspectionResponse instance using the specified properties.
@@ -644,6 +691,16 @@ export const enoki = $root.enoki = (() => {
                     throw Error("max depth exceeded");
                 if (message.targetKind != null && Object.hasOwnProperty.call(message, "targetKind"))
                     writer.uint32(/* id 1, wireType 0 =*/8).int32(message.targetKind);
+                if (message.expectedHubOrigin != null && Object.hasOwnProperty.call(message, "expectedHubOrigin"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.expectedHubOrigin);
+                if (message.expectedProbeId != null && Object.hasOwnProperty.call(message, "expectedProbeId"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.expectedProbeId);
+                if (message.sourceProbeVersion != null && Object.hasOwnProperty.call(message, "sourceProbeVersion"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.sourceProbeVersion);
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    writer.uint32(/* id 5, wireType 2 =*/42).string(message.targetProbeVersion);
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    writer.uint32(/* id 6, wireType 2 =*/50).string(message.targetAssetSetDigest);
                 return writer;
             };
 
@@ -686,6 +743,26 @@ export const enoki = $root.enoki = (() => {
                     switch (tag >>> 3) {
                     case 1: {
                             message.targetKind = reader.int32();
+                            break;
+                        }
+                    case 2: {
+                            message.expectedHubOrigin = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.expectedProbeId = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.sourceProbeVersion = reader.string();
+                            break;
+                        }
+                    case 5: {
+                            message.targetProbeVersion = reader.string();
+                            break;
+                        }
+                    case 6: {
+                            message.targetAssetSetDigest = reader.string();
                             break;
                         }
                     default:
@@ -734,8 +811,24 @@ export const enoki = $root.enoki = (() => {
                     case 0:
                     case 1:
                     case 2:
+                    case 3:
                         break;
                     }
+                if (message.expectedHubOrigin != null && Object.hasOwnProperty.call(message, "expectedHubOrigin"))
+                    if (!$util.isString(message.expectedHubOrigin))
+                        return "expectedHubOrigin: string expected";
+                if (message.expectedProbeId != null && Object.hasOwnProperty.call(message, "expectedProbeId"))
+                    if (!$util.isString(message.expectedProbeId))
+                        return "expectedProbeId: string expected";
+                if (message.sourceProbeVersion != null && Object.hasOwnProperty.call(message, "sourceProbeVersion"))
+                    if (!$util.isString(message.sourceProbeVersion))
+                        return "sourceProbeVersion: string expected";
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    if (!$util.isString(message.targetProbeVersion))
+                        return "targetProbeVersion: string expected";
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    if (!$util.isString(message.targetAssetSetDigest))
+                        return "targetAssetSetDigest: string expected";
                 return null;
             };
 
@@ -776,7 +869,21 @@ export const enoki = $root.enoki = (() => {
                 case 2:
                     message.targetKind = 2;
                     break;
+                case "MANUAL_REINSTALL":
+                case 3:
+                    message.targetKind = 3;
+                    break;
                 }
+                if (object.expectedHubOrigin != null)
+                    message.expectedHubOrigin = String(object.expectedHubOrigin);
+                if (object.expectedProbeId != null)
+                    message.expectedProbeId = String(object.expectedProbeId);
+                if (object.sourceProbeVersion != null)
+                    message.sourceProbeVersion = String(object.sourceProbeVersion);
+                if (object.targetProbeVersion != null)
+                    message.targetProbeVersion = String(object.targetProbeVersion);
+                if (object.targetAssetSetDigest != null)
+                    message.targetAssetSetDigest = String(object.targetAssetSetDigest);
                 return message;
             };
 
@@ -797,10 +904,26 @@ export const enoki = $root.enoki = (() => {
                 if (q > $util.recursionLimit)
                     throw Error("max depth exceeded");
                 let object = {};
-                if (options.defaults)
+                if (options.defaults) {
                     object.targetKind = options.enums === String ? "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED" : 0;
+                    object.expectedHubOrigin = "";
+                    object.expectedProbeId = "";
+                    object.sourceProbeVersion = "";
+                    object.targetProbeVersion = "";
+                    object.targetAssetSetDigest = "";
+                }
                 if (message.targetKind != null && Object.hasOwnProperty.call(message, "targetKind"))
                     object.targetKind = options.enums === String ? $root.enoki.v1.ProbeEnrollmentTargetKind[message.targetKind] === undefined ? message.targetKind : $root.enoki.v1.ProbeEnrollmentTargetKind[message.targetKind] : message.targetKind;
+                if (message.expectedHubOrigin != null && Object.hasOwnProperty.call(message, "expectedHubOrigin"))
+                    object.expectedHubOrigin = message.expectedHubOrigin;
+                if (message.expectedProbeId != null && Object.hasOwnProperty.call(message, "expectedProbeId"))
+                    object.expectedProbeId = message.expectedProbeId;
+                if (message.sourceProbeVersion != null && Object.hasOwnProperty.call(message, "sourceProbeVersion"))
+                    object.sourceProbeVersion = message.sourceProbeVersion;
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    object.targetProbeVersion = message.targetProbeVersion;
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    object.targetAssetSetDigest = message.targetAssetSetDigest;
                 return object;
             };
 

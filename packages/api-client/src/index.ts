@@ -92,6 +92,10 @@ export type EnrollmentTarget =
   | {
       hostId: number;
       kind: "existing_host";
+    }
+  | {
+      hostId: number;
+      kind: "manual_reinstall";
     };
 
 export type EnrollmentStatusResponse = {
@@ -200,6 +204,11 @@ export type ProbeUpgradeEligibility = {
   currentProbeAssetSetVersion: string | null;
   currentProbeVersion: string | null;
   isUpgradeable: boolean;
+  manualReinstall?: {
+    sourceProbeVersion: string;
+    targetAssetSetDigest: string;
+    targetProbeVersion: string;
+  };
   nonUpgradeableReason:
     | "probe_asset_set_version_missing"
     | "probe_asset_set_version_malformed"

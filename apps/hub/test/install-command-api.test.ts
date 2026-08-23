@@ -10,6 +10,7 @@ import {
   renderInstallCommand,
   resolveProbeBootstrapRecipeRecord,
 } from "../src/enrollment/install-command";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 
 const tempRoots: string[] = [];
 const bootstrapRecipe = {
@@ -221,6 +222,88 @@ describe("Owner add-host install command", () => {
     expect(existingCommand.installCommand).not.toContain(
       "ENOKI_ENROLLMENT_TARGET",
     );
+
+    database.close();
+  });
+
+  it("issues one bounded manual reinstall command from the verified replacement transition", async () => {
+    const database = await createTemporaryDatabase();
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-reinstall-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "1.2.2",
+      targetVersion: "1.2.3",
+      transition: "replacement-required",
+    });
+    database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "203.0.113.10",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "需要迁移的主机",
+      displayNameEdited: false,
+      id: 7,
+      lastClockSkewMs: null,
+      lastReportAtMs: 1_725_000_000_000,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-old-identity",
+      probeSecretHash: "secret-hash-old-identity",
+      probeVersion: "1.2.2",
+    });
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      installation: {
+        bootstrapRecipe,
+        probeApiOrigin: "https://hub.example",
+      },
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
+    });
+    const ownerSession = await loginOwner(app);
+
+    const response = await app.request(
+      "/api/web/enrollments/manual-reinstall/7",
+      { headers: { cookie: ownerSession }, method: "POST" },
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+      installCommand: string;
+      target: { hostId: number; kind: string };
+    };
+    expect(body.target).toEqual({ hostId: 7, kind: "manual_reinstall" });
+    expect(body.installCommand).toContain("enoki-probe-bootstrap.py");
+    expect(body.installCommand).toContain(body.enrollmentToken);
+    expect(body.installCommand).not.toContain("&&");
+    expect(body.installCommand).not.toContain(" uninstall");
+    expect(
+      database.sqlite
+        .prepare(
+          `select expected_hub_origin as expectedHubOrigin,
+                  expected_probe_id as expectedProbeId,
+                  expected_probe_version as expectedProbeVersion,
+                  target_asset_set_digest as targetAssetSetDigest,
+                  target_probe_version as targetProbeVersion
+             from enrollment_tokens where enrollment_id = ?`,
+        )
+        .get(body.enrollmentId),
+    ).toEqual({
+      expectedHubOrigin: "https://hub.example",
+      expectedProbeId: "probe-old-identity",
+      expectedProbeVersion: "1.2.2",
+      targetAssetSetDigest: release.targetAssetSetDigest,
+      targetProbeVersion: "1.2.3",
+    });
 
     database.close();
   });

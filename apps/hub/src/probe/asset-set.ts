@@ -17,6 +17,11 @@ export type ProbeUpgradeEligibility = {
   currentProbeAssetSetVersion: string | null;
   currentProbeVersion: string | null;
   isUpgradeable: boolean;
+  manualReinstall?: {
+    sourceProbeVersion: string;
+    targetAssetSetDigest: string;
+    targetProbeVersion: string;
+  };
   nonUpgradeableReason: ProbeUpgradeNonUpgradeableReason | null;
 };
 
@@ -190,11 +195,17 @@ export function evaluateProbeUpgradeEligibility(input: {
       });
     }
     if (input.releaseTransition.classification === "replacement-required") {
-      return notUpgradeable({
+      return {
         currentProbeAssetSetVersion: assetSetVersion,
         currentProbeVersion: probeVersion,
-        reason: "probe_release_transition_replacement_required",
-      });
+        isUpgradeable: false,
+        manualReinstall: {
+          sourceProbeVersion: input.releaseTransition.sourceProbeVersion,
+          targetAssetSetDigest: input.releaseTransition.targetAssetSetDigest,
+          targetProbeVersion: input.releaseTransition.targetProbeVersion,
+        },
+        nonUpgradeableReason: "probe_release_transition_replacement_required",
+      };
     }
     return {
       currentProbeAssetSetVersion: assetSetVersion,

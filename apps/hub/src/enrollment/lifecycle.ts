@@ -15,6 +15,7 @@ export const enrollmentStatusValues = [
 export const enrollmentTargetKindValues = [
   "new_host",
   "existing_host",
+  "manual_reinstall",
 ] as const;
 
 export const maxEnrollmentRejectionCodeLength = 64;
@@ -102,6 +103,13 @@ function enrollmentTarget(
     positiveInteger(enrollment.targetHostId)
   ) {
     return { hostId: enrollment.targetHostId, kind: "existing_host" };
+  }
+
+  if (
+    enrollment.targetKind === "manual_reinstall" &&
+    positiveInteger(enrollment.targetHostId)
+  ) {
+    return { hostId: enrollment.targetHostId, kind: "manual_reinstall" };
   }
 
   return null;

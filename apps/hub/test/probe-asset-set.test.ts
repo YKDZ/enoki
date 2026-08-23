@@ -106,6 +106,11 @@ describe("Probe Asset Set upgrade eligibility", () => {
       currentProbeAssetSetVersion: "1.4.0",
       currentProbeVersion: "1.3.9",
       isUpgradeable: false,
+      manualReinstall: {
+        sourceProbeVersion: "1.3.9",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+        targetProbeVersion: "1.4.0",
+      },
       nonUpgradeableReason: "probe_release_transition_replacement_required",
     });
   });

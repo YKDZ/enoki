@@ -43,6 +43,11 @@ export const enrollmentTokens = sqliteTable(
     usedAtMs: integer(),
     targetKind: text({ enum: enrollmentTargetKindValues }),
     targetHostId: integer("target_host_id"),
+    expectedHubOrigin: text("expected_hub_origin"),
+    expectedProbeId: text("expected_probe_id"),
+    expectedProbeVersion: text("expected_probe_version"),
+    targetAssetSetDigest: text("target_asset_set_digest"),
+    targetProbeVersion: text("target_probe_version"),
     status: text({ enum: enrollmentStatusValues }).notNull().default("expired"),
     hostId: integer("managed_host_id"),
     verificationDeadlineAtMs: integer(),
@@ -58,7 +63,7 @@ export const enrollmentTokens = sqliteTable(
     uniqueIndex("enrollment_tokens_one_active_existing_host_idx")
       .on(table.targetHostId)
       .where(
-        sql`${table.targetKind} = 'existing_host' and ${table.status} in ('pending', 'verifying')`,
+        sql`${table.targetKind} in ('existing_host', 'manual_reinstall') and ${table.status} in ('pending', 'verifying')`,
       ),
     index("enrollment_tokens_status_expiry_idx").on(
       table.status,
@@ -70,7 +75,7 @@ export const enrollmentTokens = sqliteTable(
     ),
     check(
       "enrollment_tokens_target_check",
-      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
+      sql`(${table.targetKind} = 'new_host' and ${table.targetHostId} is null and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null) or (${table.targetKind} = 'existing_host' and ${table.targetHostId} > 0 and ${table.expectedHubOrigin} is null and ${table.expectedProbeId} is null and ${table.expectedProbeVersion} is null and ${table.targetAssetSetDigest} is null and ${table.targetProbeVersion} is null) or (${table.targetKind} = 'manual_reinstall' and ${table.targetHostId} > 0 and length(${table.expectedHubOrigin}) > 0 and length(${table.expectedProbeId}) > 0 and length(${table.expectedProbeVersion}) > 0 and length(${table.targetAssetSetDigest}) = 71 and length(${table.targetProbeVersion}) > 0) or (${table.targetKind} is null and ${table.targetHostId} is null and ${table.status} = 'expired')`,
     ),
     check(
       "enrollment_tokens_rejection_check",

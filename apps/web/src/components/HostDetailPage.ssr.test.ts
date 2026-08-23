@@ -172,6 +172,26 @@ describe("Host detail page", () => {
       ...currentHost,
       probeUpgradeEligibility: {
         currentProbeAssetSetVersion: "0.2.0",
+        currentProbeVersion: "0.1.0",
+        isUpgradeable: false,
+        manualReinstall: {
+          sourceProbeVersion: "0.1.0",
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion: "0.2.0",
+        },
+        nonUpgradeableReason: "probe_release_transition_replacement_required",
+      },
+    };
+    const replacementHtml = await renderDetailPage();
+    expect(replacementHtml).toContain("需要手动重新安装探针");
+    expect(replacementHtml).toContain("生成手动重装命令");
+    expect(replacementHtml).toContain("主机、主机元数据和指标历史会保留");
+    expect(replacementHtml).not.toContain("Host Re-enrollment");
+
+    detail.host.value = {
+      ...currentHost,
+      probeUpgradeEligibility: {
+        currentProbeAssetSetVersion: "0.2.0",
         currentProbeVersion: "0.2.0",
         isUpgradeable: false,
         nonUpgradeableReason: "probe_version_current",

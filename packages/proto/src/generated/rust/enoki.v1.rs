@@ -640,10 +640,20 @@ pub struct ProbeRegistrationRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationInspection {}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationInspectionResponse {
     #[prost(enumeration = "ProbeEnrollmentTargetKind", tag = "1")]
     pub target_kind: i32,
+    #[prost(string, tag = "2")]
+    pub expected_hub_origin: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub expected_probe_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub source_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub target_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub target_asset_set_digest: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationRejection {
@@ -747,6 +757,7 @@ pub enum ProbeEnrollmentTargetKind {
     Unspecified = 0,
     NewHost = 1,
     ExistingHost = 2,
+    ManualReinstall = 3,
 }
 impl ProbeEnrollmentTargetKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -758,6 +769,7 @@ impl ProbeEnrollmentTargetKind {
             Self::Unspecified => "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED",
             Self::NewHost => "NEW_HOST",
             Self::ExistingHost => "EXISTING_HOST",
+            Self::ManualReinstall => "MANUAL_REINSTALL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -766,6 +778,7 @@ impl ProbeEnrollmentTargetKind {
             "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "NEW_HOST" => Some(Self::NewHost),
             "EXISTING_HOST" => Some(Self::ExistingHost),
+            "MANUAL_REINSTALL" => Some(Self::ManualReinstall),
             _ => None,
         }
     }
