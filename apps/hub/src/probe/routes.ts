@@ -1245,6 +1245,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         );
       }
     }
+    if (!repair) {
+      const active = services.probeOperations?.findActiveForHost(host.id);
+      if (
+        active?.kind === "probe_repair" &&
+        active.repairFailedOperationId === failedUpgrade.id
+      ) {
+        return probeJsonError("probe_repair_still_unresolved", 409);
+      }
+    } else if (repair.state === "running") {
+      return probeJsonError("probe_repair_still_unresolved", 409);
+    } else if (repair.state !== "accepted") {
+      return probeJsonError("probe_repair_operation_terminal", 409);
+    }
     if (
       !repair ||
       repair.kind !== "probe_repair" ||

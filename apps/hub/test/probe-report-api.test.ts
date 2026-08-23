@@ -17,6 +17,8 @@ import {
 import {
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
+  startProbeUpgradeRequest,
+  succeedProbeUpgradeRequestFromHostProfile,
 } from "../src/probe/operation";
 import {
   issueProbeOperationToken,
@@ -3402,6 +3404,25 @@ describe("Probe report API", () => {
     const replay = await request();
     expect(replay.status).toBe(200);
     await expect(replay.json()).resolves.toEqual(body);
+    const blockedEvidence = {
+      ...evidence,
+      requestNonce: "request_nonce_blocked",
+    };
+    const blocked = await app.request(requestPath, {
+      body: JSON.stringify({
+        evidence: blockedEvidence,
+        evidenceSignature: signProbeRepairEvidence(
+          canonicalProbeRepairEvidence(blockedEvidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toEqual({
+      error: "probe_repair_still_unresolved",
+    });
     repairNowMs = 1_725_000_080_000;
     const renewedEvidence = {
       ...evidence,
@@ -3444,23 +3465,105 @@ describe("Probe report API", () => {
         state: "failed",
       }),
     );
+    const renewedOperation = database.probeOperations.findById(
+      Number(renewedBody.authority.repairOperationId),
+    )!;
+    database.probeOperations.updateProbeUpgradeRequest({
+      ...renewedOperation,
+      completedAtMs: repairNowMs,
+      failureCode: "lifecycle.repair_unresolved",
+      failureMessage: null,
+      state: "failed",
+      updatedAtMs: repairNowMs,
+    });
+    const freshEvidence = {
+      ...renewedEvidence,
+      requestNonce: "request_nonce_03",
+    };
+    const freshRequestBody = JSON.stringify({
+      evidence: freshEvidence,
+      evidenceSignature: signProbeRepairEvidence(
+        canonicalProbeRepairEvidence(freshEvidence),
+        installKey,
+      ),
+    });
+    const fresh = await app.request(requestPath, {
+      body: freshRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(fresh.status).toBe(200);
+    const freshBody = (await fresh.json()) as {
+      authority: { repairOperationId: string };
+    };
+    expect(freshBody.authority.repairOperationId).not.toBe(
+      renewedBody.authority.repairOperationId,
+    );
+    const terminalReplay = await app.request(requestPath, {
+      body: renewedRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(terminalReplay.status).toBe(409);
+    await expect(terminalReplay.json()).resolves.toEqual({
+      error: "probe_repair_operation_terminal",
+    });
     expect(database.probeOperations.findById(failed.id!)).toEqual(failed);
-    for (let index = 0; index < 4; index += 1) {
+    for (let index = 0; index < 2; index += 1) {
       expect(
         await app.request(requestPath, {
-          body: renewedRequestBody,
+          body: freshRequestBody,
           headers: { "content-type": "application/json" },
           method: "POST",
         }),
       ).toMatchObject({ status: 200 });
     }
     const rateLimited = await app.request(requestPath, {
-      body: renewedRequestBody,
+      body: freshRequestBody,
       headers: { "content-type": "application/json" },
       method: "POST",
     });
     expect(rateLimited.status).toBe(429);
     expect(rateLimited.headers.get("retry-after")).toMatch(/^\d+$/);
+    const freshOperation = database.probeOperations.findById(
+      Number(freshBody.authority.repairOperationId),
+    )!;
+    const running = startProbeUpgradeRequest({
+      nowMs: repairNowMs + 1,
+      operation: freshOperation,
+    }).operation;
+    database.probeOperations.updateProbeUpgradeRequest(running);
+    repairNowMs += 10_000;
+    const runningReplay = await app.request(requestPath, {
+      body: freshRequestBody,
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(runningReplay.status).toBe(409);
+    await expect(runningReplay.json()).resolves.toEqual({
+      error: "probe_repair_still_unresolved",
+    });
+    const succeeded = succeedProbeUpgradeRequestFromHostProfile({
+      authenticatedProbeId: registration.probeId,
+      bootEvidenceBootId: "repair-boot-01",
+      bootEvidenceProbeId: registration.probeId,
+      bootProbeAssetBundleVersion: "1.4.0",
+      hostProfile: {
+        probeAssetBundleVersion: "1.4.0",
+        probeVersion: "1.4.0",
+      },
+      nowMs: repairNowMs + 2,
+      operation: running,
+      profileReportBootId: "repair-boot-01",
+    })!;
+    database.probeOperations.updateProbeUpgradeRequest(succeeded);
+    expect(succeeded.state).toBe("succeeded");
+    expect(
+      startProbeUpgradeRequest({
+        nowMs: repairNowMs + 3,
+        operation: succeeded,
+      }),
+    ).toEqual({ error: null, operation: succeeded });
     database.close();
   });
 

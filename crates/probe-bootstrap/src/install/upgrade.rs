@@ -31,7 +31,6 @@ pub struct ConsumedRepairAuthority {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepairIntentState {
     Consumed,
-    Unresolved,
     CompletionPending,
 }
 
@@ -62,12 +61,11 @@ pub fn resume_probe_repair_intent(
     }
     let (capsule, install_key) = read_verified_repair_capsule(paths)?;
     let state = journal_string(&capsule, "state")?;
-    if state == "completed" {
+    if matches!(state, "completed" | "unresolved") {
         return Ok(None);
     }
     let state = match state {
         "consumed" => RepairIntentState::Consumed,
-        "unresolved" => RepairIntentState::Unresolved,
         "completion-pending" => RepairIntentState::CompletionPending,
         _ => return Err(InstallError::ExistingResidue),
     };

@@ -1291,7 +1291,7 @@ mod tests {
             .replace("phase = \"repair-required\"", "phase = \"activated\"")
             .replace("activated_targets = 3", "activated_targets = 20")
             .replace("finalized_targets = 0", "finalized_targets = 20");
-        fs::write(&journal_path, progressed).unwrap();
+        fs::write(&journal_path, &progressed).unwrap();
         fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(resume_probe_repair_intent(&paths).unwrap(), Some(consumed.clone()));
         mark_probe_repair_unresolved(&paths, &consumed).unwrap();
@@ -1304,9 +1304,66 @@ mod tests {
         assert!(status.contains("operation_id = \"repair-operation-1\""));
         assert!(status.contains("status = \"failed\""));
         assert!(status.contains("error_code = \"lifecycle.repair_unresolved\""));
-        let resumed = resume_probe_repair_intent(&paths).unwrap().unwrap();
-        assert_eq!(resumed.repair_operation_id, consumed.repair_operation_id);
-        assert_eq!(resumed.state, RepairIntentState::Unresolved);
+        assert!(resume_probe_repair_intent(&paths).unwrap().is_none());
+
+        let repair_required = progressed
+            .replace("phase = \"activated\"", "phase = \"repair-required\"")
+            .replace("activated_targets = 20", "activated_targets = 3")
+            .replace("finalized_targets = 20", "finalized_targets = 0");
+        fs::write(&journal_path, repair_required).unwrap();
+        let fresh = issue_probe_repair_evidence(
+            &paths,
+            1_725_000_002_000,
+            1_725_000_062_000,
+            "request-nonce-2",
+        )
+        .unwrap();
+        let fresh_authority = crate::lifecycle::RepairAuthorityV1 {
+            schema_version: 1,
+            hub_origin: fresh.evidence.hub_origin.clone(),
+            host_id: fresh.evidence.host_id.clone(),
+            probe_id: fresh.evidence.probe_id.clone(),
+            failed_operation_id: fresh.evidence.failed_operation_id.clone(),
+            repair_operation_id: "repair-operation-2".to_owned(),
+            repair_nonce: "repair-nonce-2".to_owned(),
+            repair_evidence_sha256: fresh.evidence.sha256(),
+            target_bundle_version: fresh.evidence.target_bundle_version.clone(),
+            target_asset_set_digest: fresh.evidence.target_asset_set_digest.clone(),
+            target_manifest_sha256: fresh.evidence.target_manifest_sha256.clone(),
+            verified_stage_sha256: fresh.evidence.verified_stage_sha256.clone(),
+            expires_at_ms: 1_725_000_062_000,
+        };
+        let mut fresh_signer = Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        fresh_signer.update(b"enoki/lifecycle-repair-authority/hmac-sha256/v1\0");
+        fresh_signer.update(&fresh_authority.canonical_bytes());
+        let fresh_authority_signature: String = fresh_signer
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            consume_probe_repair_authority(
+                &paths,
+                &fresh.evidence,
+                &fresh.signature,
+                &authority,
+                &authority_signature,
+                1_725_000_003_000,
+            ),
+            Err(InstallError::ExistingResidue),
+        );
+        let resumed = consume_probe_repair_authority(
+            &paths,
+            &fresh.evidence,
+            &fresh.signature,
+            &fresh_authority,
+            &fresh_authority_signature,
+            1_725_000_003_000,
+        )
+        .unwrap();
+        assert_eq!(resumed.repair_operation_id, "repair-operation-2");
+        fs::write(&journal_path, &progressed).unwrap();
 
         let status_write = paths
             .state()
