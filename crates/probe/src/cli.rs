@@ -140,3 +140,8 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         ProbeCommand::Version => format!("enoki-probe {}\n", crate::version::probe_version()),
     }
 }
+
+#[must_use]
+pub fn render_probe_repair_failure(code: &str) -> String {
+    format!("Probe repair failed: code={code}.\n")
+}

@@ -1256,6 +1256,24 @@ mod tests {
         .unwrap();
         assert!(repair_journal.contains("state = \"consumed\""));
         assert!(repair_journal.contains("repair_evidence_sha256 = "));
+        assert!(repair_journal.contains("capsule_mac = "));
+        fs::write(
+            paths.bootstrap_state().join("probe-repair-attempt.toml"),
+            repair_journal.replace(
+                "state = \"consumed\"",
+                "state = \"completion-pending\"",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            resume_probe_repair_intent(&paths),
+            Err(InstallError::ExistingResidue),
+        );
+        fs::write(
+            paths.bootstrap_state().join("probe-repair-attempt.toml"),
+            &repair_journal,
+        )
+        .unwrap();
         assert_eq!(
             consume_probe_repair_authority(
                 &paths,
@@ -1306,6 +1324,25 @@ mod tests {
         assert_eq!(pending.state, RepairIntentState::CompletionPending);
         assert!(systemd.calls.is_empty());
         fs::remove_dir_all(&status_write).unwrap();
+
+        let repair_write = paths
+            .bootstrap_state()
+            .join(".probe-repair-attempt.toml.enoki-write");
+        fs::create_dir(&repair_write).unwrap();
+        fs::write(repair_write.join("blocks-replace"), b"fault").unwrap();
+        assert_eq!(
+            execute_authorized_probe_repair(&paths, &pending, &mut systemd, |_, _| {
+                panic!("completion commit must not repeat recovery or stage cleanup")
+            }),
+            Err(InstallError::Io),
+        );
+        persist_probe_repair_execution_failure(&paths, &pending).unwrap();
+        let still_pending = resume_probe_repair_intent(&paths).unwrap().unwrap();
+        assert_eq!(still_pending.state, RepairIntentState::CompletionPending);
+        let status = fs::read_to_string(paths.state().join("probe-operation-status.toml")).unwrap();
+        assert!(status.contains("status = \"running\""));
+        assert!(!status.contains("status = \"failed\""));
+        fs::remove_dir_all(&repair_write).unwrap();
         execute_authorized_probe_repair(&paths, &pending, &mut systemd, |_, _| {
             panic!("completion resume must not repeat recovery or stage cleanup")
         })

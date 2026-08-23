@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use enoki_probe::cli::{ProbeCommand, parse_probe_command, render_probe_output};
+use enoki_probe::cli::{
+    ProbeCommand, parse_probe_command, render_probe_output, render_probe_repair_failure,
+};
 
 #[test]
 fn renders_version_output_for_owner_smoke_checks() {
@@ -28,6 +30,14 @@ fn repair_output_describes_explicit_local_and_hub_authorization() {
     for unsupported_guidance in ["migration guide", "reinstall", "replacement"] {
         assert!(!output.contains(unsupported_guidance));
     }
+}
+
+#[test]
+fn repair_cli_renders_the_typed_manual_reinstall_disposition() {
+    assert_eq!(
+        render_probe_repair_failure("probe_manual_reinstall_required"),
+        "Probe repair failed: code=probe_manual_reinstall_required.\n",
+    );
 }
 
 #[test]

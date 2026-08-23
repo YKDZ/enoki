@@ -23,7 +23,7 @@ use enoki_probe_bootstrap::{
         VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
         consume_probe_repair_authority, consume_signed_before_upgrade_outer_checks,
         execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
-        issue_probe_repair_evidence, mark_probe_repair_unresolved,
+        issue_probe_repair_evidence, persist_probe_repair_execution_failure,
         recover_incomplete_probe_upgrade, resume_probe_repair_intent,
         upgrade_current_probe_for_operation,
     },
@@ -211,6 +211,9 @@ impl ProbeRepairRunError {
                     "probe_repair_installation_missing"
                 }
                 ProbeUpgraderRunError::InvalidConfig(_) => "probe_repair_installation_invalid",
+                ProbeUpgraderRunError::ManualProbeReinstallRequired => {
+                    "probe_manual_reinstall_required"
+                }
                 _ => "probe_repair_failed",
             },
         }
@@ -1293,8 +1296,8 @@ fn run_authorized_probe_repair_for_invoking_admin(
         let output = child
             .wait_with_output()
             .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-        if output.status.code() == Some(3) {
-            return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+        if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
+            return Err(error);
         }
         if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
             return Err(repair_contract_failure(
@@ -1330,7 +1333,7 @@ fn run_authorized_probe_repair_for_invoking_admin(
         },
     );
     if repaired.is_err() {
-        mark_probe_repair_unresolved(&paths, &consumed)
+        persist_probe_repair_execution_failure(&paths, &consumed)
             .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
         return Err(repair_contract_failure("probe_repair_recovery_pending"));
     }
@@ -1338,6 +1341,17 @@ fn run_authorized_probe_repair_for_invoking_admin(
         probe_id: consumed.probe_id,
         repaired_version: consumed.target_bundle_version,
     })
+}
+
+fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError> {
+    (code == Some(3)).then(|| ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
+}
+
+#[cfg(test)]
+pub(crate) fn repair_acquirer_exit_lifecycle_response(
+    code: Option<i32>,
+) -> Option<LifecycleResponse> {
+    repair_acquirer_exit_failure(code).map(|error| probe_repair_lifecycle_response(Err(error)))
 }
 
 fn configure_repair_acquirer_privileges(command: &mut Command, uid: u32, gid: u32) {
@@ -1922,10 +1936,10 @@ pub fn run_lifecycle_companion_from_peer(
         {
             return LifecycleResponse::failed("lifecycle.authority_mismatch");
         }
-        return match run_authorized_probe_repair_for_invoking_admin(*invoking_uid, *invoking_gid) {
-            Ok(_) => LifecycleResponse::succeeded(),
-            Err(_) => LifecycleResponse::failed("lifecycle.repair_unresolved"),
-        };
+        return probe_repair_lifecycle_response(run_authorized_probe_repair_for_invoking_admin(
+            *invoking_uid,
+            *invoking_gid,
+        ));
     }
     if request.transition() == LifecycleTransition::ReplacementMigration {
         return run_probe_replacement_migration(request, &metadata, &identity);
@@ -1980,6 +1994,18 @@ pub fn run_lifecycle_companion_from_peer(
         transport,
         &mut systemd,
     ))
+}
+
+fn probe_repair_lifecycle_response(
+    result: Result<ProbeRepairResult, ProbeRepairRunError>,
+) -> LifecycleResponse {
+    match result {
+        Ok(_) => LifecycleResponse::succeeded(),
+        Err(error) if error.code() == "probe_manual_reinstall_required" => {
+            LifecycleResponse::failed("probe_manual_reinstall_required")
+        }
+        Err(_) => LifecycleResponse::failed("lifecycle.repair_unresolved"),
+    }
 }
 
 fn run_probe_compatible_upgrade(
@@ -6818,21 +6844,23 @@ mod tests {
         if unsafe { libc::geteuid() } != 0 {
             return;
         }
-        let uid = unsafe { libc::getuid() };
-        let gid = unsafe { libc::getgid() };
+        let uid = 65_534;
+        let gid = 65_534;
         let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("/usr/bin/id -G; /usr/bin/awk '/^NoNewPrivs:/ { print $2 }' /proc/self/status");
+        command.arg("-c").arg(concat!(
+            "/usr/bin/id -u; /usr/bin/id -g; ",
+            "/usr/bin/awk '/^Groups:/ { print NF - 1 } ",
+            "/^NoNewPrivs:/ { print $2 }' /proc/self/status",
+        ));
         configure_repair_acquirer_privileges(&mut command, uid, gid);
 
         let output = command.output().expect("spawn constrained child");
         assert!(output.status.success());
         let stdout = String::from_utf8(output.stdout).unwrap();
         let mut lines = stdout.lines();
-        let groups = lines.next().unwrap().split_whitespace().collect::<Vec<_>>();
-        assert!(!groups.is_empty());
-        assert!(groups.iter().all(|group| *group == gid.to_string()));
+        assert_eq!(lines.next(), Some("65534"));
+        assert_eq!(lines.next(), Some("65534"));
+        assert_eq!(lines.next(), Some("0"));
         assert_eq!(lines.next(), Some("1"));
     }
 

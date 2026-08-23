@@ -1100,8 +1100,15 @@ pub fn request_local_probe_repair() -> Result<(), &'static str> {
     let response =
         request_lifecycle_companion_at(std::path::Path::new(LIFECYCLE_COMPANION_SOCKET), &request)
             .map_err(|_| "lifecycle.companion_unavailable")?;
+    local_probe_repair_response(&response)
+}
+
+fn local_probe_repair_response(response: &LifecycleResponse) -> Result<(), &'static str> {
     match response.status() {
         LifecycleResultStatus::Succeeded => Ok(()),
+        LifecycleResultStatus::Failed if response.code() == "probe_manual_reinstall_required" => {
+            Err("probe_manual_reinstall_required")
+        }
         LifecycleResultStatus::Failed | LifecycleResultStatus::NotEnabled => {
             Err("lifecycle.repair_unresolved")
         }
@@ -1384,6 +1391,20 @@ mod operation_report_tests {
 
         assert_eq!(response.status(), LifecycleResultStatus::Succeeded);
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn manual_reinstall_survives_acquirer_companion_runtime_and_cli_boundaries() {
+        let response = crate::upgrader::repair_acquirer_exit_lifecycle_response(Some(3))
+            .expect("Acquirer exit 3 is the one typed manual disposition");
+        assert_eq!(response.code(), "probe_manual_reinstall_required");
+        let code = local_probe_repair_response(&response).unwrap_err();
+        assert_eq!(code, "probe_manual_reinstall_required");
+        assert_eq!(
+            crate::cli::render_probe_repair_failure(code),
+            "Probe repair failed: code=probe_manual_reinstall_required.\n",
+        );
+        assert!(crate::upgrader::repair_acquirer_exit_lifecycle_response(Some(1)).is_none());
     }
 
     #[test]

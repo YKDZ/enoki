@@ -1,5 +1,5 @@
 use enoki_probe::{
-    cli::{ProbeCommand, parse_probe_command, render_probe_output},
+    cli::{ProbeCommand, parse_probe_command, render_probe_output, render_probe_repair_failure},
     registration::{HttpRegistrationTransport, ProbeRegistrationInput, register_probe},
     runtime::{
         ProbeRunInput, probe_run_exit_status, run_loop_control_from_environment,
@@ -27,7 +27,7 @@ fn main() {
         ProbeCommand::Repair => match enoki_probe::runtime::request_local_probe_repair() {
             Ok(()) => println!("Probe repair completed."),
             Err(code) => {
-                eprintln!("Probe repair failed: code={code}.");
+                eprint!("{}", render_probe_repair_failure(code));
                 std::process::exit(1);
             }
         },

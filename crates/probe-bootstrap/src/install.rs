@@ -1574,8 +1574,8 @@ pub use upgrade::{
     consume_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
     inspect_installed_probe_for_upgrade, issue_probe_repair_evidence, mark_probe_repair_unresolved,
-    recover_incomplete_probe_upgrade, resume_probe_repair_intent, upgrade_current_probe,
-    upgrade_current_probe_for_operation,
+    persist_probe_repair_execution_failure, recover_incomplete_probe_upgrade,
+    resume_probe_repair_intent, upgrade_current_probe, upgrade_current_probe_for_operation,
 };
 
 include!("install/tests.rs");

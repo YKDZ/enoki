@@ -3,6 +3,7 @@ use crate::lifecycle::{
     RepairAuthorityV1, RepairEvidenceV1, UpgradeCompletion, UpgradeLifecycleEffects,
     execute_upgrade_lifecycle, verify_lifecycle_upgrade_authority_signature,
 };
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -10,6 +11,7 @@ use std::os::fd::AsRawFd;
 const UPGRADE_ATTEMPT_FILE: &str = "probe-upgrade-attempt.toml";
 const OPERATION_STATUS_FILE: &str = "probe-operation-status.toml";
 const REPAIR_ATTEMPT_FILE: &str = "probe-repair-attempt.toml";
+const REPAIR_CAPSULE_SIGNING_DOMAIN: &[u8] = b"enoki/lifecycle-repair-capsule/hmac-sha256/v1\0";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignedRepairEvidence {
@@ -35,6 +37,22 @@ pub enum RepairIntentState {
 
 const MAX_REPAIR_CANONICAL_BYTES: usize = 8 * 1024;
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairCapsuleMacV1<'a> {
+    schema_version: u16,
+    repair_operation_id: &'a str,
+    failed_operation_id: &'a str,
+    repair_nonce: &'a str,
+    repair_evidence_sha256: &'a str,
+    repair_authority_sha256: &'a str,
+    evidence_canonical_hex: &'a str,
+    evidence_signature: &'a str,
+    authority_canonical_hex: &'a str,
+    authority_signature: &'a str,
+    state: &'a str,
+}
+
 pub fn resume_probe_repair_intent(
     paths: &FixedInstallPaths,
 ) -> Result<Option<ConsumedRepairAuthority>, InstallError> {
@@ -42,10 +60,7 @@ pub fn resume_probe_repair_intent(
     if !repair_journal.exists() {
         return Ok(None);
     }
-    let capsule = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
-    if metadata_scalar(&capsule, "schema_version").as_deref() != Some("2") {
-        return Err(InstallError::ExistingResidue);
-    }
+    let (capsule, install_key) = read_verified_repair_capsule(paths)?;
     let state = journal_string(&capsule, "state")?;
     if state == "completed" {
         return Ok(None);
@@ -88,11 +103,6 @@ pub fn resume_probe_repair_intent(
     {
         return Err(InstallError::ExistingResidue);
     }
-    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
-    let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
-        .as_deref()
-        .and_then(decode_lower_sha256)
-        .ok_or(InstallError::ExistingResidue)?;
     if !evidence.verify(
         &install_key,
         journal_string(&capsule, "evidence_signature")?,
@@ -155,7 +165,7 @@ pub fn consume_probe_repair_authority(
     }
     let repair_journal = paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE);
     if repair_journal.exists() {
-        let prior = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
+        let (prior, _) = read_verified_repair_capsule(paths)?;
         let same = journal_string(&prior, "repair_operation_id")? == authority.repair_operation_id
             && journal_string(&prior, "repair_nonce")? == authority.repair_nonce
             && journal_string(&prior, "repair_evidence_sha256")?
@@ -176,21 +186,21 @@ pub fn consume_probe_repair_authority(
         }
     }
     let authority_sha256 = format!("{:x}", Sha256::digest(authority.canonical_bytes()));
+    let capsule = format!(
+        "schema_version = 2\nrepair_operation_id = {:?}\nfailed_operation_id = {:?}\nrepair_nonce = {:?}\nrepair_evidence_sha256 = {:?}\nrepair_authority_sha256 = {:?}\nevidence_canonical_hex = {:?}\nevidence_signature = {:?}\nauthority_canonical_hex = {:?}\nauthority_signature = {:?}\nstate = \"consumed\"\n",
+        authority.repair_operation_id,
+        authority.failed_operation_id,
+        authority.repair_nonce,
+        authority.repair_evidence_sha256,
+        authority_sha256,
+        encode_lower_hex(&evidence.canonical_bytes()),
+        evidence_signature,
+        encode_lower_hex(&authority.canonical_bytes()),
+        authority_signature,
+    );
     atomic_durable_write(
         &repair_journal,
-        format!(
-            "schema_version = 2\nrepair_operation_id = {:?}\nfailed_operation_id = {:?}\nrepair_nonce = {:?}\nrepair_evidence_sha256 = {:?}\nrepair_authority_sha256 = {:?}\nevidence_canonical_hex = {:?}\nevidence_signature = {:?}\nauthority_canonical_hex = {:?}\nauthority_signature = {:?}\nstate = \"consumed\"\n",
-            authority.repair_operation_id,
-            authority.failed_operation_id,
-            authority.repair_nonce,
-            authority.repair_evidence_sha256,
-            authority_sha256,
-            encode_lower_hex(&evidence.canonical_bytes()),
-            evidence_signature,
-            encode_lower_hex(&authority.canonical_bytes()),
-            authority_signature,
-        )
-        .as_bytes(),
+        &signed_repair_capsule(&capsule, &install_key)?,
         0o600,
     )?;
     let consumed = ConsumedRepairAuthority {
@@ -201,14 +211,7 @@ pub fn consume_probe_repair_authority(
         state: RepairIntentState::Consumed,
     };
     if write_repair_running_status(paths, &consumed).is_err() {
-        let current = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
-        atomic_durable_write(
-            &repair_journal,
-            current
-                .replace("state = \"consumed\"", "state = \"unresolved\"")
-                .as_bytes(),
-            0o600,
-        )?;
+        transition_repair_state(paths, &consumed, &["consumed"], "unresolved")?;
         return Err(InstallError::Io);
     }
     Ok(consumed)
@@ -243,6 +246,94 @@ fn decode_bounded_hex(value: &str, max_bytes: usize) -> Result<Vec<u8>, InstallE
         .collect()
 }
 
+fn read_verified_repair_capsule(
+    paths: &FixedInstallPaths,
+) -> Result<(String, [u8; 32]), InstallError> {
+    let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
+    let install_key = metadata_string(&metadata, "lifecycle_authority_install_key")
+        .as_deref()
+        .and_then(decode_lower_sha256)
+        .ok_or(InstallError::ExistingResidue)?;
+    let capsule = trusted_text(
+        &paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE),
+        paths.expected_root_uid(),
+        0o600,
+    )?;
+    let expected = decode_lower_sha256(journal_string(&capsule, "capsule_mac")?)
+        .ok_or(InstallError::ExistingResidue)?;
+    let mut verifier = Hmac::<Sha256>::new_from_slice(&install_key)
+        .expect("HMAC accepts the fixed lifecycle install key");
+    verifier.update(REPAIR_CAPSULE_SIGNING_DOMAIN);
+    verifier.update(&repair_capsule_mac_canonical(&capsule)?);
+    verifier
+        .verify_slice(&expected)
+        .map_err(|_| InstallError::ExistingResidue)?;
+    Ok((capsule, install_key))
+}
+
+fn repair_capsule_mac_canonical(capsule: &str) -> Result<Vec<u8>, InstallError> {
+    const REQUIRED_KEYS: [&str; 11] = [
+        "schema_version",
+        "repair_operation_id",
+        "failed_operation_id",
+        "repair_nonce",
+        "repair_evidence_sha256",
+        "repair_authority_sha256",
+        "evidence_canonical_hex",
+        "evidence_signature",
+        "authority_canonical_hex",
+        "authority_signature",
+        "state",
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for line in capsule.lines() {
+        let (key, _) = line
+            .split_once(" = ")
+            .ok_or(InstallError::ExistingResidue)?;
+        if (!REQUIRED_KEYS.contains(&key) && key != "capsule_mac") || !seen.insert(key) {
+            return Err(InstallError::ExistingResidue);
+        }
+    }
+    if !REQUIRED_KEYS.iter().all(|key| seen.contains(key)) || !matches!(seen.len(), 11 | 12) {
+        return Err(InstallError::ExistingResidue);
+    }
+    if metadata_scalar(capsule, "schema_version").as_deref() != Some("2") {
+        return Err(InstallError::ExistingResidue);
+    }
+    serde_json::to_vec(&RepairCapsuleMacV1 {
+        schema_version: 2,
+        repair_operation_id: journal_string(capsule, "repair_operation_id")?,
+        failed_operation_id: journal_string(capsule, "failed_operation_id")?,
+        repair_nonce: journal_string(capsule, "repair_nonce")?,
+        repair_evidence_sha256: journal_string(capsule, "repair_evidence_sha256")?,
+        repair_authority_sha256: journal_string(capsule, "repair_authority_sha256")?,
+        evidence_canonical_hex: journal_string(capsule, "evidence_canonical_hex")?,
+        evidence_signature: journal_string(capsule, "evidence_signature")?,
+        authority_canonical_hex: journal_string(capsule, "authority_canonical_hex")?,
+        authority_signature: journal_string(capsule, "authority_signature")?,
+        state: journal_string(capsule, "state")?,
+    })
+    .map_err(|_| InstallError::ExistingResidue)
+}
+
+fn signed_repair_capsule(
+    capsule_without_mac: &str,
+    key: &[u8; 32],
+) -> Result<Vec<u8>, InstallError> {
+    if capsule_without_mac
+        .lines()
+        .any(|line| line.starts_with("capsule_mac = "))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let mut signer =
+        Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts the fixed lifecycle install key");
+    signer.update(REPAIR_CAPSULE_SIGNING_DOMAIN);
+    signer.update(&repair_capsule_mac_canonical(capsule_without_mac)?);
+    let mac = encode_lower_hex(&signer.finalize().into_bytes());
+    Ok(format!("{capsule_without_mac}capsule_mac = {mac:?}\n").into_bytes())
+}
+
 fn write_repair_running_status(
     paths: &FixedInstallPaths,
     consumed: &ConsumedRepairAuthority,
@@ -264,20 +355,13 @@ pub fn mark_probe_repair_unresolved(
     paths: &FixedInstallPaths,
     consumed: &ConsumedRepairAuthority,
 ) -> Result<(), InstallError> {
-    let repair_journal = paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE);
-    let current = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
+    let (current, _) = read_verified_repair_capsule(paths)?;
     if journal_string(&current, "repair_operation_id")? != consumed.repair_operation_id {
         return Err(InstallError::ExistingResidue);
     }
     let state = journal_string(&current, "state")?;
     if state == "consumed" {
-        atomic_durable_write(
-            &repair_journal,
-            current
-                .replace("state = \"consumed\"", "state = \"unresolved\"")
-                .as_bytes(),
-            0o600,
-        )?;
+        transition_repair_state(paths, consumed, &["consumed"], "unresolved")?;
     } else if !matches!(state, "unresolved" | "completion-pending") {
         return Err(InstallError::ExistingResidue);
     }
@@ -292,6 +376,20 @@ pub fn mark_probe_repair_unresolved(
         "failed",
         Some("lifecycle.repair_unresolved"),
     )
+}
+
+pub fn persist_probe_repair_execution_failure(
+    paths: &FixedInstallPaths,
+    consumed: &ConsumedRepairAuthority,
+) -> Result<(), InstallError> {
+    let persisted = resume_probe_repair_intent(paths)?.ok_or(InstallError::ExistingResidue)?;
+    if persisted.repair_operation_id != consumed.repair_operation_id {
+        return Err(InstallError::ExistingResidue);
+    }
+    if persisted.state == RepairIntentState::CompletionPending {
+        return Ok(());
+    }
+    mark_probe_repair_unresolved(paths, &persisted)
 }
 
 pub fn execute_authorized_probe_repair(
@@ -342,7 +440,7 @@ fn transition_repair_state(
     next: &str,
 ) -> Result<(), InstallError> {
     let repair_journal = paths.bootstrap_state().join(REPAIR_ATTEMPT_FILE);
-    let current = trusted_text(&repair_journal, paths.expected_root_uid(), 0o600)?;
+    let (current, install_key) = read_verified_repair_capsule(paths)?;
     if journal_string(&current, "repair_operation_id")? != consumed.repair_operation_id {
         return Err(InstallError::ExistingResidue);
     }
@@ -350,11 +448,25 @@ fn transition_repair_state(
     if !expected.contains(&state) {
         return Err(InstallError::ExistingResidue);
     }
+    let mut replacement_count = 0;
+    let mut unsigned = String::new();
+    for line in current.lines() {
+        if line.starts_with("capsule_mac = ") {
+            replacement_count += 1;
+        } else if line == format!("state = {state:?}") {
+            replacement_count += 1;
+            unsigned.push_str(&format!("state = {next:?}\n"));
+        } else {
+            unsigned.push_str(line);
+            unsigned.push('\n');
+        }
+    }
+    if replacement_count != 2 {
+        return Err(InstallError::ExistingResidue);
+    }
     atomic_durable_write(
         &repair_journal,
-        current
-            .replace(&format!("state = {state:?}"), &format!("state = {next:?}"))
-            .as_bytes(),
+        &signed_repair_capsule(&unsigned, &install_key)?,
         0o600,
     )
 }
