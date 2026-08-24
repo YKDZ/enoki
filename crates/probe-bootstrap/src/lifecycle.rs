@@ -806,17 +806,29 @@ pub enum LifecycleCompletion {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(all(feature = "acquirer", feature = "activator")),
+    allow(dead_code)
+)]
 pub(crate) enum UpgradeCompletion {
     Activated,
     RepairRequired,
 }
 
+#[cfg_attr(
+    not(all(feature = "acquirer", feature = "activator")),
+    allow(dead_code)
+)]
 pub(crate) enum UpgradeActivationFailure<E> {
     Preactivation(E),
     Postactivation(E),
     RecoveryPersistence(E),
 }
 
+#[cfg_attr(
+    not(all(feature = "acquirer", feature = "activator")),
+    allow(dead_code)
+)]
 pub(crate) trait UpgradeLifecycleEffects {
     type Error;
 
@@ -828,6 +840,10 @@ pub(crate) trait UpgradeLifecycleEffects {
     fn activate_complete_bundle(&mut self) -> Result<(), UpgradeActivationFailure<Self::Error>>;
 }
 
+#[cfg_attr(
+    not(all(feature = "acquirer", feature = "activator")),
+    allow(dead_code)
+)]
 pub(crate) fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
     effects: &mut E,
 ) -> Result<UpgradeCompletion, E::Error> {

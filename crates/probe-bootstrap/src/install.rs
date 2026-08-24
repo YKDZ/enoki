@@ -6,10 +6,12 @@
 
 mod account;
 mod command;
+#[cfg(feature = "acquirer")]
 mod compatible_upgrade;
 mod filesystem;
 mod systemd;
 mod transaction;
+#[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
 mod upgrade;
 
 use crate::{
@@ -1565,11 +1567,20 @@ fn single_systemd_value(bytes: &[u8]) -> Result<&str, InstallError> {
 pub use account::SystemAccounts;
 #[cfg(test)]
 use account::create_static_service_identity_with_commands;
+#[cfg(feature = "acquirer")]
 pub use compatible_upgrade::run_compatible_upgrade;
 use filesystem::*;
 pub use systemd::SystemSystemd;
+#[cfg(feature = "acquirer")]
 pub(crate) use upgrade::{
     ConsumeBeforeOuterError, InstalledUpgradeBinding, UpgradeAttempt, UpgradeAuthorityConsumption,
+    VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
+    consume_signed_before_upgrade_outer_checks, inspect_installed_probe_for_upgrade,
+    upgrade_current_probe_for_operation,
+};
+#[cfg(all(test, not(feature = "acquirer")))]
+use upgrade::{
+    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
     VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
     consume_signed_before_upgrade_outer_checks, inspect_installed_probe_for_upgrade,
     upgrade_current_probe_for_operation,
