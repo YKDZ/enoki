@@ -43,6 +43,7 @@ import {
   createProbeAssetRoutes,
   type ProbeAssetRouteOptions,
 } from "./probe/assets.js";
+import type { ForwardTransitions } from "./probe/forward-transitions.js";
 import { createProbeRoutes } from "./probe/routes.js";
 import { createWebAssetHandler } from "./web-assets.js";
 
@@ -56,6 +57,7 @@ export type HubAppOptions = {
   auth?: AuthConfig;
   clockSkewThresholdMs?: number;
   database?: HubDatabase;
+  forwardTransitions?: ForwardTransitions;
   installation?: InstallationCommandConfig;
   listener?: HubListener;
   logger?: HubLogger;
@@ -85,6 +87,7 @@ export type ProbeApiAppOptions = Pick<
   | "app"
   | "clockSkewThresholdMs"
   | "database"
+  | "forwardTransitions"
   | "hostStatus"
   | "liveUpdates"
   | "logger"
@@ -349,6 +352,7 @@ function mountProbeApiSurface(app: Hono, options: ProbeApiAppOptions) {
     createProbeRoutes({
       audit: options.database.audit,
       enrollments: options.database.enrollments,
+      forwardTransitions: options.forwardTransitions,
       hosts: options.database.hosts,
       metrics: options.database.metrics,
       probeConfigurations: options.database.probeConfigurations,

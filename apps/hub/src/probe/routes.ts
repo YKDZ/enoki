@@ -46,6 +46,7 @@ import { defaultProbeConfiguration } from "./configuration.js";
 import {
   createForwardTransitions,
   type AuthenticatedForwardEvidence,
+  type ForwardTransitions,
 } from "./forward-transitions.js";
 import {
   canonicalLifecycleUpgradeAuthority,
@@ -63,6 +64,7 @@ import {
   createProbeRepairRequest,
   failReportedProbeUpgradeRequest,
   hasUnavailableProbeUpgradeTarget,
+  isClosedProbeOperation,
   succeedReportedProbeOperation,
   startProbeUpgradeRequest,
   type ProbeUpgradeRequest,
@@ -114,6 +116,7 @@ export type ProbeRouteServices = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+  forwardTransitions?: ForwardTransitions;
   probeOperationTimeouts?: ProbeOperationConfig;
   reportTransaction: ProbeReportTransaction;
   snapshotCollectors?: SnapshotCollectorStorageRegistry;
@@ -132,6 +135,12 @@ export type ProbeRouteServices = {
 export function createProbeRoutes(services: ProbeRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
+  const forwardTransitions =
+    services.forwardTransitions ??
+    createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations!,
+    });
   const repairAuthorizationBudget =
     services.repairAuthorizationBudget ??
     createMemoryRepairAuthorizationBudget({ monotonicNow: now });
@@ -1366,12 +1375,30 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError(tokenResult.error, 403);
     }
 
+    if (operation.kind !== "probe_uninstall" && body.status === "failed") {
+      const reconciled = forwardTransitions.reconcileAuthenticatedEvidence({
+        evidence: [
+          {
+            code: body.errorCode ?? "probe_operation_failed",
+            hostId: host.id,
+            kind: "operation_failed",
+            message: body.message ?? "",
+            observedAtMs: now(),
+            operationId,
+          },
+        ],
+      });
+      if (reconciled.kind === "refused") {
+        return probeJsonError("malformed_probe_operation_status", 400);
+      }
+      return context.json({ accepted: true }, 200, {
+        "cache-control": "no-store",
+      });
+    }
+
     const statusResult =
       body.status === "succeeded"
-        ? succeedReportedProbeOperation({
-            nowMs: now(),
-            operation,
-          })
+        ? succeedReportedProbeOperation({ nowMs: now(), operation })
         : failReportedProbeUpgradeRequest({
             code: body.errorCode ?? "probe_operation_failed",
             message: body.message ?? "",
@@ -1972,9 +1999,9 @@ function planProbeOperationReportApplication(input: {
   }
 
   if (forwardEvidence.length > 0) {
-    const reconciled = createForwardTransitions({
-      probeOperations: input.services.probeOperations!,
-    }).reconcileAuthenticatedEvidence({ evidence: forwardEvidence });
+    const reconciled = forwardTransitionsFor(
+      input.services,
+    ).reconcileAuthenticatedEvidence({ evidence: forwardEvidence });
     if (reconciled.kind === "refused") {
       return {
         error: "malformed_probe_operation_status",
@@ -2033,12 +2060,6 @@ function stageProbeOperationUpdate(
 
   stagedOperations.set(operation.id, operation);
   operationsToUpdate.set(operation.id, operation);
-}
-
-function isClosedProbeOperation(operation: ProbeUpgradeRequest) {
-  return ["canceled", "failed", "succeeded", "superseded"].includes(
-    operation.state,
-  );
 }
 
 function findReportableProbeOperation(
@@ -2224,9 +2245,7 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
   }
 
   if (active.id === null) return;
-  createForwardTransitions({
-    probeOperations: input.services.probeOperations!,
-  }).reconcileAuthenticatedEvidence({
+  forwardTransitionsFor(input.services).reconcileAuthenticatedEvidence({
     evidence: [
       {
         authenticatedProbeId: input.authenticatedProbeId,
@@ -2242,6 +2261,16 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
       },
     ],
   });
+}
+
+function forwardTransitionsFor(services: ProbeRouteServices) {
+  return (
+    services.forwardTransitions ??
+    createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations!,
+    })
+  );
 }
 
 function parseProbeOperationId(operationId: string | null | undefined) {

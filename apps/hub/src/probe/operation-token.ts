@@ -1,6 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import type { ProbeOperationState, ProbeUpgradeRequest } from "./operation.js";
+import {
+  isClosedProbeOperation,
+  type ProbeUpgradeRequest,
+} from "./operation.js";
 
 export type ProbeOperationTokenValidationError =
   | "probe_operation_token_invalid"
@@ -20,13 +23,6 @@ type ProbeOperationTokenPayload = {
   targetAssetSetDigest?: string;
   targetProbeVersion?: string;
 };
-
-const closedStates: ProbeOperationState[] = [
-  "canceled",
-  "failed",
-  "superseded",
-  "succeeded",
-];
 
 export const defaultProbeOperationTokenTtlMs = 5 * 60 * 1000;
 
@@ -127,12 +123,7 @@ export function validateProbeOperationToken(input: {
     return { error: "probe_operation_token_expired" };
   }
 
-  if (
-    closedStates.includes(input.operation.state) &&
-    !(
-      succeededUninstallReplay
-    )
-  ) {
+  if (isClosedProbeOperation(input.operation) && !succeededUninstallReplay) {
     return { error: "probe_operation_token_operation_closed" };
   }
 

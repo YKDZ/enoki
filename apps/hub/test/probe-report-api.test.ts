@@ -10,11 +10,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import {
+  createForwardTransitions,
+  type AuthenticatedForwardEvidence,
+  type ForwardTransitions,
+} from "../src/probe/forward-transitions";
+import {
   canonicalLifecycleUpgradeAuthority,
   deriveLifecycleAuthorityKey,
   type LifecycleUpgradeAuthority,
 } from "../src/probe/lifecycle-authority";
 import {
+  acknowledgeProbeUpgradeRequest,
+  createProbeRepairRequest,
   createProbeUninstallRequest,
   createProbeUpgradeRequest,
   startProbeUpgradeRequest,
@@ -3163,6 +3170,183 @@ describe("Probe report API", () => {
     await expect(canceled.json()).resolves.toEqual({
       error: "probe_operation_token_operation_closed",
     });
+  });
+
+  it("routes authenticated Upgrade and Repair failures through ForwardTransitions while Uninstall remains independent", async () => {
+    const database = await createTemporaryDatabase();
+    const reconciledEvidence: AuthenticatedForwardEvidence[][] = [];
+    const module = createForwardTransitions({
+      probeOperations: database.probeOperations,
+    });
+    const forwardTransitions: ForwardTransitions = {
+      ...module,
+      reconcileAuthenticatedEvidence(input) {
+        reconciledEvidence.push(input.evidence);
+        return module.reconcileAuthenticatedEvidence(input);
+      },
+    };
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      forwardTransitions,
+      now: () => 1_725_000_010_000,
+      probeOperationTokenSecret: "configured-token-signing-secret",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) throw new Error("registered Probe Host is missing");
+
+    const createdUpgrade = database.probeOperations.createProbeUpgradeRequest(
+      createProbeUpgradeRequest({
+        activeOperation: null,
+        currentProbeVersion: "0.1.0",
+        hostId: host.id,
+        nowMs: 1_725_000_008_000,
+        target: {
+          assetSetDigest: `sha256:${"a".repeat(64)}`,
+          version: "0.2.0",
+        },
+      }).operation,
+    );
+    const acceptedUpgrade = acknowledgeProbeUpgradeRequest({
+      nowMs: 1_725_000_009_000,
+      operation: createdUpgrade,
+    }).acknowledged;
+    database.probeOperations.updateProbeUpgradeRequest(acceptedUpgrade);
+    database.sqlite.exec(`
+      CREATE TEMP TABLE operation_update_log (operation_id integer not null);
+      CREATE TEMP TRIGGER record_operation_update
+      AFTER UPDATE ON probe_operations
+      BEGIN
+        INSERT INTO operation_update_log (operation_id) VALUES (NEW.id);
+      END;
+    `);
+
+    const upgradeToken = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation: acceptedUpgrade,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const upgradePath = `/api/probe/operations/${acceptedUpgrade.id}/status`;
+    const upgradeBody = JSON.stringify({
+      errorCode: "upgrade_failed",
+      message: "upgrade stopped",
+      status: "failed",
+      targetAssetSetDigest: acceptedUpgrade.targetAssetSetDigest,
+      targetProbeVersion: acceptedUpgrade.targetProbeVersion,
+      token: upgradeToken,
+    });
+    const upgradeResponse = await app.request(
+      upgradePath,
+      signedJsonProbeRequest(registration, upgradePath, upgradeBody),
+    );
+    expect(upgradeResponse.status).toBe(200);
+    const failedUpgrade = database.probeOperations.findById(
+      acceptedUpgrade.id!,
+    );
+    expect(failedUpgrade).toMatchObject({
+      failureCode: "upgrade_failed",
+      state: "failed",
+    });
+    if (!failedUpgrade) throw new Error("failed Upgrade is missing");
+
+    const repair = database.probeOperations.createProbeUpgradeRequest(
+      createProbeRepairRequest({
+        authorityExpiresAtMs: 1_725_000_020_000,
+        evidenceSha256: "b".repeat(64),
+        failedOperation: failedUpgrade,
+        nonce: "repair-nonce",
+        nowMs: 1_725_000_009_500,
+        targetManifestSha256: "c".repeat(64),
+        verifiedStageSha256: "d".repeat(64),
+      })!,
+    );
+    const repairToken = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation: repair,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const repairPath = `/api/probe/operations/${repair.id}/status`;
+    const repairBody = JSON.stringify({
+      errorCode: "repair_failed",
+      message: "repair stopped",
+      status: "failed",
+      token: repairToken,
+    });
+    const repairResponse = await app.request(
+      repairPath,
+      signedJsonProbeRequest(registration, repairPath, repairBody),
+    );
+    expect(repairResponse.status).toBe(200);
+    expect(database.probeOperations.findById(repair.id!)).toMatchObject({
+      failureCode: "repair_failed",
+      state: "failed",
+    });
+    expect(reconciledEvidence).toEqual([
+      [
+        expect.objectContaining({
+          kind: "operation_failed",
+          operationId: acceptedUpgrade.id,
+        }),
+      ],
+      [
+        expect.objectContaining({
+          kind: "operation_failed",
+          operationId: repair.id,
+        }),
+      ],
+    ]);
+    expect(
+      database.sqlite
+        .prepare("select operation_id from operation_update_log order by rowid")
+        .all(),
+    ).toEqual([
+      { operation_id: acceptedUpgrade.id },
+      { operation_id: repair.id },
+    ]);
+
+    const uninstall = database.probeOperations.createProbeUpgradeRequest({
+      ...createProbeUninstallRequest({
+        activeOperation: null,
+        hostId: host.id,
+        nowMs: 1_725_000_009_700,
+      }).operation,
+      acceptedAtMs: 1_725_000_009_800,
+      state: "accepted",
+    });
+    const uninstallToken = issueProbeOperationToken({
+      expiresAtMs: 1_725_000_020_000,
+      operation: uninstall,
+      probeId: registration.probeId,
+      secret: "configured-token-signing-secret",
+    });
+    const uninstallPath = `/api/probe/operations/${uninstall.id}/status`;
+    const uninstallBody = JSON.stringify({
+      errorCode: "uninstall_failed",
+      message: "uninstall stopped",
+      status: "failed",
+      token: uninstallToken,
+    });
+    const uninstallResponse = await app.request(
+      uninstallPath,
+      signedJsonProbeRequest(registration, uninstallPath, uninstallBody),
+    );
+    expect(uninstallResponse.status).toBe(200);
+    expect(database.probeOperations.findById(uninstall.id!)).toMatchObject({
+      failureCode: "uninstall_failed",
+      state: "failed",
+    });
+    expect(reconciledEvidence).toHaveLength(2);
+
+    database.close();
   });
 
   it("admits one verified upgrade stage and signs an offline root authority", async () => {

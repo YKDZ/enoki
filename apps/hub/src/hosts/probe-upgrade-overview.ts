@@ -3,6 +3,7 @@ import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 
 import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
+import type { HostProfileForwardEvidence } from "../database/host-profiles.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import type { HostRow } from "../database/schema.js";
 import {
@@ -70,12 +71,7 @@ export function acceptedForwardHostProfileEvidence(input: {
     | "probeAssetBundleVersion"
   >;
   observation: {
-    forwardEvidence: {
-      operationId: number;
-      profileProbeAssetBundleVersion: string | null;
-      reportBootId: string;
-      reportProbeId: string;
-    } | null;
+    forwardEvidence: HostProfileForwardEvidence | null;
     observedAtMs: number;
     view: HostProfileSnapshot;
   } | null;

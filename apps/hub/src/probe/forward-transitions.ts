@@ -13,6 +13,7 @@ import {
   acknowledgeProbeUpgradeRequest,
   createProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
+  isClosedProbeOperation,
   startProbeUpgradeRequest,
   succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
@@ -233,7 +234,7 @@ function reconcileOneEvidence(
   | { kind: "reconciled"; operation: ProbeUpgradeRequest }
   | { kind: "refused"; reason: "probe_operation_status_invalid" } {
   if (evidence.kind === "operation_accepted") {
-    if (isClosed(operation)) {
+    if (isClosedProbeOperation(operation)) {
       return { kind: "reconciled", operation };
     }
     const result = acknowledgeProbeUpgradeRequest({
@@ -246,7 +247,7 @@ function reconcileOneEvidence(
   }
 
   if (evidence.kind === "operation_running") {
-    if (isClosed(operation)) {
+    if (isClosedProbeOperation(operation)) {
       return { kind: "reconciled", operation };
     }
     const result = startProbeUpgradeRequest({
@@ -259,7 +260,7 @@ function reconcileOneEvidence(
   }
 
   if (evidence.kind === "operation_failed") {
-    if (isClosed(operation) && !evidence.repairEligibility) {
+    if (isClosedProbeOperation(operation) && !evidence.repairEligibility) {
       return { kind: "reconciled", operation };
     }
     const result = failReportedProbeUpgradeRequest({
@@ -288,12 +289,6 @@ function reconcileOneEvidence(
     kind: "reconciled",
     operation: succeeded ?? operation,
   };
-}
-
-function isClosed(operation: ProbeUpgradeRequest) {
-  return ["canceled", "failed", "succeeded", "superseded"].includes(
-    operation.state,
-  );
 }
 
 function currentForwardOperation(input: {

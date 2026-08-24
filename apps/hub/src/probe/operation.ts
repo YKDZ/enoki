@@ -589,6 +589,12 @@ export function isActiveProbeOperation(operation: ProbeUpgradeRequest) {
   return ["pending", "accepted", "running"].includes(operation.state);
 }
 
+export function isClosedProbeOperation(operation: ProbeUpgradeRequest) {
+  return ["canceled", "failed", "succeeded", "superseded"].includes(
+    operation.state,
+  );
+}
+
 function isSafeToSupersedeProbeOperation(operation: ProbeUpgradeRequest) {
   return operation.state === "pending" || operation.state === "accepted";
 }
