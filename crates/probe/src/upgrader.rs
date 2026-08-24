@@ -11,14 +11,15 @@ use std::{
 };
 
 use enoki_probe_bootstrap::{
-    acquisition::remove_verified_probe_upgrade_stage,
+    acquisition::{open_verified_probe_upgrade_stage, remove_verified_probe_upgrade_stage},
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
     install::{
-        FixedInstallPaths, SystemSystemd, complete_authorized_probe_repair,
-        consume_probe_repair_authority, execute_authorized_probe_repair,
+        FixedInstallPaths, SystemSystemd, SystemdPort, VerifiedUpgradeComponents,
+        complete_authorized_probe_repair, consume_probe_repair_authority,
+        execute_authorized_probe_repair, inspect_installed_probe_for_upgrade,
         issue_probe_repair_evidence, persist_probe_repair_execution_failure,
-        resume_probe_repair_intent, run_compatible_upgrade,
+        restore_installed_bundle_for_repair, resume_probe_repair_intent, run_compatible_upgrade,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
@@ -54,6 +55,7 @@ use crate::{
     hub_url,
     probe_auth::{ProbeRequestAuth, signed_probe_request_headers},
     protocol::enoki::v1::ProbeConfigurationRequest,
+    secure_file::{atomic_write, ensure_directory, remove_regular_file},
 };
 
 const OBSERVATION_RUNTIME_BINARY_PATH: &str = "/usr/local/bin/enoki-observation-runtime";
@@ -1249,13 +1251,23 @@ fn run_authorized_probe_repair_for_invoking_admin(
     if unsafe { libc::geteuid() } != 0 || invoking_uid == 0 || invoking_gid == 0 {
         return Err(ProbeRepairRunError::RootRequired);
     }
-    if Path::new("/var/lib/enoki-probe/runtime-failure/latch").exists() {
+    let paths = FixedInstallPaths::production();
+    let resumable_upgrade = resume_probe_repair_intent(&paths)
+        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    let upgrade_failure_is_current = resumable_upgrade.is_some()
+        || issue_probe_repair_evidence(&paths, 1, 2, "repair_dispatch_probe").is_ok();
+    let installed_failure_is_current =
+        crate::runtime_failure::installed_bundle_failure_is_current();
+    if installed_failure_is_current && upgrade_failure_is_current {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+    }
+    if installed_failure_is_current {
         return run_authorized_installed_bundle_repair(invoking_uid, invoking_gid);
     }
-    let paths = FixedInstallPaths::production();
-    let consumed = if let Some(consumed) = resume_probe_repair_intent(&paths)
-        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?
-    {
+    if Path::new("/var/lib/enoki-probe/runtime-failure/latch").exists() {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+    }
+    let consumed = if let Some(consumed) = resumable_upgrade {
         consumed
     } else {
         let mut nonce = [0_u8; 16];
@@ -1361,6 +1373,16 @@ fn run_authorized_installed_bundle_repair(
     invoking_uid: u32,
     invoking_gid: u32,
 ) -> Result<ProbeRepairResult, ProbeRepairRunError> {
+    if let Some(resumable) = crate::runtime_failure::resume_installed_bundle_repair()
+        .map_err(|_| repair_contract_failure("probe_repair_intent_invalid"))?
+    {
+        return execute_installed_bundle_repair(
+            resumable.grant,
+            resumable.stage_receipt,
+            resumable.stage_owner_uid,
+            resumable.progress,
+        );
+    }
     let mut nonce = [0_u8; 16];
     fs::File::open("/dev/urandom")
         .and_then(|mut random| random.read_exact(&mut nonce))
@@ -1415,28 +1437,196 @@ fn run_authorized_installed_bundle_repair(
     struct Response {
         authority: enoki_probe_bootstrap::lifecycle::InstalledBundleRepairAuthorityV1,
         signature: String,
+        stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
     }
     let response: Response = serde_json::from_slice(&output.stdout)
         .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
-    let (probe_id, repaired_version) =
-        crate::runtime_failure::consume_installed_bundle_repair_authority(
-            &signed,
-            &response.authority,
-            &response.signature,
-            now_ms,
+    let grant = crate::runtime_failure::validate_installed_bundle_repair_authority(
+        &signed,
+        &response.authority,
+        &response.signature,
+        now_ms,
+    )
+    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    let identity_metadata =
+        fs::symlink_metadata("/var/lib/enoki-probe/identity/probe-bootstrap.toml")
+            .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    grant
+        .persist_intent(&response.stage_receipt, identity_metadata.uid())
+        .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
+    execute_installed_bundle_repair(
+        grant,
+        response.stage_receipt,
+        identity_metadata.uid(),
+        crate::runtime_failure::InstalledBundleRepairProgress::Admitted,
+    )
+}
+
+fn execute_installed_bundle_repair(
+    grant: crate::runtime_failure::InstalledBundleRepairGrant,
+    stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+    stage_owner_uid: u32,
+    progress: crate::runtime_failure::InstalledBundleRepairProgress,
+) -> Result<ProbeRepairResult, ProbeRepairRunError> {
+    let mut stage = open_verified_probe_upgrade_stage(&stage_receipt, stage_owner_uid)
+        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    let paths = FixedInstallPaths::production();
+    let installed = inspect_installed_probe_for_upgrade(&paths)
+        .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    let authority = grant.authority();
+    if installed.hub_origin != authority.hub_origin
+        || installed.probe_id != authority.probe_id
+        || installed.source_bundle_version != authority.bundle_version
+        || installed.source_install_state_sha256 != authority.install_state_sha256
+        || installed.source_manifest_sha256 != authority.manifest_sha256
+        || stage.bundle.version != authority.bundle_version
+        || stage.bundle.manifest_sha256 != authority.manifest_sha256
+        || stage_receipt.target_manifest_sha256 != authority.manifest_sha256
+        || stage_receipt.target_asset_set_digest != authority.target_asset_set_digest
+    {
+        return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
+    }
+    let mut systemd = SystemSystemd::for_live_upgrade();
+    let repaired = (|| {
+        mask_runtime_validation_socket()?;
+        remove_runtime_repair_validation_gate()?;
+        systemd
+            .daemon_reload()
+            .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+        restore_installed_bundle_for_repair(
+            VerifiedUpgradeComponents {
+                probe: &mut stage.probe,
+                observation_runtime: &mut stage.observation_runtime,
+                system_state_provider: &mut stage.system_state_provider,
+                disk_health_provider: &mut stage.disk_health_provider,
+                lifecycle_companion: &mut stage.lifecycle_companion,
+                bootstrap_acquirer: &mut stage.bootstrap_acquirer,
+                bootstrap_activator: &mut stage.bootstrap_activator,
+            },
+            &stage.bundle,
+            &installed,
+            &paths,
+            &mut systemd,
         )
-        .map_err(|error| match error {
-            crate::runtime_failure::InstalledBundleRepairError::InvalidBoundary => {
-                ProbeUpgraderRunError::ManualProbeReinstallRequired.into()
-            }
-            crate::runtime_failure::InstalledBundleRepairError::RuntimeRestartFailed => {
-                repair_contract_failure("probe_repair_recovery_pending")
-            }
-        })?;
+        .map_err(|_| repair_contract_failure("probe_repair_bundle_restore_failed"))?;
+        if progress != crate::runtime_failure::InstalledBundleRepairProgress::RuntimeHealthy {
+            grant
+                .mark_validation_pending()
+                .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
+        }
+        install_runtime_repair_validation_gate()?;
+        systemd
+            .daemon_reload()
+            .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+        unmask_and_start_runtime_validation_socket()?;
+        crate::observation_runtime::UnixObservationRuntimeClient::production()
+            .request_finalized_window(Duration::from_secs(1), 0)
+            .map_err(|_| repair_contract_failure("probe_repair_runtime_validation_failed"))?;
+        grant
+            .mark_runtime_healthy()
+            .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
+        remove_runtime_repair_validation_gate()?;
+        systemd
+            .daemon_reload()
+            .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+        grant
+            .complete()
+            .map_err(|_| repair_contract_failure("probe_repair_completion_persist_failed"))
+    })();
+    let (probe_id, repaired_version) = match repaired {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = systemd.stop();
+            let _ = remove_runtime_repair_validation_gate();
+            let _ = systemd.daemon_reload();
+            let _ = unmask_runtime_validation_socket();
+            let _ = grant.persist_unresolved();
+            return Err(error);
+        }
+    };
+    let _ = remove_verified_probe_upgrade_stage(&stage_receipt.operation_id, stage_owner_uid);
+    systemd
+        .start()
+        .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+    systemd
+        .wait_local_activated()
+        .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
     Ok(ProbeRepairResult {
         probe_id,
         repaired_version,
     })
+}
+
+const RUNTIME_REPAIR_RUN_DIR: &str = "/run/enoki-probe";
+const RUNTIME_REPAIR_PERMIT: &str = "/run/enoki-probe/runtime-repair-permit";
+const RUNTIME_REPAIR_DROP_IN_DIR: &str = "/run/systemd/system/enoki-observation-runtime.service.d";
+const RUNTIME_REPAIR_DROP_IN: &str =
+    "/run/systemd/system/enoki-observation-runtime.service.d/repair-validation.conf";
+
+fn mask_runtime_validation_socket() -> Result<(), ProbeRepairRunError> {
+    required_repair_systemctl(&[
+        "stop",
+        "enoki-probe.service",
+        "enoki-observation-runtime.socket",
+        "enoki-observation-runtime.service",
+    ])?;
+    required_repair_systemctl(&["mask", "--runtime", "enoki-observation-runtime.socket"])
+}
+
+fn install_runtime_repair_validation_gate() -> Result<(), ProbeRepairRunError> {
+    ensure_directory(Path::new(RUNTIME_REPAIR_RUN_DIR), 0o700, Some((0, 0)))
+        .map_err(|_| repair_contract_failure("probe_repair_validation_gate_failed"))?;
+    ensure_directory(Path::new(RUNTIME_REPAIR_DROP_IN_DIR), 0o700, Some((0, 0)))
+        .map_err(|_| repair_contract_failure("probe_repair_validation_gate_failed"))?;
+    atomic_write(
+        Path::new(RUNTIME_REPAIR_PERMIT),
+        b"installed-bundle-repair\n",
+        0o600,
+        Some((0, 0)),
+    )
+    .map_err(|_| repair_contract_failure("probe_repair_validation_gate_failed"))?;
+    atomic_write(
+        Path::new(RUNTIME_REPAIR_DROP_IN),
+        b"[Unit]\nConditionPathExists=\nConditionPathExists=/run/enoki-probe/runtime-repair-permit\n",
+        0o600,
+        Some((0, 0)),
+    )
+    .map_err(|_| repair_contract_failure("probe_repair_validation_gate_failed"))
+}
+
+fn remove_runtime_repair_validation_gate() -> Result<(), ProbeRepairRunError> {
+    for path in [RUNTIME_REPAIR_DROP_IN, RUNTIME_REPAIR_PERMIT] {
+        match remove_regular_file(Path::new(path), 0o600, Some((0, 0))) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(repair_contract_failure(
+                    "probe_repair_validation_gate_failed",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unmask_and_start_runtime_validation_socket() -> Result<(), ProbeRepairRunError> {
+    unmask_runtime_validation_socket()?;
+    required_repair_systemctl(&["start", "enoki-observation-runtime.socket"])
+}
+
+fn unmask_runtime_validation_socket() -> Result<(), ProbeRepairRunError> {
+    required_repair_systemctl(&["unmask", "--runtime", "enoki-observation-runtime.socket"])
+}
+
+fn required_repair_systemctl(arguments: &[&str]) -> Result<(), ProbeRepairRunError> {
+    let status = Command::new("/usr/bin/systemctl")
+        .args(arguments)
+        .status()
+        .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| repair_contract_failure("probe_repair_systemd_failed"))
 }
 
 fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError> {

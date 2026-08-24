@@ -46,6 +46,7 @@ describe("Probe Repair authority", () => {
       nowMs: 1_725_000_001_000,
       repairNonce: "repair_nonce_01",
       repairOperationId: "42",
+      targetAssetSetDigest: `sha256:${"f".repeat(64)}`,
     });
 
     expect(decision).toEqual({
@@ -56,6 +57,7 @@ describe("Probe Repair authority", () => {
         hostId: "7",
         probeId: "probe_01",
         repairOperationId: "42",
+        targetAssetSetDigest: `sha256:${"f".repeat(64)}`,
       }),
       signature: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
@@ -73,6 +75,7 @@ describe("Probe Repair authority", () => {
         nowMs: 1_725_000_001_000,
         repairNonce: "repair_nonce_02",
         repairOperationId: "43",
+        targetAssetSetDigest: `sha256:${"f".repeat(64)}`,
       }).disposition,
     ).toBe("manual_reinstall_required");
   });

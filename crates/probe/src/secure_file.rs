@@ -98,6 +98,14 @@ pub fn managed_path_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
+pub fn remove_regular_file(path: &Path, mode: u32, owner: Option<(u32, u32)>) -> io::Result<()> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    verify_file_at(parent.raw(), &target, mode, owner)?;
+    unlink_at(parent.raw(), &target)?;
+    sync_directory(parent.raw())
+}
+
 /// Reads an existing managed regular file through held no-follow directory FDs.
 /// This is for the registration handoff, which preserves installer-owned fields
 /// before atomically replacing the bootstrap identity.

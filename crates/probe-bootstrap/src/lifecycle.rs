@@ -262,6 +262,7 @@ pub struct InstalledBundleRepairAuthorityV1 {
     pub install_state_sha256: String,
     pub manifest_sha256: String,
     pub bundle_version: String,
+    pub target_asset_set_digest: String,
     pub repair_operation_id: String,
     pub repair_nonce: String,
     pub repair_evidence_sha256: String,
@@ -280,6 +281,22 @@ impl InstalledBundleRepairAuthorityV1 {
             &self.canonical_bytes(),
             signature_hex,
         )
+    }
+
+    #[must_use]
+    pub fn matches_evidence(&self, evidence: &InstalledBundleFailureEvidenceV1) -> bool {
+        self.kind == evidence.kind
+            && self.hub_origin == evidence.hub_origin
+            && self.probe_id == evidence.probe_id
+            && self.generation == evidence.generation
+            && self.boot_id == evidence.boot_id
+            && self.unit == evidence.unit
+            && self.unit_sha256 == evidence.unit_sha256
+            && self.identity_receipt_sha256 == evidence.identity_receipt_sha256
+            && self.install_state_sha256 == evidence.install_state_sha256
+            && self.manifest_sha256 == evidence.manifest_sha256
+            && self.bundle_version == evidence.bundle_version
+            && self.repair_evidence_sha256 == evidence.sha256()
     }
 }
 

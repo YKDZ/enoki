@@ -1151,6 +1151,88 @@ mod tests {
     }
 
     #[test]
+    fn installed_bundle_repair_restores_all_roles_only_for_the_exact_bound_manifest() {
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let installed_bundle = bundle().with_test_complete_receipts(5);
+        let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &installed_bundle,
+            &trust(),
+            &paths,
+            &mut Accounts::default(),
+            &mut Systemd::default(),
+        )
+        .unwrap();
+        let mut identity = fs::read_to_string(paths.identity()).unwrap();
+        identity.push_str("probe_id = \"probe_01\"\n");
+        fs::write(paths.identity(), identity).unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        let binding = inspect_installed_probe_for_upgrade(&paths).unwrap();
+
+        let mut wrong_manifest = installed_bundle.clone();
+        wrong_manifest.manifest_sha256 = "d".repeat(64);
+        let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            restore_installed_bundle_for_repair(
+                VerifiedUpgradeComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    system_state_provider: &mut provider,
+                    disk_health_provider: &mut disk,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &wrong_manifest,
+                &binding,
+                &paths,
+                &mut Systemd::default(),
+            ),
+            Err(InstallError::ExistingResidue),
+        );
+
+        fs::write(paths.observation_runtime_binary(), b"bad!!").unwrap();
+        let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        let mut systemd = Systemd::default();
+        restore_installed_bundle_for_repair(
+            VerifiedUpgradeComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                system_state_provider: &mut provider,
+                disk_health_provider: &mut disk,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &installed_bundle,
+            &binding,
+            &paths,
+            &mut systemd,
+        )
+        .unwrap();
+        assert_eq!(fs::read(paths.observation_runtime_binary()).unwrap(), b"probe");
+        assert_eq!(systemd.calls, ["stop", "reload"]);
+        assert_eq!(inspect_installed_probe_for_upgrade(&paths).unwrap(), binding);
+    }
+
+    #[test]
     fn outer_stage_and_generation_failures_cannot_replay_the_consumed_authority() {
         for failed_outer_step in ["stage-open", "generation-persist"] {
             let temporary = tempdir().unwrap();
@@ -2131,12 +2213,60 @@ mod tests {
             "RestrictAddressFamilies=AF_UNIX",
             "IPAddressDeny=any",
             "SocketBindDeny=any",
+            "ProtectSystem=strict",
             "ReadWritePaths=/var/lib/enoki-probe/runtime-failure",
         ] {
             assert!(recorder.contains(property), "failure recorder 缺少 {property}");
         }
         assert!(!recorder.contains("Environment="));
         assert!(!recorder.contains("StandardInput=socket"));
+    }
+
+    #[test]
+    fn production_state_parent_and_root_failure_child_have_distinct_custody() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+        )
+        .unwrap();
+
+        let state = fs::symlink_metadata(paths.state()).unwrap();
+        let identity = fs::symlink_metadata(paths.identity()).unwrap();
+        assert_eq!(state.mode() & 0o7777, 0o750);
+        assert_eq!((state.uid(), state.gid()), (identity.uid(), identity.gid()));
+        let recorder = fs::read_to_string(paths.observation_runtime_failure_recorder_unit())
+            .unwrap();
+        assert!(recorder.contains("StateDirectory=enoki-probe/runtime-failure"));
+        assert!(recorder.contains("StateDirectoryMode=0700"));
+        assert!(recorder.contains("User=root\nGroup=root"));
     }
 
     #[test]

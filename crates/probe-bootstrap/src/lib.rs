@@ -12,6 +12,7 @@ pub mod handoff;
 #[cfg(feature = "activator")]
 pub mod install;
 pub mod lifecycle;
+pub mod operation_status;
 pub mod replacement;
 pub mod trust;
 pub mod verifier;

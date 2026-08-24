@@ -129,6 +129,7 @@ export function createInstalledBundleRepairRequest(input: {
   failureGeneration: string;
   hostId: number;
   manifestSha256: string;
+  targetAssetSetDigest: string;
   nonce: string;
   nowMs: number;
 }): ProbeUpgradeRequest | null {
@@ -136,6 +137,7 @@ export function createInstalledBundleRepairRequest(input: {
     !/^[0-9a-f]{64}$/.test(input.failureGeneration) ||
     !/^[0-9a-f]{64}$/.test(input.evidenceSha256) ||
     !/^[0-9a-f]{64}$/.test(input.manifestSha256) ||
+    !/^sha256:[0-9a-f]{64}$/.test(input.targetAssetSetDigest) ||
     !input.bundleVersion
   ) {
     return null;
@@ -160,6 +162,7 @@ export function createInstalledBundleRepairRequest(input: {
     runningAtMs: null,
     state: "accepted",
     supersededAtMs: null,
+    targetAssetSetDigest: input.targetAssetSetDigest,
     targetManifestSha256: input.manifestSha256,
     targetProbeVersion: input.bundleVersion,
     updatedAtMs: input.nowMs,

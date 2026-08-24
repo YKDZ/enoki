@@ -60,7 +60,7 @@ pub fn acquire_probe_repair_authority_once(
     }
     let envelope: ClosedRepairEvidence =
         serde_json::from_slice(request_body).map_err(|_| AcquisitionFailure::Permanent)?;
-    let url = match envelope {
+    let (url, installed_evidence) = match envelope {
         ClosedRepairEvidence::FailedUpgrade(envelope) => {
             if envelope.evidence_signature.len() != 64
                 || !valid_stage_identifier(&envelope.evidence.failed_operation_id)
@@ -73,7 +73,7 @@ pub fn acquire_probe_repair_authority_once(
                 "{origin}/api/probe/operations/{}/repair-authorize",
                 envelope.evidence.failed_operation_id
             );
-            url
+            (url, None)
         }
         ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
             if envelope.evidence_signature.len() != 64
@@ -88,7 +88,7 @@ pub fn acquire_probe_repair_authority_once(
                 "{origin}/api/probe/runtime-failures/{}/repair-authorize",
                 envelope.evidence.generation
             );
-            url
+            (url, Some(envelope.evidence))
         }
     };
     let response = ureq::AgentBuilder::new()
@@ -140,7 +140,44 @@ pub fn acquire_probe_repair_authority_once(
     if output.is_empty() || output.len() as u64 > MAX_REPAIR_EXCHANGE_BYTES {
         return Err(AcquisitionFailure::Permanent);
     }
-    Ok(output)
+    let Some(evidence) = installed_evidence else {
+        return Ok(output);
+    };
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct InstalledExchange {
+        authority: crate::lifecycle::InstalledBundleRepairAuthorityV1,
+        signature: String,
+        target_asset_set_digest: String,
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct InstalledAcquisition {
+        authority: crate::lifecycle::InstalledBundleRepairAuthorityV1,
+        signature: String,
+        stage_receipt: VerifiedUpgradeStageReceipt,
+    }
+    let exchange: InstalledExchange =
+        serde_json::from_slice(&output).map_err(|_| AcquisitionFailure::Permanent)?;
+    if !exchange.authority.matches_evidence(&evidence)
+        || exchange.authority.target_asset_set_digest != exchange.target_asset_set_digest
+        || exchange.signature.len() != 64
+        || !valid_stage_identifier(&exchange.authority.repair_operation_id)
+    {
+        return Err(AcquisitionFailure::Permanent);
+    }
+    let stage_receipt = acquire_probe_upgrade_once(ProbeUpgradeAcquisition {
+        hub_origin: evidence.hub_origin,
+        operation_id: exchange.authority.repair_operation_id.clone(),
+        target_asset_set_digest: exchange.target_asset_set_digest,
+        target_version: evidence.bundle_version,
+    })?;
+    serde_json::to_vec(&InstalledAcquisition {
+        authority: exchange.authority,
+        signature: exchange.signature,
+        stage_receipt,
+    })
+    .map_err(|_| AcquisitionFailure::Local)
 }
 
 fn classify_repair_authorization_error(
@@ -182,7 +219,8 @@ pub struct ProbeUpgradeAcquisition {
     pub target_version: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifiedUpgradeStageReceipt {
     pub operation_id: String,
     pub target_asset_set_digest: String,

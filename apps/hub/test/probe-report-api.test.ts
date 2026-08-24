@@ -3466,6 +3466,15 @@ describe("Probe report API", () => {
   it("persists an Installed Bundle Failure Repair without synthesizing a failed Upgrade", async () => {
     const database = await createTemporaryDatabase();
     const nowMs = 1_725_000_010_000;
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-installed-repair-assets-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.0.9",
+      targetVersion: "0.1.0",
+      transition: "compatible",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -3475,6 +3484,10 @@ describe("Probe report API", () => {
       database,
       now: () => nowMs,
       probeApiOrigin: "https://hub.example",
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
     });
     const ownerSession = await loginOwner(app);
     const enrollmentToken = await createEnrollmentToken(app, ownerSession);
@@ -3493,7 +3506,7 @@ describe("Probe report API", () => {
       unitSha256: "b".repeat(64),
       identityReceiptSha256: "c".repeat(64),
       installStateSha256: "d".repeat(64),
-      manifestSha256: "e".repeat(64),
+      manifestSha256: release.targetBundles[0]!.bundleManifestSha256,
       bundleVersion: "0.1.0",
       issuedAtMs: nowMs,
       expiresAtMs: nowMs + 60_000,
@@ -3503,8 +3516,8 @@ describe("Probe report API", () => {
       createHash("sha256").update(enrollmentToken).digest(),
       "https://hub.example",
     );
-    const path = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
-    const response = await app.request(path, {
+    const repairPath = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
+    const response = await app.request(repairPath, {
       body: JSON.stringify({
         evidence,
         evidenceSignature: signInstalledBundleFailureEvidence(
@@ -3518,9 +3531,11 @@ describe("Probe report API", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       authority: { repairOperationId: string; probeId: string };
+      targetAssetSetDigest: string;
     };
     expect(body.authority).not.toHaveProperty("failedOperationId");
     expect(body.authority.probeId).toBe(registration.probeId);
+    expect(body.targetAssetSetDigest).toBe(release.targetAssetSetDigest);
     expect(
       database.probeOperations.findById(
         Number(body.authority.repairOperationId),

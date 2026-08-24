@@ -202,6 +202,35 @@ fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechani
 }
 
 #[test]
+fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validation_gate() {
+    for required in [
+        "open_verified_probe_upgrade_stage",
+        "restore_installed_bundle_for_repair",
+        "stage.bundle.manifest_sha256 != authority.manifest_sha256",
+        "mask\", \"--runtime\", \"enoki-observation-runtime.socket",
+        "ConditionPathExists=\\nConditionPathExists=/run/enoki-probe/runtime-repair-permit",
+        "request_finalized_window(Duration::from_secs(1), 0)",
+        "mark_runtime_healthy()",
+        ".complete()",
+    ] {
+        assert!(
+            UPGRADER.contains(required),
+            "Installed Bundle Repair 缺少 {required}"
+        );
+    }
+    let installed_repair = UPGRADER
+        .split("fn run_authorized_installed_bundle_repair")
+        .nth(1)
+        .expect("Installed Bundle Repair coordinator 必须存在")
+        .split("fn repair_acquirer_exit_failure")
+        .next()
+        .expect("Installed Bundle Repair coordinator 必须封闭");
+    assert!(!installed_repair.contains("retry_runtime"));
+    assert!(!installed_repair.contains("activate_complete_fresh"));
+    assert!(!installed_repair.contains("Replacement"));
+}
+
+#[test]
 fn compatible_upgrade_enters_a_transition_specific_coordinator() {
     assert!(
         UPGRADER.contains("run_compatible_upgrade(request, peer_uid)"),

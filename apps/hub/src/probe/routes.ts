@@ -148,6 +148,72 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   const repairAuthorizationBudget =
     services.repairAuthorizationBudget ??
     createMemoryRepairAuthorizationBudget({ monotonicNow: now });
+  const manualReinstallRequired = (context: Context) =>
+    context.json({ disposition: "manual_reinstall_required" }, 409, {
+      "cache-control": "no-store",
+    });
+  const anonymousRepairLimit = (context: Context) => {
+    const budget = repairAuthorizationBudget.consumeAnonymous(
+      observedIpFromContext(context, services.trustedProxyCidrs) ?? "unknown",
+    );
+    return budget.accepted
+      ? null
+      : probeJsonError("probe_repair_rate_limited", 429, {
+          "retry-after": String(budget.retryAfterSeconds),
+        });
+  };
+  const repairHostBoundary = (probeId: string) => {
+    const host = services.hosts.findByProbeId(probeId);
+    const hubOrigin = services.probeApiOrigin ?? "";
+    const tokenHash = host
+      ? services.enrollments.lifecycleAuthorityTokenHashForHost(host.id)
+      : null;
+    if (
+      !host ||
+      !tokenHash ||
+      !/^[0-9a-f]{64}$/.test(tokenHash) ||
+      !hubOrigin
+    ) {
+      return null;
+    }
+    return {
+      host,
+      hubOrigin,
+      installKey: deriveLifecycleAuthorityKey(
+        Buffer.from(tokenHash, "hex"),
+        hubOrigin,
+      ),
+    };
+  };
+  const verifiedHostRepairLimit = (hostId: number) => {
+    const budget = repairAuthorizationBudget.consumeVerifiedHost(
+      String(hostId),
+    );
+    return budget.accepted
+      ? null
+      : probeJsonError("probe_repair_rate_limited", 429, {
+          "retry-after": String(budget.retryAfterSeconds),
+        });
+  };
+  const findOrCreateRepair = (
+    evidenceSha256: string,
+    candidate: ProbeUpgradeRequest | null,
+    operationNowMs: number,
+  ) => {
+    let repair =
+      services.probeOperations?.findByRepairEvidenceSha256(evidenceSha256);
+    if (repair || !candidate) return repair;
+    try {
+      repair = services.probeOperations?.renewOrCreateProbeRepairRequest(
+        candidate,
+        operationNowMs,
+      );
+    } catch {
+      repair =
+        services.probeOperations?.findByRepairEvidenceSha256(evidenceSha256);
+    }
+    return repair;
+  };
 
   routes.use("*", async (context, next) => {
     if (!isIdentityContentEncoding(context.req.raw.headers)) {
@@ -1170,14 +1236,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   routes.post(
     "/runtime-failures/:generation/repair-authorize",
     async (context) => {
-      const anonymousBudget = repairAuthorizationBudget.consumeAnonymous(
-        observedIpFromContext(context, services.trustedProxyCidrs) ?? "unknown",
-      );
-      if (!anonymousBudget.accepted) {
-        return probeJsonError("probe_repair_rate_limited", 429, {
-          "retry-after": String(anonymousBudget.retryAfterSeconds),
-        });
-      }
+      const anonymousLimit = anonymousRepairLimit(context);
+      if (anonymousLimit) return anonymousLimit;
       const requestBody = await readCappedRequestBody(
         context.req.raw,
         maxProbeOperationPayloadBytes,
@@ -1186,32 +1246,18 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         ? readInstalledBundleRepairAuthorizationBody(requestBody)
         : null;
       const generation = context.req.param("generation");
-      const host = body
-        ? services.hosts.findByProbeId(body.evidence.probeId)
-        : null;
+      const boundary = body ? repairHostBoundary(body.evidence.probeId) : null;
+      const host = boundary?.host ?? null;
       if (
         !body ||
+        !boundary ||
         !host ||
         !host.probeVersion ||
         generation !== body.evidence.generation
       ) {
-        return context.json({ disposition: "manual_reinstall_required" }, 409, {
-          "cache-control": "no-store",
-        });
+        return manualReinstallRequired(context);
       }
-      const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
-        host.id,
-      );
-      const hubOrigin = services.probeApiOrigin ?? "";
-      if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
-        return context.json({ disposition: "manual_reinstall_required" }, 409, {
-          "cache-control": "no-store",
-        });
-      }
-      const installKey = deriveLifecycleAuthorityKey(
-        Buffer.from(tokenHash, "hex"),
-        hubOrigin,
-      );
+      const { hubOrigin, installKey } = boundary;
       const operationNowMs = now();
       const verified = verifyInstalledBundleFailureEvidence({
         evidence: body.evidence,
@@ -1223,45 +1269,49 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         nowMs: operationNowMs,
       });
       if (!verified) {
-        return context.json({ disposition: "manual_reinstall_required" }, 409, {
-          "cache-control": "no-store",
-        });
+        return manualReinstallRequired(context);
       }
-      const hostBudget = repairAuthorizationBudget.consumeVerifiedHost(
-        String(host.id),
-      );
-      if (!hostBudget.accepted) {
-        return probeJsonError("probe_repair_rate_limited", 429, {
-          "retry-after": String(hostBudget.retryAfterSeconds),
-        });
+      if (
+        !services.probeAssetDir ||
+        !services.probeDistributionRootPublicKeyPem
+      ) {
+        return manualReinstallRequired(context);
       }
-      let repair = services.probeOperations?.findByRepairEvidenceSha256(
+      const release = await readProbeReleaseContextFromDirectory({
+        assetDir: services.probeAssetDir,
+        trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+      });
+      const targetAssetSetDigest = release.assetSet.targetAssetSetDigest;
+      const transition = release.releaseTransition;
+      if (
+        release.assetSet.version !== body.evidence.bundleVersion ||
+        !targetAssetSetDigest ||
+        transition?.targetProbeVersion !== body.evidence.bundleVersion ||
+        transition.targetAssetSetDigest !== targetAssetSetDigest ||
+        !transition.targetBundles?.some(
+          (bundle) =>
+            bundle.bundleManifestSha256 === body.evidence.manifestSha256,
+        )
+      ) {
+        return manualReinstallRequired(context);
+      }
+      const hostLimit = verifiedHostRepairLimit(host.id);
+      if (hostLimit) return hostLimit;
+      const repair = findOrCreateRepair(
         verified.repairEvidenceSha256,
-      );
-      if (!repair) {
-        const candidate = createInstalledBundleRepairRequest({
+        createInstalledBundleRepairRequest({
           authorityExpiresAtMs: operationNowMs + probeRepairAuthorityTtlMs,
           bundleVersion: body.evidence.bundleVersion,
           evidenceSha256: verified.repairEvidenceSha256,
           failureGeneration: body.evidence.generation,
           hostId: host.id,
           manifestSha256: body.evidence.manifestSha256,
+          targetAssetSetDigest,
           nonce: randomBytes(16).toString("hex"),
           nowMs: operationNowMs,
-        });
-        if (candidate) {
-          try {
-            repair = services.probeOperations?.renewOrCreateProbeRepairRequest(
-              candidate,
-              operationNowMs,
-            );
-          } catch {
-            repair = services.probeOperations?.findByRepairEvidenceSha256(
-              verified.repairEvidenceSha256,
-            );
-          }
-        }
-      }
+        }),
+        operationNowMs,
+      );
       if (
         !repair ||
         repair.kind !== "probe_repair" ||
@@ -1272,12 +1322,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         repair.repairFailureGeneration !== body.evidence.generation ||
         repair.repairEvidenceSha256 !== verified.repairEvidenceSha256 ||
         !repair.repairNonce ||
+        repair.targetAssetSetDigest !== targetAssetSetDigest ||
         !repair.repairAuthorityExpiresAtMs ||
         repair.repairAuthorityExpiresAtMs <= operationNowMs
       ) {
-        return context.json({ disposition: "manual_reinstall_required" }, 409, {
-          "cache-control": "no-store",
-        });
+        return manualReinstallRequired(context);
       }
       const decision = authorizeInstalledBundleRepair({
         authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,
@@ -1291,12 +1340,17 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         nowMs: operationNowMs,
         repairNonce: repair.repairNonce,
         repairOperationId: String(repair.id),
+        targetAssetSetDigest,
       });
       if (decision.disposition !== "probe_repair") {
         return context.json(decision, 409, { "cache-control": "no-store" });
       }
       return context.json(
-        { authority: decision.authority, signature: decision.signature },
+        {
+          authority: decision.authority,
+          signature: decision.signature,
+          targetAssetSetDigest,
+        },
         200,
         { "cache-control": "no-store" },
       );
@@ -1304,14 +1358,8 @@ export function createProbeRoutes(services: ProbeRouteServices) {
   );
 
   routes.post("/operations/:operationId/repair-authorize", async (context) => {
-    const anonymousBudget = repairAuthorizationBudget.consumeAnonymous(
-      observedIpFromContext(context, services.trustedProxyCidrs) ?? "unknown",
-    );
-    if (!anonymousBudget.accepted) {
-      return probeJsonError("probe_repair_rate_limited", 429, {
-        "retry-after": String(anonymousBudget.retryAfterSeconds),
-      });
-    }
+    const anonymousLimit = anonymousRepairLimit(context);
+    if (anonymousLimit) return anonymousLimit;
     const requestBody = await readCappedRequestBody(
       context.req.raw,
       maxProbeOperationPayloadBytes,
@@ -1325,11 +1373,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         ? null
         : (services.probeOperations?.findById(failedOperationId) ?? null);
     const body = readRepairAuthorizationBody(requestBody);
-    const host = body
-      ? services.hosts.findByProbeId(body.evidence.probeId)
-      : null;
+    const boundary = body ? repairHostBoundary(body.evidence.probeId) : null;
+    const host = boundary?.host ?? null;
     if (
       !host ||
+      !boundary ||
       String(host.id) !== body?.evidence.hostId ||
       !failedUpgrade ||
       failedUpgrade.hostId !== host.id ||
@@ -1340,23 +1388,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       !failedUpgrade.upgradeAuthoritySha256 ||
       !body
     ) {
-      return context.json({ disposition: "manual_reinstall_required" }, 409, {
-        "cache-control": "no-store",
-      });
+      return manualReinstallRequired(context);
     }
-    const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
-      host.id,
-    );
-    const hubOrigin = services.probeApiOrigin ?? "";
-    if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
-      return context.json({ disposition: "manual_reinstall_required" }, 409, {
-        "cache-control": "no-store",
-      });
-    }
-    const installKey = deriveLifecycleAuthorityKey(
-      Buffer.from(tokenHash, "hex"),
-      hubOrigin,
-    );
+    const { hubOrigin, installKey } = boundary;
     const operationNowMs = now();
     const verified = verifyProbeRepairEvidence({
       evidence: body.evidence,
@@ -1369,24 +1403,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       targetManifestSha256: failedUpgrade.targetManifestSha256,
     });
     if (!verified) {
-      return context.json({ disposition: "manual_reinstall_required" }, 409, {
-        "cache-control": "no-store",
-      });
+      return manualReinstallRequired(context);
     }
-    const hostBudget = repairAuthorizationBudget.consumeVerifiedHost(
-      String(host.id),
-    );
-    if (!hostBudget.accepted) {
-      return probeJsonError("probe_repair_rate_limited", 429, {
-        "retry-after": String(hostBudget.retryAfterSeconds),
-      });
-    }
+    const hostLimit = verifiedHostRepairLimit(host.id);
+    if (hostLimit) return hostLimit;
 
-    let repair = services.probeOperations?.findByRepairEvidenceSha256(
+    const repair = findOrCreateRepair(
       verified.repairEvidenceSha256,
-    );
-    if (!repair) {
-      const candidate = createProbeRepairRequest({
+      createProbeRepairRequest({
         authorityExpiresAtMs: operationNowMs + probeRepairAuthorityTtlMs,
         evidenceSha256: verified.repairEvidenceSha256,
         failedOperation: failedUpgrade,
@@ -1394,23 +1418,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         nowMs: operationNowMs,
         targetManifestSha256: failedUpgrade.targetManifestSha256,
         verifiedStageSha256: failedUpgrade.verifiedStageSha256,
-      });
-      if (!candidate) {
-        return context.json({ disposition: "manual_reinstall_required" }, 409, {
-          "cache-control": "no-store",
-        });
-      }
-      try {
-        repair = services.probeOperations?.renewOrCreateProbeRepairRequest(
-          candidate,
-          operationNowMs,
-        );
-      } catch {
-        repair = services.probeOperations?.findByRepairEvidenceSha256(
-          verified.repairEvidenceSha256,
-        );
-      }
-    }
+      }),
+      operationNowMs,
+    );
     if (!repair) {
       const active = services.probeOperations?.findActiveForHost(host.id);
       if (
@@ -1436,9 +1446,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       !repair.targetManifestSha256 ||
       !repair.verifiedStageSha256
     ) {
-      return context.json({ disposition: "manual_reinstall_required" }, 409, {
-        "cache-control": "no-store",
-      });
+      return manualReinstallRequired(context);
     }
     const decision = authorizeProbeRepair({
       authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,

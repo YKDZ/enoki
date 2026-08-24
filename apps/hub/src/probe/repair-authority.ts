@@ -121,6 +121,7 @@ export type InstalledBundleRepairAuthority = {
   installStateSha256: string;
   manifestSha256: string;
   bundleVersion: string;
+  targetAssetSetDigest: string;
   repairOperationId: string;
   repairNonce: string;
   repairEvidenceSha256: string;
@@ -134,6 +135,29 @@ export type InstalledBundleRepairAuthorizationDecision =
       signature: string;
     }
   | { disposition: "manual_reinstall_required"; authority?: never };
+
+type InstalledBundleBindings = Pick<
+  InstalledBundleFailureEvidence,
+  | "bootId"
+  | "bundleVersion"
+  | "generation"
+  | "hubOrigin"
+  | "identityReceiptSha256"
+  | "installStateSha256"
+  | "manifestSha256"
+  | "probeId"
+  | "unit"
+  | "unitSha256"
+>;
+
+function installedBundleBindingsMatch(
+  actual: InstalledBundleBindings,
+  expected: InstalledBundleBindings,
+) {
+  return (Object.keys(expected) as (keyof InstalledBundleBindings)[]).every(
+    (key) => actual[key] === expected[key],
+  );
+}
 
 export function canonicalInstalledBundleFailureEvidence(
   evidence: InstalledBundleFailureEvidence,
@@ -171,13 +195,22 @@ export function verifyInstalledBundleFailureEvidence(input: {
     input.evidence,
   );
   const validSha256 = (value: string) => /^[0-9a-f]{64}$/.test(value);
+  const expectedBindings: InstalledBundleBindings = {
+    bootId: input.evidence.bootId,
+    bundleVersion: input.expectedBundleVersion,
+    generation: input.evidence.generation,
+    hubOrigin: input.expectedHubOrigin,
+    identityReceiptSha256: input.evidence.identityReceiptSha256,
+    installStateSha256: input.evidence.installStateSha256,
+    manifestSha256: input.evidence.manifestSha256,
+    probeId: input.expectedProbeId,
+    unit: "enoki-observation-runtime.service",
+    unitSha256: input.evidence.unitSha256,
+  };
   if (
     input.evidence.kind !== "installed_bundle_failure" ||
     input.evidence.schemaVersion !== 1 ||
-    input.evidence.unit !== "enoki-observation-runtime.service" ||
-    input.evidence.hubOrigin !== input.expectedHubOrigin ||
-    input.evidence.probeId !== input.expectedProbeId ||
-    input.evidence.bundleVersion !== input.expectedBundleVersion ||
+    !installedBundleBindingsMatch(input.evidence, expectedBindings) ||
     !validSha256(input.evidence.generation) ||
     !validSha256(input.evidence.unitSha256) ||
     !validSha256(input.evidence.identityReceiptSha256) ||
@@ -218,12 +251,14 @@ export function authorizeInstalledBundleRepair(input: {
   nowMs: number;
   repairNonce: string;
   repairOperationId: string;
+  targetAssetSetDigest: string;
 }): InstalledBundleRepairAuthorizationDecision {
   const verified = verifyInstalledBundleFailureEvidence(input);
   if (
     !verified ||
     !validIdentifier(input.repairOperationId) ||
     !validIdentifier(input.repairNonce) ||
+    !/^sha256:[0-9a-f]{64}$/.test(input.targetAssetSetDigest) ||
     input.authorityExpiresAtMs <= input.nowMs ||
     input.authorityExpiresAtMs - input.nowMs > maxRepairAuthorityTtlMs
   ) {
@@ -243,6 +278,7 @@ export function authorizeInstalledBundleRepair(input: {
     installStateSha256: input.evidence.installStateSha256,
     manifestSha256: input.evidence.manifestSha256,
     bundleVersion: input.evidence.bundleVersion,
+    targetAssetSetDigest: input.targetAssetSetDigest,
     repairOperationId: input.repairOperationId,
     repairNonce: input.repairNonce,
     repairEvidenceSha256: verified.repairEvidenceSha256,

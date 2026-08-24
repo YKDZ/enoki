@@ -1110,6 +1110,137 @@ pub fn upgrade_current_probe_for_operation(
     )
 }
 
+pub fn restore_installed_bundle_for_repair(
+    mut components: VerifiedUpgradeComponents<'_>,
+    bundle: &VerifiedBundle,
+    expected_installation: &InstalledUpgradeBinding,
+    paths: &FixedInstallPaths,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    let actual = inspect_installed_probe_for_upgrade(paths)?;
+    if &actual != expected_installation
+        || bundle.version != actual.source_bundle_version
+        || bundle.manifest_sha256 != actual.source_manifest_sha256
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    verify_component_lengths(&mut components, bundle)?;
+    let expected_payload = vec![
+        (paths.binary(), component_fingerprint(components.probe)?),
+        (
+            paths.observation_runtime_binary(),
+            component_fingerprint(components.observation_runtime)?,
+        ),
+        (
+            paths.cpu_provider_binary(),
+            component_fingerprint(components.system_state_provider)?,
+        ),
+        (
+            paths.disk_health_provider_binary(),
+            component_fingerprint(components.disk_health_provider)?,
+        ),
+        (
+            paths.lifecycle_companion_binary(),
+            component_fingerprint(components.lifecycle_companion)?,
+        ),
+        (
+            paths.bootstrap_acquirer(),
+            component_fingerprint(components.bootstrap_acquirer)?,
+        ),
+        (
+            paths.bootstrap_activator(),
+            component_fingerprint(components.bootstrap_activator)?,
+        ),
+    ];
+    let mut prepared = prepare_upgrade(&mut components, bundle, paths, &actual)?;
+    systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
+    systemd.stop()?;
+    for (temporary, destination) in prepared.staged.iter().zip(&prepared.destinations) {
+        fs::rename(temporary, destination).map_err(|_| InstallError::Io)?;
+        sync_directory(destination.parent().ok_or(InstallError::Io)?)?;
+    }
+    systemd.daemon_reload()?;
+    if inspect_installed_probe_for_upgrade(paths)? != actual {
+        return Err(InstallError::ExistingResidue);
+    }
+    verify_repaired_bundle_payload(paths, &expected_payload)?;
+    for backup in &prepared.backups {
+        fs::remove_file(backup).map_err(|_| InstallError::Io)?;
+        sync_directory(backup.parent().ok_or(InstallError::Io)?)?;
+    }
+    prepared.retain_for_repair = false;
+    Ok(())
+}
+
+fn verify_repaired_bundle_payload(
+    paths: &FixedInstallPaths,
+    expected_payload: &[(PathBuf, (u64, String))],
+) -> Result<(), InstallError> {
+    for (path, (expected_len, expected_sha256)) in expected_payload {
+        let mut file = trusted_file(path, paths.expected_root_uid(), 0o755)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
+        if bytes.len() as u64 != *expected_len
+            || format!("{:x}", Sha256::digest(&bytes)) != *expected_sha256
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+    }
+    for (path, expected) in [
+        (paths.unit(), service_unit()),
+        (paths.observation_runtime_unit(), observation_runtime_unit()),
+        (
+            paths.observation_runtime_socket_unit(),
+            observation_runtime_socket_unit().to_owned(),
+        ),
+        (paths.cpu_provider_unit(), cpu_provider_unit()),
+        (
+            paths.cpu_provider_socket_unit(),
+            cpu_provider_socket_unit().to_owned(),
+        ),
+        (
+            paths.disk_health_provider_unit(),
+            disk_health_provider_unit(),
+        ),
+        (
+            paths.disk_health_provider_socket_unit(),
+            disk_health_provider_socket_unit().to_owned(),
+        ),
+        (paths.lifecycle_companion_unit(), lifecycle_companion_unit()),
+        (
+            paths.lifecycle_companion_socket_unit(),
+            lifecycle_companion_socket_unit().to_owned(),
+        ),
+        (paths.lifecycle_upgrade_unit(), lifecycle_upgrade_unit()),
+        (
+            paths.lifecycle_upgrade_socket_unit(),
+            lifecycle_upgrade_socket_unit().to_owned(),
+        ),
+        (
+            paths.observation_runtime_failure_recorder_unit(),
+            observation_runtime_failure_recorder_unit(),
+        ),
+    ] {
+        let mut file = trusted_file(&path, paths.expected_root_uid(), 0o644)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
+        if bytes != expected.as_bytes() {
+            return Err(InstallError::ExistingResidue);
+        }
+    }
+    Ok(())
+}
+
+fn component_fingerprint(file: &mut File) -> Result<(u64, String), InstallError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| InstallError::Io)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| InstallError::Io)?;
+    Ok((bytes.len() as u64, format!("{:x}", Sha256::digest(&bytes))))
+}
+
 fn upgrade_current_probe_inner(
     components: VerifiedUpgradeComponents<'_>,
     bundle: &VerifiedBundle,
@@ -2400,22 +2531,33 @@ pub(crate) fn write_operation_status(
     status: &str,
     error_code: Option<&str>,
 ) -> Result<(), InstallError> {
-    let mut contents = format!(
-        "operation_id = {:?}\ntarget_probe_version = {:?}\nstatus = {:?}\n",
-        attempt.operation_id, target_version, status,
-    );
-    if let Some(code) = error_code {
-        contents.push_str(&format!("error_code = {:?}\nmessage = \"\"\n", code));
-        if code == "lifecycle.upgrade_repair_required"
-            && let Ok(eligibility) = issue_probe_repair_eligibility(paths)
-            && let Ok(canonical) = String::from_utf8(eligibility.evidence.canonical_bytes())
-        {
-            contents.push_str(&format!(
-                "repair_eligibility_evidence = {:?}\nrepair_eligibility_signature = {:?}\n",
-                canonical, eligibility.signature,
-            ));
-        }
+    let eligibility = error_code
+        .filter(|code| *code == "lifecycle.upgrade_repair_required")
+        .and_then(|_| issue_probe_repair_eligibility(paths).ok())
+        .and_then(|eligibility| {
+            String::from_utf8(eligibility.evidence.canonical_bytes())
+                .ok()
+                .map(|canonical| (canonical, eligibility.signature))
+        });
+    let contents = crate::operation_status::OperationStatusDocument {
+        operation_id: &attempt.operation_id,
+        target_probe_version: target_version,
+        status: match (status, error_code) {
+            ("failed", Some(error_code)) => {
+                crate::operation_status::OperationStatus::Failed { error_code }
+            }
+            ("running", None) => crate::operation_status::OperationStatus::Running,
+            ("succeeded", None) => crate::operation_status::OperationStatus::Succeeded,
+            _ => return Err(InstallError::ExistingResidue),
+        },
+        repair_eligibility: eligibility.as_ref().map(|(canonical, signature)| {
+            crate::operation_status::RepairEligibilityDocument {
+                canonical_evidence: canonical,
+                signature,
+            }
+        }),
     }
+    .encode();
     atomic_durable_write(
         &paths.state().join(OPERATION_STATUS_FILE),
         contents.as_bytes(),

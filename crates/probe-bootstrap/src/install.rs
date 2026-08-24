@@ -1507,7 +1507,7 @@ fn lifecycle_companion_socket_unit() -> &'static str {
 
 fn lifecycle_companion_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap\n"
+        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe /run/systemd/system/enoki-observation-runtime.service.d /run/systemd/system/enoki-observation-runtime.socket\n"
     )
 }
 
@@ -1659,25 +1659,25 @@ use filesystem::*;
 pub use systemd::SystemSystemd;
 #[cfg(feature = "acquirer")]
 pub(crate) use upgrade::{
-    ConsumeBeforeOuterError, InstalledUpgradeBinding, UpgradeAttempt, UpgradeAuthorityConsumption,
-    VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
-    consume_signed_before_upgrade_outer_checks, inspect_installed_probe_for_upgrade,
+    ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
+    abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     upgrade_current_probe_for_operation,
 };
 #[cfg(all(test, not(feature = "acquirer")))]
 use upgrade::{
     ConsumeBeforeOuterError, UpgradeAttempt, UpgradeAuthorityConsumption,
-    VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
-    consume_signed_before_upgrade_outer_checks, inspect_installed_probe_for_upgrade,
+    abort_consumed_probe_upgrade_authority, consume_signed_before_upgrade_outer_checks,
     upgrade_current_probe_for_operation,
 };
 pub use upgrade::{
-    ConsumedRepairAuthority, RepairIntentState, SignedRepairEligibility, SignedRepairEvidence,
-    UpgradeRecoveryReceipt, complete_authorized_probe_repair, consume_probe_repair_authority,
+    ConsumedRepairAuthority, InstalledUpgradeBinding, RepairIntentState, SignedRepairEligibility,
+    SignedRepairEvidence, UpgradeRecoveryReceipt, VerifiedUpgradeComponents,
+    complete_authorized_probe_repair, consume_probe_repair_authority,
     execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
-    issue_probe_repair_eligibility, issue_probe_repair_evidence, mark_probe_repair_unresolved,
+    inspect_installed_probe_for_upgrade, issue_probe_repair_eligibility,
+    issue_probe_repair_evidence, mark_probe_repair_unresolved,
     persist_probe_repair_execution_failure, recover_incomplete_probe_upgrade,
-    resume_probe_repair_intent,
+    restore_installed_bundle_for_repair, resume_probe_repair_intent,
 };
 #[cfg(test)]
 use upgrade::{consume_before_upgrade_outer_checks, consume_probe_upgrade_authority};
