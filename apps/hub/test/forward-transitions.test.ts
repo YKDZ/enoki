@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { ProbeOperationRepository } from "../src/database/probe-operations";
-import { createForwardTransitions } from "../src/probe/forward-transitions";
+import {
+  createForwardTransitions,
+  type AuthenticatedHostProfileEvidence,
+} from "../src/probe/forward-transitions";
 import type { ProbeUpgradeRequest } from "../src/probe/operation";
 
 describe("ForwardTransitions", () => {
@@ -17,17 +20,9 @@ describe("ForwardTransitions", () => {
         kind: "compatible_upgrade",
         hostId: 7,
         sourceProbeVersion: "1.3.0",
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "1.4.0",
       },
       nowMs: 1_725_000_000_000,
-      releaseTransition: {
-        classification: "compatible",
-        sourceProbeSha256: ["b".repeat(64)],
-        sourceProbeVersion: "1.3.0",
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "1.4.0",
-      },
+      releaseContext: compatibleReleaseContext(),
     });
 
     expect(result).toEqual({
@@ -57,25 +52,13 @@ describe("ForwardTransitions", () => {
       hostId: 7,
       kind: "compatible_upgrade" as const,
       sourceProbeVersion: "1.3.0",
-      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-      targetProbeVersion: "1.4.0",
-    };
-    const transition = {
-      classification: "compatible" as const,
-      sourceProbeSha256: ["b".repeat(64)],
-      sourceProbeVersion: "1.3.0",
-      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-      targetProbeVersion: "1.4.0",
     };
 
     expect(
       forwardTransitions.authorize({
         intent,
         nowMs: 1_725_000_000_000,
-        releaseTransition: {
-          ...transition,
-          classification: "replacement-required",
-        },
+        releaseContext: compatibleReleaseContext("replacement-required"),
       }),
     ).toEqual({
       kind: "refused",
@@ -95,7 +78,7 @@ describe("ForwardTransitions", () => {
       forwardTransitions.authorize({
         intent,
         nowMs: 1_725_000_001_000,
-        releaseTransition: transition,
+        releaseContext: compatibleReleaseContext(),
       }),
     ).toEqual({
       kind: "refused",
@@ -114,9 +97,16 @@ describe("ForwardTransitions", () => {
     expect(
       forwardTransitions.view({
         acceptedHostProfile: {
+          authenticatedProbeId: "probe-7",
+          bootEvidenceBootId: "boot-after-upgrade",
+          bootEvidenceProbeId: "probe-7",
+          bootProbeAssetBundleVersion: "1.4.0",
           kind: "authenticated_host_profile",
           observedAtMs: failed.completedAtMs! + 1,
+          operationId: failed.id!,
+          probeAssetBundleVersion: "1.4.0",
           probeVersion: "v1.4.0",
+          profileReportBootId: "boot-after-upgrade",
         },
         latestOperation: failed,
       }),
@@ -126,6 +116,49 @@ describe("ForwardTransitions", () => {
       status: null,
     });
     expect(operations[0]).toEqual(failed);
+  });
+
+  it("keeps a failed current view when a newer same-version profile has the wrong Operation binding", () => {
+    const failed = failedUpgrade({ failureCode: "running_timeout" });
+    const forwardTransitions = createForwardTransitions({
+      probeOperations: memoryProbeOperations([failed]),
+    });
+
+    expect(
+      forwardTransitions.view({
+        acceptedHostProfile: {
+          authenticatedProbeId: "probe-7",
+          bootEvidenceBootId: "boot-after-upgrade",
+          bootEvidenceProbeId: "probe-7",
+          bootProbeAssetBundleVersion: "1.4.0",
+          kind: "authenticated_host_profile",
+          observedAtMs: failed.completedAtMs! + 1,
+          operationId: failed.id! + 1,
+          probeAssetBundleVersion: "1.4.0",
+          probeVersion: "1.4.0",
+          profileReportBootId: "boot-after-upgrade",
+        },
+        latestOperation: failed,
+      }).currentOperation,
+    ).toBe(failed);
+  });
+
+  it("keeps a failed current view when a newer same-version profile lacks installation bindings", () => {
+    const failed = failedUpgrade({ failureCode: "running_timeout" });
+    const forwardTransitions = createForwardTransitions({
+      probeOperations: memoryProbeOperations([failed]),
+    });
+
+    expect(
+      forwardTransitions.view({
+        acceptedHostProfile: {
+          kind: "authenticated_host_profile",
+          observedAtMs: failed.completedAtMs! + 1,
+          probeVersion: "1.4.0",
+        } as AuthenticatedHostProfileEvidence,
+        latestOperation: failed,
+      }).currentOperation,
+    ).toBe(failed);
   });
 
   it("does not collapse an unresolved Repair into Compatible Upgrade recovery", () => {
@@ -141,9 +174,16 @@ describe("ForwardTransitions", () => {
     expect(
       forwardTransitions.view({
         acceptedHostProfile: {
+          authenticatedProbeId: "probe-7",
+          bootEvidenceBootId: "boot-after-repair",
+          bootEvidenceProbeId: "probe-7",
+          bootProbeAssetBundleVersion: repair.targetProbeVersion,
           kind: "authenticated_host_profile",
           observedAtMs: repair.completedAtMs! + 1,
+          operationId: repair.id,
+          probeAssetBundleVersion: repair.targetProbeVersion,
           probeVersion: repair.targetProbeVersion,
+          profileReportBootId: "boot-after-repair",
         },
         latestOperation: repair,
       }).currentOperation,
@@ -160,17 +200,9 @@ describe("ForwardTransitions", () => {
         kind: "compatible_upgrade",
         hostId: 7,
         sourceProbeVersion: "1.3.0",
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "1.4.0",
       },
       nowMs: 1_725_000_000_000,
-      releaseTransition: {
-        classification: "compatible",
-        sourceProbeSha256: ["b".repeat(64)],
-        sourceProbeVersion: "1.3.0",
-        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-        targetProbeVersion: "1.4.0",
-      },
+      releaseContext: compatibleReleaseContext(),
     });
     if (authorized.kind !== "authorized") throw new Error("not authorized");
 
@@ -204,6 +236,25 @@ describe("ForwardTransitions", () => {
     );
   });
 });
+
+function compatibleReleaseContext(
+  classification: "compatible" | "replacement-required" = "compatible",
+) {
+  return {
+    assetSet: {
+      nonUpgradeableReason: null,
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      version: "1.4.0",
+    },
+    releaseTransition: {
+      classification,
+      sourceProbeSha256: ["b".repeat(64)],
+      sourceProbeVersion: "1.3.0",
+      targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+      targetProbeVersion: "1.4.0",
+    },
+  };
+}
 
 function failedUpgrade(input: { failureCode: string }): ProbeUpgradeRequest {
   return {

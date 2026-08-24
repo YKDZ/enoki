@@ -164,6 +164,10 @@ export const officialHostProfiles = sqliteTable(
     collectorCapabilitiesJson: text(),
     filesystemsJson: text().notNull(),
     networkInterfacesJson: text().notNull(),
+    reportBootId: text(),
+    reportProbeId: text(),
+    reportProfileBundleVersion: text(),
+    forwardOperationId: integer(),
     updatedAtMs: integer().notNull(),
   },
   (table) => [

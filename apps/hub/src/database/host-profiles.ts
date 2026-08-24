@@ -26,18 +26,36 @@ export type SnapshotCollectorStorageAdapter<Payload, View> = {
     snapshotHash: string | null | undefined,
   ) => boolean;
   read: (hostId: number) => View | null;
-  readObservation: (
-    hostId: number,
-  ) => { observedAtMs: number; view: View } | null;
+  readObservation: (hostId: number) => {
+    forwardEvidence: {
+      operationId: number;
+      profileProbeAssetBundleVersion: string | null;
+      reportBootId: string;
+      reportProbeId: string;
+    } | null;
+    observedAtMs: number;
+    view: View;
+  } | null;
   observe: (input: {
+    forwardEvidence?: {
+      operationId: number;
+      reportBootId: string;
+      reportProbeId: string;
+    } | null;
     hostId: number;
     observedAtMs: number;
     snapshotHash: string;
   }) => boolean;
   write: (input: {
+    forwardEvidence?: {
+      operationId: number;
+      reportBootId: string;
+      reportProbeId: string;
+    } | null;
     hostId: number;
     observedIp?: string | null;
     payload: Payload;
+    profileProbeAssetBundleVersion?: string | null;
     snapshotHash: string;
     updatedAtMs: number;
   }) => { changed: boolean; view: View };
@@ -45,9 +63,15 @@ export type SnapshotCollectorStorageAdapter<Payload, View> = {
 
 export type HostProfileSnapshotWrite = {
   collectorId: typeof hostProfileCollectorId;
+  forwardEvidence?: {
+    operationId: number;
+    reportBootId: string;
+    reportProbeId: string;
+  } | null;
   hostId: number;
   observedIp?: string | null;
   payload: ProtoHostProfileSnapshot;
+  profileProbeAssetBundleVersion?: string | null;
   snapshotHash: string;
   updatedAtMs: number;
 };
@@ -56,7 +80,11 @@ export type SnapshotCollectorSnapshotWrite = HostProfileSnapshotWrite;
 
 export type HostProfilePersistenceValues = Omit<
   NewOfficialHostProfileRow,
-  "hostId"
+  | "forwardOperationId"
+  | "hostId"
+  | "reportBootId"
+  | "reportProbeId"
+  | "reportProfileBundleVersion"
 >;
 
 type RegisteredSnapshotCollectorStorageAdapter = Pick<
@@ -218,14 +246,34 @@ export function createHostProfileStorageAdapter(
           .get() ?? null;
 
       return row
-        ? { observedAtMs: row.updatedAtMs, view: viewFromRow(row) }
+        ? {
+            forwardEvidence:
+              row.forwardOperationId !== null &&
+              row.reportBootId &&
+              row.reportProbeId
+                ? {
+                    operationId: row.forwardOperationId,
+                    profileProbeAssetBundleVersion:
+                      row.reportProfileBundleVersion,
+                    reportBootId: row.reportBootId,
+                    reportProbeId: row.reportProbeId,
+                  }
+                : null,
+            observedAtMs: row.updatedAtMs,
+            view: viewFromRow(row),
+          }
         : null;
     },
     observe(input) {
       return Boolean(
         database
           .update(officialHostProfiles)
-          .set({ updatedAtMs: input.observedAtMs })
+          .set({
+            forwardOperationId: input.forwardEvidence?.operationId ?? null,
+            reportBootId: input.forwardEvidence?.reportBootId ?? null,
+            reportProbeId: input.forwardEvidence?.reportProbeId ?? null,
+            updatedAtMs: input.observedAtMs,
+          })
           .where(
             and(
               eq(officialHostProfiles.hostId, input.hostId),
@@ -251,7 +299,14 @@ export function createHostProfileStorageAdapter(
           if (existing.updatedAtMs < input.updatedAtMs) {
             transaction
               .update(officialHostProfiles)
-              .set({ updatedAtMs: input.updatedAtMs })
+              .set({
+                forwardOperationId: input.forwardEvidence?.operationId ?? null,
+                reportBootId: input.forwardEvidence?.reportBootId ?? null,
+                reportProbeId: input.forwardEvidence?.reportProbeId ?? null,
+                reportProfileBundleVersion:
+                  input.profileProbeAssetBundleVersion ?? undefined,
+                updatedAtMs: input.updatedAtMs,
+              })
               .where(eq(officialHostProfiles.hostId, input.hostId))
               .run();
           }
@@ -277,7 +332,12 @@ export function createHostProfileStorageAdapter(
             snapshotHash: input.snapshotHash,
             updatedAtMs: input.updatedAtMs,
           }),
+          forwardOperationId: input.forwardEvidence?.operationId ?? null,
           hostId: input.hostId,
+          reportBootId: input.forwardEvidence?.reportBootId ?? null,
+          reportProbeId: input.forwardEvidence?.reportProbeId ?? null,
+          reportProfileBundleVersion:
+            input.profileProbeAssetBundleVersion ?? null,
         };
 
         if (existing) {

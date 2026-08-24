@@ -46,6 +46,91 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("adds nullable Forward evidence bindings without reclassifying an existing Host Profile", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const currentMigration = "20260824121043_minor_payback";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    const options = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    createHost(legacy, { id: 72, probeId: "probe-legacy-profile" });
+    legacy.sqlite
+      .prepare(
+        `insert into official_host_profiles (
+           managed_host_id, snapshot_hash, payload_json, hostname, os,
+           kernel, architecture, cpu_count, memory_total_bytes, probe_version,
+           filesystems_json, network_interfaces_json, updated_at_ms
+         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        72,
+        "legacy-profile-hash",
+        JSON.stringify({
+          architecture: "x86_64",
+          collectorCapabilities: null,
+          cpuCount: 2,
+          cpuModel: null,
+          filesystems: [],
+          hostname: "legacy-profile",
+          kernel: "6.8.0",
+          memoryTotalBytes: 2_147_483_648,
+          networkInterfaces: [],
+          os: "linux",
+          probeVersion: "0.1.0",
+        }),
+        "legacy-profile",
+        "linux",
+        "6.8.0",
+        "x86_64",
+        2,
+        2_147_483_648,
+        "0.1.0",
+        "[]",
+        "[]",
+        1_725_000_000_000,
+      );
+    legacy.close();
+    await cp(
+      path.resolve("drizzle", currentMigration),
+      path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      options,
+    );
+    expect(migrated.snapshotCollectors.hostProfile.readObservation(72)).toEqual(
+      expect.objectContaining({
+        forwardEvidence: null,
+        observedAtMs: 1_725_000_000_000,
+        view: expect.objectContaining({ probeVersion: "0.1.0" }),
+      }),
+    );
+    migrated.close();
+  });
+
   it("closes an active legacy manual reinstall authority when its signed source receipt is absent", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);

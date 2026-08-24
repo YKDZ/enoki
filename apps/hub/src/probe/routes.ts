@@ -557,6 +557,18 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       const reportedHostProfileHash =
         hostProfileSnapshot?.canonicalHash ?? null;
       const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
+      const latestForwardOperation =
+        services.probeOperations?.findLatestForHost(host.id) ?? null;
+      const hostProfileForwardEvidence =
+        latestForwardOperation?.kind === "probe_upgrade" &&
+        latestForwardOperation.state === "failed" &&
+        latestForwardOperation.id !== null
+          ? {
+              operationId: latestForwardOperation.id,
+              reportBootId: request.bootId,
+              reportProbeId: request.probeId,
+            }
+          : null;
       const knownHostProfileSnapshot =
         services.snapshotCollectors
           ?.get(hostProfileCollectorId)
@@ -819,9 +831,11 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       ) {
         const result = services.snapshotCollectors?.write({
           collectorId: hostProfileCollectorId,
+          forwardEvidence: hostProfileForwardEvidence,
           hostId: host.id,
           observedIp,
           payload: reportedHostProfile,
+          profileProbeAssetBundleVersion: reportedBundleVersion,
           snapshotHash: reportedHostProfileHash,
           updatedAtMs: hostProfileObservedAtMs,
         });
@@ -834,6 +848,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         reportedSnapshotHash
       ) {
         services.snapshotCollectors?.hostProfile.observe({
+          forwardEvidence: hostProfileForwardEvidence,
           hostId: host.id,
           observedAtMs: hostProfileObservedAtMs,
           snapshotHash: reportedSnapshotHash,
@@ -1984,7 +1999,8 @@ function forwardEvidenceFromStatus(input: {
   } | null;
   status: ProtoMessage;
 }): AuthenticatedForwardEvidence | null {
-  if (input.status.running && !input.status.failed) {
+  const status = decodeProbeOperationStatus(input.status);
+  if (status?.kind === "running") {
     return {
       hostId: input.hostId,
       kind: "operation_running",
@@ -1992,16 +2008,12 @@ function forwardEvidenceFromStatus(input: {
       operationId: input.operation.id!,
     };
   }
-  if (
-    input.status.failed &&
-    !input.status.running &&
-    input.status.failed.errorCode
-  ) {
+  if (status?.kind === "failed") {
     return {
-      code: input.status.failed.errorCode,
+      code: status.code,
       hostId: input.hostId,
       kind: "operation_failed",
-      message: input.status.failed.message ?? "",
+      message: status.message,
       observedAtMs: input.nowMs,
       operationId: input.operation.id!,
       repairEligibility: input.repairEligibility,
@@ -2072,24 +2084,25 @@ function applyProbeOperationStatus(
     evidenceSha256: string;
   } | null,
 ) {
-  if (status.running && !status.failed) {
+  const decoded = decodeProbeOperationStatus(status);
+  if (decoded?.kind === "running") {
     return startProbeUpgradeRequest({
       nowMs,
       operation,
     });
   }
 
-  if (status.failed && !status.running && status.failed.errorCode) {
+  if (decoded?.kind === "failed") {
     return failReportedProbeUpgradeRequest({
-      code: status.failed.errorCode,
-      message: status.failed.message ?? "",
+      code: decoded.code,
+      message: decoded.message,
       nowMs,
       operation,
       repairEligibility,
     });
   }
 
-  if (status.succeeded && !status.running && !status.failed) {
+  if (decoded?.kind === "succeeded") {
     return succeedReportedProbeOperation({
       nowMs,
       operation,
@@ -2100,6 +2113,31 @@ function applyProbeOperationStatus(
     error: "probe_operation_status_invalid" as const,
     operation,
   };
+}
+
+function decodeProbeOperationStatus(
+  status: ProtoMessage,
+):
+  | { kind: "running" }
+  | { code: string; kind: "failed"; message: string }
+  | { kind: "succeeded" }
+  | null {
+  const branches = [
+    Boolean(status.running),
+    Boolean(status.failed),
+    Boolean(status.succeeded),
+  ];
+  if (branches.filter(Boolean).length !== 1) return null;
+
+  if (status.running) return { kind: "running" };
+  if (status.failed?.errorCode) {
+    return {
+      code: status.failed.errorCode,
+      kind: "failed",
+      message: status.failed.message ?? "",
+    };
+  }
+  return status.succeeded ? { kind: "succeeded" } : null;
 }
 
 function verifiedRepairEligibilityForStatus(input: {

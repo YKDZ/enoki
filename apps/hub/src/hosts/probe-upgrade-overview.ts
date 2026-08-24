@@ -4,7 +4,11 @@ import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
-import { createForwardTransitions } from "../probe/forward-transitions.js";
+import type { HostRow } from "../database/schema.js";
+import {
+  createForwardTransitions,
+  type AuthenticatedHostProfileEvidence,
+} from "../probe/forward-transitions.js";
 import { persistTimedOutProbeUpgradeRequest } from "./probe-upgrade-timeout.js";
 
 export function probeUpgradeOverviewProblems(input: {
@@ -12,9 +16,9 @@ export function probeUpgradeOverviewProblems(input: {
   hostIds: number[];
   nowMs: number;
   probeOperations?: ProbeOperationRepository;
-  reportedHostProfileObservationForHost: (
+  acceptedHostProfileEvidenceForHost: (
     hostId: number,
-  ) => { observedAtMs: number; view: HostProfileSnapshot } | null;
+  ) => AuthenticatedHostProfileEvidence | null;
   timeouts: Pick<
     ProbeOperationConfig,
     "acceptedTimeoutMs" | "runningTimeoutMs"
@@ -32,8 +36,8 @@ export function probeUpgradeOverviewProblems(input: {
     : null;
 
   for (const hostId of input.hostIds) {
-    const hostProfileObservation =
-      input.reportedHostProfileObservationForHost(hostId);
+    const acceptedHostProfile =
+      input.acceptedHostProfileEvidenceForHost(hostId);
     const latestOperation = latestOperations.get(hostId) ?? null;
     const timedOutOperation = latestOperation
       ? persistTimedOutProbeUpgradeRequest({
@@ -49,17 +53,46 @@ export function probeUpgradeOverviewProblems(input: {
     problems.set(
       hostId,
       forwardTransitions?.view({
-        acceptedHostProfile: hostProfileObservation
-          ? {
-              kind: "authenticated_host_profile",
-              observedAtMs: hostProfileObservation.observedAtMs,
-              probeVersion: hostProfileObservation.view.probeVersion,
-            }
-          : null,
+        acceptedHostProfile,
         latestOperation: timedOutOperation ?? latestOperation,
       }).overviewProblem ?? null,
     );
   }
 
   return problems;
+}
+
+export function acceptedForwardHostProfileEvidence(input: {
+  host: Pick<
+    HostRow,
+    | "probeAssetBundleBootId"
+    | "probeAssetBundleProbeId"
+    | "probeAssetBundleVersion"
+  >;
+  observation: {
+    forwardEvidence: {
+      operationId: number;
+      profileProbeAssetBundleVersion: string | null;
+      reportBootId: string;
+      reportProbeId: string;
+    } | null;
+    observedAtMs: number;
+    view: HostProfileSnapshot;
+  } | null;
+}): AuthenticatedHostProfileEvidence | null {
+  if (!input.observation?.forwardEvidence) return null;
+
+  return {
+    authenticatedProbeId: input.observation.forwardEvidence.reportProbeId,
+    bootEvidenceBootId: input.host.probeAssetBundleBootId,
+    bootEvidenceProbeId: input.host.probeAssetBundleProbeId,
+    bootProbeAssetBundleVersion: input.host.probeAssetBundleVersion,
+    kind: "authenticated_host_profile",
+    observedAtMs: input.observation.observedAtMs,
+    operationId: input.observation.forwardEvidence.operationId,
+    probeAssetBundleVersion:
+      input.observation.forwardEvidence.profileProbeAssetBundleVersion,
+    probeVersion: input.observation.view.probeVersion,
+    profileReportBootId: input.observation.forwardEvidence.reportBootId,
+  };
 }

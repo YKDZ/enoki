@@ -162,6 +162,7 @@ async function sendReport(
     cpuPercent?: number;
     diskAvailable?: boolean;
     hostProfile?: root.enoki.v1.IHostProfileSnapshot;
+    hostProfileAlreadyStored?: boolean;
     sequence?: number;
   } = {},
 ) {
@@ -255,10 +256,14 @@ async function sendReport(
       },
     ],
   });
-  expect(
-    ReportResponse.decode(new Uint8Array(await compactResponse.arrayBuffer()))
-      .requestedSnapshotCollectorIds,
-  ).toEqual(["official.host-profile"]);
+  const requestedSnapshotCollectorIds = ReportResponse.decode(
+    new Uint8Array(await compactResponse.arrayBuffer()),
+  ).requestedSnapshotCollectorIds;
+  if (options.hostProfileAlreadyStored) {
+    expect(requestedSnapshotCollectorIds).toEqual([]);
+    return;
+  }
+  expect(requestedSnapshotCollectorIds).toEqual(["official.host-profile"]);
   await postReport({
     metrics: [],
     snapshots: [
@@ -1035,13 +1040,30 @@ describe("WebSocket live updates", () => {
     expect(JSON.stringify(failedSummaries)).not.toContain("recovery.example");
     expect(JSON.stringify(failedSummaries)).not.toContain("enk_private");
 
+    database.hosts.recordReport(1, {
+      lastReportAtMs: 1_725_000_010_000,
+      probeAssetBundleBootId: "boot-live-summary",
+      probeAssetBundleProbeId: registration.probeId,
+      probeAssetBundleVersion: "0.2.0",
+    });
+    const recoveredHostProfile = {
+      ...baselineHostProfile(),
+      probeAssetBundleVersion: "0.2.0",
+      probeVersion: "v0.2.0",
+    };
+    database.snapshotCollectors.write({
+      collectorId: "official.host-profile",
+      hostId: 1,
+      payload: recoveredHostProfile,
+      profileProbeAssetBundleVersion: "0.2.0",
+      snapshotHash: hashStableHostProfile(recoveredHostProfile),
+      updatedAtMs: 1_725_000_009_600,
+    });
     const recoveredSummaryMessages = collectWebSocketJson(socket);
     await sendReport(baseUrl, registration, {
       bootId: "boot-live-summary",
-      hostProfile: {
-        ...baselineHostProfile(),
-        probeVersion: "v0.2.0",
-      },
+      hostProfile: recoveredHostProfile,
+      hostProfileAlreadyStored: true,
       sequence: 4,
     });
     await expect(recoveredSummaryMessages).resolves.toEqual(

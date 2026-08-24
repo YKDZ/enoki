@@ -12,7 +12,10 @@ import type { MetricsRepository } from "../database/metrics.js";
 import type { ProbeConfigurationRepository } from "../database/probe-configuration.js";
 import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import { hostSummaryResponse } from "./api-response.js";
-import { probeUpgradeOverviewProblems } from "./probe-upgrade-overview.js";
+import {
+  acceptedForwardHostProfileEvidence,
+  probeUpgradeOverviewProblems,
+} from "./probe-upgrade-overview.js";
 
 export type HostSummaryProjection = {
   databaseHost: DatabaseHostSummary;
@@ -81,8 +84,15 @@ export function projectHostSummaries(
     hostIds: databaseHosts.map((host) => host.id),
     nowMs: input.nowMs,
     probeOperations: services.probeOperations,
-    reportedHostProfileObservationForHost: (hostId) =>
-      hostProfileObservations.get(hostId) ?? null,
+    acceptedHostProfileEvidenceForHost: (hostId) => {
+      const host = services.hosts.findActiveById(hostId);
+      return host
+        ? acceptedForwardHostProfileEvidence({
+            host,
+            observation: hostProfileObservations.get(hostId) ?? null,
+          })
+        : null;
+    },
     timeouts: input.timeouts,
     userAgent: input.userAgent,
   });

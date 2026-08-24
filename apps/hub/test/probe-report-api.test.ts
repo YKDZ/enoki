@@ -4185,13 +4185,22 @@ describe("Probe report API", () => {
       kernel: "6.8.0",
       memoryTotalBytes: 2_147_483_648,
       os: "linux",
+      probeAssetBundleVersion: "0.1.0",
       probeVersion: "0.1.0",
     } satisfies root.enoki.v1.IHostProfileSnapshot;
     const snapshotHash = hashStableHostProfile(hostProfile);
-    const send = (sequence: number, snapshot: root.enoki.v1.ISnapshot) => {
+    const send = (
+      sequence: number,
+      snapshot: root.enoki.v1.ISnapshot,
+      options: {
+        bootId?: string;
+        probeAssetBundleVersion?: string;
+      } = {},
+    ) => {
       const body = ReportRequest.encode(
         ReportRequest.create({
-          bootId: "boot-same-hash-observation",
+          bootId: options.bootId ?? "boot-same-hash-observation",
+          probeAssetBundleVersion: options.probeAssetBundleVersion,
           probeConfigurationVersion: "default-v1",
           probeId: registration.probeId,
           sequenceEnd: sequence,
@@ -4207,11 +4216,15 @@ describe("Probe report API", () => {
     };
 
     nowMs = 1_725_000_001_100;
-    const full = await send(1, {
-      collectorId: "official.host-profile",
-      hostProfile,
-      snapshotHash,
-    });
+    const full = await send(
+      1,
+      {
+        collectorId: "official.host-profile",
+        hostProfile,
+        snapshotHash,
+      },
+      { probeAssetBundleVersion: "0.1.0" },
+    );
     expect(full.status).toBe(200);
     expect(
       database.snapshotCollectors.hostProfile.readObservation(host.id)
@@ -4288,6 +4301,29 @@ describe("Probe report API", () => {
       database.snapshotCollectors.hostProfile.readObservation(host.id)
         ?.observedAtMs,
     ).toBe(1_725_000_001_200);
+
+    nowMs = 1_725_000_001_375;
+    const wrongBootProfile = await send(
+      1,
+      {
+        collectorId: "official.host-profile",
+        hostProfile,
+        snapshotHash,
+      },
+      { bootId: "wrong-recovery-boot" },
+    );
+    expect(wrongBootProfile.status).toBe(200);
+    const wrongBootDetail = await app.request(`/api/web/hosts/${host.id}`, {
+      headers: { cookie: ownerSession },
+    });
+    await expect(wrongBootDetail.json()).resolves.toEqual({
+      host: expect.objectContaining({
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
+      }),
+    });
 
     nowMs = 1_725_000_001_400;
     const newCompact = await send(4, {

@@ -1707,7 +1707,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("clears a failed current projection from newer accepted target-version Host Profile evidence", async () => {
+  it("keeps a failed current projection for newer target-version Host Profile data without accepted report bindings", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1800,8 +1800,11 @@ describe("Host detail API", () => {
     expect(recoveredDetailResponse.status).toBe(200);
     await expect(recoveredDetailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
-        probeUpgradeProblem: null,
-        probeUpgradeStatus: null,
+        probeUpgradeProblem: { status: "failed" },
+        probeUpgradeStatus: expect.objectContaining({
+          id: failed.id,
+          state: "failed",
+        }),
       }),
     });
     const recoveredOverviewResponse = await app.request("/api/web/hosts", {
@@ -1812,7 +1815,7 @@ describe("Host detail API", () => {
       hosts: [
         expect.objectContaining({
           id: hostId,
-          probeUpgradeProblem: null,
+          probeUpgradeProblem: { status: "failed" },
         }),
       ],
     });

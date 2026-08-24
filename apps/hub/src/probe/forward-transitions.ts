@@ -8,7 +8,6 @@ import type { ProbeOperationRepository } from "../database/probe-operations.js";
 import {
   evaluateProbeUpgradeEligibility,
   type ProbeUpgradeNonUpgradeableReason,
-  type VerifiedReleaseTransition,
 } from "./asset-set.js";
 import {
   acknowledgeProbeUpgradeRequest,
@@ -18,12 +17,20 @@ import {
   succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
 } from "./operation.js";
+import type { ProbeReleaseContext } from "./release-context.js";
 import { probeUpgradeRecoveryDisposition } from "./upgrade-recovery.js";
 
 export type AuthenticatedHostProfileEvidence = {
+  authenticatedProbeId: string;
+  bootEvidenceBootId: string | null;
+  bootEvidenceProbeId: string | null;
+  bootProbeAssetBundleVersion: string | null;
   kind: "authenticated_host_profile";
   observedAtMs: number;
+  operationId: number;
+  probeAssetBundleVersion: string | null;
   probeVersion: string;
+  profileReportBootId: string;
 };
 
 export type ForwardTransitionView = {
@@ -66,16 +73,14 @@ export type AuthenticatedForwardEvidence =
 export type CompatibleUpgradeIntent = {
   hostId: number;
   kind: "compatible_upgrade";
-  sourceProbeVersion: string;
-  targetAssetSetDigest: string;
-  targetProbeVersion: string;
+  sourceProbeVersion: string | null;
 };
 
 export type ForwardTransitions = {
   authorize(input: {
     intent: CompatibleUpgradeIntent;
     nowMs: number;
-    releaseTransition: VerifiedReleaseTransition | null;
+    releaseContext: ProbeReleaseContext;
     userAgent?: string;
   }):
     | {
@@ -108,13 +113,13 @@ export function createForwardTransitions(input: {
   probeOperations: ProbeOperationRepository;
 }): ForwardTransitions {
   return {
-    authorize({ intent, nowMs, releaseTransition, userAgent }) {
-      const refusal = compatibleUpgradeContractRefusal(
+    authorize({ intent, nowMs, releaseContext, userAgent }) {
+      const authorization = compatibleUpgradeAuthorization(
         intent,
-        releaseTransition,
+        releaseContext,
       );
-      if (refusal) {
-        return { kind: "refused", reason: refusal };
+      if (authorization.kind === "refused") {
+        return authorization;
       }
 
       const result = createProbeUpgradeRequest({
@@ -123,8 +128,8 @@ export function createForwardTransitions(input: {
         hostId: intent.hostId,
         nowMs,
         target: {
-          assetSetDigest: intent.targetAssetSetDigest,
-          version: intent.targetProbeVersion,
+          assetSetDigest: authorization.targetAssetSetDigest,
+          version: authorization.targetProbeVersion,
         },
       });
       if (result.error) {
@@ -309,15 +314,38 @@ function currentForwardOperation(input: {
     operation.state === "failed" &&
     operation.completedAtMs !== null &&
     input.acceptedHostProfile !== null &&
-    input.acceptedHostProfile.observedAtMs > operation.completedAtMs &&
-    normalizeProbeVersion(input.acceptedHostProfile.probeVersion) ===
-      normalizeProbeVersion(operation.targetProbeVersion) &&
+    acceptedHostProfileProvesFailedUpgradeRecovery(
+      input.acceptedHostProfile,
+      operation,
+    ) &&
     probeUpgradeRecoveryDisposition(operation) !== "probe_repair"
   ) {
     return null;
   }
 
   return operation;
+}
+
+function acceptedHostProfileProvesFailedUpgradeRecovery(
+  evidence: AuthenticatedHostProfileEvidence,
+  operation: ProbeUpgradeRequest,
+) {
+  return (
+    operation.id !== null &&
+    operation.completedAtMs !== null &&
+    evidence.operationId === operation.id &&
+    evidence.observedAtMs > operation.completedAtMs &&
+    Boolean(evidence.authenticatedProbeId) &&
+    Boolean(evidence.profileReportBootId) &&
+    evidence.bootEvidenceBootId === evidence.profileReportBootId &&
+    evidence.bootEvidenceProbeId === evidence.authenticatedProbeId &&
+    normalizeProbeVersion(evidence.bootProbeAssetBundleVersion) ===
+      normalizeProbeVersion(operation.targetProbeVersion) &&
+    normalizeProbeVersion(evidence.probeAssetBundleVersion) ===
+      normalizeProbeVersion(operation.targetProbeVersion) &&
+    normalizeProbeVersion(evidence.probeVersion) ===
+      normalizeProbeVersion(operation.targetProbeVersion)
+  );
 }
 
 function probeUpgradeStatus(
@@ -348,24 +376,41 @@ function probeUpgradeStatus(
   };
 }
 
-function normalizeProbeVersion(value: string) {
-  return value.trim().replace(/^v/, "");
+function normalizeProbeVersion(value: string | null | undefined) {
+  return value?.trim().replace(/^v/, "") ?? "";
 }
 
-function compatibleUpgradeContractRefusal(
+function compatibleUpgradeAuthorization(
   intent: CompatibleUpgradeIntent,
-  releaseTransition: VerifiedReleaseTransition | null,
-): ProbeUpgradeNonUpgradeableReason | null {
+  releaseContext: ProbeReleaseContext,
+):
+  | {
+      kind: "authorized";
+      targetAssetSetDigest: string;
+      targetProbeVersion: string;
+    }
+  | { kind: "refused"; reason: ProbeUpgradeNonUpgradeableReason } {
   const eligibility = evaluateProbeUpgradeEligibility({
-    probeAssetSetVersion: intent.targetProbeVersion,
+    probeAssetSetVersion: releaseContext.assetSet.version,
+    probeAssetSetVersionNonUpgradeableReason:
+      releaseContext.assetSet.nonUpgradeableReason,
     probeVersion: intent.sourceProbeVersion,
-    releaseTransition,
+    releaseTransition: releaseContext.releaseTransition,
   });
   if (!eligibility.isUpgradeable) {
-    return eligibility.nonUpgradeableReason;
+    return { kind: "refused", reason: eligibility.nonUpgradeableReason! };
   }
-  if (releaseTransition?.targetAssetSetDigest !== intent.targetAssetSetDigest) {
-    return "probe_release_transition_mismatch" as const;
+  if (
+    !eligibility.currentProbeAssetSetVersion ||
+    !releaseContext.assetSet.targetAssetSetDigest ||
+    releaseContext.releaseTransition?.targetAssetSetDigest !==
+      releaseContext.assetSet.targetAssetSetDigest
+  ) {
+    return { kind: "refused", reason: "probe_release_transition_mismatch" };
   }
-  return null;
+  return {
+    kind: "authorized",
+    targetAssetSetDigest: releaseContext.assetSet.targetAssetSetDigest,
+    targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+  };
 }
