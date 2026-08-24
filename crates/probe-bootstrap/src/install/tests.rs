@@ -859,6 +859,8 @@ mod tests {
         )
         .unwrap();
         assert!(journal.contains("operation_id = \"41\""));
+        assert!(journal.contains("host_id = \"host_01\""));
+        assert!(journal.contains("source_probe_id = \"probe_01\""));
         assert!(journal.contains("phase = \"activated\""));
         assert!(journal.contains("schema_version = 3"));
         assert!(journal.contains("activation_started = true"));
@@ -1022,6 +1024,11 @@ mod tests {
         fs::write(paths.identity(), identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
+        let identity_before_failed_verification = fs::read(paths.identity()).unwrap();
+        let installed_before_failed_verification = upgrade_destinations(&paths)
+            .into_iter()
+            .map(|path| (path.clone(), fs::read(path).unwrap()))
+            .collect::<Vec<_>>();
         let mut target_bundle = bundle().with_test_complete_receipts(5);
         target_bundle.version = "1.2.4".to_owned();
         target_bundle.manifest_sha256 = "d".repeat(64);
@@ -1042,6 +1049,7 @@ mod tests {
             mut invalid_activator,
         ] = std::array::from_fn(|_| component());
         invalid_probe.set_len(4).unwrap();
+        let mut preactivation_systemd = Systemd::default();
         assert_eq!(
             upgrade_current_probe_for_operation(
                 VerifiedUpgradeComponents {
@@ -1057,10 +1065,18 @@ mod tests {
                 &source,
                 &attempt,
                 &paths,
-                &mut Systemd::default(),
+                &mut preactivation_systemd,
             ),
             Err(InstallError::InvalidVerifiedComponent)
         );
+        assert!(preactivation_systemd.calls.is_empty());
+        assert_eq!(
+            fs::read(paths.identity()).unwrap(),
+            identity_before_failed_verification
+        );
+        for (path, contents) in installed_before_failed_verification {
+            assert_eq!(fs::read(path).unwrap(), contents);
+        }
         let journal_path = paths.bootstrap_state().join("probe-upgrade-attempt.toml");
         let admitted = fs::read_to_string(&journal_path).unwrap();
         assert!(admitted.contains("phase = \"admitted\""));

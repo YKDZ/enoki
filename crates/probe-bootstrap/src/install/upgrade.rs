@@ -228,7 +228,7 @@ fn encode_lower_hex(bytes: &[u8]) -> String {
 
 fn decode_bounded_hex(value: &str, max_bytes: usize) -> Result<Vec<u8>, InstallError> {
     if value.is_empty()
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || value.len() > max_bytes.saturating_mul(2)
         || !value
             .bytes()
@@ -666,7 +666,7 @@ fn load_validated_upgrade_attempt(
         .ok_or(InstallError::ExistingResidue)?
         .parse::<u16>()
         .map_err(|_| InstallError::ExistingResidue)?;
-    if !matches!(schema_version, 1 | 2 | 3) {
+    if !matches!(schema_version, 1..=3) {
         return Err(InstallError::ExistingResidue);
     }
     let operation_id = journal_string(&contents, "operation_id")?.to_owned();
@@ -869,17 +869,18 @@ pub struct UpgradeAuthorityConsumption {
 
 #[derive(Debug)]
 pub enum ConsumeBeforeOuterError<E> {
-    Consume(InstallError),
+    Consume,
     Outer { consumed: UpgradeAttempt, error: E },
 }
 
+#[cfg(test)]
 pub fn consume_before_upgrade_outer_checks<T, E>(
     paths: &FixedInstallPaths,
     authority: &UpgradeAuthorityConsumption,
     outer_checks: impl FnOnce(&UpgradeAttempt) -> Result<T, E>,
 ) -> Result<(UpgradeAttempt, T), ConsumeBeforeOuterError<E>> {
     let consumed = consume_probe_upgrade_authority(paths, authority)
-        .map_err(ConsumeBeforeOuterError::Consume)?;
+        .map_err(|_| ConsumeBeforeOuterError::Consume)?;
     match outer_checks(&consumed) {
         Ok(output) => Ok((consumed, output)),
         Err(error) => Err(ConsumeBeforeOuterError::Outer { consumed, error }),
@@ -899,7 +900,7 @@ pub fn consume_signed_before_upgrade_outer_checks<T, E>(
         canonical_authority,
         signature_hex,
     )
-    .map_err(ConsumeBeforeOuterError::Consume)?;
+    .map_err(|_| ConsumeBeforeOuterError::Consume)?;
     match outer_checks(&consumed) {
         Ok(output) => Ok((consumed, output)),
         Err(error) => Err(ConsumeBeforeOuterError::Outer { consumed, error }),
@@ -1082,16 +1083,6 @@ fn trusted_file(path: &Path, uid: u32, mode: u32) -> Result<File, InstallError> 
     Ok(file)
 }
 
-pub fn upgrade_current_probe(
-    components: VerifiedUpgradeComponents<'_>,
-    bundle: &VerifiedBundle,
-    expected_source: &InstalledUpgradeBinding,
-    paths: &FixedInstallPaths,
-    systemd: &mut impl SystemdPort,
-) -> Result<UpgradeCompletion, InstallError> {
-    upgrade_current_probe_inner(components, bundle, expected_source, None, paths, systemd)
-}
-
 pub fn upgrade_current_probe_for_operation(
     components: VerifiedUpgradeComponents<'_>,
     bundle: &VerifiedBundle,
@@ -1168,11 +1159,7 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
             .as_mut()
             .ok_or(InstallError::InvalidVerifiedComponent)?;
         verify_component_lengths(components, self.bundle)?;
-        let prepared = prepare_upgrade(components, self.bundle, self.paths, &actual);
-        let prepared = match prepared {
-            Ok(prepared) => prepared,
-            Err(error) => return Err(error),
-        };
+        let prepared = prepare_upgrade(components, self.bundle, self.paths, &actual)?;
         if let Some(attempt) = self.attempt
             && write_upgrade_attempt(
                 self.paths,
@@ -1712,6 +1699,7 @@ fn begin_upgrade_attempt(
     write_upgrade_attempt(paths, attempt, source, bundle, "admitted", 0, 0)
 }
 
+#[cfg(test)]
 pub fn consume_probe_upgrade_authority(
     paths: &FixedInstallPaths,
     authority: &UpgradeAuthorityConsumption,
@@ -1848,6 +1836,7 @@ fn valid_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+#[cfg(test)]
 fn consumed_authority_sha256(authority: &UpgradeAuthorityConsumption) -> String {
     let canonical = format!(
         "enoki/lifecycle-upgrade-consumption/v2\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",

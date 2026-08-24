@@ -12,7 +12,10 @@ const LIFECYCLE_COMPANION_BINARY: &str =
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
+const COMPATIBLE_UPGRADE: &str =
+    include_str!("../../probe-bootstrap/src/install/compatible_upgrade.rs");
 const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
+const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -162,6 +165,38 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
         assert!(
             !PROBE_RUNTIME.contains(forbidden) && !UPGRADER.contains(forbidden),
             "生产模块不得保留旧 systemd-run launch adapter：{forbidden}",
+        );
+    }
+}
+
+#[test]
+fn compatible_upgrade_enters_a_transition_specific_coordinator() {
+    assert!(
+        UPGRADER.contains("run_compatible_upgrade(request, peer_uid)"),
+        "Compatible Upgrade 的生产入口必须委托给转换专属 coordinator",
+    );
+    assert!(
+        !UPGRADER.contains("fn run_probe_compatible_upgrade("),
+        "Compatible Upgrade coordinator 不得继续内联在通用 upgrader 分派中",
+    );
+    assert!(COMPATIBLE_UPGRADE.contains("struct VerifiedMutationPlan"));
+    assert!(COMPATIBLE_UPGRADE.contains("mod mechanics"));
+    assert!(COMPATIBLE_UPGRADE.contains("SystemSystemd::for_live_upgrade()"));
+    assert!(!BOOTSTRAP_LIFECYCLE.contains("pub trait UpgradeLifecycleEffects"));
+    assert!(!BOOTSTRAP_LIFECYCLE.contains("pub fn execute_upgrade_lifecycle"));
+    for forbidden in [
+        "pub struct VerifiedMutationPlan",
+        "pub(crate) struct VerifiedMutationPlan",
+        "journal_phase",
+        "initial_mode",
+        "retry_mode",
+        "resume_mode",
+        "steps:",
+        "commands:",
+    ] {
+        assert!(
+            !COMPATIBLE_UPGRADE.contains(forbidden),
+            "私有 lifecycle mechanics Interface 不得暴露可选 phase/mode/步骤：{forbidden}",
         );
     }
 }

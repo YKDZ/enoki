@@ -806,18 +806,18 @@ pub enum LifecycleCompletion {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UpgradeCompletion {
+pub(crate) enum UpgradeCompletion {
     Activated,
     RepairRequired,
 }
 
-pub enum UpgradeActivationFailure<E> {
+pub(crate) enum UpgradeActivationFailure<E> {
     Preactivation(E),
     Postactivation(E),
     RecoveryPersistence(E),
 }
 
-pub trait UpgradeLifecycleEffects {
+pub(crate) trait UpgradeLifecycleEffects {
     type Error;
 
     /// 校验 Hub authority、当前 root-owned 安装收据与固定 stage；不得产生安装变更。
@@ -828,7 +828,7 @@ pub trait UpgradeLifecycleEffects {
     fn activate_complete_bundle(&mut self) -> Result<(), UpgradeActivationFailure<Self::Error>>;
 }
 
-pub fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
+pub(crate) fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
     effects: &mut E,
 ) -> Result<UpgradeCompletion, E::Error> {
     LifecyclePlan::for_transition(LifecycleTransition::Upgrade)

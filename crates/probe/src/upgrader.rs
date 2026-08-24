@@ -11,31 +11,29 @@ use std::{
 };
 
 use enoki_probe_bootstrap::{
-    acquisition::{
-        VerifiedUpgradeStageReceipt, open_verified_probe_upgrade_stage,
-        remove_verified_probe_upgrade_stage,
-    },
+    acquisition::remove_verified_probe_upgrade_stage,
     generation::acquire_delegation_generation_at_owned_root,
     handoff::Handoff,
     install::{
-        ConsumeBeforeOuterError, FixedInstallPaths, InstalledUpgradeBinding, SystemSystemd,
-        UpgradeAttempt, UpgradeAuthorityConsumption, UpgradeRecoveryReceipt,
-        VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
-        complete_authorized_probe_repair, consume_probe_repair_authority,
-        consume_signed_before_upgrade_outer_checks, execute_authorized_probe_repair,
-        finalize_probe_upgrade_stage_cleanup, issue_probe_repair_evidence,
-        persist_probe_repair_execution_failure, recover_incomplete_probe_upgrade,
-        resume_probe_repair_intent, upgrade_current_probe_for_operation,
+        FixedInstallPaths, SystemSystemd, complete_authorized_probe_repair,
+        consume_probe_repair_authority, execute_authorized_probe_repair,
+        issue_probe_repair_evidence, persist_probe_repair_execution_failure,
+        resume_probe_repair_intent, run_compatible_upgrade,
     },
     lifecycle::{
         LifecycleCompletion, LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
         LifecycleTransition, RepairAuthorityV1, UninstallCommitPolicy, UninstallLifecycleEffects,
-        UpgradeCompletion, execute_uninstall_lifecycle,
+        execute_uninstall_lifecycle,
     },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
         verify_metadata, verify_outer_metadata,
     },
+};
+
+#[cfg(test)]
+use enoki_probe_bootstrap::install::{
+    finalize_probe_upgrade_stage_cleanup, recover_incomplete_probe_upgrade,
 };
 use flate2::read::GzDecoder;
 use prost::Message;
@@ -1905,7 +1903,7 @@ pub fn run_lifecycle_companion_from_peer(
         return LifecycleResponse::failed("lifecycle.root_required");
     }
     if request.transition() == LifecycleTransition::Upgrade {
-        return run_probe_compatible_upgrade(request, peer_uid);
+        return run_compatible_upgrade(request, peer_uid);
     }
     let metadata = match read_trusted_probe_install_metadata(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
@@ -2013,196 +2011,6 @@ fn probe_repair_lifecycle_response(
     }
 }
 
-fn run_probe_compatible_upgrade(
-    request: &LifecycleRequest,
-    peer_uid: Option<u32>,
-) -> LifecycleResponse {
-    let LifecycleRequestAuthority::HubUpgrade {
-        hub_origin,
-        host_id,
-        probe_id,
-        operation_id,
-        source_bundle_version,
-        source_install_state_sha256,
-        source_manifest_sha256,
-        target_bundle_version,
-        target_asset_set_digest,
-        target_manifest_sha256,
-        verified_stage_sha256,
-        expires_at_ms,
-        authority_signature,
-    } = request.authority()
-    else {
-        return LifecycleResponse::failed("lifecycle.invalid_authority");
-    };
-    let Some(peer_uid) = peer_uid else {
-        return LifecycleResponse::failed("lifecycle.invalid_authority");
-    };
-    let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => duration.as_millis(),
-        Err(_) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
-    };
-    if now_ms > u128::from(*expires_at_ms) {
-        return LifecycleResponse::failed("lifecycle.invalid_authority");
-    }
-    let canonical_authority = match request.canonical_upgrade_authority_bytes() {
-        Ok(canonical) => canonical,
-        Err(_) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
-    };
-    let paths = FixedInstallPaths::production();
-    let authority = UpgradeAuthorityConsumption {
-        operation_id: operation_id.clone(),
-        stage_owner_uid: peer_uid,
-        hub_origin: hub_origin.clone(),
-        host_id: host_id.clone(),
-        probe_id: probe_id.clone(),
-        source_bundle_version: source_bundle_version.clone(),
-        source_install_state_sha256: source_install_state_sha256.clone(),
-        source_manifest_sha256: source_manifest_sha256.clone(),
-        target_bundle_version: target_bundle_version.clone(),
-        target_asset_set_digest: target_asset_set_digest.clone(),
-        target_manifest_sha256: target_manifest_sha256.clone(),
-        verified_stage_sha256: verified_stage_sha256.clone(),
-    };
-    let receipt = VerifiedUpgradeStageReceipt {
-        operation_id: operation_id.clone(),
-        target_asset_set_digest: target_asset_set_digest.clone(),
-        target_manifest_sha256: target_manifest_sha256.clone(),
-        target_version: target_bundle_version.clone(),
-        verified_stage_sha256: verified_stage_sha256.clone(),
-    };
-    let outer = consume_signed_before_upgrade_outer_checks(
-        &paths,
-        &authority,
-        &canonical_authority,
-        authority_signature,
-        |_| {
-            let metadata = read_trusted_probe_install_metadata(
-                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-                None,
-            )
-            .map_err(|_| "lifecycle.install_state_invalid")?;
-            let identity = read_trusted_probe_install_preflight(
-                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-                None,
-            )
-            .map_err(|_| "lifecycle.identity_invalid")?;
-            if hub_origin != &metadata.hub_url
-                || metadata.schema_version != 5
-                || identity.probe_id != *probe_id
-                || metadata.install_state_sha256.as_deref() != Some(source_install_state_sha256)
-                || metadata.target_manifest_sha256.as_deref() != Some(source_manifest_sha256)
-                || metadata.bundle_version.as_deref() != Some(source_bundle_version)
-            {
-                return Err("lifecycle.authority_mismatch");
-            }
-            let mut stage = open_verified_probe_upgrade_stage(&receipt, peer_uid)
-                .map_err(|_| "lifecycle.upgrade_stage_invalid")?;
-            stage
-                .persist_generation_before_activation()
-                .map_err(|_| "lifecycle.upgrade_stage_invalid")?;
-            Ok((
-                stage,
-                InstalledUpgradeBinding {
-                    hub_origin: metadata.hub_url.clone(),
-                    probe_id: probe_id.clone(),
-                    source_bundle_version: source_bundle_version.clone(),
-                    source_install_state_sha256: source_install_state_sha256.clone(),
-                    source_manifest_sha256: source_manifest_sha256.clone(),
-                },
-            ))
-        },
-    );
-    let (consumed, (mut stage, expected_source)) = match outer {
-        Ok(ready) => ready,
-        Err(ConsumeBeforeOuterError::Consume(_)) => {
-            return LifecycleResponse::failed("lifecycle.upgrade_authority_consumed");
-        }
-        Err(ConsumeBeforeOuterError::Outer { consumed, error }) => {
-            return fail_consumed_upgrade_before_activation(
-                &paths,
-                &consumed,
-                operation_id,
-                peer_uid,
-                error,
-            );
-        }
-    };
-    let mut systemd = SystemSystemd::for_live_upgrade();
-    let result = upgrade_current_probe_for_operation(
-        VerifiedUpgradeComponents {
-            probe: &mut stage.probe,
-            observation_runtime: &mut stage.observation_runtime,
-            system_state_provider: &mut stage.system_state_provider,
-            disk_health_provider: &mut stage.disk_health_provider,
-            lifecycle_companion: &mut stage.lifecycle_companion,
-            bootstrap_acquirer: &mut stage.bootstrap_acquirer,
-            bootstrap_activator: &mut stage.bootstrap_activator,
-        },
-        &stage.bundle,
-        &expected_source,
-        &consumed,
-        &paths,
-        &mut systemd,
-    );
-    match result {
-        Ok(UpgradeCompletion::Activated) => {
-            let receipt = UpgradeRecoveryReceipt {
-                operation_id: operation_id.clone(),
-                probe_id: probe_id.clone(),
-                stage_owner_uid: peer_uid,
-                source_bundle_version: source_bundle_version.clone(),
-                target_bundle_version: target_bundle_version.clone(),
-                activated: true,
-            };
-            if remove_verified_probe_upgrade_stage(operation_id, peer_uid).is_ok()
-                && finalize_probe_upgrade_stage_cleanup(&FixedInstallPaths::production(), &receipt)
-                    .is_ok()
-            {
-                LifecycleResponse::succeeded()
-            } else {
-                LifecycleResponse::failed("lifecycle.upgrade_repair_required")
-            }
-        }
-        Ok(UpgradeCompletion::RepairRequired) => {
-            LifecycleResponse::failed("lifecycle.upgrade_repair_required")
-        }
-        Err(_) => {
-            let paths = FixedInstallPaths::production();
-            let recovered = recover_incomplete_probe_upgrade(&paths, &mut systemd);
-            if let Ok(Some(receipt)) = recovered
-                && !receipt.activated
-                && remove_verified_probe_upgrade_stage(
-                    &receipt.operation_id,
-                    receipt.stage_owner_uid,
-                )
-                .is_ok()
-                && finalize_probe_upgrade_stage_cleanup(&paths, &receipt).is_ok()
-            {
-                LifecycleResponse::failed("lifecycle.upgrade_failed_before_activation")
-            } else {
-                LifecycleResponse::failed("lifecycle.upgrade_repair_required")
-            }
-        }
-    }
-}
-
-fn fail_consumed_upgrade_before_activation(
-    paths: &FixedInstallPaths,
-    consumed: &UpgradeAttempt,
-    operation_id: &str,
-    stage_owner_uid: u32,
-    failure_code: &'static str,
-) -> LifecycleResponse {
-    if remove_verified_probe_upgrade_stage(operation_id, stage_owner_uid).is_ok()
-        && abort_consumed_probe_upgrade_authority(paths, consumed).is_ok()
-    {
-        LifecycleResponse::failed(failure_code)
-    } else {
-        LifecycleResponse::failed("lifecycle.upgrade_repair_required")
-    }
-}
-
 #[cfg(test)]
 fn verify_lifecycle_upgrade_authority(
     request: &LifecycleRequest,
@@ -2246,7 +2054,7 @@ fn verify_lifecycle_upgrade_authority(
 
 fn decode_lower_hex(value: &str) -> Option<Vec<u8>> {
     if value.is_empty()
-        || value.len() % 2 != 0
+        || !value.len().is_multiple_of(2)
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
@@ -10827,12 +10635,16 @@ printf '%s\n' '{}'
         let runtime = b"new runtime".to_vec();
         let provider = b"new provider".to_vec();
         let disk_health_provider = b"new disk health provider".to_vec();
+        let lifecycle_companion = b"new lifecycle companion".to_vec();
         let acquirer = b"acquirer".to_vec();
-        let target_units =
-            enoki_probe_bootstrap::install::fixed_observation_unit_contents().map(|mut unit| {
+        let target_units = enoki_probe_bootstrap::install::fixed_observation_unit_contents()
+            .into_iter()
+            .take(6)
+            .map(|mut unit| {
                 unit.extend_from_slice(b"# target-version-integration\n");
                 unit
-            });
+            })
+            .collect::<Vec<_>>();
         let mut integration = b"enoki.observation-integration.v1\n".to_vec();
         for unit in &target_units {
             integration.extend_from_slice(unit.len().to_string().as_bytes());
@@ -10847,7 +10659,7 @@ printf '%s\n' '{}'
         )
         .into_bytes();
         let bundle_manifest = format!(
-            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v3\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":{},\"version\":\"{version}\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{target}\",\"version\":\"{version}\"}}\n",
             hex_sha256(&acquirer),
             acquirer.len(),
             hex_sha256(&activator),
@@ -10860,6 +10672,8 @@ printf '%s\n' '{}'
             provider.len(),
             hex_sha256(&disk_health_provider),
             disk_health_provider.len(),
+            hex_sha256(&lifecycle_companion),
+            lifecycle_companion.len(),
         )
         .into_bytes();
         let gzip = GzEncoder::new(Vec::new(), Compression::default());
@@ -10870,6 +10684,7 @@ printf '%s\n' '{}'
             ("enoki-observation-runtime", runtime),
             ("enoki-cpu-resource-provider", provider),
             ("enoki-disk-health-resource-provider", disk_health_provider),
+            ("enoki-probe-lifecycle-companion", lifecycle_companion),
             ("bootstrap/enoki-probe-bootstrap-acquire", acquirer),
             ("bootstrap/enoki-probe-bootstrap-activate", activator),
         ] {

@@ -2452,7 +2452,7 @@ fn probe_runtime_acknowledges_and_reports_probe_upgrade_operation_status() {
         ProbeOperationStatus {
             status: Some(Status::Failed(failed)),
             ..
-        } if failed.error_code == "unsupported_installation"
+        } if failed.error_code == "lifecycle.install_receipt_missing"
     ));
     assert!(reports[2].operation_statuses.is_empty());
 }

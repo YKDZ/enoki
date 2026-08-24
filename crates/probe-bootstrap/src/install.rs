@@ -6,6 +6,7 @@
 
 mod account;
 mod command;
+mod compatible_upgrade;
 mod filesystem;
 mod systemd;
 mod transaction;
@@ -1564,19 +1565,24 @@ fn single_systemd_value(bytes: &[u8]) -> Result<&str, InstallError> {
 pub use account::SystemAccounts;
 #[cfg(test)]
 use account::create_static_service_identity_with_commands;
+pub use compatible_upgrade::run_compatible_upgrade;
 use filesystem::*;
 pub use systemd::SystemSystemd;
+pub(crate) use upgrade::{
+    ConsumeBeforeOuterError, InstalledUpgradeBinding, UpgradeAttempt, UpgradeAuthorityConsumption,
+    VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
+    consume_signed_before_upgrade_outer_checks, inspect_installed_probe_for_upgrade,
+    upgrade_current_probe_for_operation,
+};
 pub use upgrade::{
-    ConsumeBeforeOuterError, ConsumedRepairAuthority, InstalledUpgradeBinding, RepairIntentState,
-    SignedRepairEligibility, SignedRepairEvidence, UpgradeAttempt, UpgradeAuthorityConsumption,
-    UpgradeRecoveryReceipt, VerifiedUpgradeComponents, abort_consumed_probe_upgrade_authority,
-    complete_authorized_probe_repair, consume_before_upgrade_outer_checks,
-    consume_probe_repair_authority, consume_probe_upgrade_authority,
-    consume_signed_before_upgrade_outer_checks, execute_authorized_probe_repair,
-    finalize_probe_upgrade_stage_cleanup, inspect_installed_probe_for_upgrade,
+    ConsumedRepairAuthority, RepairIntentState, SignedRepairEligibility, SignedRepairEvidence,
+    UpgradeRecoveryReceipt, complete_authorized_probe_repair, consume_probe_repair_authority,
+    execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
     issue_probe_repair_eligibility, issue_probe_repair_evidence, mark_probe_repair_unresolved,
     persist_probe_repair_execution_failure, recover_incomplete_probe_upgrade,
-    resume_probe_repair_intent, upgrade_current_probe, upgrade_current_probe_for_operation,
+    resume_probe_repair_intent,
 };
+#[cfg(test)]
+use upgrade::{consume_before_upgrade_outer_checks, consume_probe_upgrade_authority};
 
 include!("install/tests.rs");
