@@ -1,4 +1,4 @@
-//! Compatible Upgrade 的 Host coordinator 与私有 lifecycle mechanics kernel。
+//! 兼容升级的主机协调器与私有生命周期机制内核。
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,8 +20,8 @@ use super::{
     recover_incomplete_probe_upgrade, upgrade_current_probe_for_operation,
 };
 
-/// Compatible Upgrade 的封闭生产 Interface。调用者只交付 Hub 的类型化请求与
-/// Unix peer 身份，不能选择路径、unit、命令、权限、phase 或恢复模式。
+/// 兼容升级的封闭生产接口。调用者只交付 Hub 的类型化请求与
+/// Unix 对等方身份，不能选择路径、单元、命令、权限、阶段或恢复模式。
 pub fn run_compatible_upgrade(
     request: &LifecycleRequest,
     peer_uid: Option<u32>,
