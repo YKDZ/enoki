@@ -1707,7 +1707,7 @@ describe("Host detail API", () => {
     database.close();
   });
 
-  it("keeps a failed Probe Upgrade current despite newer target-version Host Profile evidence", async () => {
+  it("clears a failed current projection from newer accepted target-version Host Profile evidence", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -1800,10 +1800,8 @@ describe("Host detail API", () => {
     expect(recoveredDetailResponse.status).toBe(200);
     await expect(recoveredDetailResponse.json()).resolves.toEqual({
       host: expect.objectContaining({
-        probeUpgradeStatus: expect.objectContaining({
-          id: failed.id,
-          state: "failed",
-        }),
+        probeUpgradeProblem: null,
+        probeUpgradeStatus: null,
       }),
     });
     const recoveredOverviewResponse = await app.request("/api/web/hosts", {
@@ -1814,7 +1812,7 @@ describe("Host detail API", () => {
       hosts: [
         expect.objectContaining({
           id: hostId,
-          probeUpgradeProblem: { status: "failed" },
+          probeUpgradeProblem: null,
         }),
       ],
     });
@@ -1992,6 +1990,7 @@ describe("Host detail API", () => {
         probeVersion: "v0.2.0",
         probeUpgradeStatus: expect.objectContaining({
           id: created.probeUpgradeRequest.id,
+          kind: "probe_upgrade",
           state: "running",
           targetProbeVersion: "0.2.0",
         }),
@@ -2079,6 +2078,7 @@ describe("Host detail API", () => {
             recoveryDisposition: "retry_probe_upgrade",
           },
           id: created.probeUpgradeRequest.id,
+          kind: "probe_upgrade",
           runningAtMs: null,
           state: "failed",
           targetProbeVersion: "0.2.0",
@@ -2279,6 +2279,7 @@ describe("Host detail API", () => {
         createdAtMs: 1_725_000_000_000,
         failure: null,
         id: created.probeUpgradeRequest.id,
+        kind: "probe_upgrade",
         runningAtMs: null,
         state: "canceled",
         targetProbeVersion: "0.2.0",

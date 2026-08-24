@@ -46,6 +46,7 @@ function app(
         };
       },
       inspectPending: () => null,
+      lifecycleAuthorityTokenHashForHost: () => null,
       readStatus: () => null,
       registerNewHost: () => null,
       rejectInstallation: () => null,

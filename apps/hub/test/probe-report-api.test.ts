@@ -3501,6 +3501,9 @@ describe("Probe report API", () => {
         }),
       ),
     );
+    if (!renewed || !concurrentRenewed) {
+      throw new Error("Expected both concurrent repair responses.");
+    }
     expect(renewed.status).toBe(200);
     expect(concurrentRenewed.status).toBe(200);
     const renewedBody = (await renewed.json()) as {

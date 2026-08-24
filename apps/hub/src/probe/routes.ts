@@ -44,6 +44,10 @@ import {
 import { deriveObservedIp, type TrustedProxyCidr } from "../network.js";
 import { defaultProbeConfiguration } from "./configuration.js";
 import {
+  createForwardTransitions,
+  type AuthenticatedForwardEvidence,
+} from "./forward-transitions.js";
+import {
   canonicalLifecycleUpgradeAuthority,
   deriveLifecycleAuthorityKey,
   signLifecycleUpgradeAuthority,
@@ -61,7 +65,6 @@ import {
   hasUnavailableProbeUpgradeTarget,
   succeedReportedProbeOperation,
   startProbeUpgradeRequest,
-  succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
 } from "./operation.js";
 import { readProbeReleaseContextFromDirectory } from "./release-context.js";
@@ -411,18 +414,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const reportReceivedAtMs = now();
-    const prevalidatedOperations = planProbeOperationReportApplication({
-      acknowledgements: request.operationAcknowledgements ?? [],
-      hostId: host.id,
-      nowMs: reportReceivedAtMs,
-      probeId: host.probeId,
-      services,
-      statuses: request.operationStatuses ?? [],
-    });
-    if (prevalidatedOperations.error) {
-      return probeJsonError(prevalidatedOperations.error, 400);
-    }
-
     const ingestReport = (reportServices: ProbeRouteServices) => {
       const services = reportServices;
       const transactionalHost = services.hosts.findActiveById(host.id);
@@ -1846,6 +1837,7 @@ function planProbeOperationReportApplication(input: {
 
   const stagedOperations = new Map<number, ProbeUpgradeRequest>();
   const operationsToUpdate = new Map<number, ProbeUpgradeRequest>();
+  const forwardEvidence: AuthenticatedForwardEvidence[] = [];
 
   for (const acknowledgement of input.acknowledgements) {
     const operation = findReportableProbeOperation(
@@ -1863,6 +1855,16 @@ function planProbeOperationReportApplication(input: {
     }
 
     if (isClosedProbeOperation(operation)) {
+      continue;
+    }
+
+    if (operation.kind !== "probe_uninstall") {
+      forwardEvidence.push({
+        hostId: input.hostId,
+        kind: "operation_accepted",
+        observedAtMs: input.nowMs,
+        operationId: operation.id!,
+      });
       continue;
     }
 
@@ -1909,6 +1911,24 @@ function planProbeOperationReportApplication(input: {
       status,
     });
 
+    if (operation.kind !== "probe_uninstall") {
+      const evidence = forwardEvidenceFromStatus({
+        hostId: input.hostId,
+        nowMs: input.nowMs,
+        operation,
+        repairEligibility,
+        status,
+      });
+      if (!evidence) {
+        return {
+          error: "malformed_probe_operation_status",
+          operations: [],
+        };
+      }
+      forwardEvidence.push(evidence);
+      continue;
+    }
+
     if (isClosedProbeOperation(operation) && !repairEligibility) {
       continue;
     }
@@ -1936,10 +1956,58 @@ function planProbeOperationReportApplication(input: {
     }
   }
 
+  if (forwardEvidence.length > 0) {
+    const reconciled = createForwardTransitions({
+      probeOperations: input.services.probeOperations!,
+    }).reconcileAuthenticatedEvidence({ evidence: forwardEvidence });
+    if (reconciled.kind === "refused") {
+      return {
+        error: "malformed_probe_operation_status",
+        operations: [],
+      };
+    }
+  }
+
   return {
     error: null,
     operations: [...operationsToUpdate.values()],
   };
+}
+
+function forwardEvidenceFromStatus(input: {
+  hostId: number;
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+  repairEligibility?: {
+    evidenceJson: string;
+    evidenceSha256: string;
+  } | null;
+  status: ProtoMessage;
+}): AuthenticatedForwardEvidence | null {
+  if (input.status.running && !input.status.failed) {
+    return {
+      hostId: input.hostId,
+      kind: "operation_running",
+      observedAtMs: input.nowMs,
+      operationId: input.operation.id!,
+    };
+  }
+  if (
+    input.status.failed &&
+    !input.status.running &&
+    input.status.failed.errorCode
+  ) {
+    return {
+      code: input.status.failed.errorCode,
+      hostId: input.hostId,
+      kind: "operation_failed",
+      message: input.status.failed.message ?? "",
+      observedAtMs: input.nowMs,
+      operationId: input.operation.id!,
+      repairEligibility: input.repairEligibility,
+    };
+  }
+  return null;
 }
 
 function stageProbeOperationUpdate(
@@ -2117,20 +2185,25 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
     return;
   }
 
-  const succeeded = succeedProbeUpgradeRequestFromHostProfile({
-    authenticatedProbeId: input.authenticatedProbeId,
-    bootEvidenceBootId: input.bootEvidenceBootId,
-    bootEvidenceProbeId: input.bootEvidenceProbeId,
-    bootProbeAssetBundleVersion: input.bootProbeAssetBundleVersion,
-    hostProfile: input.hostProfile,
-    nowMs: input.nowMs,
-    operation: active,
-    profileReportBootId: input.profileReportBootId,
+  if (active.id === null) return;
+  createForwardTransitions({
+    probeOperations: input.services.probeOperations!,
+  }).reconcileAuthenticatedEvidence({
+    evidence: [
+      {
+        authenticatedProbeId: input.authenticatedProbeId,
+        bootEvidenceBootId: input.bootEvidenceBootId,
+        bootEvidenceProbeId: input.bootEvidenceProbeId,
+        bootProbeAssetBundleVersion: input.bootProbeAssetBundleVersion,
+        hostId: input.hostId,
+        hostProfile: input.hostProfile,
+        kind: "host_profile_terminal",
+        observedAtMs: input.nowMs,
+        operationId: active.id,
+        profileReportBootId: input.profileReportBootId,
+      },
+    ],
   });
-
-  if (succeeded) {
-    input.services.probeOperations?.updateProbeUpgradeRequest(succeeded);
-  }
 }
 
 function parseProbeOperationId(operationId: string | null | undefined) {

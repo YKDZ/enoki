@@ -2,7 +2,10 @@ import { and, desc, eq, gt, inArray, lte, notExists, or } from "drizzle-orm";
 import type { NodeSQLiteDatabase } from "drizzle-orm/node-sqlite";
 import { alias } from "drizzle-orm/sqlite-core";
 
-import type { ProbeUpgradeRequest } from "../probe/operation.js";
+import type {
+  ProbeUpgradeRequest,
+  ProbeUpgradeRequestLifecycleEvent,
+} from "../probe/operation.js";
 import {
   probeOperations,
   type NewProbeOperationRow,
@@ -23,6 +26,9 @@ export type ProbeOperationRepository = {
   ) => ProbeUpgradeRequest | null;
   createProbeUpgradeRequest: (
     operation: ProbeUpgradeRequest,
+  ) => ProbeUpgradeRequest;
+  commitProbeUpgradeAuthorization: (
+    events: ProbeUpgradeRequestLifecycleEvent[],
   ) => ProbeUpgradeRequest;
   findActiveForHost: (hostId: number) => ProbeUpgradeRequest | null;
   findById: (id: number) => ProbeUpgradeRequest | null;
@@ -82,6 +88,47 @@ export function createProbeOperationRepository(
       }
 
       return rowToProbeUpgradeRequest(row);
+    },
+    commitProbeUpgradeAuthorization(events) {
+      if (events.length === 0) {
+        throw new Error("A reused Probe Upgrade Request is already persisted.");
+      }
+      return database.transaction((transaction) => {
+        let authorized: ProbeUpgradeRequest | null = null;
+        for (const event of events) {
+          if (event.action === "superseded") {
+            if (event.operation.id === null) {
+              throw new Error("Cannot supersede an unsaved Probe Operation.");
+            }
+            const row = transaction
+              .update(probeOperations)
+              .set(probeUpgradeRequestToRow(event.operation))
+              .where(eq(probeOperations.id, event.operation.id))
+              .returning()
+              .get();
+            if (!row) {
+              throw new Error("Failed to supersede Probe Upgrade Request.");
+            }
+            continue;
+          }
+
+          const row = transaction
+            .insert(probeOperations)
+            .values(probeUpgradeRequestToRow(event.operation))
+            .returning()
+            .get();
+          if (!row) {
+            throw new Error("Failed to create Probe Upgrade Request.");
+          }
+          authorized = rowToProbeUpgradeRequest(row);
+        }
+        if (!authorized) {
+          throw new Error(
+            "Probe Upgrade authorization did not create a request.",
+          );
+        }
+        return authorized;
+      }) as ProbeUpgradeRequest;
     },
     findActiveForHost(hostId) {
       const row =

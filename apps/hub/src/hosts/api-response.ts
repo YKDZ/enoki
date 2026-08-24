@@ -4,8 +4,6 @@ import type {
 } from "@enoki/api-client";
 
 import type { HostSummary as DatabaseHostSummary } from "../database/hosts.js";
-import type { ProbeUpgradeRequest } from "../probe/operation.js";
-import { currentProbeUpgradeProblem } from "../probe/upgrade-recovery.js";
 
 export function hostSummaryResponse(
   host: DatabaseHostSummary,
@@ -76,22 +74,6 @@ export function hostSummaryResponse(
     probeVersion: host.probeVersion,
     status: host.status,
     system: host.system,
-  };
-}
-
-export function probeUpgradeOverviewProblem(input: {
-  operation: ProbeUpgradeRequest | null;
-  reportedProbeVersion?: string | null;
-  reportedProbeVersionObservedAtMs: number | null | undefined;
-}): ProbeUpgradeOverviewProblem {
-  const currentProblem = currentProbeUpgradeProblem(input);
-
-  if (!currentProblem) {
-    return null;
-  }
-
-  return {
-    status: currentProblem.state === "failed" ? "failed" : "in_progress",
   };
 }
 

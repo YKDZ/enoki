@@ -217,15 +217,17 @@ it("keeps successful per-Host requests when one repository creation fails and fi
   const firstHost = createHost(fixture.database, 1, "0.1.0");
   const secondHost = createHost(fixture.database, 2, "0.1.0");
   const thirdHost = createHost(fixture.database, 3, "0.1.0");
-  const createRequest =
-    fixture.database.probeOperations.createProbeUpgradeRequest.bind(
+  const commitAuthorization =
+    fixture.database.probeOperations.commitProbeUpgradeAuthorization.bind(
       fixture.database.probeOperations,
     );
-  fixture.database.probeOperations.createProbeUpgradeRequest = (operation) => {
-    if (operation.hostId === secondHost.id) {
+  fixture.database.probeOperations.commitProbeUpgradeAuthorization = (
+    events,
+  ) => {
+    if (events.some(({ operation }) => operation.hostId === secondHost.id)) {
       throw new Error("injected per-Host failure");
     }
-    return createRequest(operation);
+    return commitAuthorization(events);
   };
 
   const partial = await postUpgradeAll(fixture);
@@ -244,7 +246,8 @@ it("keeps successful per-Host requests when one repository creation fails and fi
     fixture.database.probeOperations.findLatestForHost(thirdHost.id),
   ).toEqual(expect.objectContaining({ state: "pending" }));
 
-  fixture.database.probeOperations.createProbeUpgradeRequest = createRequest;
+  fixture.database.probeOperations.commitProbeUpgradeAuthorization =
+    commitAuthorization;
   const filled = await postUpgradeAll(fixture);
   await expect(filled.json()).resolves.toEqual({
     failed: 0,

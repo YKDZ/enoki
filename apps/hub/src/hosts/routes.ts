@@ -26,11 +26,11 @@ import {
 } from "../live-updates.js";
 import { defaultProbeConfiguration } from "../probe-configuration/model.js";
 import { evaluateProbeUpgradeEligibility } from "../probe/asset-set.js";
+import { createForwardTransitions } from "../probe/forward-transitions.js";
 import { manualProbeReinstallPolicy } from "../probe/manual-reinstall-policy.js";
 import {
   cancelProbeUpgradeRequest,
   createProbeUninstallRequest,
-  createProbeUpgradeRequest,
   isActiveProbeOperation,
   type ProbeUpgradeRequest,
 } from "../probe/operation.js";
@@ -38,14 +38,8 @@ import {
   readProbeReleaseContextFromDirectory,
   unavailableProbeReleaseContext,
 } from "../probe/release-context.js";
-import {
-  currentProbeUpgradeProblem,
-  probeUpgradeRecoveryDisposition,
-} from "../probe/upgrade-recovery.js";
-import {
-  hostSummaryResponse,
-  probeUpgradeOverviewProblem,
-} from "./api-response.js";
+import { probeUpgradeRecoveryDisposition } from "../probe/upgrade-recovery.js";
+import { hostSummaryResponse } from "./api-response.js";
 import { broadcastHostSummaryHint } from "./live-summary.js";
 import {
   defaultProbeOperationTimeouts,
@@ -106,6 +100,10 @@ export function createHostRoutes(services: HostRouteServices) {
       skipped: 0,
       submitted: 0,
     };
+    const forwardTransitions = createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations,
+    });
 
     for (const host of activeHosts) {
       const eligibility = evaluateProbeUpgradeEligibility({
@@ -118,11 +116,16 @@ export function createHostRoutes(services: HostRouteServices) {
       const hostProfileObservation =
         services.snapshotCollectors?.hostProfile.readObservation(host.id) ??
         null;
-      const currentProblem = currentProbeUpgradeProblem({
-        operation: latestOperation,
-        reportedProbeVersion: hostProfileObservation?.view.probeVersion,
-        reportedProbeVersionObservedAtMs: hostProfileObservation?.observedAtMs,
-      });
+      const currentProblem = forwardTransitions.view({
+        acceptedHostProfile: hostProfileObservation
+          ? {
+              kind: "authenticated_host_profile",
+              observedAtMs: hostProfileObservation.observedAtMs,
+              probeVersion: hostProfileObservation.view.probeVersion,
+            }
+          : null,
+        latestOperation,
+      }).currentOperation;
 
       if (
         !eligibility.isUpgradeable ||
@@ -135,41 +138,30 @@ export function createHostRoutes(services: HostRouteServices) {
         continue;
       }
 
-      const result = createProbeUpgradeRequest({
-        activeOperation: null,
-        currentProbeVersion: eligibility.currentProbeVersion,
-        hostId: host.id,
-        nowMs: now(),
-        target: {
-          assetSetDigest: assetSet.targetAssetSetDigest,
-          version: eligibility.currentProbeAssetSetVersion,
-        },
-      });
-
-      let created: ProbeUpgradeRequest;
+      let result: ReturnType<typeof forwardTransitions.authorize>;
       try {
-        created = services.probeOperations.createProbeUpgradeRequest(
-          result.operation,
-        );
+        result = forwardTransitions.authorize({
+          intent: {
+            hostId: host.id,
+            kind: "compatible_upgrade",
+            sourceProbeVersion: eligibility.currentProbeVersion!,
+            targetAssetSetDigest: assetSet.targetAssetSetDigest,
+            targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+          },
+          nowMs: now(),
+          releaseTransition,
+          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+        });
       } catch {
         response.failed += 1;
         continue;
       }
+      if (result.kind === "refused") {
+        response.skipped += 1;
+        continue;
+      }
 
       response.submitted += 1;
-      services.audit?.record({
-        action: "probe_upgrade_request.create",
-        actor: "owner",
-        details: {
-          hostId: host.id,
-          targetProbeVersion: created.targetProbeVersion,
-        },
-        occurredAtMs: now(),
-        outcome: "success",
-        subjectId: String(created.id),
-        subjectType: "probe_upgrade_request",
-        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
-      });
       broadcastHostSummaryHint(services, {
         hostId: host.id,
         nowMs: now(),
@@ -230,14 +222,24 @@ export function createHostRoutes(services: HostRouteServices) {
       userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
 
-    const currentOperation = currentProbeUpgradeProblem({
-      operation:
-        timedOutOperation ??
-        services.probeOperations?.findLatestForHost(hostId) ??
-        null,
-      reportedProbeVersion: hostProfile?.probeVersion,
-      reportedProbeVersionObservedAtMs: hostProfileObservation?.observedAtMs,
-    });
+    const forwardView = services.probeOperations
+      ? createForwardTransitions({
+          audit: services.audit,
+          probeOperations: services.probeOperations,
+        }).view({
+          acceptedHostProfile: hostProfileObservation
+            ? {
+                kind: "authenticated_host_profile",
+                observedAtMs: hostProfileObservation.observedAtMs,
+                probeVersion: hostProfileObservation.view.probeVersion,
+              }
+            : null,
+          latestOperation:
+            timedOutOperation ??
+            services.probeOperations.findLatestForHost(hostId),
+        })
+      : { currentOperation: null, overviewProblem: null, status: null };
+    const currentOperation = forwardView.currentOperation;
     const probeUpgradeEligibility = evaluateProbeUpgradeEligibility({
       probeAssetSetVersion: currentProbeAssetSetVersion.version,
       probeAssetSetVersionNonUpgradeableReason:
@@ -259,12 +261,7 @@ export function createHostRoutes(services: HostRouteServices) {
     const response = {
       host: {
         ...hostSummaryResponse(hostSummary, {
-          probeUpgradeProblem: probeUpgradeOverviewProblem({
-            operation: currentOperation,
-            reportedProbeVersion: hostProfile?.probeVersion,
-            reportedProbeVersionObservedAtMs:
-              hostProfileObservation?.observedAtMs,
-          }),
+          probeUpgradeProblem: forwardView.overviewProblem,
         }),
         hostMetadata: {
           connectAddress: host.connectAddress,
@@ -284,14 +281,7 @@ export function createHostRoutes(services: HostRouteServices) {
           ...probeUpgradeEligibility,
           ...(manualReinstall ? { manualReinstall } : {}),
         },
-        probeUpgradeStatus: probeUpgradeStatus(
-          currentOperation,
-          currentOperation?.kind === "probe_repair"
-            ? (services.probeOperations?.findBoundFailedUpgradeForRepair(
-                currentOperation,
-              ) ?? null)
-            : null,
-        ),
+        probeUpgradeStatus: forwardView.status,
         warnings: warningList(host),
       },
     } satisfies HostDetailResponse;
@@ -338,75 +328,39 @@ export function createHostRoutes(services: HostRouteServices) {
       );
     }
 
-    const activeOperation =
-      failTimedOutActiveProbeUpgradeRequest({
-        hostId,
-        nowMs: now(),
-        probeOperationTimeouts,
-        services,
-        userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
-      }) ?? services.probeOperations.findActiveForHost(hostId);
-    const result = createProbeUpgradeRequest({
-      activeOperation,
-      currentProbeVersion: eligibility.currentProbeVersion,
+    failTimedOutActiveProbeUpgradeRequest({
       hostId,
       nowMs: now(),
-      target: {
-        assetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
-        version: eligibility.currentProbeAssetSetVersion,
-      },
+      probeOperationTimeouts,
+      services,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
     });
-    if (result.error) {
+    const result = createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations,
+    }).authorize({
+      intent: {
+        hostId,
+        kind: "compatible_upgrade",
+        sourceProbeVersion: eligibility.currentProbeVersion!,
+        targetAssetSetDigest: currentProbeAssetSetVersion.targetAssetSetDigest,
+        targetProbeVersion: eligibility.currentProbeAssetSetVersion,
+      },
+      nowMs: now(),
+      releaseTransition,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
+    if (result.kind === "refused") {
       return context.json(
         {
-          error: result.error,
+          error: result.reason,
         },
         409,
       );
     }
 
-    const isDuplicate = result.events.length === 0 && result.operation.id;
-    let operation = result.operation;
-
-    for (const event of result.events) {
-      if (event.action === "superseded") {
-        const superseded = services.probeOperations.updateProbeUpgradeRequest(
-          event.operation,
-        );
-        services.audit?.record({
-          action: "probe_upgrade_request.supersede",
-          actor: "owner",
-          details: {
-            hostId,
-            targetProbeVersion: superseded.targetProbeVersion,
-          },
-          occurredAtMs: now(),
-          outcome: "success",
-          subjectId: String(superseded.id),
-          subjectType: "probe_upgrade_request",
-          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
-        });
-      }
-
-      if (event.action === "created") {
-        operation = services.probeOperations.createProbeUpgradeRequest(
-          event.operation,
-        );
-        services.audit?.record({
-          action: "probe_upgrade_request.create",
-          actor: "owner",
-          details: {
-            hostId,
-            targetProbeVersion: operation.targetProbeVersion,
-          },
-          occurredAtMs: now(),
-          outcome: "success",
-          subjectId: String(operation.id),
-          subjectType: "probe_upgrade_request",
-          userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
-        });
-      }
-    }
+    const isDuplicate = result.reused;
+    const operation = result.operation;
 
     const response = {
       probeUpgradeRequest: probeUpgradeStatus(operation),

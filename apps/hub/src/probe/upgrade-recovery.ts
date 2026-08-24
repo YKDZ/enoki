@@ -212,20 +212,3 @@ function isSha256Value(value: unknown): value is string {
 function isAssetSetDigest(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
-
-export function currentProbeUpgradeProblem(input: {
-  operation: ProbeUpgradeRequest | null;
-  reportedProbeVersion?: string | null;
-  reportedProbeVersionObservedAtMs: number | null | undefined;
-}) {
-  const { operation } = input;
-  if (
-    !operation ||
-    !["probe_upgrade", "probe_repair"].includes(operation.kind) ||
-    ["succeeded", "canceled", "superseded"].includes(operation.state)
-  ) {
-    return null;
-  }
-
-  return operation;
-}

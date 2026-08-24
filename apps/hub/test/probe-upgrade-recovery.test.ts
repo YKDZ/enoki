@@ -3,10 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import type { ProbeUpgradeRequest } from "../src/probe/operation";
-import {
-  currentProbeUpgradeProblem,
-  probeUpgradeRecoveryDisposition,
-} from "../src/probe/upgrade-recovery";
+import { probeUpgradeRecoveryDisposition } from "../src/probe/upgrade-recovery";
 
 const hashes = {
   asset: `sha256:${"1".repeat(64)}`,
@@ -60,24 +57,6 @@ describe("Probe Upgrade recovery classification", () => {
         targetAssetSetDigest: `sha256:${"8".repeat(64)}`,
       }),
     ).toBe("manual_reinstall_required");
-  });
-
-  it("does not let a newer Profile scalar close a failed current problem", () => {
-    const operation = withEligibility(failedUpgrade());
-    expect(
-      currentProbeUpgradeProblem({
-        operation,
-        reportedProbeVersion: operation.targetProbeVersion,
-        reportedProbeVersionObservedAtMs: operation.completedAtMs! + 1,
-      }),
-    ).toBe(operation);
-    expect(
-      currentProbeUpgradeProblem({
-        operation: { ...operation, state: "succeeded" },
-        reportedProbeVersion: operation.targetProbeVersion,
-        reportedProbeVersionObservedAtMs: operation.completedAtMs! + 1,
-      }),
-    ).toBeNull();
   });
 });
 
