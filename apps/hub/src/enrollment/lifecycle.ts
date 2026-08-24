@@ -64,10 +64,25 @@ export function enrollmentStatusResponse(
     readyAtMs: enrollment.readyAtMs,
     rejectedAtMs: enrollment.rejectedAtMs,
     rejection: rejection.value,
+    ...(target.kind === "manual_reinstall"
+      ? { replacementMigration: replacementMigrationResult(enrollment) }
+      : {}),
     status,
     target,
     verificationDeadlineAtMs: enrollment.verificationDeadlineAtMs,
   };
+}
+
+function replacementMigrationResult(
+  enrollment: EnrollmentLifecycleRecord,
+): "waiting_host" | "incomplete" | "ready" {
+  if (enrollment.status === "ready") return "ready";
+  // Registration is the first Hub-trusted post-commit evidence in this slice:
+  // it consumes this Enrollment and binds the replacement identity. A pending
+  // or merely expired command never proves that Host cleanup began.
+  return enrollment.usedAtMs === null || enrollment.hostId === null
+    ? "waiting_host"
+    : "incomplete";
 }
 
 export function isEnrollmentStatus(value: string): value is EnrollmentStatus {

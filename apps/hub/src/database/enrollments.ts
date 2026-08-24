@@ -47,11 +47,13 @@ export type PendingEnrollmentCreation =
 export type PendingEnrollmentInspection =
   | { targetKind: "existing_host" | "new_host" }
   | {
+      enrollmentId: string;
       expectedHubOrigin: string;
       expectedProbeId: string;
       sourceProbeVersion: string;
       sourceProbeSha256: string[];
       targetAssetSetDigest: string;
+      targetHostId: number;
       targetKind: "manual_reinstall";
       targetProbeVersion: string;
     };
@@ -130,6 +132,7 @@ export function createEnrollmentRepository(
     inspectPending(input) {
       const pending = database
         .select({
+          enrollmentId: enrollmentTokens.enrollmentId,
           expectedHubOrigin: enrollmentTokens.expectedHubOrigin,
           expectedProbeId: enrollmentTokens.expectedProbeId,
           expectedProbeVersion: enrollmentTokens.expectedProbeVersion,
@@ -157,6 +160,7 @@ export function createEnrollmentRepository(
       }
       if (pending.targetKind === "manual_reinstall") {
         if (
+          !pending.enrollmentId ||
           pending.targetHostId === null ||
           !pending.expectedHubOrigin ||
           !pending.expectedProbeId ||
@@ -192,11 +196,13 @@ export function createEnrollmentRepository(
           return null;
         }
         return {
+          enrollmentId: pending.enrollmentId,
           expectedHubOrigin: pending.expectedHubOrigin,
           expectedProbeId: pending.expectedProbeId,
           sourceProbeVersion: pending.expectedProbeVersion,
           sourceProbeSha256,
           targetAssetSetDigest: pending.targetAssetSetDigest,
+          targetHostId: pending.targetHostId,
           targetKind: "manual_reinstall",
           targetProbeVersion: pending.targetProbeVersion,
         };

@@ -2307,6 +2307,86 @@ mod tests {
     }
 
     #[test]
+    fn committed_replacement_start_failure_keeps_candidate_layout_and_forward_journal() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd { fail_start: true, ..Systemd::default() };
+
+        let result = activate_complete_replacement_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        );
+
+        assert_eq!(result, Err(InstallError::Systemd));
+        assert!(temporary.path().join("usr/local/bin/enoki-probe").exists());
+        assert!(temporary
+            .path()
+            .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
+            .exists());
+        assert!(temporary
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
+            .exists());
+        assert!(!accounts.calls.contains(&"remove"));
+        assert!(!accounts.ipc_calls.contains(&"remove"));
+        assert!(!systemd.calls.contains(&"disable"));
+        assert!(!systemd.calls.contains(&"stop"));
+
+        systemd.fail_start = false;
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_replacement_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &FixedInstallPaths::under(temporary.path()),
+            &mut accounts,
+            &mut systemd,
+        )
+        .expect("exact committed candidate resumes to the current layout");
+        assert!(temporary
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/current-layout")
+            .exists());
+        assert!(!temporary
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
+            .exists());
+    }
+
+    #[test]
     fn complete_fresh_install_does_not_publish_the_retired_operation_entrypoint() {
         let temporary = tempdir().unwrap();
         for parent in [

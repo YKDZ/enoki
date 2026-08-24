@@ -135,6 +135,8 @@ fn manual_reinstall_inspection_returns_the_bounded_hub_authority() {
                     enoki_probe::protocol::enoki::v1::ProbeEnrollmentTargetKind::ManualReinstall
                         as i32,
                 expected_hub_origin: "https://hub.example".to_string(),
+                enrollment_id: "enr_0123456789abcdef".to_string(),
+                target_host_id: "7".to_string(),
                 expected_probe_id: "probe_old_01".to_string(),
                 source_probe_version: "1.2.2".to_string(),
                 source_probe_sha256: vec!["b".repeat(64)],
@@ -165,6 +167,8 @@ fn manual_reinstall_inspection_returns_the_bounded_hub_authority() {
         ProbeInstallationTarget::ManualReinstall(
             enoki_probe::registration::ProbeReplacementAuthorization {
                 expected_hub_origin: "https://hub.example".to_string(),
+                enrollment_id: "enr_0123456789abcdef".to_string(),
+                host_id: "7".to_string(),
                 expected_probe_id: "probe_old_01".to_string(),
                 source_probe_version: "1.2.2".to_string(),
                 source_probe_sha256: vec!["b".repeat(64)],

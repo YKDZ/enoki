@@ -513,6 +513,12 @@ pub struct VerifiedCompleteFreshComponents<'a> {
     pub bootstrap_activator: &'a mut File,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InstallFailureSemantics {
+    FreshRollback,
+    CommittedReplacement,
+}
+
 pub fn activate_fresh_current_probe(
     components: VerifiedFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -572,6 +578,45 @@ pub fn activate_complete_fresh_current_probe(
             systemd,
             files: &mut files,
         },
+        InstallFailureSemantics::FreshRollback,
+    )
+}
+
+/// Replacement-only adapter. Its caller has already persisted the exact
+/// Replacement Migration commit fact, so a failed candidate activation keeps
+/// its durable journal and never invokes ordinary fresh-install rollback.
+pub fn activate_complete_replacement_current_probe(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    let mut files = SystemInstallFiles;
+    activate_current_probe_with_observation_files(
+        components.probe,
+        Some((
+            components.observation_runtime,
+            components.cpu_provider,
+            components.disk_health_provider,
+            components.lifecycle_companion,
+        )),
+        Some((
+            components.bootstrap_acquirer,
+            components.bootstrap_activator,
+        )),
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        &mut InstallPorts {
+            accounts,
+            systemd,
+            files: &mut files,
+        },
+        InstallFailureSemantics::CommittedReplacement,
     )
 }
 
@@ -629,6 +674,7 @@ fn activate_current_probe_with_files(
         trust,
         paths,
         ports,
+        InstallFailureSemantics::FreshRollback,
     )
 }
 
@@ -644,6 +690,7 @@ fn activate_current_probe_with_observation_files(
     trust: &BuildTrust,
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+    failure_semantics: InstallFailureSemantics,
 ) -> Result<(), InstallError> {
     let mut effects = FreshInstallEffects {
         component,
@@ -654,6 +701,7 @@ fn activate_current_probe_with_observation_files(
         trust,
         paths,
         ports,
+        failure_semantics,
     };
     execute_fresh_install_lifecycle(&mut effects)
 }
@@ -672,6 +720,7 @@ struct FreshInstallEffects<'input, 'ports, A, S, F> {
     trust: &'input BuildTrust,
     paths: &'input FixedInstallPaths,
     ports: &'input mut InstallPorts<'ports, A, S, F>,
+    failure_semantics: InstallFailureSemantics,
 }
 
 impl<A, S, F> FreshInstallLifecycleEffects for FreshInstallEffects<'_, '_, A, S, F>
@@ -701,6 +750,7 @@ where
             self.trust,
             self.paths,
             self.ports,
+            self.failure_semantics,
         )
     }
 }
@@ -756,6 +806,7 @@ fn activate_verified_fresh_install(
     trust: &BuildTrust,
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+    failure_semantics: InstallFailureSemantics,
 ) -> Result<(), InstallError> {
     let install_observation = observation_components.is_some();
     let _activation_lock = ActivationLock::acquire(
@@ -987,6 +1038,12 @@ fn activate_verified_fresh_install(
             Ok(())
         }
         Err(install_error) => {
+            if failure_semantics == InstallFailureSemantics::CommittedReplacement {
+                // The journal and all receipt-owned candidate paths remain the
+                // recovery source of truth. A later exact candidate invocation
+                // repairs/restages them forward; it never restores P0.
+                return Err(install_error);
+            }
             let rollback_deadline = Instant::now() + ROLLBACK_COMMAND_BUDGET;
             ports.accounts.set_command_deadline(rollback_deadline);
             ports.systemd.set_command_deadline(rollback_deadline);

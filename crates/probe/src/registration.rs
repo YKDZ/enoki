@@ -60,6 +60,8 @@ pub enum ProbeInstallationTarget {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProbeReplacementAuthorization {
+    pub enrollment_id: String,
+    pub host_id: String,
     pub expected_hub_origin: String,
     pub expected_probe_id: String,
     pub source_probe_version: String,
@@ -224,6 +226,8 @@ pub fn inspect_probe_installation(
         {
             Ok(ProbeInstallationTarget::ManualReinstall(
                 ProbeReplacementAuthorization {
+                    enrollment_id: inspection.enrollment_id,
+                    host_id: inspection.target_host_id,
                     expected_hub_origin: inspection.expected_hub_origin,
                     expected_probe_id: inspection.expected_probe_id,
                     source_probe_version: inspection.source_probe_version,
@@ -248,6 +252,11 @@ fn valid_replacement_inspection(
 ) -> bool {
     hub_url::normalized_base(&inspection.expected_hub_origin).ok()
         == hub_url::normalized_base(requested_hub_url).ok()
+        && valid_enrollment_id(&inspection.enrollment_id)
+        && inspection
+            .target_host_id
+            .parse::<u64>()
+            .is_ok_and(|id| id > 0)
         && bounded_identifier(&inspection.expected_probe_id)
         && valid_semver(&inspection.source_probe_version)
         && (1..=4).contains(&inspection.source_probe_sha256.len())
@@ -267,6 +276,15 @@ fn valid_replacement_inspection(
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
             })
+}
+
+fn valid_enrollment_id(value: &str) -> bool {
+    value.strip_prefix("enr_").is_some_and(|suffix| {
+        suffix.len() >= 16
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
 }
 
 fn bounded_identifier(value: &str) -> bool {

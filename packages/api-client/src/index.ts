@@ -110,6 +110,8 @@ export type EnrollmentStatusResponse = {
     code: string;
     message: string | null;
   } | null;
+  /** Derived replacement result; it is not an Enrollment status or operation. */
+  replacementMigration?: "waiting_host" | "incomplete" | "ready";
   status: EnrollmentStatus;
   target: EnrollmentTarget;
   verificationDeadlineAtMs: number | null;

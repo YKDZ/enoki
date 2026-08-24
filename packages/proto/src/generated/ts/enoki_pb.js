@@ -597,6 +597,8 @@ export const enoki = $root.enoki = (() => {
              * @property {string|null} [targetProbeVersion] ProbeInstallationInspectionResponse targetProbeVersion
              * @property {string|null} [targetAssetSetDigest] ProbeInstallationInspectionResponse targetAssetSetDigest
              * @property {Array.<string>|null} [sourceProbeSha256] ProbeInstallationInspectionResponse sourceProbeSha256
+             * @property {string|null} [enrollmentId] ProbeInstallationInspectionResponse enrollmentId
+             * @property {string|null} [targetHostId] ProbeInstallationInspectionResponse targetHostId
              */
 
             /**
@@ -672,6 +674,22 @@ export const enoki = $root.enoki = (() => {
             ProbeInstallationInspectionResponse.prototype.sourceProbeSha256 = $util.emptyArray;
 
             /**
+             * ProbeInstallationInspectionResponse enrollmentId.
+             * @member {string} enrollmentId
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.enrollmentId = "";
+
+            /**
+             * ProbeInstallationInspectionResponse targetHostId.
+             * @member {string} targetHostId
+             * @memberof enoki.v1.ProbeInstallationInspectionResponse
+             * @instance
+             */
+            ProbeInstallationInspectionResponse.prototype.targetHostId = "";
+
+            /**
              * Creates a new ProbeInstallationInspectionResponse instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeInstallationInspectionResponse
@@ -714,6 +732,10 @@ export const enoki = $root.enoki = (() => {
                 if (message.sourceProbeSha256 != null && message.sourceProbeSha256.length)
                     for (let i = 0; i < message.sourceProbeSha256.length; ++i)
                         writer.uint32(/* id 7, wireType 2 =*/58).string(message.sourceProbeSha256[i]);
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    writer.uint32(/* id 8, wireType 2 =*/66).string(message.enrollmentId);
+                if (message.targetHostId != null && Object.hasOwnProperty.call(message, "targetHostId"))
+                    writer.uint32(/* id 9, wireType 2 =*/74).string(message.targetHostId);
                 return writer;
             };
 
@@ -782,6 +804,14 @@ export const enoki = $root.enoki = (() => {
                             if (!(message.sourceProbeSha256 && message.sourceProbeSha256.length))
                                 message.sourceProbeSha256 = [];
                             message.sourceProbeSha256.push(reader.string());
+                            break;
+                        }
+                    case 8: {
+                            message.enrollmentId = reader.string();
+                            break;
+                        }
+                    case 9: {
+                            message.targetHostId = reader.string();
                             break;
                         }
                     default:
@@ -855,6 +885,12 @@ export const enoki = $root.enoki = (() => {
                         if (!$util.isString(message.sourceProbeSha256[i]))
                             return "sourceProbeSha256: string[] expected";
                 }
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    if (!$util.isString(message.enrollmentId))
+                        return "enrollmentId: string expected";
+                if (message.targetHostId != null && Object.hasOwnProperty.call(message, "targetHostId"))
+                    if (!$util.isString(message.targetHostId))
+                        return "targetHostId: string expected";
                 return null;
             };
 
@@ -917,6 +953,10 @@ export const enoki = $root.enoki = (() => {
                     for (let i = 0; i < object.sourceProbeSha256.length; ++i)
                         message.sourceProbeSha256[i] = String(object.sourceProbeSha256[i]);
                 }
+                if (object.enrollmentId != null)
+                    message.enrollmentId = String(object.enrollmentId);
+                if (object.targetHostId != null)
+                    message.targetHostId = String(object.targetHostId);
                 return message;
             };
 
@@ -946,6 +986,8 @@ export const enoki = $root.enoki = (() => {
                     object.sourceProbeVersion = "";
                     object.targetProbeVersion = "";
                     object.targetAssetSetDigest = "";
+                    object.enrollmentId = "";
+                    object.targetHostId = "";
                 }
                 if (message.targetKind != null && Object.hasOwnProperty.call(message, "targetKind"))
                     object.targetKind = options.enums === String ? $root.enoki.v1.ProbeEnrollmentTargetKind[message.targetKind] === undefined ? message.targetKind : $root.enoki.v1.ProbeEnrollmentTargetKind[message.targetKind] : message.targetKind;
@@ -964,6 +1006,10 @@ export const enoki = $root.enoki = (() => {
                     for (let j = 0; j < message.sourceProbeSha256.length; ++j)
                         object.sourceProbeSha256[j] = message.sourceProbeSha256[j];
                 }
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    object.enrollmentId = message.enrollmentId;
+                if (message.targetHostId != null && Object.hasOwnProperty.call(message, "targetHostId"))
+                    object.targetHostId = message.targetHostId;
                 return object;
             };
 

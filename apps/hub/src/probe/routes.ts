@@ -207,6 +207,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
               enrollment.targetKind === "manual_reinstall"
                 ? enrollment.expectedHubOrigin
                 : "",
+            enrollmentId:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.enrollmentId
+                : "",
+            targetHostId:
+              enrollment.targetKind === "manual_reinstall"
+                ? String(enrollment.targetHostId)
+                : "",
             expectedProbeId:
               enrollment.targetKind === "manual_reinstall"
                 ? enrollment.expectedProbeId

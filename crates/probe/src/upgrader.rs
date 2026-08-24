@@ -25,6 +25,10 @@ use enoki_probe_bootstrap::{
         LifecycleTransition, RepairAuthorityV1, UninstallCommitPolicy, UninstallLifecycleEffects,
         execute_uninstall_lifecycle,
     },
+    replacement::{
+        FileReplacementCommitStore, ReplacementCommitError, ReplacementIntent,
+        commit_and_cleanup_replacement,
+    },
     verifier::{
         VerificationPolicy, read_bundle_manifest, verify_archive_and_extract_lifecycle_roles,
         verify_metadata, verify_outer_metadata,
@@ -304,6 +308,8 @@ const PRODUCTION_COLLECTOR_HELPER_SUDOERS_PATH: &str =
     "/etc/sudoers.d/enoki-probe-collector-helpers";
 const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-acquire";
 const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
+const PRODUCTION_REPLACEMENT_COMMIT_PATH: &str =
+    "/var/lib/enoki-probe-bootstrap/replacement-migration.json";
 const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
 const PRODUCTION_INSTALL_STATE_DIR: &str = "/var/lib/enoki-probe";
 const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
@@ -2081,7 +2087,7 @@ fn run_probe_replacement_migration(
         enrollment_token,
         hub_origin,
         target_asset_set_digest,
-        target_manifest_sha256: _,
+        target_manifest_sha256,
         bundle_version,
     } = request.authority()
     else {
@@ -2119,12 +2125,36 @@ fn run_probe_replacement_migration(
             ReplacementAuthorityMatch::Matches => unreachable!(),
         });
     }
-    match cleanup_trusted_probe_install_for_reenrollment(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
-        Ok(()) => LifecycleResponse::succeeded(),
-        Err(_) => LifecycleResponse::failed("lifecycle.replacement_cleanup_failed"),
+    let intent = ReplacementIntent {
+        enrollment_id: authority.enrollment_id,
+        enrollment_token_sha256: format!("{:x}", Sha256::digest(enrollment_token.as_bytes())),
+        host_id: authority.host_id,
+        hub_origin: authority.expected_hub_origin,
+        old_probe_id: authority.expected_probe_id,
+        source_probe_version: authority.source_probe_version,
+        source_probe_sha256: installed_probe_sha256,
+        target_probe_version: authority.target_probe_version,
+        target_asset_set_digest: authority.target_asset_set_digest,
+        target_manifest_sha256: target_manifest_sha256.clone(),
+    };
+    let mut store = FileReplacementCommitStore::at(PRODUCTION_REPLACEMENT_COMMIT_PATH, 0);
+    let mut cleanup = || {
+        cleanup_trusted_probe_install_for_reenrollment(
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+            None,
+        )
+    };
+    match commit_and_cleanup_replacement(intent, &mut store, &mut cleanup) {
+        Ok(_) => LifecycleResponse::succeeded(),
+        Err(ReplacementCommitError::Effect(_)) => {
+            LifecycleResponse::failed("lifecycle.replacement_cleanup_failed")
+        }
+        Err(ReplacementCommitError::Store(_)) => {
+            LifecycleResponse::failed("lifecycle.replacement_commit_failed")
+        }
+        Err(ReplacementCommitError::ConflictingCommit) => {
+            LifecycleResponse::failed("lifecycle.replacement_commit_conflict")
+        }
     }
 }
 
@@ -6213,6 +6243,8 @@ mod tests {
             probe_id: "probe_old_01".to_string(),
         };
         let authority = crate::registration::ProbeReplacementAuthorization {
+            enrollment_id: "enr_0123456789abcdef".to_string(),
+            host_id: "7".to_string(),
             expected_hub_origin: "https://hub.example".to_string(),
             expected_probe_id: "probe_old_01".to_string(),
             source_probe_version: "1.2.2".to_string(),
@@ -6315,6 +6347,8 @@ mod tests {
             probe_id: "probe_old_01".to_string(),
         };
         let authority = crate::registration::ProbeReplacementAuthorization {
+            enrollment_id: "enr_0123456789abcdef".to_string(),
+            host_id: "7".to_string(),
             expected_hub_origin: "https://hub.example".to_string(),
             expected_probe_id: "probe_old_01".to_string(),
             source_probe_version: "1.2.2".to_string(),

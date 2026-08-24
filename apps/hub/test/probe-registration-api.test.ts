@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
 import { hashSecret } from "../src/enrollment/routes";
+import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import { createTestProbeIdentity, signedProbeRequest } from "./probe-test-auth";
 
 const tempRoots: string[] = [];
@@ -19,6 +20,20 @@ const HostProfileSnapshot = root.enoki.v1.HostProfileSnapshot;
 const testProbePrivateKeys = new WeakMap<Response, string>();
 const hostProfileCrossRuntimeCanonicalHash =
   "22843eb296c1643cd0a9b40706f3609fecbaec0ae0114a041923c9adaef07da3";
+const bootstrapRecipe = {
+  bundleVersion: "0.2.0",
+  distribution: "enoki",
+  kind: "enoki-probe-bootstrap-recipe-record" as const,
+  recipe: {
+    file: "enoki-probe-bootstrap.py",
+    sha256: "a".repeat(64),
+    size: 123,
+    version: "v1",
+  },
+  rootFingerprint: "b".repeat(64),
+  schemaVersion: 1 as const,
+  targets: ["x86_64-unknown-linux-gnu"],
+};
 
 async function createTemporaryDatabase() {
   const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-probe-db-"));
@@ -612,6 +627,15 @@ describe("Probe registration API", () => {
   it("binds an empty-snapshot replacement registration and becomes ready only after Boot and a current target Host Profile", async () => {
     const database = await createTemporaryDatabase();
     const nowMs = Date.now();
+    const assetDir = await mkdtemp(
+      path.join(os.tmpdir(), "enoki-replacement-vertical-"),
+    );
+    tempRoots.push(assetDir);
+    const release = await writeSignedProbeAssetSet(assetDir, {
+      sourceVersion: "0.1.0",
+      targetVersion: "0.2.0",
+      transition: "replacement-required",
+    });
     const app = createHubApp({
       auth: {
         failureDelayMs: 0,
@@ -619,6 +643,14 @@ describe("Probe registration API", () => {
         sessionCookieName: "enoki_owner_session",
       },
       database,
+      installation: {
+        bootstrapRecipe,
+        probeApiOrigin: "https://hub.example",
+      },
+      probeAssets: {
+        assetDir,
+        trustedRootPublicKeyPem: release.rootPublicKeyPem,
+      },
     });
     const ownerSession = await loginOwner(app);
     const firstRegistration = await registerProbe(
@@ -638,26 +670,28 @@ describe("Probe registration API", () => {
       receivedAtMs: 1_725_000_001_100,
       sequence: 2,
     });
-    const enrollmentToken = `enk_enroll_${"m".repeat(32)}`;
-    const enrollmentId = `enr_${"m".repeat(24)}`;
-    expect(
-      database.enrollments.createPending({
-        createdAtMs: nowMs,
-        enrollmentId,
-        expiresAtMs: nowMs + 3_600_000,
-        target: {
-          expectedHubOrigin: "https://hub.example",
-          expectedProbeId: firstIdentity.probeId,
-          expectedProbeVersion: "0.1.0",
-          hostId: host.id,
-          kind: "manual_reinstall",
-          sourceProbeSha256: ["c".repeat(64)],
-          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
-          targetProbeVersion: "0.2.0",
-        },
-        tokenHash: hashSecret(enrollmentToken),
-      }).kind,
-    ).toBe("created");
+    const enrollmentResponse = await app.request(
+      `/api/web/enrollments/manual-reinstall/${host.id}`,
+      { headers: { cookie: ownerSession }, method: "POST" },
+    );
+    expect(enrollmentResponse.status).toBe(201);
+    const enrollmentCommand = (await enrollmentResponse.json()) as {
+      enrollmentId: string;
+      enrollmentToken: string;
+      installCommand: string;
+    };
+    const { enrollmentId, enrollmentToken } = enrollmentCommand;
+    expect(enrollmentCommand.installCommand).toContain(enrollmentToken);
+    expect(enrollmentCommand.installCommand).not.toContain("&&");
+    const pendingStatus = await app.request(
+      `/api/web/enrollments/${enrollmentId}`,
+      {
+        headers: { cookie: ownerSession },
+      },
+    );
+    await expect(pendingStatus.json()).resolves.toEqual(
+      expect.objectContaining({ replacementMigration: "waiting_host" }),
+    );
 
     const RegistrationRequest = root.enoki.v1.ProbeRegistrationRequest;
     const RegistrationResponse = root.enoki.v1.ProbeRegistrationResponse;
@@ -678,8 +712,10 @@ describe("Probe registration API", () => {
       ).installationInspection,
     ).toEqual(
       expect.objectContaining({
-        sourceProbeSha256: ["c".repeat(64)],
+        enrollmentId,
+        sourceProbeSha256: release.sourceProbeSha256,
         sourceProbeVersion: "0.1.0",
+        targetHostId: String(host.id),
         targetKind: root.enoki.v1.ProbeEnrollmentTargetKind.MANUAL_REINSTALL,
       }),
     );
@@ -715,6 +751,15 @@ describe("Probe registration API", () => {
         )
         .get(enrollmentId),
     ).toEqual({ status: "verifying", usedAtMs: expect.any(Number) });
+    const verifyingStatus = await app.request(
+      `/api/web/enrollments/${enrollmentId}`,
+      {
+        headers: { cookie: ownerSession },
+      },
+    );
+    await expect(verifyingStatus.json()).resolves.toEqual(
+      expect.objectContaining({ replacementMigration: "incomplete" }),
+    );
 
     const ReportRequest = root.enoki.v1.ProbeReportRequest;
     const bootBody = ReportRequest.encode(
@@ -843,6 +888,15 @@ describe("Probe registration API", () => {
         .prepare("select status from enrollment_tokens where enrollment_id = ?")
         .get(enrollmentId),
     ).toEqual({ status: "ready" });
+    const readyStatus = await app.request(
+      `/api/web/enrollments/${enrollmentId}`,
+      {
+        headers: { cookie: ownerSession },
+      },
+    );
+    await expect(readyStatus.json()).resolves.toEqual(
+      expect.objectContaining({ replacementMigration: "ready" }),
+    );
     expect(
       database.metrics.findSamplesForHost({
         fromCollectedAtMs: 1_725_000_001_000,

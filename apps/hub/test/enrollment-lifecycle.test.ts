@@ -20,6 +20,28 @@ const validPending = {
 } as const;
 
 describe("Enrollment lifecycle boundary", () => {
+  it.each([
+    ["pending", null, "waiting_host"],
+    ["expired", null, "waiting_host"],
+    ["verifying", 7, "incomplete"],
+    ["rejected", 7, "incomplete"],
+    ["ready", 7, "ready"],
+  ] as const)(
+    "derives manual replacement result from trusted Enrollment evidence for %s",
+    (status, hostId, replacementMigration) => {
+      expect(
+        enrollmentStatusResponse({
+          ...validPending,
+          hostId,
+          status,
+          targetHostId: 7,
+          targetKind: "manual_reinstall",
+          usedAtMs: hostId ? 1_725_000_001_000 : null,
+        }),
+      ).toEqual(expect.objectContaining({ replacementMigration }));
+    },
+  );
+
   it("formats only closed Target and Status values for Owner responses", () => {
     expect(enrollmentStatusResponse(validPending)).toEqual({
       createdAtMs: validPending.createdAtMs,

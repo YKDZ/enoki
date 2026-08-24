@@ -666,6 +666,11 @@ pub struct ProbeInstallationInspectionResponse {
     pub target_asset_set_digest: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "7")]
     pub source_probe_sha256: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Public correlation facts bound by the pending manual-reinstall Enrollment.
+    #[prost(string, tag = "8")]
+    pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub target_host_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationRejection {

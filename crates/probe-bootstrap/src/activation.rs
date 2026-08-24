@@ -6,14 +6,19 @@ use crate::{
     install::{
         FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd,
         VerifiedCompleteFreshComponents, activate_complete_fresh_current_probe,
+        activate_complete_replacement_current_probe,
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
+    replacement::{
+        FileReplacementCommitStore, ReplacementCommitStore, record_replacement_candidate_layout,
+    },
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
         VerificationPolicy, VerifiedBundle, verify_acquirer_receipt, verify_activator_receipt,
         verify_component, verify_metadata, verify_role_component,
     },
 };
+use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
     fs::File,
@@ -28,6 +33,7 @@ use zeroize::Zeroize;
 
 const INBOX_DIRECTORY: &str = "inbox";
 const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
+const REPLACEMENT_COMMIT: &str = "/var/lib/enoki-probe-bootstrap/replacement-migration.json";
 const REPLACEMENT_COMPANION_BUDGET: Duration = Duration::from_secs(90);
 const REPLACEMENT_COMPANION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 static COMPONENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -118,29 +124,49 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
-        prepare_replacement_migration(
+        let replacement_intent_sha256 = prepare_replacement_migration(
             &self.enrollment,
             &self.bundle,
             &mut self.lifecycle_companion,
         )?;
-        activate_complete_fresh_current_probe(
-            VerifiedCompleteFreshComponents {
-                probe: &mut self.component,
-                observation_runtime: &mut self.runtime,
-                cpu_provider: &mut self.cpu_provider,
-                disk_health_provider: &mut self.disk_health_provider,
-                lifecycle_companion: &mut self.lifecycle_companion,
-                bootstrap_acquirer: acquirer,
-                bootstrap_activator: activator,
-            },
-            &self.enrollment,
-            &self.bundle,
-            &trust,
-            &FixedInstallPaths::production(),
-            &mut accounts,
-            &mut systemd,
-        )
-        .map_err(ActivationError::Install)
+        let components = VerifiedCompleteFreshComponents {
+            probe: &mut self.component,
+            observation_runtime: &mut self.runtime,
+            cpu_provider: &mut self.cpu_provider,
+            disk_health_provider: &mut self.disk_health_provider,
+            lifecycle_companion: &mut self.lifecycle_companion,
+            bootstrap_acquirer: acquirer,
+            bootstrap_activator: activator,
+        };
+        let paths = FixedInstallPaths::production();
+        let result = if replacement_intent_sha256.is_some() {
+            activate_complete_replacement_current_probe(
+                components,
+                &self.enrollment,
+                &self.bundle,
+                &trust,
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            )
+        } else {
+            activate_complete_fresh_current_probe(
+                components,
+                &self.enrollment,
+                &self.bundle,
+                &trust,
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            )
+        };
+        result.map_err(ActivationError::Install)?;
+        if let Some(intent_sha256) = replacement_intent_sha256 {
+            let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+            record_replacement_candidate_layout(&mut store, &intent_sha256)
+                .map_err(|_| ActivationError::Replacement)?;
+        }
+        Ok(())
     }
     pub fn component(&mut self) -> Result<&mut File, ActivationError> {
         validate_regular_file(&self.component, 0, 0o600)?;
@@ -159,16 +185,42 @@ fn prepare_replacement_migration(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     companion: &mut File,
-) -> Result<(), ActivationError> {
+) -> Result<Option<String>, ActivationError> {
     let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
         .try_exists()
         .map_err(|_| ActivationError::Io)?;
     let Some(request) =
         replacement_request_for_installed_state(has_installed_metadata, enrollment, bundle)?
     else {
-        return Ok(());
+        return committed_replacement_matches(enrollment, bundle);
     };
-    invoke_replacement_companion(&request, companion, bundle)
+    invoke_replacement_companion(&request, companion, bundle)?;
+    committed_replacement_matches(enrollment, bundle)
+}
+
+fn committed_replacement_matches(
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> Result<Option<String>, ActivationError> {
+    let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+    let Some(fact) = store.load().map_err(|_| ActivationError::Replacement)? else {
+        return Ok(None);
+    };
+    let token_sha256 = format!(
+        "{:x}",
+        Sha256::digest(enrollment.enrollment_token().as_bytes())
+    );
+    if !fact.cleanup_complete
+        || fact.intent.enrollment_token_sha256 != token_sha256
+        || fact.intent.hub_origin != enrollment.hub_origin()
+        || fact.intent.target_probe_version != bundle.version
+        || fact.intent.target_asset_set_digest
+            != format!("sha256:{}", bundle.asset_set_manifest_sha256)
+        || fact.intent.target_manifest_sha256 != bundle.manifest_sha256
+    {
+        return Err(ActivationError::Replacement);
+    }
+    Ok(Some(fact.canonical_intent_sha256))
 }
 
 fn replacement_request_for_installed_state(

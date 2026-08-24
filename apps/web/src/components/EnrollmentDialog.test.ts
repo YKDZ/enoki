@@ -124,6 +124,25 @@ describe("Enrollment dialog command control", () => {
     ).toEqual(pendingEnrollment.bootstrapRecipe.targets);
     wrapper.unmount();
   });
+
+  it("explains the manual replacement commit boundary without treating a snapshot as a Hub gate", async () => {
+    const wrapper = mount(EnrollmentDialog, {
+      attachTo: document.body,
+      props: dialogProps({
+        enrollment: {
+          ...pendingEnrollment,
+          replacementMigration: "waiting_host",
+          target: { hostId: 7, kind: "manual_reinstall" },
+        },
+      }),
+    });
+    await flushRender();
+
+    expect(document.body.textContent).toContain("提交边界前");
+    expect(document.body.textContent).toContain("可选的迁移前恢复点");
+    expect(document.body.textContent).toContain("提交后不会恢复旧探针身份");
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
+  });
 });
 
 type DialogProps = {

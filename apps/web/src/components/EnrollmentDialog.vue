@@ -70,7 +70,13 @@ watch(
   <Dialog :open="open" @update:open="$emit('update:open', $event)">
     <DialogContent class="sm:max-w-3xl">
       <DialogHeader>
-        <DialogTitle>添加主机</DialogTitle>
+        <DialogTitle>
+          {{
+            enrollment?.target.kind === "manual_reinstall"
+              ? "手动重新安装探针"
+              : "添加主机"
+          }}
+        </DialogTitle>
         <DialogDescription class="sr-only">
           生成用于部署探针的一次性安装命令。
         </DialogDescription>
@@ -95,6 +101,14 @@ watch(
         </div>
 
         <template v-else-if="enrollment">
+          <p
+            v-if="enrollment.target.kind === 'manual_reinstall'"
+            class="text-muted-foreground text-sm leading-6"
+          >
+            Hub 不会检查或要求
+            snapshot。你可以在提交边界前自行保留一个可选的迁移前恢复点；
+            命令越过提交边界后只会向当前探针安装包和新探针身份恢复，提交后不会恢复旧探针身份。
+          </p>
           <p class="text-muted-foreground text-sm">
             状态：{{
               enrollment.status === "pending" ? "等待安装" : "正在验证"

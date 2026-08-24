@@ -249,6 +249,12 @@ export namespace enoki {
 
             /** ProbeInstallationInspectionResponse sourceProbeSha256 */
             sourceProbeSha256?: (string[]|null);
+
+            /** ProbeInstallationInspectionResponse enrollmentId */
+            enrollmentId?: (string|null);
+
+            /** ProbeInstallationInspectionResponse targetHostId */
+            targetHostId?: (string|null);
         }
 
         /** Represents a ProbeInstallationInspectionResponse. */
@@ -280,6 +286,12 @@ export namespace enoki {
 
             /** ProbeInstallationInspectionResponse sourceProbeSha256. */
             public sourceProbeSha256: string[];
+
+            /** ProbeInstallationInspectionResponse enrollmentId. */
+            public enrollmentId: string;
+
+            /** ProbeInstallationInspectionResponse targetHostId. */
+            public targetHostId: string;
 
             /**
              * Creates a new ProbeInstallationInspectionResponse instance using the specified properties.
