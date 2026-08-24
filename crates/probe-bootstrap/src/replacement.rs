@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    fs::{self, OpenOptions},
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
 
@@ -134,24 +134,7 @@ impl ReplacementCommitStore for FileReplacementCommitStore {
                 "replacement commit fact is too large",
             ));
         }
-        let temporary = parent.join(format!(".replacement-migration-{}", random_suffix()?));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&temporary)?;
-        let result = (|| {
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            fs::rename(&temporary, &self.path)?;
-            File::open(parent)?.sync_all()
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result
+        crate::secure_file::atomic_write(&self.path, &bytes, 0o600, None)
     }
 }
 
@@ -168,15 +151,6 @@ fn validate_private_parent(path: &Path, expected_owner_uid: u32) -> std::io::Res
         ));
     }
     Ok(())
-}
-
-fn random_suffix() -> std::io::Result<String> {
-    let mut bytes = [0_u8; 16];
-    let read = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
-    if read != bytes.len() as isize {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 #[derive(Debug, Eq, PartialEq)]

@@ -536,6 +536,12 @@ enum InstallFailureSemantics {
     CommittedReplacement,
 }
 
+enum InterruptedInstall {
+    Fresh,
+    ResumeCommitted(Box<TransactionJournal>),
+    Complete,
+}
+
 pub fn activate_fresh_current_probe(
     components: VerifiedFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -599,9 +605,8 @@ pub fn activate_complete_fresh_current_probe(
     )
 }
 
-/// Replacement-only adapter. Its caller has already persisted the exact
-/// Replacement Migration commit fact, so a failed candidate activation keeps
-/// its durable journal and never invokes ordinary fresh-install rollback.
+/// 仅用于 Replacement；调用者已持久化精确的 Replacement Migration commit fact，
+/// 因此候选激活失败时保留 durable journal，绝不调用普通 fresh-install rollback。
 pub fn activate_complete_replacement_current_probe(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -831,25 +836,40 @@ fn activate_verified_fresh_install(
         paths.expected_root_uid(),
         Instant::now() + INSTALL_COMMAND_BUDGET,
     )?;
-    recover_interrupted_install(paths, ports)?;
-    preflight_parent_chains(paths)?;
-    preflight_files(paths)?;
-    preflight_fixed_metadata_directory(&paths.etc_enoki())?;
-    if bootstrap_components.is_some() {
-        require_bootstrap_roles_absent(paths)?;
-    } else {
-        validate_bootstrap_roles(paths)?;
+    let resumed_journal = match recover_interrupted_install(paths, ports, failure_semantics)? {
+        InterruptedInstall::Fresh => None,
+        InterruptedInstall::ResumeCommitted(journal) => Some(*journal),
+        InterruptedInstall::Complete => return Ok(()),
+    };
+    let is_committed_resume = resumed_journal.is_some();
+    if !is_committed_resume {
+        preflight_parent_chains(paths)?;
+        preflight_files(paths)?;
+        preflight_fixed_metadata_directory(&paths.etc_enoki())?;
+        if bootstrap_components.is_some() {
+            require_bootstrap_roles_absent(paths)?;
+        } else {
+            validate_bootstrap_roles(paths)?;
+        }
     }
     let install_deadline = Instant::now() + INSTALL_COMMAND_BUDGET;
     ports.accounts.set_command_deadline(install_deadline);
     ports.systemd.set_command_deadline(install_deadline);
-    ports.accounts.require_absent()?;
-    ports.systemd.require_absent()?;
+    if !is_committed_resume {
+        ports.accounts.require_absent()?;
+        ports.systemd.require_absent()?;
+    }
 
-    let mut journal = TransactionJournal::begin(&paths.bootstrap_state())?;
+    let mut journal = match resumed_journal {
+        Some(journal) => journal,
+        None => TransactionJournal::begin(&paths.bootstrap_state())?,
+    };
     if let Some((acquirer, activator)) = bootstrap_components {
         let role_sources = [acquirer, activator];
         for (source, role) in role_sources.into_iter().zip(bootstrap_role_registry(paths)) {
+            if journal.owns_published_path(&role.path)? {
+                continue;
+            }
             if let Err(error) =
                 ports
                     .files
@@ -864,12 +884,24 @@ fn activate_verified_fresh_install(
             }
         }
     }
-    let identity = match ports
-        .accounts
-        .create_transaction_identity(journal.transaction_id())
-    {
-        Ok(identity) => identity,
-        Err(error) => {
+    let identity = if let Some((uid, gid)) = journal.identity() {
+        ServiceIdentity { uid, gid }
+    } else {
+        let identity = match ports
+            .accounts
+            .create_transaction_identity(journal.transaction_id())
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                return Err(abort_prepared_install(
+                    error,
+                    &journal,
+                    ports.accounts,
+                    ports.files,
+                ));
+            }
+        };
+        if let Err(error) = journal.record_identity(identity.uid, identity.gid) {
             return Err(abort_prepared_install(
                 error,
                 &journal,
@@ -877,16 +909,10 @@ fn activate_verified_fresh_install(
                 ports.files,
             ));
         }
+        identity
     };
-    if let Err(error) = journal.record_identity(identity.uid, identity.gid) {
-        return Err(abort_prepared_install(
-            error,
-            &journal,
-            ports.accounts,
-            ports.files,
-        ));
-    }
     if install_observation
+        && !is_committed_resume
         && let Err(error) = ports
             .accounts
             .create_observation_ipc_group(journal.transaction_id())
@@ -897,6 +923,20 @@ fn activate_verified_fresh_install(
             ports.accounts,
             ports.files,
         ));
+    }
+    if is_committed_resume {
+        for staged_name in [
+            "enoki-probe",
+            "probe-bootstrap.toml",
+            "probe-install.toml",
+            "enoki-probe.service",
+        ] {
+            match fs::remove_file(journal.staging_directory().join(staged_name)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(InstallError::Io),
+            }
+        }
     }
     let staged = match stage_complete_layout(
         component,
@@ -920,82 +960,87 @@ fn activate_verified_fresh_install(
     let mut enabled = false;
     let mut started = false;
     let result = (|| {
-        ports
-            .files
-            .ensure_metadata_directory(&paths.etc_enoki(), &mut journal)?;
-        ports.files.create_directory(
-            &paths.state(),
-            0o750,
-            identity,
-            &mut journal,
-            RollbackStep::RemoveStateDirectory,
-        )?;
-        ports.files.create_directory(
-            &paths.identity_dir(),
-            0o700,
-            identity,
-            &mut journal,
-            RollbackStep::RemoveIdentityDirectory,
-        )?;
+        if !journal.owns_published_path(&paths.etc_enoki())? {
+            ports
+                .files
+                .ensure_metadata_directory(&paths.etc_enoki(), &mut journal)?;
+        }
+        if !journal.owns_published_path(&paths.state())? {
+            ports.files.create_directory(
+                &paths.state(),
+                0o750,
+                identity,
+                &mut journal,
+                RollbackStep::RemoveStateDirectory,
+            )?;
+        }
+        if !journal.owns_published_path(&paths.identity_dir())? {
+            ports.files.create_directory(
+                &paths.identity_dir(),
+                0o700,
+                identity,
+                &mut journal,
+                RollbackStep::RemoveIdentityDirectory,
+            )?;
+        }
         let mut staged_binary = File::open(&staged.binary).map_err(|_| InstallError::Io)?;
-        ports.files.install_binary(
-            &mut staged_binary,
-            &paths.binary(),
-            &mut journal,
-            RollbackStep::RemoveBinary,
-        )?;
-        if let Some((runtime, cpu_provider, disk_health_provider, lifecycle_companion)) =
-            observation_components
-        {
+        if !journal.owns_published_path(&paths.binary())? {
             ports.files.install_binary(
-                runtime,
-                &paths.observation_runtime_binary(),
-                &mut journal,
-                RollbackStep::RemoveBinary,
-            )?;
-            ports.files.install_binary(
-                disk_health_provider,
-                &paths.disk_health_provider_binary(),
-                &mut journal,
-                RollbackStep::RemoveBinary,
-            )?;
-            ports.files.install_binary(
-                cpu_provider,
-                &paths.cpu_provider_binary(),
-                &mut journal,
-                RollbackStep::RemoveBinary,
-            )?;
-            ports.files.install_binary(
-                lifecycle_companion,
-                &paths.lifecycle_companion_binary(),
+                &mut staged_binary,
+                &paths.binary(),
                 &mut journal,
                 RollbackStep::RemoveBinary,
             )?;
         }
-        ports.files.write_owned(
-            &paths.identity(),
-            &fs::read(&staged.identity).map_err(|_| InstallError::Io)?,
-            0o600,
-            identity,
-            &mut journal,
-            RollbackStep::RemoveIdentity,
-        )?;
-        ports.files.write_owned(
-            &paths.metadata(),
-            &fs::read(&staged.metadata).map_err(|_| InstallError::Io)?,
-            0o600,
-            ServiceIdentity { uid: 0, gid: 0 },
-            &mut journal,
-            RollbackStep::RemoveInstallMetadata,
-        )?;
-        ports.files.write_owned(
-            &paths.unit(),
-            &fs::read(&staged.unit).map_err(|_| InstallError::Io)?,
-            0o644,
-            ServiceIdentity { uid: 0, gid: 0 },
-            &mut journal,
-            RollbackStep::RemoveUnit,
-        )?;
+        if let Some((runtime, cpu_provider, disk_health_provider, lifecycle_companion)) =
+            observation_components
+        {
+            for (source, destination) in [
+                (runtime, paths.observation_runtime_binary()),
+                (disk_health_provider, paths.disk_health_provider_binary()),
+                (cpu_provider, paths.cpu_provider_binary()),
+                (lifecycle_companion, paths.lifecycle_companion_binary()),
+            ] {
+                if !journal.owns_published_path(&destination)? {
+                    ports.files.install_binary(
+                        source,
+                        &destination,
+                        &mut journal,
+                        RollbackStep::RemoveBinary,
+                    )?;
+                }
+            }
+        }
+        if !journal.owns_published_path(&paths.identity())? {
+            ports.files.write_owned(
+                &paths.identity(),
+                &fs::read(&staged.identity).map_err(|_| InstallError::Io)?,
+                0o600,
+                identity,
+                &mut journal,
+                RollbackStep::RemoveIdentity,
+            )?;
+        }
+        if !journal.owns_published_path(&paths.metadata())? {
+            ports.files.write_owned(
+                &paths.metadata(),
+                &fs::read(&staged.metadata).map_err(|_| InstallError::Io)?,
+                0o600,
+                ServiceIdentity { uid: 0, gid: 0 },
+                &mut journal,
+                RollbackStep::RemoveInstallMetadata,
+            )?;
+        }
+        if !journal.owns_published_path(&paths.unit())? {
+            ports.files.write_owned(
+                &paths.unit(),
+                &fs::read(&staged.unit).map_err(|_| InstallError::Io)?,
+                0o644,
+                ServiceIdentity { uid: 0, gid: 0 },
+                &mut journal,
+                RollbackStep::RemoveUnit,
+            )?;
+        }
         for (path, contents) in install_observation
             .then_some([
                 (paths.observation_runtime_unit(), observation_runtime_unit()),
@@ -1034,20 +1079,26 @@ fn activate_verified_fresh_install(
             .into_iter()
             .flatten()
         {
-            ports.files.write_owned(
-                &path,
-                contents.as_bytes(),
-                0o644,
-                ServiceIdentity { uid: 0, gid: 0 },
-                &mut journal,
-                RollbackStep::RemoveUnit,
-            )?;
+            if !journal.owns_published_path(&path)? {
+                ports.files.write_owned(
+                    &path,
+                    contents.as_bytes(),
+                    0o644,
+                    ServiceIdentity { uid: 0, gid: 0 },
+                    &mut journal,
+                    RollbackStep::RemoveUnit,
+                )?;
+            }
         }
         ports.systemd.daemon_reload()?;
-        journal.record_enabled_intent()?;
+        if !journal.enabled_may_exist() {
+            journal.record_enabled_intent()?;
+        }
         enabled = true;
         ports.systemd.enable()?;
-        journal.record_started_intent()?;
+        if !journal.started_may_exist() {
+            journal.record_started_intent()?;
+        }
         started = true;
         ports.systemd.start()?;
         ports.systemd.wait_local_activated()?;
@@ -1060,9 +1111,8 @@ fn activate_verified_fresh_install(
         }
         Err(install_error) => {
             if failure_semantics == InstallFailureSemantics::CommittedReplacement {
-                // The journal and all receipt-owned candidate paths remain the
-                // recovery source of truth. A later exact candidate invocation
-                // repairs/restages them forward; it never restores P0.
+                // journal 与所有由 receipt 持有的候选路径继续作为恢复事实源；后续精确
+                // 候选调用只向前修复或重新暂存，绝不恢复 P0。
                 return Err(install_error);
             }
             let rollback_deadline = Instant::now() + ROLLBACK_COMMAND_BUDGET;
@@ -1225,14 +1275,33 @@ fn cleanup_failed_install(
 fn recover_interrupted_install(
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-) -> Result<(), InstallError> {
+    failure_semantics: InstallFailureSemantics,
+) -> Result<InterruptedInstall, InstallError> {
     let Some(journal) = TransactionJournal::load(&paths.bootstrap_state())? else {
-        return Ok(());
+        return Ok(InterruptedInstall::Fresh);
     };
     if TransactionJournal::layout_is_committed(&paths.bootstrap_state())? {
         journal.remove_staging_if_owned()?;
         journal.remove()?;
-        return Err(InstallError::ExistingResidue);
+        return if failure_semantics == InstallFailureSemantics::CommittedReplacement {
+            Ok(InterruptedInstall::Complete)
+        } else {
+            Err(InstallError::ExistingResidue)
+        };
+    }
+    if failure_semantics == InstallFailureSemantics::CommittedReplacement {
+        if !journal.all_published_paths_are_owned() {
+            return Err(InstallError::ExistingResidue);
+        }
+        if let Some((uid, gid)) = journal.identity()
+            && !ports.accounts.owns_transaction_identity(
+                journal.transaction_id(),
+                Some(ServiceIdentity { uid, gid }),
+            )?
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        return Ok(InterruptedInstall::ResumeCommitted(Box::new(journal)));
     }
     let deadline = Instant::now() + ROLLBACK_COMMAND_BUDGET;
     ports.accounts.set_command_deadline(deadline);
@@ -1317,7 +1386,7 @@ fn recover_interrupted_install(
         }
     }
     if failures.is_empty() {
-        journal.remove()
+        journal.remove().map(|()| InterruptedInstall::Fresh)
     } else {
         Err(InstallError::Rollback {
             cause: InstallErrorKind::Io,
@@ -1497,7 +1566,7 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0700\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 

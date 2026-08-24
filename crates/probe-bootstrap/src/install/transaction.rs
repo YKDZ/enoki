@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -403,6 +402,18 @@ impl TransactionJournal {
         &self.state.paths
     }
 
+    pub fn all_published_paths_are_owned(&self) -> bool {
+        self.state.paths.iter().all(OwnedPath::still_owned)
+    }
+
+    pub fn owns_published_path(&self, path: &Path) -> Result<bool, InstallError> {
+        match self.state.paths.iter().find(|owned| owned.path() == path) {
+            Some(owned) if owned.still_owned() => Ok(true),
+            Some(_) => Err(InstallError::ExistingResidue),
+            None => Ok(false),
+        }
+    }
+
     pub fn staging_directory(&self) -> &Path {
         self.state.staging.path()
     }
@@ -518,24 +529,7 @@ fn ensure_private_state(path: &Path, expected_uid: u32) -> Result<(), InstallErr
 }
 
 fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
-    let parent = path.parent().ok_or(InstallError::Io)?;
-    let temporary = parent.join(format!(".{JOURNAL_NAME}-{}", transaction_id()?));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|_| InstallError::Io)?;
-    let result = (|| {
-        file.write_all(bytes).map_err(|_| InstallError::Io)?;
-        file.sync_all().map_err(|_| InstallError::Io)?;
-        fs::rename(&temporary, path).map_err(|_| InstallError::Io)?;
-        sync_parent(path)
-    })();
-    if result.is_err() && fs::remove_file(&temporary).is_ok() {
-        let _ = sync_parent(&temporary);
-    }
-    result
+    crate::secure_file::atomic_write(path, bytes, 0o600, None).map_err(|_| InstallError::Io)
 }
 
 fn remove_unpublished_journal_candidates(state: &Path) -> Result<(), InstallError> {

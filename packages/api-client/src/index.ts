@@ -110,7 +110,7 @@ export type EnrollmentStatusResponse = {
     code: string;
     message: string | null;
   } | null;
-  /** Derived replacement result; it is not an Enrollment status or operation. */
+  /** 派生的 Replacement 结果；它不是 Enrollment status 或 operation。 */
   replacementMigration?: "waiting_host" | "incomplete" | "ready";
   status: EnrollmentStatus;
   target: EnrollmentTarget;

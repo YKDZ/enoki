@@ -228,6 +228,26 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
     assert!(!installed_repair.contains("retry_runtime"));
     assert!(!installed_repair.contains("activate_complete_fresh"));
     assert!(!installed_repair.contains("Replacement"));
+    assert!(!installed_repair.contains("systemd.stop()"));
+    let prepared_repair = installed_repair.split("let prepared").nth(1).unwrap();
+    let runtime_healthy = prepared_repair.find("mark_runtime_healthy()").unwrap();
+    let probe_reporting = prepared_repair.find("start_probe_reporting").unwrap();
+    let invalidation_boundary = prepared_repair.find("mark_probe_active()").unwrap();
+    let completion = prepared_repair.find(".complete()").unwrap();
+    assert!(runtime_healthy < probe_reporting);
+    assert!(probe_reporting < invalidation_boundary);
+    assert!(invalidation_boundary < completion);
+
+    let exchange = UPGRADER
+        .split("fn exchange_repair_authority(")
+        .nth(1)
+        .unwrap()
+        .split('{')
+        .next()
+        .unwrap();
+    for forbidden_parameter in ["executable", "argument", "command", "path"] {
+        assert!(!exchange.contains(forbidden_parameter));
+    }
 }
 
 #[test]

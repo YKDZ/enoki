@@ -34,6 +34,11 @@ describe("Probe Repair authority", () => {
       canonicalInstalledBundleFailureEvidence(evidence),
       installKey,
     );
+    expect(
+      canonicalInstalledBundleFailureEvidence(evidence).toString("utf8"),
+    ).toBe(
+      `{"kind":"installed_bundle_failure","schemaVersion":1,"hubOrigin":"https://hub.example","probeId":"probe_01","generation":"${"a".repeat(64)}","bootId":"4f7d3e15-63cc-4d61-8fe4-f5d42773dd51","unit":"enoki-observation-runtime.service","unitSha256":"${"b".repeat(64)}","identityReceiptSha256":"${"c".repeat(64)}","installStateSha256":"${"d".repeat(64)}","manifestSha256":"${"e".repeat(64)}","bundleVersion":"1.2.3","issuedAtMs":1725000001000,"expiresAtMs":1725000061000,"requestNonce":"request_nonce_01"}`,
+    );
     const decision = authorizeInstalledBundleRepair({
       authorityExpiresAtMs: 1_725_000_061_000,
       evidence,

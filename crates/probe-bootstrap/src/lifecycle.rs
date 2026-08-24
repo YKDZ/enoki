@@ -219,7 +219,37 @@ pub struct InstalledBundleFailureEvidenceV1 {
     pub request_nonce: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalledBundleBindingsV1 {
+    pub hub_origin: String,
+    pub probe_id: String,
+    pub generation: String,
+    pub boot_id: String,
+    pub unit: String,
+    pub unit_sha256: String,
+    pub identity_receipt_sha256: String,
+    pub install_state_sha256: String,
+    pub manifest_sha256: String,
+    pub bundle_version: String,
+}
+
 impl InstalledBundleFailureEvidenceV1 {
+    #[must_use]
+    pub fn bindings(&self) -> InstalledBundleBindingsV1 {
+        InstalledBundleBindingsV1 {
+            hub_origin: self.hub_origin.clone(),
+            probe_id: self.probe_id.clone(),
+            generation: self.generation.clone(),
+            boot_id: self.boot_id.clone(),
+            unit: self.unit.clone(),
+            unit_sha256: self.unit_sha256.clone(),
+            identity_receipt_sha256: self.identity_receipt_sha256.clone(),
+            install_state_sha256: self.install_state_sha256.clone(),
+            manifest_sha256: self.manifest_sha256.clone(),
+            bundle_version: self.bundle_version.clone(),
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("fixed Installed Bundle Failure Evidence serializes")
     }
@@ -270,6 +300,22 @@ pub struct InstalledBundleRepairAuthorityV1 {
 }
 
 impl InstalledBundleRepairAuthorityV1 {
+    #[must_use]
+    pub fn bindings(&self) -> InstalledBundleBindingsV1 {
+        InstalledBundleBindingsV1 {
+            hub_origin: self.hub_origin.clone(),
+            probe_id: self.probe_id.clone(),
+            generation: self.generation.clone(),
+            boot_id: self.boot_id.clone(),
+            unit: self.unit.clone(),
+            unit_sha256: self.unit_sha256.clone(),
+            identity_receipt_sha256: self.identity_receipt_sha256.clone(),
+            install_state_sha256: self.install_state_sha256.clone(),
+            manifest_sha256: self.manifest_sha256.clone(),
+            bundle_version: self.bundle_version.clone(),
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("fixed Installed Bundle Repair Authority serializes")
     }
@@ -286,16 +332,7 @@ impl InstalledBundleRepairAuthorityV1 {
     #[must_use]
     pub fn matches_evidence(&self, evidence: &InstalledBundleFailureEvidenceV1) -> bool {
         self.kind == evidence.kind
-            && self.hub_origin == evidence.hub_origin
-            && self.probe_id == evidence.probe_id
-            && self.generation == evidence.generation
-            && self.boot_id == evidence.boot_id
-            && self.unit == evidence.unit
-            && self.unit_sha256 == evidence.unit_sha256
-            && self.identity_receipt_sha256 == evidence.identity_receipt_sha256
-            && self.install_state_sha256 == evidence.install_state_sha256
-            && self.manifest_sha256 == evidence.manifest_sha256
-            && self.bundle_version == evidence.bundle_version
+            && self.bindings() == evidence.bindings()
             && self.repair_evidence_sha256 == evidence.sha256()
     }
 }
@@ -1184,6 +1221,42 @@ mod tests {
             evidence.sign(&[0x11; 32]),
             "2010c4ef8f227628ce5c3ba568e3ddbe33d9e582bed425d46f7095d2d0147d82"
         );
+    }
+
+    #[test]
+    fn installed_bundle_bindings_are_typed_without_changing_canonical_wire_order() {
+        let evidence = InstalledBundleFailureEvidenceV1 {
+            kind: "installed_bundle_failure".into(),
+            schema_version: 1,
+            hub_origin: "https://hub.example".into(),
+            probe_id: "probe_01".into(),
+            generation: "a".repeat(64),
+            boot_id: "boot-01".into(),
+            unit: "enoki-observation-runtime.service".into(),
+            unit_sha256: "b".repeat(64),
+            identity_receipt_sha256: "c".repeat(64),
+            install_state_sha256: "d".repeat(64),
+            manifest_sha256: "e".repeat(64),
+            bundle_version: "1.2.3".into(),
+            issued_at_ms: 10,
+            expires_at_ms: 20,
+            request_nonce: "request-01".into(),
+        };
+        let expected = format!(
+            "{{\"kind\":\"installed_bundle_failure\",\"schemaVersion\":1,\"hubOrigin\":\"https://hub.example\",\"probeId\":\"probe_01\",\"generation\":\"{}\",\"bootId\":\"boot-01\",\"unit\":\"enoki-observation-runtime.service\",\"unitSha256\":\"{}\",\"identityReceiptSha256\":\"{}\",\"installStateSha256\":\"{}\",\"manifestSha256\":\"{}\",\"bundleVersion\":\"1.2.3\",\"issuedAtMs\":10,\"expiresAtMs\":20,\"requestNonce\":\"request-01\"}}",
+            "a".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+        );
+        assert_eq!(evidence.canonical_bytes(), expected.as_bytes());
+
+        let bindings = evidence.bindings();
+        assert_eq!(bindings, evidence.bindings());
+        let mut changed = evidence.clone();
+        changed.boot_id = "boot-02".into();
+        assert_ne!(bindings, changed.bindings());
     }
 
     #[test]

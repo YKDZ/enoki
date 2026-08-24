@@ -1,15 +1,21 @@
 use std::{
     ffi::{CString, OsStr},
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
         unix::ffi::OsStrExt,
     },
     path::{Component, Path},
+};
+
+#[cfg(test)]
+use std::{
+    io::Write,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(test)]
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Creates a no-follow temporary sibling through held directory file descriptors,
@@ -22,9 +28,11 @@ pub fn atomic_write(
     mode: u32,
     owner: Option<(u32, u32)>,
 ) -> io::Result<()> {
-    atomic_write_with_before_rename(path, contents, mode, owner, || Ok(()))
+    let _ = open_parent(path, true)?;
+    enoki_probe_bootstrap::secure_file::atomic_write(path, contents, mode, owner)
 }
 
+#[cfg(test)]
 fn atomic_write_with_before_rename(
     path: &Path,
     contents: &[u8],
@@ -265,6 +273,7 @@ fn open_directory_at(parent: RawFd, name: &CString) -> RawFd {
     }
 }
 
+#[cfg(test)]
 fn reject_target_symlink(parent: RawFd, name: &CString) -> io::Result<()> {
     match stat_at(parent, name) {
         Ok(stat) if file_type(stat.st_mode) == libc::S_IFLNK => Err(io::Error::new(
@@ -277,6 +286,7 @@ fn reject_target_symlink(parent: RawFd, name: &CString) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn open_new_file(parent: RawFd, name: &CString, mode: u32) -> io::Result<RawFd> {
     let fd = unsafe {
         libc::openat(
@@ -293,6 +303,7 @@ fn open_new_file(parent: RawFd, name: &CString, mode: u32) -> io::Result<RawFd> 
     }
 }
 
+#[cfg(test)]
 fn temporary_name(target: &CString) -> io::Result<CString> {
     let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     CString::new(format!(

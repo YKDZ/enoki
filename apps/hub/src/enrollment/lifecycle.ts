@@ -77,9 +77,8 @@ function replacementMigrationResult(
   enrollment: EnrollmentLifecycleRecord,
 ): "waiting_host" | "incomplete" | "ready" {
   if (enrollment.status === "ready") return "ready";
-  // Registration is the first Hub-trusted post-commit evidence in this slice:
-  // it consumes this Enrollment and binds the replacement identity. A pending
-  // or merely expired command never proves that Host cleanup began.
+  // 注册是本切片中第一份获 Hub 信任的提交后证据：它消费此 Enrollment，并绑定
+  // 替换后的身份。等待中或仅已过期的命令不能证明 Host 已开始清理。
   return enrollment.usedAtMs === null || enrollment.hostId === null
     ? "waiting_host"
     : "incomplete";

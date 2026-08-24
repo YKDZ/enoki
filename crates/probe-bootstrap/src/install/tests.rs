@@ -199,7 +199,10 @@ mod tests {
     #[derive(Default)]
     struct Systemd {
         calls: Vec<&'static str>,
+        fail_reload: bool,
+        fail_enable: bool,
         fail_start: bool,
+        fail_ready: bool,
         residue: bool,
     }
     impl SystemdPort for Systemd {
@@ -211,11 +214,15 @@ mod tests {
         }
         fn daemon_reload(&mut self) -> Result<(), InstallError> {
             self.calls.push("reload");
-            Ok(())
+            (!self.fail_reload)
+                .then_some(())
+                .ok_or(InstallError::Systemd)
         }
         fn enable(&mut self) -> Result<(), InstallError> {
             self.calls.push("enable");
-            Ok(())
+            (!self.fail_enable)
+                .then_some(())
+                .ok_or(InstallError::Systemd)
         }
         fn start(&mut self) -> Result<(), InstallError> {
             self.calls.push("start");
@@ -225,7 +232,9 @@ mod tests {
         }
         fn wait_local_activated(&mut self) -> Result<(), InstallError> {
             self.calls.push("ready");
-            Ok(())
+            (!self.fail_ready)
+                .then_some(())
+                .ok_or(InstallError::Systemd)
         }
         fn stop(&mut self) -> Result<(), InstallError> {
             self.calls.push("stop");
@@ -349,6 +358,68 @@ mod tests {
         fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
             self.inner.remove_path(path)
         }
+        fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
+            self.inner.remove_directory(path)
+        }
+    }
+
+    struct FailFirstCandidateDirectoryFiles {
+        inner: SystemInstallFiles,
+        failed: bool,
+    }
+
+    impl InstallFilePort for FailFirstCandidateDirectoryFiles {
+        fn ensure_metadata_directory(
+            &mut self,
+            path: &Path,
+            journal: &mut TransactionJournal,
+        ) -> Result<bool, InstallError> {
+            self.inner.ensure_metadata_directory(path, journal)
+        }
+
+        fn create_directory(
+            &mut self,
+            path: &Path,
+            mode: u32,
+            identity: ServiceIdentity,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            if !self.failed {
+                self.failed = true;
+                return Err(InstallError::Io);
+            }
+            self.inner
+                .create_directory(path, mode, identity, journal, step)
+        }
+
+        fn install_binary(
+            &mut self,
+            component: &mut File,
+            path: &Path,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.inner.install_binary(component, path, journal, step)
+        }
+
+        fn write_owned(
+            &mut self,
+            path: &Path,
+            contents: &[u8],
+            mode: u32,
+            owner: ServiceIdentity,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.inner
+                .write_owned(path, contents, mode, owner, journal, step)
+        }
+
+        fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
+            self.inner.remove_path(path)
+        }
+
         fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
             self.inner.remove_directory(path)
         }
@@ -2068,7 +2139,7 @@ mod tests {
         assert!(probe.contains("DynamicUser=true"));
         assert!(probe.contains("SupplementaryGroups=enoki-probe-ipc"));
         assert!(probe.contains("StateDirectory=enoki-probe"));
-        assert!(probe.contains("StateDirectoryMode=0700"));
+        assert!(probe.contains("StateDirectoryMode=0750"));
         assert!(probe.contains(
             "Wants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket"
         ));
@@ -2461,8 +2532,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn committed_replacement_start_failure_keeps_candidate_layout_and_forward_journal() {
+    fn assert_committed_replacement_resumes_after(failed_effect: &str) {
         let temporary = tempdir().unwrap();
         for parent in [
             "usr/local/bin",
@@ -2475,7 +2545,13 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         let mut accounts = Accounts::default();
-        let mut systemd = Systemd { fail_start: true, ..Systemd::default() };
+        let mut systemd = Systemd {
+            fail_reload: failed_effect == "reload",
+            fail_enable: failed_effect == "enable",
+            fail_start: failed_effect == "start",
+            fail_ready: failed_effect == "ready",
+            ..Systemd::default()
+        };
 
         let result = activate_complete_replacement_current_probe(
             VerifiedCompleteFreshComponents {
@@ -2510,7 +2586,10 @@ mod tests {
         assert!(!systemd.calls.contains(&"disable"));
         assert!(!systemd.calls.contains(&"stop"));
 
+        systemd.fail_reload = false;
+        systemd.fail_enable = false;
         systemd.fail_start = false;
+        systemd.fail_ready = false;
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         activate_complete_replacement_current_probe(
@@ -2531,6 +2610,16 @@ mod tests {
             &mut systemd,
         )
         .expect("exact committed candidate resumes to the current layout");
+        assert!(
+            !accounts.calls.contains(&"remove"),
+            "已提交 Replacement 恢复不得删除候选 identity"
+        );
+        assert!(
+            !accounts.ipc_calls.contains(&"remove"),
+            "已提交 Replacement 恢复不得删除候选 IPC group"
+        );
+        assert!(!systemd.calls.contains(&"disable"));
+        assert!(!systemd.calls.contains(&"stop"));
         assert!(temporary
             .path()
             .join("var/lib/enoki-probe-bootstrap/current-layout")
@@ -2539,6 +2628,91 @@ mod tests {
             .path()
             .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
             .exists());
+    }
+
+    #[test]
+    fn committed_replacement_resumes_every_systemd_receipt_without_deleting_the_candidate() {
+        for failed_effect in ["reload", "enable", "start", "ready"] {
+            assert_committed_replacement_resumes_after(failed_effect);
+        }
+    }
+
+    #[test]
+    fn committed_replacement_resumes_after_identity_and_partial_layout_receipts() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let mut files = FailFirstCandidateDirectoryFiles {
+            inner: SystemInstallFiles,
+            failed: false,
+        };
+
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_verified_fresh_install(
+                &mut probe,
+                Some((
+                    &mut runtime,
+                    &mut provider,
+                    &mut disk_health,
+                    &mut lifecycle,
+                )),
+                Some((&mut acquirer, &mut activator)),
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut InstallPorts {
+                    accounts: &mut accounts,
+                    systemd: &mut systemd,
+                    files: &mut files,
+                },
+                InstallFailureSemantics::CommittedReplacement,
+            ),
+            Err(InstallError::Io)
+        );
+        assert!(accounts.calls.contains(&"create"));
+        assert!(!accounts.calls.contains(&"remove"));
+        assert!(paths.etc_enoki().exists());
+
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_verified_fresh_install(
+            &mut probe,
+            Some((
+                &mut runtime,
+                &mut provider,
+                &mut disk_health,
+                &mut lifecycle,
+            )),
+            Some((&mut acquirer, &mut activator)),
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &paths,
+            &mut InstallPorts {
+                accounts: &mut accounts,
+                systemd: &mut systemd,
+                files: &mut files,
+            },
+            InstallFailureSemantics::CommittedReplacement,
+        )
+        .expect("已提交 Replacement 从首个缺失 candidate effect 继续");
+
+        assert_eq!(accounts.calls.iter().filter(|call| **call == "create").count(), 1);
+        assert!(!accounts.calls.contains(&"remove"));
+        assert!(!accounts.ipc_calls.contains(&"remove"));
+        assert!(paths.bootstrap_state().join("current-layout").exists());
     }
 
     #[test]
@@ -3461,9 +3635,8 @@ mod tests {
         let mut component = component();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd {
-            calls: Vec::new(),
             fail_start: true,
-            residue: false,
+            ..Systemd::default()
         };
         let error = activate_current_probe(
             &mut component,
@@ -4054,9 +4227,8 @@ mod tests {
         let mut component = component();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd {
-            calls: Vec::new(),
-            fail_start: false,
             residue: true,
+            ..Systemd::default()
         };
         assert_eq!(
             activate_current_probe(

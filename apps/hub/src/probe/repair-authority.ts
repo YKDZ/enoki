@@ -136,19 +136,35 @@ export type InstalledBundleRepairAuthorizationDecision =
     }
   | { disposition: "manual_reinstall_required"; authority?: never };
 
-type InstalledBundleBindings = Pick<
-  InstalledBundleFailureEvidence,
-  | "bootId"
-  | "bundleVersion"
-  | "generation"
-  | "hubOrigin"
-  | "identityReceiptSha256"
-  | "installStateSha256"
-  | "manifestSha256"
-  | "probeId"
-  | "unit"
-  | "unitSha256"
->;
+type InstalledBundleBindings = {
+  bootId: string;
+  bundleVersion: string;
+  generation: string;
+  hubOrigin: string;
+  identityReceiptSha256: string;
+  installStateSha256: string;
+  manifestSha256: string;
+  probeId: string;
+  unit: "enoki-observation-runtime.service";
+  unitSha256: string;
+};
+
+function installedBundleBindings(
+  evidence: InstalledBundleFailureEvidence,
+): InstalledBundleBindings {
+  return {
+    bootId: evidence.bootId,
+    bundleVersion: evidence.bundleVersion,
+    generation: evidence.generation,
+    hubOrigin: evidence.hubOrigin,
+    identityReceiptSha256: evidence.identityReceiptSha256,
+    installStateSha256: evidence.installStateSha256,
+    manifestSha256: evidence.manifestSha256,
+    probeId: evidence.probeId,
+    unit: evidence.unit,
+    unitSha256: evidence.unitSha256,
+  };
+}
 
 function installedBundleBindingsMatch(
   actual: InstalledBundleBindings,
@@ -210,7 +226,10 @@ export function verifyInstalledBundleFailureEvidence(input: {
   if (
     input.evidence.kind !== "installed_bundle_failure" ||
     input.evidence.schemaVersion !== 1 ||
-    !installedBundleBindingsMatch(input.evidence, expectedBindings) ||
+    !installedBundleBindingsMatch(
+      installedBundleBindings(input.evidence),
+      expectedBindings,
+    ) ||
     !validSha256(input.evidence.generation) ||
     !validSha256(input.evidence.unitSha256) ||
     !validSha256(input.evidence.identityReceiptSha256) ||

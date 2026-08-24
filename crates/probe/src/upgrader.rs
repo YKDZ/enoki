@@ -1270,17 +1270,7 @@ fn run_authorized_probe_repair_for_invoking_admin(
     let consumed = if let Some(consumed) = resumable_upgrade {
         consumed
     } else {
-        let mut nonce = [0_u8; 16];
-        fs::File::open("/dev/urandom")
-            .and_then(|mut random| random.read_exact(&mut nonce))
-            .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
-        let request_nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-        let now_ms: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
-            .as_millis()
-            .try_into()
-            .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
+        let (request_nonce, now_ms) = fresh_repair_exchange_facts()?;
         let signed = issue_probe_repair_evidence(
             &paths,
             now_ms,
@@ -1299,39 +1289,14 @@ fn run_authorized_probe_repair_for_invoking_admin(
             evidence_signature: &signed.signature,
         })
         .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
-        let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
-        acquirer.arg("--repair-authorize");
-        configure_repair_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
-        let mut child = acquirer
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-        child
-            .stdin
-            .take()
-            .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
-            .write_all(&request)
-            .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-        if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
-            return Err(error);
-        }
-        if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
-            return Err(repair_contract_failure(
-                "probe_repair_authority_acquire_failed",
-            ));
-        }
+        let output = exchange_repair_authority(&request, invoking_uid, invoking_gid)?;
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct RepairAuthorizationResponse {
             authority: RepairAuthorityV1,
             signature: String,
         }
-        let response: RepairAuthorizationResponse = serde_json::from_slice(&output.stdout)
+        let response: RepairAuthorizationResponse = serde_json::from_slice(&output)
             .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
         consume_probe_repair_authority(
             &paths,
@@ -1383,17 +1348,7 @@ fn run_authorized_installed_bundle_repair(
             resumable.progress,
         );
     }
-    let mut nonce = [0_u8; 16];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut nonce))
-        .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
-    let request_nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
-    let now_ms: u64 = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
-        .as_millis()
-        .try_into()
-        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
+    let (request_nonce, now_ms) = fresh_repair_exchange_facts()?;
     let signed = crate::runtime_failure::issue_installed_bundle_failure_evidence(
         now_ms,
         now_ms.saturating_add(60_000),
@@ -1411,27 +1366,7 @@ fn run_authorized_installed_bundle_repair(
         evidence_signature: &signed.signature,
     })
     .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
-    let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
-    acquirer.arg("--repair-authorize");
-    configure_repair_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
-    let mut child = acquirer
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
-        .write_all(&request)
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    let output = child
-        .wait_with_output()
-        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
-    if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
-        return Err(error);
-    }
+    let output = exchange_repair_authority(&request, invoking_uid, invoking_gid)?;
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Response {
@@ -1439,7 +1374,7 @@ fn run_authorized_installed_bundle_repair(
         signature: String,
         stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
     }
-    let response: Response = serde_json::from_slice(&output.stdout)
+    let response: Response = serde_json::from_slice(&output)
         .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
     let grant = crate::runtime_failure::validate_installed_bundle_repair_authority(
         &signed,
@@ -1468,6 +1403,18 @@ fn execute_installed_bundle_repair(
     stage_owner_uid: u32,
     progress: crate::runtime_failure::InstalledBundleRepairProgress,
 ) -> Result<ProbeRepairResult, ProbeRepairRunError> {
+    let mut systemd = SystemSystemd::for_live_upgrade();
+    if progress == crate::runtime_failure::InstalledBundleRepairProgress::ProbeActive
+        || progress.is_forward_only()
+    {
+        let (probe_id, repaired_version) = grant
+            .complete()
+            .map_err(|_| repair_contract_failure("probe_repair_completion_persist_failed"))?;
+        return Ok(ProbeRepairResult {
+            probe_id,
+            repaired_version,
+        });
+    }
     let mut stage = open_verified_probe_upgrade_stage(&stage_receipt, stage_owner_uid)
         .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
     let paths = FixedInstallPaths::production();
@@ -1486,8 +1433,7 @@ fn execute_installed_bundle_repair(
     {
         return Err(ProbeUpgraderRunError::ManualProbeReinstallRequired.into());
     }
-    let mut systemd = SystemSystemd::for_live_upgrade();
-    let repaired = (|| {
+    let prepared = (|| {
         mask_runtime_validation_socket()?;
         remove_runtime_repair_validation_gate()?;
         systemd
@@ -1525,36 +1471,92 @@ fn execute_installed_bundle_repair(
         grant
             .mark_runtime_healthy()
             .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
-        remove_runtime_repair_validation_gate()?;
-        systemd
-            .daemon_reload()
-            .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+        restore_canonical_runtime_gate(&mut systemd)?;
+        start_probe_reporting(&mut systemd)?;
         grant
-            .complete()
-            .map_err(|_| repair_contract_failure("probe_repair_completion_persist_failed"))
+            .mark_probe_active()
+            .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))
     })();
-    let (probe_id, repaired_version) = match repaired {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = systemd.stop();
-            let _ = remove_runtime_repair_validation_gate();
-            let _ = systemd.daemon_reload();
-            let _ = unmask_runtime_validation_socket();
-            let _ = grant.persist_unresolved();
-            return Err(error);
-        }
-    };
+    if let Err(error) = prepared {
+        let mut reporting = LiveInstalledRepairReporting {
+            systemd: &mut systemd,
+        };
+        let _ = compensate_preboundary_repair_failure(&mut reporting, || {
+            grant
+                .persist_unresolved()
+                .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))
+        });
+        return Err(error);
+    }
+    // ProbeActive receipt 是 evidence invalidation 的唯一 commit boundary；此后失败只前滚。
+    let (probe_id, repaired_version) = grant
+        .complete()
+        .map_err(|_| repair_contract_failure("probe_repair_completion_persist_failed"))?;
     let _ = remove_verified_probe_upgrade_stage(&stage_receipt.operation_id, stage_owner_uid);
+    Ok(ProbeRepairResult {
+        probe_id,
+        repaired_version,
+    })
+}
+
+fn restore_canonical_runtime_gate(
+    systemd: &mut impl SystemdPort,
+) -> Result<(), ProbeRepairRunError> {
+    required_repair_systemctl(&["stop", "enoki-observation-runtime.service"])?;
+    remove_runtime_repair_validation_gate()?;
+    systemd
+        .daemon_reload()
+        .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
+    unmask_runtime_validation_socket()
+}
+
+trait InstalledRepairReporting {
+    fn restore_canonical_gate(&mut self) -> Result<(), ProbeRepairRunError>;
+    fn start_probe(&mut self) -> Result<(), ProbeRepairRunError>;
+    fn wait_probe_active(&mut self) -> Result<(), ProbeRepairRunError>;
+}
+
+struct LiveInstalledRepairReporting<'a> {
+    systemd: &'a mut SystemSystemd,
+}
+
+impl InstalledRepairReporting for LiveInstalledRepairReporting<'_> {
+    fn restore_canonical_gate(&mut self) -> Result<(), ProbeRepairRunError> {
+        restore_canonical_runtime_gate(self.systemd)
+    }
+
+    fn start_probe(&mut self) -> Result<(), ProbeRepairRunError> {
+        self.systemd
+            .start()
+            .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))
+    }
+
+    fn wait_probe_active(&mut self) -> Result<(), ProbeRepairRunError> {
+        self.systemd
+            .wait_local_activated()
+            .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))
+    }
+}
+
+fn compensate_preboundary_repair_failure(
+    reporting: &mut impl InstalledRepairReporting,
+    persist_unresolved: impl FnOnce() -> Result<(), ProbeRepairRunError>,
+) -> Result<(), ProbeRepairRunError> {
+    let reporting_result = reporting
+        .restore_canonical_gate()
+        .and_then(|()| reporting.start_probe())
+        .and_then(|()| reporting.wait_probe_active());
+    let unresolved_result = persist_unresolved();
+    reporting_result.and(unresolved_result)
+}
+
+fn start_probe_reporting(systemd: &mut impl SystemdPort) -> Result<(), ProbeRepairRunError> {
     systemd
         .start()
         .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
     systemd
         .wait_local_activated()
-        .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))?;
-    Ok(ProbeRepairResult {
-        probe_id,
-        repaired_version,
-    })
+        .map_err(|_| repair_contract_failure("probe_repair_systemd_failed"))
 }
 
 const RUNTIME_REPAIR_RUN_DIR: &str = "/run/enoki-probe";
@@ -1631,6 +1633,57 @@ fn required_repair_systemctl(arguments: &[&str]) -> Result<(), ProbeRepairRunErr
 
 fn repair_acquirer_exit_failure(code: Option<i32>) -> Option<ProbeRepairRunError> {
     (code == Some(3)).then(|| ProbeUpgraderRunError::ManualProbeReinstallRequired.into())
+}
+
+fn fresh_repair_exchange_facts() -> Result<(String, u64), ProbeRepairRunError> {
+    let mut nonce = [0_u8; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut nonce))
+        .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
+    Ok((
+        nonce.iter().map(|byte| format!("{byte:02x}")).collect(),
+        now_ms,
+    ))
+}
+
+fn exchange_repair_authority(
+    request: &[u8],
+    invoking_uid: u32,
+    invoking_gid: u32,
+) -> Result<Vec<u8>, ProbeRepairRunError> {
+    let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
+    acquirer.arg("--repair-authorize");
+    configure_repair_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
+    let mut child = acquirer
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
+        .write_all(request)
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
+        return Err(error);
+    }
+    if !output.status.success() || output.stdout.is_empty() || output.stdout.len() > 8 * 1024 {
+        return Err(repair_contract_failure(
+            "probe_repair_authority_acquire_failed",
+        ));
+    }
+    Ok(output.stdout)
 }
 
 #[cfg(test)]
@@ -6439,6 +6492,82 @@ mod tests {
         signature::{RandomizedSigner, SignatureEncoding},
     };
     use std::{collections::HashMap, fs};
+
+    #[test]
+    fn preboundary_repair_failure_keeps_latch_and_resumes_probe_reporting_after_each_fail_once() {
+        struct Reporting {
+            calls: Vec<&'static str>,
+            fail_once_at: &'static str,
+            failed: bool,
+            active: bool,
+        }
+
+        impl Reporting {
+            fn effect(&mut self, name: &'static str) -> Result<(), ProbeRepairRunError> {
+                self.calls.push(name);
+                if name == self.fail_once_at && !self.failed {
+                    self.failed = true;
+                    return Err(repair_contract_failure("probe_repair_systemd_failed"));
+                }
+                if name == "active" {
+                    self.active = true;
+                }
+                Ok(())
+            }
+        }
+
+        impl InstalledRepairReporting for Reporting {
+            fn restore_canonical_gate(&mut self) -> Result<(), ProbeRepairRunError> {
+                self.effect("gate")
+            }
+
+            fn start_probe(&mut self) -> Result<(), ProbeRepairRunError> {
+                self.effect("start")
+            }
+
+            fn wait_probe_active(&mut self) -> Result<(), ProbeRepairRunError> {
+                self.effect("active")
+            }
+        }
+
+        for fail_once_at in ["gate", "start", "active"] {
+            let root = tempfile::tempdir().unwrap();
+            let latch = root.path().join("latch");
+            fs::write(&latch, b"same-generation").unwrap();
+            let unresolved_writes = std::cell::Cell::new(0);
+            let mut reporting = Reporting {
+                calls: Vec::new(),
+                fail_once_at,
+                failed: false,
+                active: false,
+            };
+
+            assert!(
+                compensate_preboundary_repair_failure(&mut reporting, || {
+                    unresolved_writes.set(unresolved_writes.get() + 1);
+                    fs::write(root.path().join("status"), b"unresolved").map_err(|_| {
+                        repair_contract_failure("probe_repair_intent_persist_failed")
+                    })?;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(fs::read(&latch).unwrap(), b"same-generation");
+            assert_eq!(fs::read(root.path().join("status")).unwrap(), b"unresolved");
+            assert_eq!(unresolved_writes.get(), 1);
+
+            compensate_preboundary_repair_failure(&mut reporting, || {
+                unresolved_writes.set(unresolved_writes.get() + 1);
+                fs::write(root.path().join("status"), b"unresolved")
+                    .map_err(|_| repair_contract_failure("probe_repair_intent_persist_failed"))?;
+                Ok(())
+            })
+            .expect("下一次 resume 恢复 Probe reporting");
+            assert!(reporting.active);
+            assert_eq!(fs::read(&latch).unwrap(), b"same-generation");
+            assert_eq!(unresolved_writes.get(), 2);
+        }
+    }
 
     #[test]
     fn compatible_upgrade_authority_is_verified_offline_with_the_per_install_key() {

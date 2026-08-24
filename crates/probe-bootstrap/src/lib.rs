@@ -14,5 +14,6 @@ pub mod install;
 pub mod lifecycle;
 pub mod operation_status;
 pub mod replacement;
+pub mod secure_file;
 pub mod trust;
 pub mod verifier;
