@@ -10,6 +10,7 @@ pub mod protocol;
 pub mod registration;
 pub mod report;
 pub mod runtime;
+pub mod runtime_failure;
 pub mod secure_file;
 pub mod system_state_resource_sandbox;
 pub mod transport;

@@ -46,6 +46,72 @@ describe("Hub database", () => {
     database.close();
   });
 
+  it("adds nullable Runtime failure repair bindings without reclassifying a legacy failed-Upgrade Repair", async () => {
+    const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
+    tempRoots.push(dataRoot);
+    const stagedMigrations = path.join(dataRoot, "core-migrations");
+    const currentMigration = "20260824132103_messy_madame_hydra";
+    await cp(path.resolve("drizzle"), stagedMigrations, { recursive: true });
+    await rm(path.join(stagedMigrations, currentMigration), {
+      force: true,
+      recursive: true,
+    });
+    const legacyOptions = {
+      migrationLayers: [
+        {
+          historyTable: "__core_migrations",
+          migrationsFolder: stagedMigrations,
+          name: "core",
+        },
+        {
+          historyTable: "__official_metrics_migrations",
+          migrationsFolder: path.resolve("drizzle-official-metrics"),
+          name: "official_metrics",
+        },
+      ],
+    };
+    const legacy = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      legacyOptions,
+    );
+    createHost(legacy, { id: 73, probeId: "probe-legacy-repair" });
+    legacy.sqlite
+      .prepare(
+        `insert into probe_operations (
+        id, managed_host_id, kind, state, target_probe_version,
+        repair_failed_operation_id, repair_evidence_sha256,
+        created_at_ms, updated_at_ms, accepted_at_ms
+      ) values (42, 73, 'probe_repair', 'accepted', '1.2.3', 41, ?, 1, 1, 1)`,
+      )
+      .run("a".repeat(64));
+    legacy.close();
+
+    await cp(
+      path.resolve("drizzle", currentMigration),
+      path.join(stagedMigrations, currentMigration),
+      { recursive: true },
+    );
+    const migrated = initializeHubDatabase(
+      { dataRoot, sqlitePath: path.join(dataRoot, "enoki.db") },
+      legacyOptions,
+    );
+    expect(
+      migrated.sqlite
+        .prepare(
+          "select repair_eligibility_kind as kind, repair_failure_generation as generation from probe_operations where id = 42",
+        )
+        .get(),
+    ).toEqual({ kind: null, generation: null });
+    expect(migrated.probeOperations.findById(42)).toEqual(
+      expect.objectContaining({
+        repairEligibilityKind: "failed_upgrade",
+        repairFailedOperationId: 41,
+        repairFailureGeneration: null,
+      }),
+    );
+    migrated.close();
+  });
+
   it("adds nullable Forward evidence bindings without reclassifying an existing Host Profile", async () => {
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), "enoki-hub-db-"));
     tempRoots.push(dataRoot);

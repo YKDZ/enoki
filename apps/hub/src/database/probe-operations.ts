@@ -280,7 +280,11 @@ export function createProbeOperationRepository(
         candidate.kind !== "probe_repair" ||
         candidate.state !== "accepted" ||
         !candidate.repairEvidenceSha256 ||
-        !candidate.repairFailedOperationId
+        !candidate.repairEligibilityKind ||
+        (candidate.repairEligibilityKind === "failed_upgrade") !==
+          Boolean(candidate.repairFailedOperationId) ||
+        (candidate.repairEligibilityKind === "installed_bundle_failure") !==
+          Boolean(candidate.repairFailureGeneration)
       ) {
         throw new Error("Invalid Probe Repair replacement candidate.");
       }
@@ -314,6 +318,11 @@ export function createProbeOperationRepository(
             active.state !== "accepted" ||
             active.repairFailedOperationId !==
               candidate.repairFailedOperationId ||
+            (active.repairEligibilityKind ??
+              (active.repairFailedOperationId ? "failed_upgrade" : null)) !==
+              candidate.repairEligibilityKind ||
+            active.repairFailureGeneration !==
+              candidate.repairFailureGeneration ||
             active.repairAuthorityExpiresAtMs === null ||
             active.repairAuthorityExpiresAtMs > nowMs
           ) {
@@ -388,6 +397,8 @@ function probeUpgradeRequestToRow(
     repairEligibilityEvidenceJson: operation.repairEligibilityEvidenceJson,
     repairEligibilityEvidenceSha256: operation.repairEligibilityEvidenceSha256,
     repairEvidenceSha256: operation.repairEvidenceSha256,
+    repairEligibilityKind: operation.repairEligibilityKind,
+    repairFailureGeneration: operation.repairFailureGeneration,
     repairFailedOperationId: operation.repairFailedOperationId,
     repairNonce: operation.repairNonce,
     runningAtMs: operation.runningAtMs,
@@ -418,6 +429,11 @@ function rowToProbeUpgradeRequest(row: ProbeOperationRow): ProbeUpgradeRequest {
     repairEligibilityEvidenceJson: row.repairEligibilityEvidenceJson,
     repairEligibilityEvidenceSha256: row.repairEligibilityEvidenceSha256,
     repairEvidenceSha256: row.repairEvidenceSha256,
+    repairEligibilityKind: (row.repairEligibilityKind ??
+      (row.repairFailedOperationId
+        ? "failed_upgrade"
+        : null)) as ProbeUpgradeRequest["repairEligibilityKind"],
+    repairFailureGeneration: row.repairFailureGeneration,
     repairFailedOperationId: row.repairFailedOperationId,
     repairNonce: row.repairNonce,
     runningAtMs: row.runningAtMs,

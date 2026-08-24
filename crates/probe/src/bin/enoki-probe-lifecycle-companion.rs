@@ -17,6 +17,8 @@ fn main() -> ExitCode {
     let mode = match std::env::args_os().skip(1).collect::<Vec<_>>().as_slice() {
         [] => CompanionMode::General,
         [argument] if argument == "--upgrade" => CompanionMode::Upgrade,
+        [argument] if argument == "record-runtime-failure" => CompanionMode::RecordRuntimeFailure,
+        [argument] if argument == "retry-runtime" => CompanionMode::RetryRuntime,
         _ => return ExitCode::from(2),
     };
     run(mode)
@@ -26,9 +28,23 @@ fn main() -> ExitCode {
 enum CompanionMode {
     General,
     Upgrade,
+    RecordRuntimeFailure,
+    RetryRuntime,
 }
 
 fn run(mode: CompanionMode) -> ExitCode {
+    if mode == CompanionMode::RecordRuntimeFailure {
+        return match enoki_probe::runtime_failure::record_runtime_failure() {
+            Ok(_) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    }
+    if mode == CompanionMode::RetryRuntime {
+        return match enoki_probe::runtime_failure::retry_runtime() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(1),
+        };
+    }
     if mode == CompanionMode::Upgrade && unsafe { libc::getuid() } != 0 {
         return ExitCode::from(2);
     }
@@ -71,6 +87,12 @@ fn mode_accepts(
     mode: CompanionMode,
     transition: enoki_probe_bootstrap::lifecycle::LifecycleTransition,
 ) -> bool {
+    if matches!(
+        mode,
+        CompanionMode::RecordRuntimeFailure | CompanionMode::RetryRuntime
+    ) {
+        return false;
+    }
     (mode == CompanionMode::Upgrade)
         == (transition == enoki_probe_bootstrap::lifecycle::LifecycleTransition::Upgrade)
 }
@@ -186,6 +208,10 @@ mod tests {
         ));
         assert!(mode_accepts(
             CompanionMode::General,
+            LifecycleTransition::Repair
+        ));
+        assert!(!mode_accepts(
+            CompanionMode::RecordRuntimeFailure,
             LifecycleTransition::Repair
         ));
     }

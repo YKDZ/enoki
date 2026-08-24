@@ -16,6 +16,7 @@ const COMPATIBLE_UPGRADE: &str =
     include_str!("../../probe-bootstrap/src/install/compatible_upgrade.rs");
 const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
+const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
 
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -167,6 +168,37 @@ fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
             "生产模块不得保留旧 systemd-run launch adapter：{forbidden}",
         );
     }
+}
+
+#[test]
+fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechanics() {
+    let recorder_branch = LIFECYCLE_COMPANION_BINARY
+        .find("mode == CompanionMode::RecordRuntimeFailure")
+        .expect("Companion 必须含固定 Runtime failure recorder 分支");
+    let stdin_decode = LIFECYCLE_COMPANION_BINARY
+        .find("read_to_end(&mut bytes)")
+        .expect("通用 Companion 仍读取有界 LifecycleRequest");
+    let http_transport = LIFECYCLE_COMPANION_BINARY
+        .find("let mut transport = HttpProbeUpgraderValidationTransport")
+        .expect("通用 Companion 仍有既有 Hub transport");
+    assert!(recorder_branch < stdin_decode);
+    assert!(recorder_branch < http_transport);
+    let recorder = include_str!("../src/runtime_failure.rs");
+    for forbidden in [
+        "LifecycleRequest::decode",
+        "HttpProbeUpgraderValidationTransport",
+        "run_compatible_upgrade",
+        "run_probe_repair",
+        "replacement_migration",
+    ] {
+        assert!(
+            !recorder.contains(forbidden),
+            "recorder 不得进入 {forbidden}"
+        );
+    }
+    assert!(BOOTSTRAP_ACQUISITION.contains("ClosedRepairEvidence::InstalledBundleFailure"));
+    assert!(BOOTSTRAP_ACQUISITION.contains("/api/probe/runtime-failures/{}/repair-authorize"));
+    assert!(!BOOTSTRAP_ACQUISITION.contains("repair_authorize_url"));
 }
 
 #[test]

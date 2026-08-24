@@ -66,6 +66,8 @@ const OBSERVATION_RUNTIME_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-observation-runtime.service";
 const OBSERVATION_RUNTIME_SOCKET_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-observation-runtime.socket";
+const OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT_PATH: &str =
+    "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const CPU_PROVIDER_SERVICE_UNIT_PATH: &str =
     "/etc/systemd/system/enoki-cpu-resource-provider@.service";
 const CPU_PROVIDER_SOCKET_UNIT_PATH: &str =
@@ -1247,6 +1249,9 @@ fn run_authorized_probe_repair_for_invoking_admin(
     if unsafe { libc::geteuid() } != 0 || invoking_uid == 0 || invoking_gid == 0 {
         return Err(ProbeRepairRunError::RootRequired);
     }
+    if Path::new("/var/lib/enoki-probe/runtime-failure/latch").exists() {
+        return run_authorized_installed_bundle_repair(invoking_uid, invoking_gid);
+    }
     let paths = FixedInstallPaths::production();
     let consumed = if let Some(consumed) = resume_probe_repair_intent(&paths)
         .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?
@@ -1349,6 +1354,88 @@ fn run_authorized_probe_repair_for_invoking_admin(
     Ok(ProbeRepairResult {
         probe_id: consumed.probe_id,
         repaired_version: consumed.target_bundle_version,
+    })
+}
+
+fn run_authorized_installed_bundle_repair(
+    invoking_uid: u32,
+    invoking_gid: u32,
+) -> Result<ProbeRepairResult, ProbeRepairRunError> {
+    let mut nonce = [0_u8; 16];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut random| random.read_exact(&mut nonce))
+        .map_err(|_| repair_contract_failure("probe_repair_random_failed"))?;
+    let request_nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let now_ms: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| repair_contract_failure("probe_repair_clock_invalid"))?;
+    let signed = crate::runtime_failure::issue_installed_bundle_failure_evidence(
+        now_ms,
+        now_ms.saturating_add(60_000),
+        &request_nonce,
+    )
+    .map_err(|_| ProbeUpgraderRunError::ManualProbeReinstallRequired)?;
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request<'a> {
+        evidence: &'a enoki_probe_bootstrap::lifecycle::InstalledBundleFailureEvidenceV1,
+        evidence_signature: &'a str,
+    }
+    let request = serde_json::to_vec(&Request {
+        evidence: &signed.evidence,
+        evidence_signature: &signed.signature,
+    })
+    .map_err(|_| repair_contract_failure("probe_repair_request_invalid"))?;
+    let mut acquirer = Command::new(PRODUCTION_BOOTSTRAP_ACQUIRER_PATH);
+    acquirer.arg("--repair-authorize");
+    configure_repair_acquirer_privileges(&mut acquirer, invoking_uid, invoking_gid);
+    let mut child = acquirer
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| repair_contract_failure("probe_repair_authority_acquire_failed"))?
+        .write_all(&request)
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|_| repair_contract_failure("probe_repair_authority_acquire_failed"))?;
+    if let Some(error) = repair_acquirer_exit_failure(output.status.code()) {
+        return Err(error);
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Response {
+        authority: enoki_probe_bootstrap::lifecycle::InstalledBundleRepairAuthorityV1,
+        signature: String,
+    }
+    let response: Response = serde_json::from_slice(&output.stdout)
+        .map_err(|_| repair_contract_failure("probe_repair_authority_invalid"))?;
+    let (probe_id, repaired_version) =
+        crate::runtime_failure::consume_installed_bundle_repair_authority(
+            &signed,
+            &response.authority,
+            &response.signature,
+            now_ms,
+        )
+        .map_err(|error| match error {
+            crate::runtime_failure::InstalledBundleRepairError::InvalidBoundary => {
+                ProbeUpgraderRunError::ManualProbeReinstallRequired.into()
+            }
+            crate::runtime_failure::InstalledBundleRepairError::RuntimeRestartFailed => {
+                repair_contract_failure("probe_repair_recovery_pending")
+            }
+        })?;
+    Ok(ProbeRepairResult {
+        probe_id,
+        repaired_version,
     })
 }
 
@@ -4179,6 +4266,15 @@ fn parse_trusted_probe_install_metadata_with_legacy_identity(
                     LIFECYCLE_UPGRADE_SOCKET_UNIT_PATH,
                 ),
             ]);
+            if value
+                .get("observation_runtime_failure_recorder_unit_path")
+                .is_some()
+            {
+                unit_specs.push((
+                    "observation_runtime_failure_recorder_unit_path",
+                    OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT_PATH,
+                ));
+            }
         }
         let units = unit_specs
             .into_iter()

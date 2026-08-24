@@ -55,6 +55,9 @@ const CPU_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-cpu-resource-provider";
 const DISK_HEALTH_PROVIDER_BINARY: &str = "/usr/local/bin/enoki-disk-health-resource-provider";
 const LIFECYCLE_COMPANION_BINARY: &str = "/usr/local/bin/enoki-probe-lifecycle-companion";
 const STATE: &str = "/var/lib/enoki-probe";
+const RUNTIME_FAILURE_EPOCH: &str = "/var/lib/enoki-probe/runtime-failure/epoch.toml";
+const RUNTIME_FAILURE_LATCH: &str = "/var/lib/enoki-probe/runtime-failure/latch";
+const RUNTIME_FAILURE_DIR: &str = "/var/lib/enoki-probe/runtime-failure";
 const IDENTITY_DIR: &str = "/var/lib/enoki-probe/identity";
 const IDENTITY: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
 const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
@@ -62,6 +65,8 @@ const UNIT: &str = "/etc/systemd/system/enoki-probe.service";
 const OBSERVATION_RUNTIME_UNIT: &str = "/etc/systemd/system/enoki-observation-runtime.service";
 const OBSERVATION_RUNTIME_SOCKET_UNIT: &str =
     "/etc/systemd/system/enoki-observation-runtime.socket";
+const OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT: &str =
+    "/etc/systemd/system/enoki-observation-runtime-failure.service";
 const CPU_PROVIDER_UNIT: &str = "/etc/systemd/system/enoki-cpu-resource-provider@.service";
 const CPU_PROVIDER_SOCKET_UNIT: &str = "/etc/systemd/system/enoki-cpu-resource-provider.socket";
 const DISK_HEALTH_PROVIDER_UNIT: &str =
@@ -403,6 +408,15 @@ impl FixedInstallPaths {
     fn state(&self) -> PathBuf {
         self.map(STATE)
     }
+    fn runtime_failure_epoch(&self) -> PathBuf {
+        self.map(RUNTIME_FAILURE_EPOCH)
+    }
+    fn runtime_failure_dir(&self) -> PathBuf {
+        self.map(RUNTIME_FAILURE_DIR)
+    }
+    fn runtime_failure_latch(&self) -> PathBuf {
+        self.map(RUNTIME_FAILURE_LATCH)
+    }
     fn identity_dir(&self) -> PathBuf {
         self.map(IDENTITY_DIR)
     }
@@ -423,6 +437,9 @@ impl FixedInstallPaths {
     }
     fn observation_runtime_socket_unit(&self) -> PathBuf {
         self.map(OBSERVATION_RUNTIME_SOCKET_UNIT)
+    }
+    fn observation_runtime_failure_recorder_unit(&self) -> PathBuf {
+        self.map(OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT)
     }
     fn cpu_provider_unit(&self) -> PathBuf {
         self.map(CPU_PROVIDER_UNIT)
@@ -986,6 +1003,10 @@ fn activate_verified_fresh_install(
                     paths.observation_runtime_socket_unit(),
                     observation_runtime_socket_unit().to_owned(),
                 ),
+                (
+                    paths.observation_runtime_failure_recorder_unit(),
+                    observation_runtime_failure_recorder_unit(),
+                ),
                 (paths.cpu_provider_unit(), cpu_provider_unit()),
                 (
                     paths.cpu_provider_socket_unit(),
@@ -1428,7 +1449,7 @@ fn install_metadata(
         enrollment.hub_origin(),
     );
     Ok(format!(
-        "schema_version = 5\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nlifecycle_authority_install_key = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\nlifecycle_upgrade_service_unit_path = {:?}\nlifecycle_upgrade_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
+        "schema_version = 5\nhub_url = {:?}\nidentity_path = {:?}\ninstall_path = {:?}\nobservation_runtime_path = {:?}\ncpu_provider_path = {:?}\ndisk_health_provider_path = {:?}\nlifecycle_companion_path = {:?}\nprobe_ipc_group = {:?}\nprobe_ipc_group_ownership = {:?}\nobservation_ipc_group = {:?}\noperation_status_path = {:?}\nstate_dir = {:?}\nprobe_distribution_root_sha256 = {:?}\nlifecycle_authority_install_key = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nbootstrap_state_dir = {:?}\nbootstrap_acquirer_path = {:?}\nbootstrap_activator_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nservice_group = {:?}\nservice_unit_path = {:?}\nobservation_runtime_service_unit_path = {:?}\nobservation_runtime_socket_unit_path = {:?}\nobservation_runtime_failure_recorder_unit_path = {:?}\ncpu_provider_service_unit_path = {:?}\ncpu_provider_socket_unit_path = {:?}\ndisk_health_provider_service_unit_path = {:?}\ndisk_health_provider_socket_unit_path = {:?}\nlifecycle_companion_service_unit_path = {:?}\nlifecycle_companion_socket_unit_path = {:?}\nlifecycle_upgrade_service_unit_path = {:?}\nlifecycle_upgrade_socket_unit_path = {:?}\ncollector_helper_sudoers_path = {:?}\n",
         enrollment.hub_origin(),
         IDENTITY,
         BINARY,
@@ -1458,6 +1479,7 @@ fn install_metadata(
         UNIT,
         OBSERVATION_RUNTIME_UNIT,
         OBSERVATION_RUNTIME_SOCKET_UNIT,
+        OBSERVATION_RUNTIME_FAILURE_RECORDER_UNIT,
         CPU_PROVIDER_UNIT,
         CPU_PROVIDER_SOCKET_UNIT,
         DISK_HEALTH_PROVIDER_UNIT,
@@ -1505,7 +1527,13 @@ fn observation_runtime_socket_unit() -> &'static str {
 
 fn observation_runtime_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nWatchdogSec=30s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release /var/lib/enoki-probe/identity -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket\n"
+        "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nOnFailure=enoki-observation-runtime-failure.service\nConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nWatchdogSec=30s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release /var/lib/enoki-probe/identity -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket\n"
+    )
+}
+
+fn observation_runtime_failure_recorder_unit() -> String {
+    format!(
+        "[Unit]\nDescription=Enoki Observation Runtime failure recorder\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure\nTimeoutStartSec=15s\nStateDirectory=enoki-probe/runtime-failure\nStateDirectoryMode=0700\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=64M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nReadOnlyPaths=/etc/enoki/probe-install.toml /var/lib/enoki-probe/identity/probe-bootstrap.toml /etc/systemd/system/enoki-observation-runtime.service /proc/sys/kernel/random/boot_id\nReadWritePaths=/var/lib/enoki-probe/runtime-failure\n"
     )
 }
 
@@ -1553,7 +1581,7 @@ pub fn fixed_execution_role_units() -> [(&'static str, Vec<u8>); 5] {
 }
 
 /// Upgrader 与首次安装共享的固定 systemd integration assets。
-pub fn fixed_observation_unit_contents() -> [Vec<u8>; 8] {
+pub fn fixed_observation_unit_contents() -> [Vec<u8>; 9] {
     [
         observation_runtime_unit().into_bytes(),
         observation_runtime_socket_unit().as_bytes().to_vec(),
@@ -1563,6 +1591,7 @@ pub fn fixed_observation_unit_contents() -> [Vec<u8>; 8] {
         disk_health_provider_socket_unit().as_bytes().to_vec(),
         lifecycle_companion_unit().into_bytes(),
         lifecycle_companion_socket_unit().as_bytes().to_vec(),
+        observation_runtime_failure_recorder_unit().into_bytes(),
     ]
 }
 

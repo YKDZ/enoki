@@ -11,6 +11,12 @@ const repairEligibilitySigningDomain = Buffer.from(
 const repairAuthoritySigningDomain = Buffer.from(
   "enoki/lifecycle-repair-authority/hmac-sha256/v1\0",
 );
+const installedBundleFailureEvidenceSigningDomain = Buffer.from(
+  "enoki/installed-bundle-failure-evidence/hmac-sha256/v1\0",
+);
+const installedBundleRepairAuthoritySigningDomain = Buffer.from(
+  "enoki/installed-bundle-repair-authority/hmac-sha256/v1\0",
+);
 const maxRepairAuthorityTtlMs = 2 * 60 * 1000;
 const postactivationPhases = new Set<ProbeRepairEvidence["journalPhase"]>([
   "activation-started",
@@ -82,6 +88,176 @@ export type VerifiedProbeRepairEvidence = {
   evidence: ProbeRepairEvidence;
   repairEvidenceSha256: string;
 };
+
+export type InstalledBundleFailureEvidence = {
+  kind: "installed_bundle_failure";
+  schemaVersion: 1;
+  hubOrigin: string;
+  probeId: string;
+  generation: string;
+  bootId: string;
+  unit: "enoki-observation-runtime.service";
+  unitSha256: string;
+  identityReceiptSha256: string;
+  installStateSha256: string;
+  manifestSha256: string;
+  bundleVersion: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  requestNonce: string;
+};
+
+export type InstalledBundleRepairAuthority = {
+  kind: "installed_bundle_failure";
+  schemaVersion: 1;
+  hubOrigin: string;
+  hostId: string;
+  probeId: string;
+  generation: string;
+  bootId: string;
+  unit: "enoki-observation-runtime.service";
+  unitSha256: string;
+  identityReceiptSha256: string;
+  installStateSha256: string;
+  manifestSha256: string;
+  bundleVersion: string;
+  repairOperationId: string;
+  repairNonce: string;
+  repairEvidenceSha256: string;
+  expiresAtMs: number;
+};
+
+export type InstalledBundleRepairAuthorizationDecision =
+  | {
+      disposition: "probe_repair";
+      authority: InstalledBundleRepairAuthority;
+      signature: string;
+    }
+  | { disposition: "manual_reinstall_required"; authority?: never };
+
+export function canonicalInstalledBundleFailureEvidence(
+  evidence: InstalledBundleFailureEvidence,
+) {
+  return Buffer.from(JSON.stringify(evidence), "utf8");
+}
+
+export function signInstalledBundleFailureEvidence(
+  canonicalEvidence: Uint8Array,
+  installKey: Uint8Array,
+) {
+  return signRepairFacts(
+    installedBundleFailureEvidenceSigningDomain,
+    canonicalEvidence,
+    installKey,
+  );
+}
+
+export function canonicalInstalledBundleRepairAuthority(
+  authority: InstalledBundleRepairAuthority,
+) {
+  return Buffer.from(JSON.stringify(authority), "utf8");
+}
+
+export function verifyInstalledBundleFailureEvidence(input: {
+  evidence: InstalledBundleFailureEvidence;
+  evidenceSignature: string;
+  expectedBundleVersion: string;
+  expectedHubOrigin: string;
+  expectedProbeId: string;
+  installKey: Uint8Array;
+  nowMs: number;
+}): { repairEvidenceSha256: string } | null {
+  const canonicalEvidence = canonicalInstalledBundleFailureEvidence(
+    input.evidence,
+  );
+  const validSha256 = (value: string) => /^[0-9a-f]{64}$/.test(value);
+  if (
+    input.evidence.kind !== "installed_bundle_failure" ||
+    input.evidence.schemaVersion !== 1 ||
+    input.evidence.unit !== "enoki-observation-runtime.service" ||
+    input.evidence.hubOrigin !== input.expectedHubOrigin ||
+    input.evidence.probeId !== input.expectedProbeId ||
+    input.evidence.bundleVersion !== input.expectedBundleVersion ||
+    !validSha256(input.evidence.generation) ||
+    !validSha256(input.evidence.unitSha256) ||
+    !validSha256(input.evidence.identityReceiptSha256) ||
+    !validSha256(input.evidence.installStateSha256) ||
+    !validSha256(input.evidence.manifestSha256) ||
+    !validIdentifier(input.evidence.bootId) ||
+    !validIdentifier(input.evidence.requestNonce) ||
+    !Number.isSafeInteger(input.evidence.issuedAtMs) ||
+    !Number.isSafeInteger(input.evidence.expiresAtMs) ||
+    input.evidence.issuedAtMs > input.nowMs ||
+    input.evidence.expiresAtMs <= input.nowMs ||
+    input.evidence.expiresAtMs - input.evidence.issuedAtMs >
+      maxRepairAuthorityTtlMs ||
+    !verifyRepairFacts(
+      installedBundleFailureEvidenceSigningDomain,
+      canonicalEvidence,
+      input.evidenceSignature,
+      input.installKey,
+    )
+  )
+    return null;
+  return {
+    repairEvidenceSha256: createHash("sha256")
+      .update(canonicalEvidence)
+      .digest("hex"),
+  };
+}
+
+export function authorizeInstalledBundleRepair(input: {
+  authorityExpiresAtMs: number;
+  evidence: InstalledBundleFailureEvidence;
+  evidenceSignature: string;
+  expectedBundleVersion: string;
+  expectedHubOrigin: string;
+  expectedProbeId: string;
+  hostId: number;
+  installKey: Uint8Array;
+  nowMs: number;
+  repairNonce: string;
+  repairOperationId: string;
+}): InstalledBundleRepairAuthorizationDecision {
+  const verified = verifyInstalledBundleFailureEvidence(input);
+  if (
+    !verified ||
+    !validIdentifier(input.repairOperationId) ||
+    !validIdentifier(input.repairNonce) ||
+    input.authorityExpiresAtMs <= input.nowMs ||
+    input.authorityExpiresAtMs - input.nowMs > maxRepairAuthorityTtlMs
+  ) {
+    return { disposition: "manual_reinstall_required" };
+  }
+  const authority: InstalledBundleRepairAuthority = {
+    kind: "installed_bundle_failure",
+    schemaVersion: 1,
+    hubOrigin: input.expectedHubOrigin,
+    hostId: String(input.hostId),
+    probeId: input.expectedProbeId,
+    generation: input.evidence.generation,
+    bootId: input.evidence.bootId,
+    unit: input.evidence.unit,
+    unitSha256: input.evidence.unitSha256,
+    identityReceiptSha256: input.evidence.identityReceiptSha256,
+    installStateSha256: input.evidence.installStateSha256,
+    manifestSha256: input.evidence.manifestSha256,
+    bundleVersion: input.evidence.bundleVersion,
+    repairOperationId: input.repairOperationId,
+    repairNonce: input.repairNonce,
+    repairEvidenceSha256: verified.repairEvidenceSha256,
+    expiresAtMs: input.authorityExpiresAtMs,
+  };
+  return {
+    disposition: "probe_repair",
+    authority,
+    signature: signRepairFacts(
+      installedBundleRepairAuthoritySigningDomain,
+      canonicalInstalledBundleRepairAuthority(authority),
+      input.installKey,
+    ),
+  };
+}
 
 export function canonicalProbeRepairEvidence(evidence: ProbeRepairEvidence) {
   return Buffer.from(JSON.stringify(evidence), "utf8");
@@ -338,7 +514,7 @@ function validRepairEligibility(evidence: ProbeRepairEligibility) {
 }
 
 function validPostactivationProgress(evidence: ProbeRepairEligibility) {
-  const targetCount = 20;
+  const targetCount = 21;
   if (
     evidence.activatedTargets > targetCount ||
     evidence.finalizedTargets > targetCount

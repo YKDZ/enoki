@@ -1,6 +1,7 @@
 use super::*;
 
 const ROLLBACK_STOP_UNITS: &[&str] = &[
+    "enoki-observation-runtime-failure.service",
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
@@ -14,6 +15,7 @@ const ROLLBACK_STOP_UNITS: &[&str] = &[
     "enoki-probe-lifecycle-upgrade@*.service",
 ];
 const ROLLBACK_VERIFY_UNITS: &[&str] = &[
+    "enoki-observation-runtime-failure.service",
     "enoki-probe.service",
     "enoki-observation-runtime.service",
     "enoki-observation-runtime.socket",
@@ -27,6 +29,7 @@ const ROLLBACK_VERIFY_UNITS: &[&str] = &[
     "enoki-probe-lifecycle-upgrade@*.service",
 ];
 const ROLLBACK_RESET_UNITS: &[&str] = &[
+    "enoki-observation-runtime-failure.service",
     "enoki-observation-runtime.socket",
     "enoki-cpu-resource-provider.socket",
     "enoki-disk-health-resource-provider.socket",
@@ -283,7 +286,7 @@ mod tests {
         assert_eq!(error, InstallError::Systemd);
         assert_eq!(calls, ROLLBACK_RESET_UNITS);
         assert_eq!(
-            &calls[..3],
+            &calls[1..4],
             [
                 "enoki-observation-runtime.socket",
                 "enoki-cpu-resource-provider.socket",

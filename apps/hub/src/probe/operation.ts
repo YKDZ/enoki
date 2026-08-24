@@ -27,6 +27,8 @@ export type ProbeUpgradeRequest = {
   repairEligibilityEvidenceJson?: string | null;
   repairEligibilityEvidenceSha256?: string | null;
   repairEvidenceSha256?: string | null;
+  repairEligibilityKind?: "failed_upgrade" | "installed_bundle_failure" | null;
+  repairFailureGeneration?: string | null;
   repairFailedOperationId?: number | null;
   repairNonce?: string | null;
   runningAtMs: number | null;
@@ -104,6 +106,8 @@ export function createProbeRepairRequest(input: {
     kind: "probe_repair",
     repairAuthorityExpiresAtMs: input.authorityExpiresAtMs,
     repairEvidenceSha256: input.evidenceSha256,
+    repairEligibilityKind: "failed_upgrade",
+    repairFailureGeneration: null,
     repairFailedOperationId: input.failedOperation.id,
     repairNonce: input.nonce,
     runningAtMs: null,
@@ -115,6 +119,50 @@ export function createProbeRepairRequest(input: {
     updatedAtMs: input.nowMs,
     upgradeAuthoritySha256: input.failedOperation.upgradeAuthoritySha256,
     verifiedStageSha256: input.verifiedStageSha256,
+  };
+}
+
+export function createInstalledBundleRepairRequest(input: {
+  authorityExpiresAtMs: number;
+  bundleVersion: string;
+  evidenceSha256: string;
+  failureGeneration: string;
+  hostId: number;
+  manifestSha256: string;
+  nonce: string;
+  nowMs: number;
+}): ProbeUpgradeRequest | null {
+  if (
+    !/^[0-9a-f]{64}$/.test(input.failureGeneration) ||
+    !/^[0-9a-f]{64}$/.test(input.evidenceSha256) ||
+    !/^[0-9a-f]{64}$/.test(input.manifestSha256) ||
+    !input.bundleVersion
+  ) {
+    return null;
+  }
+  return {
+    acceptedAtMs: input.nowMs,
+    canceledAtMs: null,
+    completedAtMs: null,
+    createdAtMs: input.nowMs,
+    currentProbeVersion: input.bundleVersion,
+    failureCode: null,
+    failureMessage: null,
+    hostId: input.hostId,
+    id: null,
+    kind: "probe_repair",
+    repairAuthorityExpiresAtMs: input.authorityExpiresAtMs,
+    repairEligibilityKind: "installed_bundle_failure",
+    repairEvidenceSha256: input.evidenceSha256,
+    repairFailedOperationId: null,
+    repairFailureGeneration: input.failureGeneration,
+    repairNonce: input.nonce,
+    runningAtMs: null,
+    state: "accepted",
+    supersededAtMs: null,
+    targetManifestSha256: input.manifestSha256,
+    targetProbeVersion: input.bundleVersion,
+    updatedAtMs: input.nowMs,
   };
 }
 

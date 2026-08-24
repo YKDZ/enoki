@@ -48,23 +48,49 @@ pub fn acquire_probe_repair_authority_once(
     }
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
-    struct Envelope {
-        evidence: crate::lifecycle::RepairEvidenceV1,
+    struct Envelope<T> {
+        evidence: T,
         evidence_signature: String,
     }
-    let envelope: Envelope =
-        serde_json::from_slice(request_body).map_err(|_| AcquisitionFailure::Permanent)?;
-    if envelope.evidence_signature.len() != 64
-        || !valid_stage_identifier(&envelope.evidence.failed_operation_id)
-    {
-        return Err(AcquisitionFailure::Permanent);
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ClosedRepairEvidence {
+        FailedUpgrade(Envelope<crate::lifecycle::RepairEvidenceV1>),
+        InstalledBundleFailure(Envelope<crate::lifecycle::InstalledBundleFailureEvidenceV1>),
     }
-    let origin =
-        exact_origin(&envelope.evidence.hub_origin).ok_or(AcquisitionFailure::InvalidOrigin)?;
-    let url = format!(
-        "{origin}/api/probe/operations/{}/repair-authorize",
-        envelope.evidence.failed_operation_id
-    );
+    let envelope: ClosedRepairEvidence =
+        serde_json::from_slice(request_body).map_err(|_| AcquisitionFailure::Permanent)?;
+    let url = match envelope {
+        ClosedRepairEvidence::FailedUpgrade(envelope) => {
+            if envelope.evidence_signature.len() != 64
+                || !valid_stage_identifier(&envelope.evidence.failed_operation_id)
+            {
+                return Err(AcquisitionFailure::Permanent);
+            }
+            let origin = exact_origin(&envelope.evidence.hub_origin)
+                .ok_or(AcquisitionFailure::InvalidOrigin)?;
+            let url = format!(
+                "{origin}/api/probe/operations/{}/repair-authorize",
+                envelope.evidence.failed_operation_id
+            );
+            url
+        }
+        ClosedRepairEvidence::InstalledBundleFailure(envelope) => {
+            if envelope.evidence_signature.len() != 64
+                || envelope.evidence.kind != "installed_bundle_failure"
+                || !valid_stage_identifier(&envelope.evidence.generation)
+            {
+                return Err(AcquisitionFailure::Permanent);
+            }
+            let origin = exact_origin(&envelope.evidence.hub_origin)
+                .ok_or(AcquisitionFailure::InvalidOrigin)?;
+            let url = format!(
+                "{origin}/api/probe/runtime-failures/{}/repair-authorize",
+                envelope.evidence.generation
+            );
+            url
+        }
+    };
     let response = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout_connect(Duration::from_secs(10))

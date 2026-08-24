@@ -975,8 +975,8 @@ mod tests {
         )
         .unwrap();
         assert!(journal.contains("phase = \"activated\""));
-        assert!(journal.contains("activated_targets = 20"));
-        assert!(journal.contains("finalized_targets = 20"));
+        assert!(journal.contains("activated_targets = 21"));
+        assert!(journal.contains("finalized_targets = 21"));
     }
 
     #[test]
@@ -1456,7 +1456,7 @@ mod tests {
     fn legacy_schema2_journals_migrate_only_with_proven_postactivation_progress() {
         for (phase, activated, finalized, accepted) in [
             ("activation-started", 0, 0, true),
-            ("finalizing", 20, 7, true),
+            ("finalizing", 21, 7, true),
             ("repair-required", 0, 0, false),
         ] {
             let temporary = tempdir().unwrap();
@@ -1543,7 +1543,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
-        write_authority_upgrade_journal(&paths, 3, "finalizing", Some(true), 20, 7);
+        write_authority_upgrade_journal(&paths, 3, "finalizing", Some(true), 21, 7);
         let destinations = upgrade_destinations(&paths);
         for destination in &destinations {
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -1563,7 +1563,7 @@ mod tests {
         let failed =
             fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
         assert!(failed.contains("phase = \"repair-required\""));
-        assert!(failed.contains("activated_targets = 20"));
+        assert!(failed.contains("activated_targets = 21"));
         assert!(failed.contains("finalized_targets = 7"));
         assert_eq!(
             issue_probe_repair_eligibility(&paths)
@@ -1581,7 +1581,7 @@ mod tests {
         let failed_again =
             fs::read_to_string(paths.bootstrap_state().join("probe-upgrade-attempt.toml")).unwrap();
         assert!(failed_again.contains("phase = \"repair-required\""));
-        assert!(failed_again.contains("activated_targets = 20"));
+        assert!(failed_again.contains("activated_targets = 21"));
         assert!(failed_again.contains("finalized_targets = 7"));
     }
 
@@ -1704,8 +1704,8 @@ mod tests {
         let progressed = fs::read_to_string(&journal_path)
             .unwrap()
             .replace("phase = \"repair-required\"", "phase = \"activated\"")
-            .replace("activated_targets = 3", "activated_targets = 20")
-            .replace("finalized_targets = 0", "finalized_targets = 20");
+            .replace("activated_targets = 3", "activated_targets = 21")
+            .replace("finalized_targets = 0", "finalized_targets = 21");
         fs::write(&journal_path, &progressed).unwrap();
         fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
@@ -1748,8 +1748,8 @@ mod tests {
 
         let repair_required = progressed
             .replace("phase = \"activated\"", "phase = \"repair-required\"")
-            .replace("activated_targets = 20", "activated_targets = 3")
-            .replace("finalized_targets = 20", "finalized_targets = 0");
+            .replace("activated_targets = 21", "activated_targets = 3")
+            .replace("finalized_targets = 21", "finalized_targets = 0");
         fs::write(&journal_path, &repair_required).unwrap();
         let fresh = issue_probe_repair_evidence(
             &paths,
@@ -1808,8 +1808,8 @@ mod tests {
                 "phase = \"repair-required\"",
                 "phase = \"stage-cleanup-required\"",
             )
-            .replace("activated_targets = 3", "activated_targets = 20")
-            .replace("finalized_targets = 0", "finalized_targets = 20");
+            .replace("activated_targets = 3", "activated_targets = 21")
+            .replace("finalized_targets = 0", "finalized_targets = 21");
         fs::write(&journal_path, cleanup_required).unwrap();
 
         let repair_write = paths
@@ -2112,6 +2112,31 @@ mod tests {
         ] {
             assert!(runtime.contains(property), "Runtime 缺少 {property}");
         }
+    }
+
+    #[test]
+    fn runtime_budget_exhaustion_wakes_a_fixed_networkless_recorder() {
+        let runtime = observation_runtime_unit();
+        let recorder = observation_runtime_failure_recorder_unit();
+
+        assert!(runtime.contains("OnFailure=enoki-observation-runtime-failure.service"));
+        for property in [
+            "Type=oneshot",
+            "User=root",
+            "Group=root",
+            "ExecStart=/usr/local/bin/enoki-probe-lifecycle-companion record-runtime-failure",
+            "PrivateNetwork=true",
+            "CapabilityBoundingSet=",
+            "AmbientCapabilities=",
+            "RestrictAddressFamilies=AF_UNIX",
+            "IPAddressDeny=any",
+            "SocketBindDeny=any",
+            "ReadWritePaths=/var/lib/enoki-probe/runtime-failure",
+        ] {
+            assert!(recorder.contains(property), "failure recorder 缺少 {property}");
+        }
+        assert!(!recorder.contains("Environment="));
+        assert!(!recorder.contains("StandardInput=socket"));
     }
 
     #[test]
@@ -2460,6 +2485,7 @@ mod tests {
             "enoki-disk-health-resource-provider.socket",
             "enoki-probe-lifecycle-companion@.service",
             "enoki-probe-lifecycle-companion.socket",
+            "enoki-observation-runtime-failure.service",
         ]
         .into_iter()
         .zip(fixed_observation_unit_contents())

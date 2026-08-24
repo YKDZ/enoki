@@ -32,8 +32,10 @@ import {
   validateProbeOperationToken,
 } from "../src/probe/operation-token";
 import {
+  canonicalInstalledBundleFailureEvidence,
   canonicalProbeRepairEligibility,
   canonicalProbeRepairEvidence,
+  signInstalledBundleFailureEvidence,
   signProbeRepairEligibility,
   signProbeRepairEvidence,
   type ProbeRepairEligibility,
@@ -3458,6 +3460,80 @@ describe("Probe report API", () => {
       state: "running",
     });
 
+    database.close();
+  });
+
+  it("persists an Installed Bundle Failure Repair without synthesizing a failed Upgrade", async () => {
+    const database = await createTemporaryDatabase();
+    const nowMs = 1_725_000_010_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+      probeApiOrigin: "https://hub.example",
+    });
+    const ownerSession = await loginOwner(app);
+    const enrollmentToken = await createEnrollmentToken(app, ownerSession);
+    const registration = await registerProbe(app, enrollmentToken);
+    const host = database.sqlite
+      .prepare("select id from managed_hosts where probe_id = ?")
+      .get(registration.probeId) as { id: number };
+    const evidence = {
+      kind: "installed_bundle_failure" as const,
+      schemaVersion: 1 as const,
+      hubOrigin: "https://hub.example",
+      probeId: registration.probeId,
+      generation: "a".repeat(64),
+      bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+      unit: "enoki-observation-runtime.service" as const,
+      unitSha256: "b".repeat(64),
+      identityReceiptSha256: "c".repeat(64),
+      installStateSha256: "d".repeat(64),
+      manifestSha256: "e".repeat(64),
+      bundleVersion: "0.1.0",
+      issuedAtMs: nowMs,
+      expiresAtMs: nowMs + 60_000,
+      requestNonce: "request_nonce_01",
+    };
+    const installKey = deriveLifecycleAuthorityKey(
+      createHash("sha256").update(enrollmentToken).digest(),
+      "https://hub.example",
+    );
+    const path = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
+    const response = await app.request(path, {
+      body: JSON.stringify({
+        evidence,
+        evidenceSignature: signInstalledBundleFailureEvidence(
+          canonicalInstalledBundleFailureEvidence(evidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      authority: { repairOperationId: string; probeId: string };
+    };
+    expect(body.authority).not.toHaveProperty("failedOperationId");
+    expect(body.authority.probeId).toBe(registration.probeId);
+    expect(
+      database.probeOperations.findById(
+        Number(body.authority.repairOperationId),
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        hostId: host.id,
+        repairEligibilityKind: "installed_bundle_failure",
+        repairFailedOperationId: null,
+        repairFailureGeneration: evidence.generation,
+        state: "accepted",
+      }),
+    );
     database.close();
   });
 

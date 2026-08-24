@@ -61,6 +61,7 @@ import {
 } from "./operation-token.js";
 import {
   acknowledgeProbeUpgradeRequest,
+  createInstalledBundleRepairRequest,
   createProbeRepairRequest,
   failReportedProbeUpgradeRequest,
   hasUnavailableProbeUpgradeTarget,
@@ -71,9 +72,12 @@ import {
 } from "./operation.js";
 import { readProbeReleaseContextFromDirectory } from "./release-context.js";
 import {
+  authorizeInstalledBundleRepair,
   authorizeProbeRepair,
+  verifyInstalledBundleFailureEvidence,
   verifyProbeRepairEligibility,
   verifyProbeRepairEvidence,
+  type InstalledBundleFailureEvidence,
   type ProbeRepairEvidence,
 } from "./repair-authority.js";
 import {
@@ -1163,6 +1167,142 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     },
   );
 
+  routes.post(
+    "/runtime-failures/:generation/repair-authorize",
+    async (context) => {
+      const anonymousBudget = repairAuthorizationBudget.consumeAnonymous(
+        observedIpFromContext(context, services.trustedProxyCidrs) ?? "unknown",
+      );
+      if (!anonymousBudget.accepted) {
+        return probeJsonError("probe_repair_rate_limited", 429, {
+          "retry-after": String(anonymousBudget.retryAfterSeconds),
+        });
+      }
+      const requestBody = await readCappedRequestBody(
+        context.req.raw,
+        maxProbeOperationPayloadBytes,
+      );
+      const body = requestBody
+        ? readInstalledBundleRepairAuthorizationBody(requestBody)
+        : null;
+      const generation = context.req.param("generation");
+      const host = body
+        ? services.hosts.findByProbeId(body.evidence.probeId)
+        : null;
+      if (
+        !body ||
+        !host ||
+        !host.probeVersion ||
+        generation !== body.evidence.generation
+      ) {
+        return context.json({ disposition: "manual_reinstall_required" }, 409, {
+          "cache-control": "no-store",
+        });
+      }
+      const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
+        host.id,
+      );
+      const hubOrigin = services.probeApiOrigin ?? "";
+      if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+        return context.json({ disposition: "manual_reinstall_required" }, 409, {
+          "cache-control": "no-store",
+        });
+      }
+      const installKey = deriveLifecycleAuthorityKey(
+        Buffer.from(tokenHash, "hex"),
+        hubOrigin,
+      );
+      const operationNowMs = now();
+      const verified = verifyInstalledBundleFailureEvidence({
+        evidence: body.evidence,
+        evidenceSignature: body.evidenceSignature,
+        expectedBundleVersion: host.probeVersion,
+        expectedHubOrigin: hubOrigin,
+        expectedProbeId: host.probeId,
+        installKey,
+        nowMs: operationNowMs,
+      });
+      if (!verified) {
+        return context.json({ disposition: "manual_reinstall_required" }, 409, {
+          "cache-control": "no-store",
+        });
+      }
+      const hostBudget = repairAuthorizationBudget.consumeVerifiedHost(
+        String(host.id),
+      );
+      if (!hostBudget.accepted) {
+        return probeJsonError("probe_repair_rate_limited", 429, {
+          "retry-after": String(hostBudget.retryAfterSeconds),
+        });
+      }
+      let repair = services.probeOperations?.findByRepairEvidenceSha256(
+        verified.repairEvidenceSha256,
+      );
+      if (!repair) {
+        const candidate = createInstalledBundleRepairRequest({
+          authorityExpiresAtMs: operationNowMs + probeRepairAuthorityTtlMs,
+          bundleVersion: body.evidence.bundleVersion,
+          evidenceSha256: verified.repairEvidenceSha256,
+          failureGeneration: body.evidence.generation,
+          hostId: host.id,
+          manifestSha256: body.evidence.manifestSha256,
+          nonce: randomBytes(16).toString("hex"),
+          nowMs: operationNowMs,
+        });
+        if (candidate) {
+          try {
+            repair = services.probeOperations?.renewOrCreateProbeRepairRequest(
+              candidate,
+              operationNowMs,
+            );
+          } catch {
+            repair = services.probeOperations?.findByRepairEvidenceSha256(
+              verified.repairEvidenceSha256,
+            );
+          }
+        }
+      }
+      if (
+        !repair ||
+        repair.kind !== "probe_repair" ||
+        repair.state !== "accepted" ||
+        repair.hostId !== host.id ||
+        repair.repairEligibilityKind !== "installed_bundle_failure" ||
+        repair.repairFailedOperationId != null ||
+        repair.repairFailureGeneration !== body.evidence.generation ||
+        repair.repairEvidenceSha256 !== verified.repairEvidenceSha256 ||
+        !repair.repairNonce ||
+        !repair.repairAuthorityExpiresAtMs ||
+        repair.repairAuthorityExpiresAtMs <= operationNowMs
+      ) {
+        return context.json({ disposition: "manual_reinstall_required" }, 409, {
+          "cache-control": "no-store",
+        });
+      }
+      const decision = authorizeInstalledBundleRepair({
+        authorityExpiresAtMs: repair.repairAuthorityExpiresAtMs,
+        evidence: body.evidence,
+        evidenceSignature: body.evidenceSignature,
+        expectedBundleVersion: host.probeVersion,
+        expectedHubOrigin: hubOrigin,
+        expectedProbeId: host.probeId,
+        hostId: host.id,
+        installKey,
+        nowMs: operationNowMs,
+        repairNonce: repair.repairNonce,
+        repairOperationId: String(repair.id),
+      });
+      if (decision.disposition !== "probe_repair") {
+        return context.json(decision, 409, { "cache-control": "no-store" });
+      }
+      return context.json(
+        { authority: decision.authority, signature: decision.signature },
+        200,
+        { "cache-control": "no-store" },
+      );
+    },
+  );
+
   routes.post("/operations/:operationId/repair-authorize", async (context) => {
     const anonymousBudget = repairAuthorizationBudget.consumeAnonymous(
       observedIpFromContext(context, services.trustedProxyCidrs) ?? "unknown",
@@ -1724,6 +1864,58 @@ function readUpgradeStageAdmissionBody(requestBody: Uint8Array) {
       targetManifestSha256: string;
       token: string;
       verifiedStageSha256: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readInstalledBundleRepairAuthorizationBody(requestBody: Uint8Array): {
+  evidence: InstalledBundleFailureEvidence;
+  evidenceSignature: string;
+} | null {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
+      string,
+      unknown
+    >;
+    if (
+      Object.keys(body).sort().join("\0") !==
+        ["evidence", "evidenceSignature"].sort().join("\0") ||
+      typeof body.evidence !== "object" ||
+      body.evidence === null ||
+      typeof body.evidenceSignature !== "string" ||
+      !/^[0-9a-f]{64}$/.test(body.evidenceSignature)
+    )
+      return null;
+    const evidence = body.evidence as Record<string, unknown>;
+    const stringKeys = [
+      "bootId",
+      "bundleVersion",
+      "generation",
+      "hubOrigin",
+      "identityReceiptSha256",
+      "installStateSha256",
+      "kind",
+      "manifestSha256",
+      "probeId",
+      "requestNonce",
+      "unit",
+      "unitSha256",
+    ];
+    const keys = [...stringKeys, "expiresAtMs", "issuedAtMs", "schemaVersion"];
+    if (
+      Object.keys(evidence).sort().join("\0") !== keys.sort().join("\0") ||
+      evidence.kind !== "installed_bundle_failure" ||
+      evidence.schemaVersion !== 1 ||
+      stringKeys.some((key) => typeof evidence[key] !== "string") ||
+      !Number.isSafeInteger(evidence.issuedAtMs) ||
+      !Number.isSafeInteger(evidence.expiresAtMs)
+    )
+      return null;
+    return {
+      evidence: evidence as InstalledBundleFailureEvidence,
+      evidenceSignature: body.evidenceSignature,
     };
   } catch {
     return null;

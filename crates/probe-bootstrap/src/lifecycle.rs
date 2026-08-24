@@ -15,6 +15,10 @@ const LIFECYCLE_REPAIR_ELIGIBILITY_SIGNING_DOMAIN: &[u8] =
     b"enoki/lifecycle-repair-eligibility/hmac-sha256/v1\0";
 const LIFECYCLE_REPAIR_AUTHORITY_SIGNING_DOMAIN: &[u8] =
     b"enoki/lifecycle-repair-authority/hmac-sha256/v1\0";
+const INSTALLED_BUNDLE_FAILURE_EVIDENCE_SIGNING_DOMAIN: &[u8] =
+    b"enoki/installed-bundle-failure-evidence/hmac-sha256/v1\0";
+const INSTALLED_BUNDLE_REPAIR_AUTHORITY_SIGNING_DOMAIN: &[u8] =
+    b"enoki/installed-bundle-repair-authority/hmac-sha256/v1\0";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -189,6 +193,90 @@ impl RepairAuthorityV1 {
         verify_lifecycle_repair_facts(
             install_key,
             LIFECYCLE_REPAIR_AUTHORITY_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+            signature_hex,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledBundleFailureEvidenceV1 {
+    pub kind: String,
+    pub schema_version: u16,
+    pub hub_origin: String,
+    pub probe_id: String,
+    pub generation: String,
+    pub boot_id: String,
+    pub unit: String,
+    pub unit_sha256: String,
+    pub identity_receipt_sha256: String,
+    pub install_state_sha256: String,
+    pub manifest_sha256: String,
+    pub bundle_version: String,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub request_nonce: String,
+}
+
+impl InstalledBundleFailureEvidenceV1 {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("fixed Installed Bundle Failure Evidence serializes")
+    }
+
+    pub fn sha256(&self) -> String {
+        format!("{:x}", Sha256::digest(self.canonical_bytes()))
+    }
+
+    pub fn sign(&self, install_key: &[u8; 32]) -> String {
+        sign_lifecycle_repair_facts(
+            install_key,
+            INSTALLED_BUNDLE_FAILURE_EVIDENCE_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+        )
+    }
+
+    pub fn verify(&self, install_key: &[u8; 32], signature_hex: &str) -> bool {
+        verify_lifecycle_repair_facts(
+            install_key,
+            INSTALLED_BUNDLE_FAILURE_EVIDENCE_SIGNING_DOMAIN,
+            &self.canonical_bytes(),
+            signature_hex,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstalledBundleRepairAuthorityV1 {
+    pub kind: String,
+    pub schema_version: u16,
+    pub hub_origin: String,
+    pub host_id: String,
+    pub probe_id: String,
+    pub generation: String,
+    pub boot_id: String,
+    pub unit: String,
+    pub unit_sha256: String,
+    pub identity_receipt_sha256: String,
+    pub install_state_sha256: String,
+    pub manifest_sha256: String,
+    pub bundle_version: String,
+    pub repair_operation_id: String,
+    pub repair_nonce: String,
+    pub repair_evidence_sha256: String,
+    pub expires_at_ms: u64,
+}
+
+impl InstalledBundleRepairAuthorityV1 {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("fixed Installed Bundle Repair Authority serializes")
+    }
+
+    pub fn verify(&self, install_key: &[u8; 32], signature_hex: &str) -> bool {
+        verify_lifecycle_repair_facts(
+            install_key,
+            INSTALLED_BUNDLE_REPAIR_AUTHORITY_SIGNING_DOMAIN,
             &self.canonical_bytes(),
             signature_hex,
         )

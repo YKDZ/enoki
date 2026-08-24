@@ -1221,6 +1221,7 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
                 }
             }
             self.systemd.daemon_reload()?;
+            invalidate_runtime_failure_epoch(self.paths)?;
             self.systemd.start()?;
             self.systemd.wait_local_activated()?;
             if let Some(attempt) = self.attempt {
@@ -1319,6 +1320,21 @@ impl<S: SystemdPort> UpgradeLifecycleEffects for UpgradeEffects<'_, S> {
         .map_err(UpgradeActivationFailure::RecoveryPersistence)?;
         Err(UpgradeActivationFailure::Postactivation(error))
     }
+}
+
+fn invalidate_runtime_failure_epoch(paths: &FixedInstallPaths) -> Result<(), InstallError> {
+    let mut changed = false;
+    for path in [paths.runtime_failure_latch(), paths.runtime_failure_epoch()] {
+        match fs::remove_file(path) {
+            Ok(()) => changed = true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(InstallError::Io),
+        }
+    }
+    if changed {
+        sync_directory(&paths.runtime_failure_dir())?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -1452,6 +1468,7 @@ fn prepare_upgrade(
         paths.lifecycle_upgrade_socket_unit(),
         paths.identity(),
         paths.metadata(),
+        paths.observation_runtime_failure_recorder_unit(),
     ];
     let mut prepared = PreparedUpgrade {
         staged: Vec::new(),
@@ -1539,6 +1556,11 @@ fn prepare_upgrade(
         &prepared.destinations[19],
         0o600,
     )?);
+    prepared.staged.push(stage_bytes(
+        observation_runtime_failure_recorder_unit().as_bytes(),
+        &prepared.destinations[20],
+        0o644,
+    )?);
     for destination in &prepared.destinations {
         let name = destination
             .file_name()
@@ -1548,7 +1570,20 @@ fn prepare_upgrade(
         if fs::symlink_metadata(&backup).is_ok() {
             return Err(InstallError::ExistingResidue);
         }
-        fs::hard_link(destination, &backup).map_err(|_| InstallError::Io)?;
+        if destination == &paths.observation_runtime_failure_recorder_unit()
+            && !destination.exists()
+        {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&backup)
+                .map_err(|_| InstallError::Io)?
+                .sync_all()
+                .map_err(|_| InstallError::Io)?;
+        } else {
+            fs::hard_link(destination, &backup).map_err(|_| InstallError::Io)?;
+        }
         prepared.backups.push(backup);
     }
     Ok(prepared)
@@ -2489,6 +2524,7 @@ pub(super) fn upgrade_destinations(paths: &FixedInstallPaths) -> Vec<PathBuf> {
         paths.lifecycle_upgrade_socket_unit(),
         paths.identity(),
         paths.metadata(),
+        paths.observation_runtime_failure_recorder_unit(),
     ]
 }
 
