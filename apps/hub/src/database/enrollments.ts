@@ -64,14 +64,36 @@ export type InstallationRejectionResult = {
 };
 
 export type RegisterNewHostEnrollmentInput = {
-  host: NewHostRow;
+  host: NewHostRow | (() => NewHostRow);
   hostProfile: HostProfilePersistenceValues | null;
+  registrationAttempt?: {
+    candidatePublicKeyPem: string;
+    enrollmentId: string;
+    hostId: number;
+    hubOrigin: string;
+    oldProbeId: string;
+    outcome: (host: HostRow) => Buffer;
+    signedAttemptSha256: string;
+    committedSourceProbeSha256: string;
+    sourceProbeVersion: string;
+    targetAssetSetDigest: string;
+    targetProbeVersion: string;
+  };
   registeredAtMs: number;
   tokenHash: string;
   verificationDeadlineAtMs: number;
 };
 
+type ResolvedRegisterNewHostEnrollmentInput = Omit<
+  RegisterNewHostEnrollmentInput,
+  "host"
+> & { host: NewHostRow };
+
 export type EnrollmentRepository = {
+  replayRegistrationOutcome: (input: {
+    signedAttemptSha256: string;
+    tokenHash: string;
+  }) => Buffer | null;
   lifecycleAuthorityTokenHashForHost: (hostId: number) => string | null;
   inspectPending: (input: {
     nowMs: number;
@@ -99,9 +121,12 @@ export type EnrollmentRepository = {
   createPending: (
     input: CreatePendingEnrollmentInput,
   ) => PendingEnrollmentCreation;
-  registerNewHost: (
-    input: RegisterNewHostEnrollmentInput,
-  ) => { enrollment: EnrollmentTokenRow; host: HostRow } | null;
+  registerNewHost: (input: RegisterNewHostEnrollmentInput) => {
+    enrollment: EnrollmentTokenRow;
+    host: HostRow;
+    registrationOutcome: Buffer | null;
+    replayed: boolean;
+  } | null;
   readStatus: (
     enrollmentId: string,
     nowMs: number,
@@ -114,6 +139,22 @@ export function createEnrollmentRepository(
   database: EnrollmentDatabase,
 ): EnrollmentRepository {
   return {
+    replayRegistrationOutcome(input) {
+      const replay = database
+        .select({ outcome: enrollmentTokens.registrationOutcome })
+        .from(enrollmentTokens)
+        .where(
+          and(
+            eq(enrollmentTokens.tokenHash, input.tokenHash),
+            eq(
+              enrollmentTokens.registrationAttemptSha256,
+              input.signedAttemptSha256,
+            ),
+          ),
+        )
+        .get();
+      return replay?.outcome ? Buffer.from(replay.outcome) : null;
+    },
     lifecycleAuthorityTokenHashForHost(hostId) {
       return (
         database
@@ -616,17 +657,53 @@ export function createEnrollmentRepository(
       });
     },
     registerNewHost(input) {
+      const hostInput = () =>
+        typeof input.host === "function" ? input.host() : input.host;
       if (
         input.verificationDeadlineAtMs <= input.registeredAtMs ||
-        !input.host.displayName.trim() ||
-        !input.host.probeId ||
-        !input.host.probePublicKeyPem
+        (typeof input.host !== "function" &&
+          (!input.host.displayName.trim() ||
+            !input.host.probeId ||
+            !input.host.probePublicKeyPem))
       ) {
         throw new Error("Invalid Probe Enrollment registration input.");
       }
 
       try {
         return database.transaction((transaction) => {
+          if (input.registrationAttempt) {
+            const attempted = transaction
+              .select()
+              .from(enrollmentTokens)
+              .where(eq(enrollmentTokens.tokenHash, input.tokenHash))
+              .get();
+            if (
+              attempted?.usedAtMs !== null &&
+              attempted?.registrationAttemptSha256 ===
+                input.registrationAttempt.signedAttemptSha256 &&
+              attempted.registrationOutcome
+            ) {
+              const replayHost = attempted.hostId
+                ? transaction
+                    .select()
+                    .from(hosts)
+                    .where(eq(hosts.id, attempted.hostId))
+                    .get()
+                : null;
+              if (!replayHost) {
+                return null;
+              }
+              return {
+                enrollment: attempted,
+                host: replayHost,
+                registrationOutcome: attempted.registrationOutcome,
+                replayed: true,
+              };
+            }
+            if (attempted?.usedAtMs !== null) {
+              return null;
+            }
+          }
           const pending = transaction
             .select()
             .from(enrollmentTokens)
@@ -675,6 +752,12 @@ export function createEnrollmentRepository(
           ) {
             return null;
           }
+          if (
+            (pending.targetKind === "manual_reinstall") !==
+            Boolean(input.registrationAttempt)
+          ) {
+            return null;
+          }
 
           if (
             pending.targetKind === "manual_reinstall" &&
@@ -688,10 +771,35 @@ export function createEnrollmentRepository(
           ) {
             return null;
           }
+          if (
+            input.registrationAttempt &&
+            (pending.targetKind !== "manual_reinstall" ||
+              pending.enrollmentId !== input.registrationAttempt.enrollmentId ||
+              pending.expectedHubOrigin !==
+                input.registrationAttempt.hubOrigin ||
+              pending.targetHostId !== input.registrationAttempt.hostId ||
+              pending.expectedProbeId !==
+                input.registrationAttempt.oldProbeId ||
+              pending.expectedProbeVersion !==
+                input.registrationAttempt.sourceProbeVersion ||
+              parseSourceProbeSha256(
+                pending.sourceProbeSha256Json ?? "",
+              )?.includes(
+                input.registrationAttempt.committedSourceProbeSha256,
+              ) !== true ||
+              pending.targetAssetSetDigest !==
+                input.registrationAttempt.targetAssetSetDigest ||
+              pending.targetProbeVersion !==
+                input.registrationAttempt.targetProbeVersion)
+          ) {
+            return null;
+          }
 
           const consumed = transaction
             .update(enrollmentTokens)
             .set({
+              registrationAttemptSha256:
+                input.registrationAttempt?.signedAttemptSha256 ?? null,
               status: "verifying",
               usedAtMs: input.registeredAtMs,
             })
@@ -712,17 +820,38 @@ export function createEnrollmentRepository(
 
           const host =
             pending.targetKind === "new_host"
-              ? createNewHostForEnrollment(transaction, input)
+              ? createNewHostForEnrollment(transaction, {
+                  ...input,
+                  host: hostInput(),
+                } as ResolvedRegisterNewHostEnrollmentInput)
               : replaceExistingHostProbeIdentity(
                   transaction,
                   existingHost ?? null,
-                  input,
+                  {
+                    ...input,
+                    host: hostInput(),
+                  } as ResolvedRegisterNewHostEnrollmentInput,
                 );
+
+          if (
+            input.registrationAttempt &&
+            (host.id !== input.registrationAttempt.hostId ||
+              host.probePublicKeyPem !==
+                input.registrationAttempt.candidatePublicKeyPem)
+          ) {
+            throw new ExistingHostEnrollmentTargetUnavailable();
+          }
+          const registrationOutcome =
+            input.registrationAttempt?.outcome(host) ?? null;
+          if (input.registrationAttempt && !registrationOutcome?.length) {
+            throw new Error("Invalid registration replay outcome.");
+          }
 
           const enrollment = transaction
             .update(enrollmentTokens)
             .set({
               hostId: host.id,
+              registrationOutcome,
               verificationDeadlineAtMs: input.verificationDeadlineAtMs,
             })
             .where(eq(enrollmentTokens.id, consumed.id))
@@ -756,7 +885,12 @@ export function createEnrollmentRepository(
             });
           }
 
-          return { enrollment, host };
+          return {
+            enrollment,
+            host,
+            registrationOutcome,
+            replayed: false,
+          };
         });
       } catch (error) {
         if (error instanceof ExistingHostEnrollmentTargetUnavailable) {
@@ -839,7 +973,7 @@ function validSourceProbeSha256(value: unknown): value is string[] {
 
 function createNewHostForEnrollment(
   transaction: EnrollmentDatabase,
-  input: RegisterNewHostEnrollmentInput,
+  input: ResolvedRegisterNewHostEnrollmentInput,
 ) {
   const host = transaction.insert(hosts).values(input.host).returning().get();
   if (!host) {
@@ -861,7 +995,7 @@ function createNewHostForEnrollment(
 function replaceExistingHostProbeIdentity(
   transaction: EnrollmentDatabase,
   existingHost: HostRow | null,
-  input: RegisterNewHostEnrollmentInput,
+  input: ResolvedRegisterNewHostEnrollmentInput,
 ) {
   if (!existingHost) {
     throw new ExistingHostEnrollmentTargetUnavailable();

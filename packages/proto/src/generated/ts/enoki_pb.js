@@ -36,6 +36,8 @@ export const enoki = $root.enoki = (() => {
              * @property {Array.<enoki.v1.ISnapshot>|null} [snapshots] ProbeRegistrationRequest snapshots
              * @property {enoki.v1.IProbeInstallationRejection|null} [installationRejection] ProbeRegistrationRequest installationRejection
              * @property {enoki.v1.IProbeInstallationInspection|null} [installationInspection] ProbeRegistrationRequest installationInspection
+             * @property {Uint8Array|null} [canonicalAttempt] ProbeRegistrationRequest canonicalAttempt
+             * @property {Uint8Array|null} [candidateSignature] ProbeRegistrationRequest candidateSignature
              */
 
             /**
@@ -95,6 +97,22 @@ export const enoki = $root.enoki = (() => {
             ProbeRegistrationRequest.prototype.installationInspection = null;
 
             /**
+             * ProbeRegistrationRequest canonicalAttempt.
+             * @member {Uint8Array} canonicalAttempt
+             * @memberof enoki.v1.ProbeRegistrationRequest
+             * @instance
+             */
+            ProbeRegistrationRequest.prototype.canonicalAttempt = $util.newBuffer([]);
+
+            /**
+             * ProbeRegistrationRequest candidateSignature.
+             * @member {Uint8Array} candidateSignature
+             * @memberof enoki.v1.ProbeRegistrationRequest
+             * @instance
+             */
+            ProbeRegistrationRequest.prototype.candidateSignature = $util.newBuffer([]);
+
+            /**
              * Creates a new ProbeRegistrationRequest instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeRegistrationRequest
@@ -133,6 +151,10 @@ export const enoki = $root.enoki = (() => {
                     $root.enoki.v1.ProbeInstallationRejection.encode(message.installationRejection, writer.uint32(/* id 5, wireType 2 =*/42).fork(), q + 1).ldelim();
                 if (message.installationInspection != null && Object.hasOwnProperty.call(message, "installationInspection"))
                     $root.enoki.v1.ProbeInstallationInspection.encode(message.installationInspection, writer.uint32(/* id 6, wireType 2 =*/50).fork(), q + 1).ldelim();
+                if (message.canonicalAttempt != null && Object.hasOwnProperty.call(message, "canonicalAttempt"))
+                    writer.uint32(/* id 7, wireType 2 =*/58).bytes(message.canonicalAttempt);
+                if (message.candidateSignature != null && Object.hasOwnProperty.call(message, "candidateSignature"))
+                    writer.uint32(/* id 8, wireType 2 =*/66).bytes(message.candidateSignature);
                 return writer;
             };
 
@@ -193,6 +215,14 @@ export const enoki = $root.enoki = (() => {
                         }
                     case 6: {
                             message.installationInspection = $root.enoki.v1.ProbeInstallationInspection.decode(reader, reader.uint32(), undefined, long + 1);
+                            break;
+                        }
+                    case 7: {
+                            message.canonicalAttempt = reader.bytes();
+                            break;
+                        }
+                    case 8: {
+                            message.candidateSignature = reader.bytes();
                             break;
                         }
                     default:
@@ -259,6 +289,12 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "installationInspection." + error;
                 }
+                if (message.canonicalAttempt != null && Object.hasOwnProperty.call(message, "canonicalAttempt"))
+                    if (!(message.canonicalAttempt && typeof message.canonicalAttempt.length === "number" || $util.isString(message.canonicalAttempt)))
+                        return "canonicalAttempt: buffer expected";
+                if (message.candidateSignature != null && Object.hasOwnProperty.call(message, "candidateSignature"))
+                    if (!(message.candidateSignature && typeof message.candidateSignature.length === "number" || $util.isString(message.candidateSignature)))
+                        return "candidateSignature: buffer expected";
                 return null;
             };
 
@@ -304,6 +340,16 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeRegistrationRequest.installationInspection: object expected");
                     message.installationInspection = $root.enoki.v1.ProbeInstallationInspection.fromObject(object.installationInspection, long + 1);
                 }
+                if (object.canonicalAttempt != null)
+                    if (typeof object.canonicalAttempt === "string")
+                        $util.base64.decode(object.canonicalAttempt, message.canonicalAttempt = $util.newBuffer($util.base64.length(object.canonicalAttempt)), 0);
+                    else if (object.canonicalAttempt.length >= 0)
+                        message.canonicalAttempt = object.canonicalAttempt;
+                if (object.candidateSignature != null)
+                    if (typeof object.candidateSignature === "string")
+                        $util.base64.decode(object.candidateSignature, message.candidateSignature = $util.newBuffer($util.base64.length(object.candidateSignature)), 0);
+                    else if (object.candidateSignature.length >= 0)
+                        message.candidateSignature = object.candidateSignature;
                 return message;
             };
 
@@ -331,6 +377,20 @@ export const enoki = $root.enoki = (() => {
                     object.probePublicKeyPem = "";
                     object.installationRejection = null;
                     object.installationInspection = null;
+                    if (options.bytes === String)
+                        object.canonicalAttempt = "";
+                    else {
+                        object.canonicalAttempt = [];
+                        if (options.bytes !== Array)
+                            object.canonicalAttempt = $util.newBuffer(object.canonicalAttempt);
+                    }
+                    if (options.bytes === String)
+                        object.candidateSignature = "";
+                    else {
+                        object.candidateSignature = [];
+                        if (options.bytes !== Array)
+                            object.candidateSignature = $util.newBuffer(object.candidateSignature);
+                    }
                 }
                 if (message.enrollmentToken != null && Object.hasOwnProperty.call(message, "enrollmentToken"))
                     object.enrollmentToken = message.enrollmentToken;
@@ -345,6 +405,10 @@ export const enoki = $root.enoki = (() => {
                     object.installationRejection = $root.enoki.v1.ProbeInstallationRejection.toObject(message.installationRejection, options, q + 1);
                 if (message.installationInspection != null && Object.hasOwnProperty.call(message, "installationInspection"))
                     object.installationInspection = $root.enoki.v1.ProbeInstallationInspection.toObject(message.installationInspection, options, q + 1);
+                if (message.canonicalAttempt != null && Object.hasOwnProperty.call(message, "canonicalAttempt"))
+                    object.canonicalAttempt = options.bytes === String ? $util.base64.encode(message.canonicalAttempt, 0, message.canonicalAttempt.length) : options.bytes === Array ? Array.prototype.slice.call(message.canonicalAttempt) : message.canonicalAttempt;
+                if (message.candidateSignature != null && Object.hasOwnProperty.call(message, "candidateSignature"))
+                    object.candidateSignature = options.bytes === String ? $util.base64.encode(message.candidateSignature, 0, message.candidateSignature.length) : options.bytes === Array ? Array.prototype.slice.call(message.candidateSignature) : message.candidateSignature;
                 return object;
             };
 
@@ -375,6 +439,533 @@ export const enoki = $root.enoki = (() => {
             };
 
             return ProbeRegistrationRequest;
+        })();
+
+        v1.ProbeRegistrationAttempt = (function() {
+
+            /**
+             * Properties of a ProbeRegistrationAttempt.
+             * @memberof enoki.v1
+             * @interface IProbeRegistrationAttempt
+             * @property {number|null} [schemaVersion] ProbeRegistrationAttempt schemaVersion
+             * @property {string|null} [enrollmentId] ProbeRegistrationAttempt enrollmentId
+             * @property {string|null} [hubOrigin] ProbeRegistrationAttempt hubOrigin
+             * @property {string|null} [hostId] ProbeRegistrationAttempt hostId
+             * @property {string|null} [oldProbeId] ProbeRegistrationAttempt oldProbeId
+             * @property {string|null} [sourceProbeVersion] ProbeRegistrationAttempt sourceProbeVersion
+             * @property {string|null} [targetProbeVersion] ProbeRegistrationAttempt targetProbeVersion
+             * @property {string|null} [targetAssetSetDigest] ProbeRegistrationAttempt targetAssetSetDigest
+             * @property {string|null} [targetManifestSha256] ProbeRegistrationAttempt targetManifestSha256
+             * @property {string|null} [replacementCommitSha256] ProbeRegistrationAttempt replacementCommitSha256
+             * @property {string|null} [nonce] ProbeRegistrationAttempt nonce
+             * @property {string|null} [candidatePublicKeyPem] ProbeRegistrationAttempt candidatePublicKeyPem
+             * @property {string|null} [committedSourceProbeSha256] ProbeRegistrationAttempt committedSourceProbeSha256
+             * @property {string|null} [targetBundleTarget] ProbeRegistrationAttempt targetBundleTarget
+             */
+
+            /**
+             * Constructs a new ProbeRegistrationAttempt.
+             * @memberof enoki.v1
+             * @classdesc Represents a ProbeRegistrationAttempt.
+             * @implements IProbeRegistrationAttempt
+             * @constructor
+             * @param {enoki.v1.IProbeRegistrationAttempt=} [properties] Properties to set
+             */
+            function ProbeRegistrationAttempt(properties) {
+                if (properties)
+                    for (let keys = Object.keys(properties), i = 0; i < keys.length; ++i)
+                        if (properties[keys[i]] != null && keys[i] !== "__proto__")
+                            this[keys[i]] = properties[keys[i]];
+            }
+
+            /**
+             * ProbeRegistrationAttempt schemaVersion.
+             * @member {number} schemaVersion
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.schemaVersion = 0;
+
+            /**
+             * ProbeRegistrationAttempt enrollmentId.
+             * @member {string} enrollmentId
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.enrollmentId = "";
+
+            /**
+             * ProbeRegistrationAttempt hubOrigin.
+             * @member {string} hubOrigin
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.hubOrigin = "";
+
+            /**
+             * ProbeRegistrationAttempt hostId.
+             * @member {string} hostId
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.hostId = "";
+
+            /**
+             * ProbeRegistrationAttempt oldProbeId.
+             * @member {string} oldProbeId
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.oldProbeId = "";
+
+            /**
+             * ProbeRegistrationAttempt sourceProbeVersion.
+             * @member {string} sourceProbeVersion
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.sourceProbeVersion = "";
+
+            /**
+             * ProbeRegistrationAttempt targetProbeVersion.
+             * @member {string} targetProbeVersion
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.targetProbeVersion = "";
+
+            /**
+             * ProbeRegistrationAttempt targetAssetSetDigest.
+             * @member {string} targetAssetSetDigest
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.targetAssetSetDigest = "";
+
+            /**
+             * ProbeRegistrationAttempt targetManifestSha256.
+             * @member {string} targetManifestSha256
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.targetManifestSha256 = "";
+
+            /**
+             * ProbeRegistrationAttempt replacementCommitSha256.
+             * @member {string} replacementCommitSha256
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.replacementCommitSha256 = "";
+
+            /**
+             * ProbeRegistrationAttempt nonce.
+             * @member {string} nonce
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.nonce = "";
+
+            /**
+             * ProbeRegistrationAttempt candidatePublicKeyPem.
+             * @member {string} candidatePublicKeyPem
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.candidatePublicKeyPem = "";
+
+            /**
+             * ProbeRegistrationAttempt committedSourceProbeSha256.
+             * @member {string} committedSourceProbeSha256
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.committedSourceProbeSha256 = "";
+
+            /**
+             * ProbeRegistrationAttempt targetBundleTarget.
+             * @member {string} targetBundleTarget
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             */
+            ProbeRegistrationAttempt.prototype.targetBundleTarget = "";
+
+            /**
+             * Creates a new ProbeRegistrationAttempt instance using the specified properties.
+             * @function create
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {enoki.v1.IProbeRegistrationAttempt=} [properties] Properties to set
+             * @returns {enoki.v1.ProbeRegistrationAttempt} ProbeRegistrationAttempt instance
+             */
+            ProbeRegistrationAttempt.create = function create(properties) {
+                return new ProbeRegistrationAttempt(properties);
+            };
+
+            /**
+             * Encodes the specified ProbeRegistrationAttempt message. Does not implicitly {@link enoki.v1.ProbeRegistrationAttempt.verify|verify} messages.
+             * @function encode
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {enoki.v1.IProbeRegistrationAttempt} message ProbeRegistrationAttempt message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeRegistrationAttempt.encode = function encode(message, writer, q) {
+                if (!writer)
+                    writer = $Writer.create();
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                if (message.schemaVersion != null && Object.hasOwnProperty.call(message, "schemaVersion"))
+                    writer.uint32(/* id 1, wireType 0 =*/8).uint32(message.schemaVersion);
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    writer.uint32(/* id 2, wireType 2 =*/18).string(message.enrollmentId);
+                if (message.hubOrigin != null && Object.hasOwnProperty.call(message, "hubOrigin"))
+                    writer.uint32(/* id 3, wireType 2 =*/26).string(message.hubOrigin);
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    writer.uint32(/* id 4, wireType 2 =*/34).string(message.hostId);
+                if (message.oldProbeId != null && Object.hasOwnProperty.call(message, "oldProbeId"))
+                    writer.uint32(/* id 5, wireType 2 =*/42).string(message.oldProbeId);
+                if (message.sourceProbeVersion != null && Object.hasOwnProperty.call(message, "sourceProbeVersion"))
+                    writer.uint32(/* id 6, wireType 2 =*/50).string(message.sourceProbeVersion);
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    writer.uint32(/* id 7, wireType 2 =*/58).string(message.targetProbeVersion);
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    writer.uint32(/* id 8, wireType 2 =*/66).string(message.targetAssetSetDigest);
+                if (message.targetManifestSha256 != null && Object.hasOwnProperty.call(message, "targetManifestSha256"))
+                    writer.uint32(/* id 9, wireType 2 =*/74).string(message.targetManifestSha256);
+                if (message.replacementCommitSha256 != null && Object.hasOwnProperty.call(message, "replacementCommitSha256"))
+                    writer.uint32(/* id 10, wireType 2 =*/82).string(message.replacementCommitSha256);
+                if (message.nonce != null && Object.hasOwnProperty.call(message, "nonce"))
+                    writer.uint32(/* id 11, wireType 2 =*/90).string(message.nonce);
+                if (message.candidatePublicKeyPem != null && Object.hasOwnProperty.call(message, "candidatePublicKeyPem"))
+                    writer.uint32(/* id 12, wireType 2 =*/98).string(message.candidatePublicKeyPem);
+                if (message.committedSourceProbeSha256 != null && Object.hasOwnProperty.call(message, "committedSourceProbeSha256"))
+                    writer.uint32(/* id 13, wireType 2 =*/106).string(message.committedSourceProbeSha256);
+                if (message.targetBundleTarget != null && Object.hasOwnProperty.call(message, "targetBundleTarget"))
+                    writer.uint32(/* id 14, wireType 2 =*/114).string(message.targetBundleTarget);
+                return writer;
+            };
+
+            /**
+             * Encodes the specified ProbeRegistrationAttempt message, length delimited. Does not implicitly {@link enoki.v1.ProbeRegistrationAttempt.verify|verify} messages.
+             * @function encodeDelimited
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {enoki.v1.IProbeRegistrationAttempt} message ProbeRegistrationAttempt message or plain object to encode
+             * @param {$protobuf.Writer} [writer] Writer to encode to
+             * @returns {$protobuf.Writer} Writer
+             */
+            ProbeRegistrationAttempt.encodeDelimited = function encodeDelimited(message, writer) {
+                return this.encode(message, writer && writer.len ? writer.fork() : writer).ldelim();
+            };
+
+            /**
+             * Decodes a ProbeRegistrationAttempt message from the specified reader or buffer.
+             * @function decode
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @param {number} [length] Message length if known beforehand
+             * @returns {enoki.v1.ProbeRegistrationAttempt} ProbeRegistrationAttempt
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeRegistrationAttempt.decode = function decode(reader, length, error, long) {
+                if (!(reader instanceof $Reader))
+                    reader = $Reader.create(reader);
+                if (long === undefined)
+                    long = 0;
+                if (long > $Reader.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let end = length === undefined ? reader.len : reader.pos + length, message = new $root.enoki.v1.ProbeRegistrationAttempt();
+                while (reader.pos < end) {
+                    let tag = reader.uint32();
+                    if (tag === error)
+                        break;
+                    switch (tag >>> 3) {
+                    case 1: {
+                            message.schemaVersion = reader.uint32();
+                            break;
+                        }
+                    case 2: {
+                            message.enrollmentId = reader.string();
+                            break;
+                        }
+                    case 3: {
+                            message.hubOrigin = reader.string();
+                            break;
+                        }
+                    case 4: {
+                            message.hostId = reader.string();
+                            break;
+                        }
+                    case 5: {
+                            message.oldProbeId = reader.string();
+                            break;
+                        }
+                    case 6: {
+                            message.sourceProbeVersion = reader.string();
+                            break;
+                        }
+                    case 7: {
+                            message.targetProbeVersion = reader.string();
+                            break;
+                        }
+                    case 8: {
+                            message.targetAssetSetDigest = reader.string();
+                            break;
+                        }
+                    case 9: {
+                            message.targetManifestSha256 = reader.string();
+                            break;
+                        }
+                    case 10: {
+                            message.replacementCommitSha256 = reader.string();
+                            break;
+                        }
+                    case 11: {
+                            message.nonce = reader.string();
+                            break;
+                        }
+                    case 12: {
+                            message.candidatePublicKeyPem = reader.string();
+                            break;
+                        }
+                    case 13: {
+                            message.committedSourceProbeSha256 = reader.string();
+                            break;
+                        }
+                    case 14: {
+                            message.targetBundleTarget = reader.string();
+                            break;
+                        }
+                    default:
+                        reader.skipType(tag & 7, long);
+                        break;
+                    }
+                }
+                return message;
+            };
+
+            /**
+             * Decodes a ProbeRegistrationAttempt message from the specified reader or buffer, length delimited.
+             * @function decodeDelimited
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {$protobuf.Reader|Uint8Array} reader Reader or buffer to decode from
+             * @returns {enoki.v1.ProbeRegistrationAttempt} ProbeRegistrationAttempt
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            ProbeRegistrationAttempt.decodeDelimited = function decodeDelimited(reader) {
+                if (!(reader instanceof $Reader))
+                    reader = new $Reader(reader);
+                return this.decode(reader, reader.uint32());
+            };
+
+            /**
+             * Verifies a ProbeRegistrationAttempt message.
+             * @function verify
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {Object.<string,*>} message Plain object to verify
+             * @returns {string|null} `null` if valid, otherwise the reason why it is not
+             */
+            ProbeRegistrationAttempt.verify = function verify(message, long) {
+                if (typeof message !== "object" || message === null)
+                    return "object expected";
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    return "maximum nesting depth exceeded";
+                if (message.schemaVersion != null && Object.hasOwnProperty.call(message, "schemaVersion"))
+                    if (!$util.isInteger(message.schemaVersion))
+                        return "schemaVersion: integer expected";
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    if (!$util.isString(message.enrollmentId))
+                        return "enrollmentId: string expected";
+                if (message.hubOrigin != null && Object.hasOwnProperty.call(message, "hubOrigin"))
+                    if (!$util.isString(message.hubOrigin))
+                        return "hubOrigin: string expected";
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    if (!$util.isString(message.hostId))
+                        return "hostId: string expected";
+                if (message.oldProbeId != null && Object.hasOwnProperty.call(message, "oldProbeId"))
+                    if (!$util.isString(message.oldProbeId))
+                        return "oldProbeId: string expected";
+                if (message.sourceProbeVersion != null && Object.hasOwnProperty.call(message, "sourceProbeVersion"))
+                    if (!$util.isString(message.sourceProbeVersion))
+                        return "sourceProbeVersion: string expected";
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    if (!$util.isString(message.targetProbeVersion))
+                        return "targetProbeVersion: string expected";
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    if (!$util.isString(message.targetAssetSetDigest))
+                        return "targetAssetSetDigest: string expected";
+                if (message.targetManifestSha256 != null && Object.hasOwnProperty.call(message, "targetManifestSha256"))
+                    if (!$util.isString(message.targetManifestSha256))
+                        return "targetManifestSha256: string expected";
+                if (message.replacementCommitSha256 != null && Object.hasOwnProperty.call(message, "replacementCommitSha256"))
+                    if (!$util.isString(message.replacementCommitSha256))
+                        return "replacementCommitSha256: string expected";
+                if (message.nonce != null && Object.hasOwnProperty.call(message, "nonce"))
+                    if (!$util.isString(message.nonce))
+                        return "nonce: string expected";
+                if (message.candidatePublicKeyPem != null && Object.hasOwnProperty.call(message, "candidatePublicKeyPem"))
+                    if (!$util.isString(message.candidatePublicKeyPem))
+                        return "candidatePublicKeyPem: string expected";
+                if (message.committedSourceProbeSha256 != null && Object.hasOwnProperty.call(message, "committedSourceProbeSha256"))
+                    if (!$util.isString(message.committedSourceProbeSha256))
+                        return "committedSourceProbeSha256: string expected";
+                if (message.targetBundleTarget != null && Object.hasOwnProperty.call(message, "targetBundleTarget"))
+                    if (!$util.isString(message.targetBundleTarget))
+                        return "targetBundleTarget: string expected";
+                return null;
+            };
+
+            /**
+             * Creates a ProbeRegistrationAttempt message from a plain object. Also converts values to their respective internal types.
+             * @function fromObject
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {Object.<string,*>} object Plain object
+             * @returns {enoki.v1.ProbeRegistrationAttempt} ProbeRegistrationAttempt
+             */
+            ProbeRegistrationAttempt.fromObject = function fromObject(object, long) {
+                if (object instanceof $root.enoki.v1.ProbeRegistrationAttempt)
+                    return object;
+                if (!$util.isObject(object))
+                    throw TypeError(".enoki.v1.ProbeRegistrationAttempt: object expected");
+                if (long === undefined)
+                    long = 0;
+                if (long > $util.recursionLimit)
+                    throw Error("maximum nesting depth exceeded");
+                let message = new $root.enoki.v1.ProbeRegistrationAttempt();
+                if (object.schemaVersion != null)
+                    message.schemaVersion = object.schemaVersion >>> 0;
+                if (object.enrollmentId != null)
+                    message.enrollmentId = String(object.enrollmentId);
+                if (object.hubOrigin != null)
+                    message.hubOrigin = String(object.hubOrigin);
+                if (object.hostId != null)
+                    message.hostId = String(object.hostId);
+                if (object.oldProbeId != null)
+                    message.oldProbeId = String(object.oldProbeId);
+                if (object.sourceProbeVersion != null)
+                    message.sourceProbeVersion = String(object.sourceProbeVersion);
+                if (object.targetProbeVersion != null)
+                    message.targetProbeVersion = String(object.targetProbeVersion);
+                if (object.targetAssetSetDigest != null)
+                    message.targetAssetSetDigest = String(object.targetAssetSetDigest);
+                if (object.targetManifestSha256 != null)
+                    message.targetManifestSha256 = String(object.targetManifestSha256);
+                if (object.replacementCommitSha256 != null)
+                    message.replacementCommitSha256 = String(object.replacementCommitSha256);
+                if (object.nonce != null)
+                    message.nonce = String(object.nonce);
+                if (object.candidatePublicKeyPem != null)
+                    message.candidatePublicKeyPem = String(object.candidatePublicKeyPem);
+                if (object.committedSourceProbeSha256 != null)
+                    message.committedSourceProbeSha256 = String(object.committedSourceProbeSha256);
+                if (object.targetBundleTarget != null)
+                    message.targetBundleTarget = String(object.targetBundleTarget);
+                return message;
+            };
+
+            /**
+             * Creates a plain object from a ProbeRegistrationAttempt message. Also converts values to other types if specified.
+             * @function toObject
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {enoki.v1.ProbeRegistrationAttempt} message ProbeRegistrationAttempt
+             * @param {$protobuf.IConversionOptions} [options] Conversion options
+             * @returns {Object.<string,*>} Plain object
+             */
+            ProbeRegistrationAttempt.toObject = function toObject(message, options, q) {
+                if (!options)
+                    options = {};
+                if (q === undefined)
+                    q = 0;
+                if (q > $util.recursionLimit)
+                    throw Error("max depth exceeded");
+                let object = {};
+                if (options.defaults) {
+                    object.schemaVersion = 0;
+                    object.enrollmentId = "";
+                    object.hubOrigin = "";
+                    object.hostId = "";
+                    object.oldProbeId = "";
+                    object.sourceProbeVersion = "";
+                    object.targetProbeVersion = "";
+                    object.targetAssetSetDigest = "";
+                    object.targetManifestSha256 = "";
+                    object.replacementCommitSha256 = "";
+                    object.nonce = "";
+                    object.candidatePublicKeyPem = "";
+                    object.committedSourceProbeSha256 = "";
+                    object.targetBundleTarget = "";
+                }
+                if (message.schemaVersion != null && Object.hasOwnProperty.call(message, "schemaVersion"))
+                    object.schemaVersion = message.schemaVersion;
+                if (message.enrollmentId != null && Object.hasOwnProperty.call(message, "enrollmentId"))
+                    object.enrollmentId = message.enrollmentId;
+                if (message.hubOrigin != null && Object.hasOwnProperty.call(message, "hubOrigin"))
+                    object.hubOrigin = message.hubOrigin;
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    object.hostId = message.hostId;
+                if (message.oldProbeId != null && Object.hasOwnProperty.call(message, "oldProbeId"))
+                    object.oldProbeId = message.oldProbeId;
+                if (message.sourceProbeVersion != null && Object.hasOwnProperty.call(message, "sourceProbeVersion"))
+                    object.sourceProbeVersion = message.sourceProbeVersion;
+                if (message.targetProbeVersion != null && Object.hasOwnProperty.call(message, "targetProbeVersion"))
+                    object.targetProbeVersion = message.targetProbeVersion;
+                if (message.targetAssetSetDigest != null && Object.hasOwnProperty.call(message, "targetAssetSetDigest"))
+                    object.targetAssetSetDigest = message.targetAssetSetDigest;
+                if (message.targetManifestSha256 != null && Object.hasOwnProperty.call(message, "targetManifestSha256"))
+                    object.targetManifestSha256 = message.targetManifestSha256;
+                if (message.replacementCommitSha256 != null && Object.hasOwnProperty.call(message, "replacementCommitSha256"))
+                    object.replacementCommitSha256 = message.replacementCommitSha256;
+                if (message.nonce != null && Object.hasOwnProperty.call(message, "nonce"))
+                    object.nonce = message.nonce;
+                if (message.candidatePublicKeyPem != null && Object.hasOwnProperty.call(message, "candidatePublicKeyPem"))
+                    object.candidatePublicKeyPem = message.candidatePublicKeyPem;
+                if (message.committedSourceProbeSha256 != null && Object.hasOwnProperty.call(message, "committedSourceProbeSha256"))
+                    object.committedSourceProbeSha256 = message.committedSourceProbeSha256;
+                if (message.targetBundleTarget != null && Object.hasOwnProperty.call(message, "targetBundleTarget"))
+                    object.targetBundleTarget = message.targetBundleTarget;
+                return object;
+            };
+
+            /**
+             * Converts this ProbeRegistrationAttempt to JSON.
+             * @function toJSON
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @instance
+             * @returns {Object.<string,*>} JSON object
+             */
+            ProbeRegistrationAttempt.prototype.toJSON = function toJSON() {
+                return this.constructor.toObject(this, $protobuf.util.toJSONOptions);
+            };
+
+            /**
+             * Gets the default type url for ProbeRegistrationAttempt
+             * @function getTypeUrl
+             * @memberof enoki.v1.ProbeRegistrationAttempt
+             * @static
+             * @param {string} [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns {string} The default type url
+             */
+            ProbeRegistrationAttempt.getTypeUrl = function getTypeUrl(typeUrlPrefix) {
+                if (typeUrlPrefix === undefined) {
+                    typeUrlPrefix = "type.googleapis.com";
+                }
+                return typeUrlPrefix + "/enoki.v1.ProbeRegistrationAttempt";
+            };
+
+            return ProbeRegistrationAttempt;
         })();
 
         v1.ProbeInstallationInspection = (function() {

@@ -1,10 +1,5 @@
 import { Buffer } from "node:buffer";
-import {
-  createHash,
-  createPublicKey,
-  createVerify,
-  randomBytes,
-} from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 import type { HostDetailSample } from "@enoki/api-client/websocket";
@@ -66,6 +61,11 @@ import {
   startProbeUpgradeRequest,
   type ProbeUpgradeRequest,
 } from "./operation.js";
+import {
+  validProbePublicKeyPem,
+  verifyProbeRequestSignature,
+} from "./probe-identity.js";
+import { resolveRegistrationAttempt } from "./registration-attempt.js";
 import { readProbeReleaseContextFromDirectory } from "./release-context.js";
 import { verifyProbeRepairEligibility } from "./repair-authority.js";
 import { type RepairAuthorizationBudget } from "./repair-authorization-budget.js";
@@ -263,6 +263,33 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return context.body(null, 204, { "cache-control": "no-store" });
     }
 
+    const tokenHash = hashSecret(request.enrollmentToken);
+    const registrationAttemptResolution = await resolveRegistrationAttempt({
+      enrollments: services.enrollments,
+      probeAssetDir: services.probeAssetDir,
+      probeDistributionRootPublicKeyPem:
+        services.probeDistributionRootPublicKeyPem,
+      request,
+      tokenHash,
+    });
+    if (registrationAttemptResolution.kind === "invalid") {
+      return probeJsonError("invalid_enrollment_token", 401);
+    }
+    if (registrationAttemptResolution.kind === "replay") {
+      return context.body(
+        toArrayBuffer(registrationAttemptResolution.outcome),
+        200,
+        {
+          "cache-control": "no-store",
+          "content-type": "application/x-protobuf",
+        },
+      );
+    }
+    const registrationAttempt =
+      registrationAttemptResolution.kind === "accepted"
+        ? registrationAttemptResolution.attempt
+        : null;
+
     if (!validProbePublicKeyPem(request.probePublicKeyPem)) {
       return probeJsonError("probe_public_key_required", 400);
     }
@@ -286,40 +313,41 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
 
     const registeredAtMs = now();
-    const probeId = createProbeId();
-    const probeSecretPlaceholder = createProbeSecret();
     const hostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const observedIp = observedIpFromContext(
       context,
       services.trustedProxyCidrs,
     );
-    const displayName =
-      hostProfile?.hostname?.trim() || fallbackDisplayName(probeId);
     const registration = services.enrollments.registerNewHost({
-      host: {
-        architecture: hostProfile?.architecture || null,
-        clockSkewDetected: false,
-        connectAddress:
-          firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
-        createdAtMs: registeredAtMs,
-        cpuCount: hostProfile?.cpuCount || null,
-        cpuModel: hostProfile?.cpuModel?.trim() || null,
-        displayName,
-        displayNameEdited: false,
-        hostname: hostProfile?.hostname || null,
-        kernel: hostProfile?.kernel || null,
-        lastClockSkewMs: null,
-        lastReportAtMs: null,
-        memoryTotalBytes: hostProfile?.memoryTotalBytes
-          ? Number(hostProfile.memoryTotalBytes)
-          : null,
-        observedIp,
-        probePublicKeyPem: request.probePublicKeyPem,
-        os: hostProfile?.os || null,
-        probeConfigurationVersion: defaultProbeConfiguration.version,
-        probeId,
-        probeSecretHash: hashSecret(probeSecretPlaceholder),
-        probeVersion: hostProfile?.probeVersion || null,
+      host: () => {
+        const probeId = createProbeId();
+        const probeSecretPlaceholder = createProbeSecret();
+        return {
+          architecture: hostProfile?.architecture || null,
+          clockSkewDetected: false,
+          connectAddress:
+            firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
+          createdAtMs: registeredAtMs,
+          cpuCount: hostProfile?.cpuCount || null,
+          cpuModel: hostProfile?.cpuModel?.trim() || null,
+          displayName:
+            hostProfile?.hostname?.trim() || fallbackDisplayName(probeId),
+          displayNameEdited: false,
+          hostname: hostProfile?.hostname || null,
+          kernel: hostProfile?.kernel || null,
+          lastClockSkewMs: null,
+          lastReportAtMs: null,
+          memoryTotalBytes: hostProfile?.memoryTotalBytes
+            ? Number(hostProfile.memoryTotalBytes)
+            : null,
+          observedIp,
+          probePublicKeyPem: request.probePublicKeyPem,
+          os: hostProfile?.os || null,
+          probeConfigurationVersion: defaultProbeConfiguration.version,
+          probeId,
+          probeSecretHash: hashSecret(probeSecretPlaceholder),
+          probeVersion: hostProfile?.probeVersion || null,
+        };
       },
       hostProfile:
         hostProfile && hostProfileHash
@@ -330,7 +358,26 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             })
           : null,
       registeredAtMs,
-      tokenHash: hashSecret(request.enrollmentToken),
+      ...(registrationAttempt
+        ? {
+            registrationAttempt: {
+              ...registrationAttempt,
+              outcome: (host: { id: number; probeId: string }) =>
+                Buffer.from(
+                  RegistrationResponse.encode(
+                    RegistrationResponse.create({
+                      initialConfiguration: defaultProbeConfiguration,
+                      enrollmentId: registrationAttempt.enrollmentId,
+                      hostId: String(host.id),
+                      probeId: host.probeId,
+                      serverTimeMs: registeredAtMs,
+                    }),
+                  ).finish(),
+                ),
+            },
+          }
+        : {}),
+      tokenHash,
       verificationDeadlineAtMs: registeredAtMs + enrollmentVerificationTtlMs,
     });
 
@@ -338,15 +385,17 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("invalid_enrollment_token", 401);
     }
 
-    const body = RegistrationResponse.encode(
-      RegistrationResponse.create({
-        initialConfiguration: defaultProbeConfiguration,
-        enrollmentId: registration.enrollment.enrollmentId,
-        hostId: String(registration.enrollment.hostId),
-        probeId,
-        serverTimeMs: registeredAtMs,
-      }),
-    ).finish();
+    const body =
+      registration.registrationOutcome ??
+      RegistrationResponse.encode(
+        RegistrationResponse.create({
+          initialConfiguration: defaultProbeConfiguration,
+          enrollmentId: registration.enrollment.enrollmentId,
+          hostId: String(registration.enrollment.hostId),
+          probeId: registration.host.probeId,
+          serverTimeMs: registeredAtMs,
+        }),
+      ).finish();
 
     return context.body(toArrayBuffer(body), 200, {
       "cache-control": "no-store",
@@ -2356,37 +2405,6 @@ function probeRequestSignaturePayload(input: {
 function canonicalOriginPathAndQuery(request: Request, probeApiOrigin: string) {
   const url = new URL(request.url);
   return `${probeApiOrigin}${url.pathname}${url.search}`;
-}
-
-function verifyProbeRequestSignature(
-  publicKeyPem: string,
-  payload: string,
-  signature: string,
-) {
-  try {
-    const verifier = createVerify("RSA-SHA256");
-    verifier.update(payload);
-    verifier.end();
-    return verifier.verify(publicKeyPem, Buffer.from(signature, "hex"));
-  } catch {
-    return false;
-  }
-}
-
-function validProbePublicKeyPem(publicKeyPem: string | null | undefined) {
-  if (!publicKeyPem) {
-    return false;
-  }
-
-  try {
-    const publicKey = createPublicKey(publicKeyPem);
-    return (
-      publicKey.asymmetricKeyType === "rsa" &&
-      (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) >= 2048
-    );
-  } catch {
-    return false;
-  }
 }
 
 function isIdentityContentEncoding(headers: Headers) {

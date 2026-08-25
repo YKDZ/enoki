@@ -6,7 +6,7 @@ use crate::{
     install::{
         FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd,
         VerifiedCompleteFreshComponents, activate_complete_fresh_current_probe,
-        activate_complete_replacement_current_probe,
+        activate_complete_replacement_current_probe_with_registration,
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
     replacement::{
@@ -139,6 +139,7 @@ impl ReceivedRootHandoff {
                 commit,
             )
             .map_err(ActivationError::Install)?;
+            retire_replacement_registration_attempt(&paths)?;
             return Ok(());
         }
         let components = VerifiedCompleteFreshComponents {
@@ -153,7 +154,10 @@ impl ReceivedRootHandoff {
         let paths = FixedInstallPaths::production();
         let result = if let ReplacementActivation::Resume(commit) = &replacement_activation {
             let resume_binding = commit.resume_binding();
-            activate_complete_replacement_current_probe(
+            let registration_binding = commit
+                .registration_binding(&self.bundle.target)
+                .ok_or(ActivationError::Replacement)?;
+            activate_complete_replacement_current_probe_with_registration(
                 components,
                 &self.enrollment,
                 &self.bundle,
@@ -162,6 +166,7 @@ impl ReceivedRootHandoff {
                 &mut accounts,
                 &mut systemd,
                 &resume_binding,
+                &registration_binding,
             )
         } else {
             activate_complete_fresh_current_probe(
@@ -191,6 +196,7 @@ impl ReceivedRootHandoff {
                 &completed,
             )
             .map_err(ActivationError::Install)?;
+            retire_replacement_registration_attempt(&paths)?;
         }
         Ok(())
     }
@@ -205,6 +211,13 @@ impl ReceivedRootHandoff {
             .map_err(|_| ActivationError::Io)?;
         Ok(&mut self.component)
     }
+}
+
+fn retire_replacement_registration_attempt(
+    paths: &FixedInstallPaths,
+) -> Result<(), ActivationError> {
+    crate::install::retire_replacement_registration_attempt_source(paths)
+        .map_err(ActivationError::Install)
 }
 
 fn prepare_replacement_migration(
@@ -300,6 +313,7 @@ fn replacement_request_for_installed_state(
         enrollment.enrollment_token(),
         enrollment.hub_origin(),
         &format!("sha256:{}", bundle.asset_set_manifest_sha256),
+        &bundle.target,
         &bundle.manifest_sha256,
         &bundle.version,
     )
@@ -1057,6 +1071,7 @@ mod tests {
                     "sha256:{}",
                     received.bundle.asset_set_manifest_sha256
                 ),
+                target_bundle_target: received.bundle.target.clone(),
                 target_manifest_sha256: received.bundle.manifest_sha256.clone(),
                 bundle_version: "1.2.3".to_string(),
             }

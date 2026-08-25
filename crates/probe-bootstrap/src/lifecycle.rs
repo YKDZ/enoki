@@ -435,6 +435,7 @@ pub enum LifecycleRequestAuthority {
         enrollment_token: String,
         hub_origin: String,
         target_asset_set_digest: String,
+        target_bundle_target: String,
         target_manifest_sha256: String,
         bundle_version: String,
     },
@@ -701,6 +702,7 @@ impl LifecycleRequest {
         enrollment_token: &str,
         hub_origin: &str,
         target_asset_set_digest: &str,
+        target_bundle_target: &str,
         target_manifest_sha256: &str,
         bundle_version: &str,
     ) -> Result<Self, LifecycleRejection> {
@@ -711,6 +713,7 @@ impl LifecycleRequest {
                 enrollment_token: enrollment_token.to_owned(),
                 hub_origin: hub_origin.to_owned(),
                 target_asset_set_digest: target_asset_set_digest.to_owned(),
+                target_bundle_target: target_bundle_target.to_owned(),
                 target_manifest_sha256: target_manifest_sha256.to_owned(),
                 bundle_version: bundle_version.to_owned(),
             },
@@ -843,6 +846,7 @@ impl LifecycleRequest {
                 enrollment_token,
                 hub_origin,
                 target_asset_set_digest,
+                target_bundle_target,
                 target_manifest_sha256,
                 bundle_version,
             } => {
@@ -852,6 +856,13 @@ impl LifecycleRequest {
                     || enrollment_token.bytes().any(|byte| byte.is_ascii_control())
                     || !valid_hub_origin(hub_origin)
                     || !is_prefixed_sha256(target_asset_set_digest)
+                    || !matches!(
+                        target_bundle_target.as_str(),
+                        "aarch64-unknown-linux-gnu"
+                            | "aarch64-unknown-linux-musl"
+                            | "x86_64-unknown-linux-gnu"
+                            | "x86_64-unknown-linux-musl"
+                    )
                     || !is_sha256_hex(target_manifest_sha256)
                     || !valid_bundle_version(bundle_version)
                 {
@@ -1151,6 +1162,7 @@ mod tests {
             "enk_enroll_test",
             "https://hub.example",
             &format!("sha256:{}", "a".repeat(64)),
+            "x86_64-unknown-linux-gnu",
             &"b".repeat(64),
             "1.2.3",
         )

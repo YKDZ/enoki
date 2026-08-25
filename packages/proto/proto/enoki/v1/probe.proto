@@ -19,6 +19,29 @@ message ProbeRegistrationRequest {
   // A staged installer asks the authoritative Hub which lifecycle it may run
   // before generating an identity or mutating local installation resources.
   ProbeInstallationInspection installation_inspection = 6;
+  // Replacement 注册携带由候选密钥签名的精确版本化注册尝试字节。
+  // 旧式 Enrollment 仍使用外层字段。
+  bytes canonical_attempt = 7;
+  bytes candidate_signature = 8;
+}
+
+// 规范字节是这个封闭消息的 protobuf 编码。Hub 只有在解码后重新编码
+// 仍与原字节逐字节一致时才接受。
+message ProbeRegistrationAttempt {
+  uint32 schema_version = 1;
+  string enrollment_id = 2;
+  string hub_origin = 3;
+  string host_id = 4;
+  string old_probe_id = 5;
+  string source_probe_version = 6;
+  string target_probe_version = 7;
+  string target_asset_set_digest = 8;
+  string target_manifest_sha256 = 9;
+  string replacement_commit_sha256 = 10;
+  string nonce = 11;
+  string candidate_public_key_pem = 12;
+  string committed_source_probe_sha256 = 13;
+  string target_bundle_target = 14;
 }
 
 message ProbeInstallationInspection {}

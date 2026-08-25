@@ -269,6 +269,7 @@ mod tests {
             "enk_enroll_test",
             "https://hub.example",
             &format!("sha256:{}", "a".repeat(64)),
+            "x86_64-unknown-linux-gnu",
             &"b".repeat(64),
             "1.2.3",
         )

@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CString, OsStr},
+    ffi::{CStr, CString, OsStr},
     fs::File,
     io::{self, Write},
     os::{
@@ -62,6 +62,7 @@ pub fn atomic_write(
             format!("暂存文件写入失败: {error}"),
         ));
     }
+    secure_file_effect_crash(path, "before-rename");
     if unsafe {
         libc::renameat(
             parent.raw(),
@@ -78,7 +79,110 @@ pub fn atomic_write(
     sync_directory(parent.raw())
         .map_err(|error| io::Error::new(error.kind(), format!("受管父目录同步失败: {error}")))?;
     verify_file(parent.raw(), &target, mode, owner)
-        .map_err(|error| io::Error::new(error.kind(), format!("发布文件复验失败: {error}")))
+        .map_err(|error| io::Error::new(error.kind(), format!("发布文件复验失败: {error}")))?;
+    secure_file_effect_crash(path, "after-rename");
+    Ok(())
+}
+
+#[cfg(feature = "deterministic-test-seams")]
+fn secure_file_effect_crash(path: &Path, point: &str) {
+    if std::env::var_os("ENOKI_TEST_SECURE_FILE_PATH").as_deref() == Some(path.as_os_str())
+        && std::env::var("ENOKI_TEST_SECURE_FILE_CRASH_POINT").as_deref() == Ok(point)
+    {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(feature = "deterministic-test-seams"))]
+fn secure_file_effect_crash(_path: &Path, _point: &str) {}
+
+/// 通过持有的禁止跟随符号链接目录描述符，删除指定的 root 私有普通文件，
+/// 并对命名空间更新执行 fsync。
+pub fn remove_private_regular_file(path: &Path, mode: u32, owner: (u32, u32)) -> io::Result<()> {
+    let (parent, target) = open_parent(path)?;
+    verify_private_directory(parent.raw())?;
+    verify_file(parent.raw(), &target, mode, Some(owner))?;
+    secure_file_effect_crash(path, "before-unlink");
+    unlink_at(parent.raw(), &target)?;
+    sync_directory(parent.raw())?;
+    secure_file_effect_crash(path, "after-unlink");
+    Ok(())
+}
+
+pub(crate) fn retire_replacement_atomic_write_residue(
+    path: &Path,
+    mode: u32,
+    owner: (u32, u32),
+) -> io::Result<()> {
+    let (parent, target) = open_parent(path)?;
+    verify_private_directory(parent.raw())?;
+    let duplicate = unsafe { libc::fcntl(parent.raw(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let directory = unsafe { libc::fdopendir(duplicate) };
+    if directory.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    let mut removed = false;
+    let result = loop {
+        unsafe { *libc::__errno_location() = 0 };
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            break if error.raw_os_error() == Some(0) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if !is_atomic_write_residue(name.to_bytes(), target.as_bytes()) {
+            continue;
+        }
+        let metadata = stat_at(parent.raw(), name)?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG
+            || metadata.st_mode & 0o777 != mode
+            || metadata.st_uid != owner.0
+            || metadata.st_gid != owner.1
+            || metadata.st_nlink != 1
+        {
+            break Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "atomic write residue attributes do not match",
+            ));
+        }
+        unlink_at(parent.raw(), name)?;
+        removed = true;
+    };
+    if unsafe { libc::closedir(directory) } != 0 && result.is_ok() {
+        return Err(io::Error::last_os_error());
+    }
+    result?;
+    if removed {
+        sync_directory(parent.raw())?;
+    }
+    Ok(())
+}
+
+fn is_atomic_write_residue(name: &[u8], target: &[u8]) -> bool {
+    let mut prefix = Vec::with_capacity(target.len() + 14);
+    prefix.push(b'.');
+    prefix.extend_from_slice(target);
+    prefix.extend_from_slice(b"-enoki-write-");
+    let Some(suffix) = name.strip_prefix(prefix.as_slice()) else {
+        return false;
+    };
+    let Some(separator) = suffix.iter().position(|byte| *byte == b'-') else {
+        return false;
+    };
+    let (process, sequence) = (&suffix[..separator], &suffix[separator + 1..]);
+    !process.is_empty()
+        && process.iter().all(u8::is_ascii_digit)
+        && !sequence.is_empty()
+        && sequence.iter().all(u8::is_ascii_digit)
 }
 
 fn open_parent(path: &Path) -> io::Result<(DirectoryFd, CString)> {
@@ -203,7 +307,10 @@ fn verify_file(
     owner: Option<(u32, u32)>,
 ) -> io::Result<()> {
     let stat = stat_at(parent, target)?;
-    if stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_mode & 0o777 != mode {
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG
+        || stat.st_mode & 0o777 != mode
+        || stat.st_nlink != 1
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "受管文件属性不匹配",
@@ -229,7 +336,7 @@ fn stat_fd(fd: RawFd) -> io::Result<libc::stat> {
     }
 }
 
-fn stat_at(parent: RawFd, target: &CString) -> io::Result<libc::stat> {
+fn stat_at(parent: RawFd, target: &CStr) -> io::Result<libc::stat> {
     let mut stat = unsafe { std::mem::zeroed() };
     if unsafe {
         libc::fstatat(
@@ -246,7 +353,7 @@ fn stat_at(parent: RawFd, target: &CString) -> io::Result<libc::stat> {
     }
 }
 
-fn unlink_at(parent: RawFd, target: &CString) -> io::Result<()> {
+fn unlink_at(parent: RawFd, target: &CStr) -> io::Result<()> {
     if unsafe { libc::unlinkat(parent, target.as_ptr(), 0) } == 0 {
         Ok(())
     } else {

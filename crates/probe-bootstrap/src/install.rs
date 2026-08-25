@@ -12,12 +12,15 @@ mod compatible_upgrade;
 mod filesystem;
 mod installed_layout;
 mod replacement_finalize;
+mod replacement_registration;
 mod systemd;
 mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
 mod upgrade;
 
-use crate::replacement::{ReplacementCommitFact, ReplacementResumeBinding};
+use crate::replacement::{
+    ReplacementCommitFact, ReplacementRegistrationBinding, ReplacementResumeBinding,
+};
 use crate::{
     bundle_role::{
         DISK_HEALTH_PERMISSION_PROFILE, LIFECYCLE_COMPANION_PERMISSION_PROFILE,
@@ -43,6 +46,8 @@ use std::{
     time::{Duration, Instant},
 };
 use transaction::{ActivationLock, OwnedPath, TransactionJournal};
+
+pub(crate) use replacement_registration::retire_attempt_source as retire_replacement_registration_attempt_source;
 
 const INSTALL_COMMAND_BUDGET: Duration = Duration::from_secs(90);
 const ROLLBACK_COMMAND_BUDGET: Duration = Duration::from_secs(30);
@@ -644,6 +649,10 @@ pub struct VerifiedCompleteFreshComponents<'a> {
 enum InstallFailureSemantics<'a> {
     FreshRollback,
     CommittedReplacement(&'a ReplacementResumeBinding),
+    CommittedReplacementWithRegistration {
+        registration: &'a ReplacementRegistrationBinding,
+        resume: &'a ReplacementResumeBinding,
+    },
 }
 
 impl<'a> InstallFailureSemantics<'a> {
@@ -651,11 +660,19 @@ impl<'a> InstallFailureSemantics<'a> {
         match self {
             Self::FreshRollback => None,
             Self::CommittedReplacement(binding) => Some(binding),
+            Self::CommittedReplacementWithRegistration { resume, .. } => Some(resume),
+        }
+    }
+
+    fn registration_binding(self) -> Option<&'a ReplacementRegistrationBinding> {
+        match self {
+            Self::CommittedReplacementWithRegistration { registration, .. } => Some(registration),
+            Self::FreshRollback | Self::CommittedReplacement(_) => None,
         }
     }
 
     fn is_committed_replacement(self) -> bool {
-        matches!(self, Self::CommittedReplacement(_))
+        !matches!(self, Self::FreshRollback)
     }
 }
 
@@ -741,6 +758,56 @@ pub fn activate_complete_replacement_current_probe(
     systemd: &mut impl SystemdPort,
     resume_binding: &ReplacementResumeBinding,
 ) -> Result<(), InstallError> {
+    activate_complete_replacement_current_probe_with_semantics(
+        components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        accounts,
+        systemd,
+        InstallFailureSemantics::CommittedReplacement(resume_binding),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn activate_complete_replacement_current_probe_with_registration(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+    resume_binding: &ReplacementResumeBinding,
+    registration_binding: &ReplacementRegistrationBinding,
+) -> Result<(), InstallError> {
+    activate_complete_replacement_current_probe_with_semantics(
+        components,
+        enrollment,
+        bundle,
+        trust,
+        paths,
+        accounts,
+        systemd,
+        InstallFailureSemantics::CommittedReplacementWithRegistration {
+            registration: registration_binding,
+            resume: resume_binding,
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activate_complete_replacement_current_probe_with_semantics<'a>(
+    components: VerifiedCompleteFreshComponents<'_>,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    trust: &BuildTrust,
+    paths: &FixedInstallPaths,
+    accounts: &mut impl AccountPort,
+    systemd: &mut impl SystemdPort,
+    semantics: InstallFailureSemantics<'a>,
+) -> Result<(), InstallError> {
     let mut files = SystemInstallFiles;
     activate_current_probe_with_observation_files(
         components.probe,
@@ -763,7 +830,7 @@ pub fn activate_complete_replacement_current_probe(
             systemd,
             files: &mut files,
         },
-        InstallFailureSemantics::CommittedReplacement(resume_binding),
+        semantics,
     )
 }
 
@@ -1130,6 +1197,7 @@ fn activate_verified_fresh_install(
         journal.staging_directory(),
         install_observation,
         journal.transaction_id(),
+        failure_semantics.registration_binding(),
     ) {
         Ok(staged) => staged,
         Err(error) => {
@@ -1196,7 +1264,14 @@ fn activate_verified_fresh_install(
                 }
             }
         }
-        if !journal.owns_published_path(&paths.identity())? {
+        let registered_identity_is_owned =
+            failure_semantics
+                .registration_binding()
+                .is_some_and(|binding| {
+                    journal.published_path_is_recorded(&paths.identity())
+                        && replacement_registration::registered_identity_matches(paths, binding)
+                });
+        if !registered_identity_is_owned && !journal.owns_published_path(&paths.identity())? {
             ports.files.write_owned(
                 &paths.identity(),
                 &fs::read(&staged.identity).map_err(|_| InstallError::Io)?,
@@ -1275,6 +1350,9 @@ fn activate_verified_fresh_install(
                 )?;
             }
         }
+        if failure_semantics.registration_binding().is_some() {
+            replacement_registration::publish_drop_in(paths)?;
+        }
         ports.systemd.daemon_reload()?;
         if !journal.enabled_may_exist() {
             journal.record_enabled_intent()?;
@@ -1287,6 +1365,10 @@ fn activate_verified_fresh_install(
         started = true;
         ports.systemd.start()?;
         ports.systemd.wait_local_activated()?;
+        if failure_semantics.registration_binding().is_some() {
+            replacement_registration::retire_drop_in(paths)?;
+            ports.systemd.daemon_reload()?;
+        }
         Ok(())
     })();
     match result {
@@ -1501,7 +1583,15 @@ fn recover_interrupted_install(
         };
     }
     if failure_semantics.is_committed_replacement() {
-        if !journal.all_published_paths_are_owned() {
+        let published_paths_are_owned = match failure_semantics.registration_binding() {
+            Some(binding) => {
+                journal.all_published_paths_except_are_owned(&paths.identity())
+                    && (journal.published_path_is_owned(&paths.identity())
+                        || replacement_registration::registered_identity_matches(paths, binding))
+            }
+            None => journal.all_published_paths_are_owned(),
+        };
+        if !published_paths_are_owned {
             return Err(InstallError::ExistingResidue);
         }
         if let Some((uid, gid)) = journal.identity()
@@ -1606,6 +1696,7 @@ fn recover_interrupted_install(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stage_complete_layout(
     component: &mut File,
     enrollment: &Enrollment,
@@ -1614,6 +1705,7 @@ fn stage_complete_layout(
     staging: &Path,
     install_observation: bool,
     transaction_id: &str,
+    registration_binding: Option<&ReplacementRegistrationBinding>,
 ) -> Result<StagedLayout, InstallError> {
     let binary = staging.join("enoki-probe");
     component
@@ -1638,9 +1730,12 @@ fn stage_complete_layout(
         transaction_id,
     )?;
     for (path, contents) in [
-        (&identity, bootstrap_config(enrollment, bundle, trust)),
+        (
+            &identity,
+            bootstrap_config(enrollment, bundle, trust, registration_binding),
+        ),
         (&metadata, metadata_contents),
-        (&unit, service_unit().to_owned()),
+        (&unit, service_unit()),
     ] {
         let mut file = OpenOptions::new()
             .write(true)
@@ -1682,8 +1777,9 @@ fn bootstrap_config(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     trust: &BuildTrust,
+    registration_binding: Option<&ReplacementRegistrationBinding>,
 ) -> String {
-    format!(
+    let mut config = format!(
         "hub_url = {:?}\nenrollment_token = {:?}\nstate_dir = {:?}\noperation_status_path = {:?}\ninstall_path = {:?}\nservice_name = {:?}\nservice_user = {:?}\nprobe_distribution_root_sha256 = {:?}\ninstall_state_sha256 = {:?}\ntarget_manifest_sha256 = {:?}\nbundle_version = {:?}\nlog_level = \"info\"\n",
         enrollment.hub_origin(),
         enrollment.enrollment_token(),
@@ -1696,7 +1792,11 @@ fn bootstrap_config(
         bundle.install_state_sha256(),
         bundle.manifest_sha256,
         bundle.version,
-    )
+    );
+    if let Some(binding) = registration_binding {
+        replacement_registration::append_bootstrap_config(&mut config, binding);
+    }
+    config
 }
 
 fn install_metadata(
@@ -1787,7 +1887,7 @@ fn lifecycle_companion_socket_unit() -> &'static str {
 
 fn lifecycle_companion_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /run/enoki-probe /run/systemd/system/enoki-observation-runtime.service.d /run/systemd/system/enoki-observation-runtime.socket\n"
+        "[Unit]\nDescription=Enoki Probe Lifecycle Companion\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\nStandardInput=socket\nStandardOutput=socket\nExecStart=/usr/local/bin/enoki-probe-lifecycle-companion\nTimeoutStartSec=90s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nMemoryMax=256M\nReadWritePaths=/etc/enoki /etc/systemd/system /etc/passwd /etc/group /etc/shadow /etc/gshadow /etc/sudoers.d /usr/local/bin /var/lib/enoki-probe /var/lib/enoki-probe-bootstrap /var/lib/enoki-probe-registration /run/enoki-probe /run/systemd/system/enoki-observation-runtime.service.d /run/systemd/system/enoki-observation-runtime.socket\n"
     )
 }
 

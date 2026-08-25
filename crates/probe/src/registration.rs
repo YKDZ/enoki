@@ -1,3 +1,10 @@
+mod replacement_attempt;
+
+use replacement_attempt::InstalledRegistrationAttempt;
+pub use replacement_attempt::{
+    RootReplacementRegistrationAttemptInput, prepare_root_replacement_registration_attempt,
+};
+
 use std::{
     error::Error,
     fmt,
@@ -5,11 +12,6 @@ use std::{
 };
 
 use prost::Message;
-use rsa::{
-    RsaPrivateKey,
-    pkcs8::{EncodePrivateKey, EncodePublicKey},
-    rand_core::OsRng,
-};
 
 use crate::{
     collectors::is_owner_configurable_collector_id,
@@ -143,13 +145,17 @@ pub fn register_probe(
     input: ProbeRegistrationInput,
     transport: &mut impl RegistrationTransport,
 ) -> Result<ProbeRegistrationOutcome, RegistrationError> {
-    let signing_key = generate_probe_signing_key()?;
-    let request = registration_request(RegistrationRequestInput {
-        enrollment_token: input.enrollment_token,
-        probe_public_key_pem: signing_key.public_key_pem.clone(),
-    });
-    let response_body =
-        transport.post_protobuf(&registration_url(&input.hub_url)?, request.encode_to_vec())?;
+    let mut installer_owned_fields = read_installer_owned_fields(&input.bootstrap_config_path)?;
+    let prepared = installer_owned_fields
+        .registration_attempt
+        .prepare(&input)?;
+    installer_owned_fields
+        .registration_attempt
+        .remember_signed_digest(prepared.signed_attempt_sha256.clone());
+    let response_body = transport.post_protobuf(
+        &registration_url(&input.hub_url)?,
+        prepared.request_body.clone(),
+    )?;
     let response = ProbeRegistrationResponse::decode(response_body.as_slice())
         .map_err(|error| RegistrationError::Decode(error.to_string()))?;
 
@@ -160,8 +166,6 @@ pub fn register_probe(
     }
 
     let server_time_offset_ms = response.server_time_ms as i128 - current_unix_time_ms_i128();
-    let installer_owned_fields = read_installer_owned_fields(&input.bootstrap_config_path)?;
-
     store_bootstrap_config(
         &input.bootstrap_config_path,
         &BootstrapConfig {
@@ -186,12 +190,11 @@ pub fn register_probe(
                 .as_ref()
                 .map(|configuration| configuration.version.as_str()),
             probe_id: response.probe_id.as_str(),
-            probe_private_key_pem: signing_key.private_key_pem.as_str(),
+            probe_private_key_pem: prepared.private_key_pem.as_str(),
             server_time_offset_ms,
             installer_owned_fields,
         },
     )?;
-
     Ok(ProbeRegistrationOutcome {
         initial_probe_configuration_version: response
             .initial_configuration
@@ -208,6 +211,8 @@ pub fn inspect_probe_installation(
     transport: &mut impl RegistrationTransport,
 ) -> Result<ProbeInstallationTarget, RegistrationError> {
     let request = ProbeRegistrationRequest {
+        candidate_signature: Vec::new(),
+        canonical_attempt: Vec::new(),
         enrollment_token: input.enrollment_token,
         installation_inspection: Some(ProbeInstallationInspection {}),
         installation_rejection: None,
@@ -324,6 +329,8 @@ pub(crate) fn prepare_probe_installation_rejection(
     input: ProbeInstallationRejectionInput,
 ) -> Result<PreparedInstallationRejection, RegistrationError> {
     let request = ProbeRegistrationRequest {
+        candidate_signature: Vec::new(),
+        canonical_attempt: Vec::new(),
         enrollment_token: input.enrollment_token,
         installation_inspection: None,
         installation_rejection: Some(ProbeInstallationRejection {
@@ -346,45 +353,6 @@ pub(crate) fn submit_prepared_installation_rejection(
 ) -> Result<(), RegistrationError> {
     transport.post_protobuf(&request.url, request.body.clone())?;
     Ok(())
-}
-
-struct GeneratedProbeSigningKey {
-    private_key_pem: String,
-    public_key_pem: String,
-}
-
-struct RegistrationRequestInput {
-    enrollment_token: String,
-    probe_public_key_pem: String,
-}
-
-fn registration_request(input: RegistrationRequestInput) -> ProbeRegistrationRequest {
-    ProbeRegistrationRequest {
-        enrollment_token: input.enrollment_token,
-        installation_inspection: None,
-        installation_rejection: None,
-        probe_public_key_pem: input.probe_public_key_pem,
-        snapshots: Vec::new(),
-    }
-}
-
-fn generate_probe_signing_key() -> Result<GeneratedProbeSigningKey, RegistrationError> {
-    let mut rng = OsRng;
-    let private_key = RsaPrivateKey::new(&mut rng, 2048)
-        .map_err(|error| RegistrationError::KeyGeneration(error.to_string()))?;
-    let public_key = private_key.to_public_key();
-    let private_key_pem = private_key
-        .to_pkcs8_pem(Default::default())
-        .map_err(|error| RegistrationError::KeyGeneration(error.to_string()))?
-        .to_string();
-    let public_key_pem = public_key
-        .to_public_key_pem(Default::default())
-        .map_err(|error| RegistrationError::KeyGeneration(error.to_string()))?;
-
-    Ok(GeneratedProbeSigningKey {
-        private_key_pem,
-        public_key_pem,
-    })
 }
 
 fn registration_url(hub_url: &str) -> Result<String, RegistrationError> {
@@ -429,6 +397,7 @@ struct InstallerOwnedFields {
     service_name: Option<String>,
     state_dir: Option<String>,
     upgrader_launch: Option<String>,
+    registration_attempt: InstalledRegistrationAttempt,
 }
 
 fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, RegistrationError> {
@@ -459,7 +428,15 @@ fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, Regi
         service_name: string_value(&value, "service_name")?,
         state_dir: string_value(&value, "state_dir")?,
         upgrader_launch: string_value(&value, "upgrader_launch")?,
+        registration_attempt: InstalledRegistrationAttempt::read(&value)?,
     })
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn store_bootstrap_config(
@@ -576,6 +553,10 @@ fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
         "upgrader_launch",
         config.installer_owned_fields.upgrader_launch.as_deref(),
     );
+    config
+        .installer_owned_fields
+        .registration_attempt
+        .render(&mut output);
     push_optional_string(
         &mut output,
         "log_level",

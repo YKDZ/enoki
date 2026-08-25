@@ -647,6 +647,45 @@ pub struct ProbeRegistrationRequest {
     /// before generating an identity or mutating local installation resources.
     #[prost(message, optional, tag = "6")]
     pub installation_inspection: ::core::option::Option<ProbeInstallationInspection>,
+    /// Replacement 注册携带由候选密钥签名的精确版本化注册尝试字节。
+    /// 旧式 Enrollment 仍使用外层字段。
+    #[prost(bytes = "vec", tag = "7")]
+    pub canonical_attempt: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub candidate_signature: ::prost::alloc::vec::Vec<u8>,
+}
+/// 规范字节是这个封闭消息的 protobuf 编码。Hub 只有在解码后重新编码
+/// 仍与原字节逐字节一致时才接受。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeRegistrationAttempt {
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    #[prost(string, tag = "2")]
+    pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub hub_origin: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub host_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub old_probe_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub source_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub target_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub target_asset_set_digest: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub target_manifest_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub replacement_commit_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub nonce: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub candidate_public_key_pem: ::prost::alloc::string::String,
+    #[prost(string, tag = "13")]
+    pub committed_source_probe_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "14")]
+    pub target_bundle_target: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationInspection {}

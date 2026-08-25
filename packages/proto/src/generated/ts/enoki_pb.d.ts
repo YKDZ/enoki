@@ -23,6 +23,12 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest installationInspection */
             installationInspection?: (enoki.v1.IProbeInstallationInspection|null);
+
+            /** ProbeRegistrationRequest canonicalAttempt */
+            canonicalAttempt?: (Uint8Array|null);
+
+            /** ProbeRegistrationRequest candidateSignature */
+            candidateSignature?: (Uint8Array|null);
         }
 
         /** Represents a ProbeRegistrationRequest. */
@@ -48,6 +54,12 @@ export namespace enoki {
 
             /** ProbeRegistrationRequest installationInspection. */
             public installationInspection?: (enoki.v1.IProbeInstallationInspection|null);
+
+            /** ProbeRegistrationRequest canonicalAttempt. */
+            public canonicalAttempt: Uint8Array;
+
+            /** ProbeRegistrationRequest candidateSignature. */
+            public candidateSignature: Uint8Array;
 
             /**
              * Creates a new ProbeRegistrationRequest instance using the specified properties.
@@ -121,6 +133,181 @@ export namespace enoki {
 
             /**
              * Gets the default type url for ProbeRegistrationRequest
+             * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
+             * @returns The default type url
+             */
+            public static getTypeUrl(typeUrlPrefix?: string): string;
+        }
+
+        /** Properties of a ProbeRegistrationAttempt. */
+        interface IProbeRegistrationAttempt {
+
+            /** ProbeRegistrationAttempt schemaVersion */
+            schemaVersion?: (number|null);
+
+            /** ProbeRegistrationAttempt enrollmentId */
+            enrollmentId?: (string|null);
+
+            /** ProbeRegistrationAttempt hubOrigin */
+            hubOrigin?: (string|null);
+
+            /** ProbeRegistrationAttempt hostId */
+            hostId?: (string|null);
+
+            /** ProbeRegistrationAttempt oldProbeId */
+            oldProbeId?: (string|null);
+
+            /** ProbeRegistrationAttempt sourceProbeVersion */
+            sourceProbeVersion?: (string|null);
+
+            /** ProbeRegistrationAttempt targetProbeVersion */
+            targetProbeVersion?: (string|null);
+
+            /** ProbeRegistrationAttempt targetAssetSetDigest */
+            targetAssetSetDigest?: (string|null);
+
+            /** ProbeRegistrationAttempt targetManifestSha256 */
+            targetManifestSha256?: (string|null);
+
+            /** ProbeRegistrationAttempt replacementCommitSha256 */
+            replacementCommitSha256?: (string|null);
+
+            /** ProbeRegistrationAttempt nonce */
+            nonce?: (string|null);
+
+            /** ProbeRegistrationAttempt candidatePublicKeyPem */
+            candidatePublicKeyPem?: (string|null);
+
+            /** ProbeRegistrationAttempt committedSourceProbeSha256 */
+            committedSourceProbeSha256?: (string|null);
+
+            /** ProbeRegistrationAttempt targetBundleTarget */
+            targetBundleTarget?: (string|null);
+        }
+
+        /** Represents a ProbeRegistrationAttempt. */
+        class ProbeRegistrationAttempt implements IProbeRegistrationAttempt {
+
+            /**
+             * Constructs a new ProbeRegistrationAttempt.
+             * @param [properties] Properties to set
+             */
+            constructor(properties?: enoki.v1.IProbeRegistrationAttempt);
+
+            /** ProbeRegistrationAttempt schemaVersion. */
+            public schemaVersion: number;
+
+            /** ProbeRegistrationAttempt enrollmentId. */
+            public enrollmentId: string;
+
+            /** ProbeRegistrationAttempt hubOrigin. */
+            public hubOrigin: string;
+
+            /** ProbeRegistrationAttempt hostId. */
+            public hostId: string;
+
+            /** ProbeRegistrationAttempt oldProbeId. */
+            public oldProbeId: string;
+
+            /** ProbeRegistrationAttempt sourceProbeVersion. */
+            public sourceProbeVersion: string;
+
+            /** ProbeRegistrationAttempt targetProbeVersion. */
+            public targetProbeVersion: string;
+
+            /** ProbeRegistrationAttempt targetAssetSetDigest. */
+            public targetAssetSetDigest: string;
+
+            /** ProbeRegistrationAttempt targetManifestSha256. */
+            public targetManifestSha256: string;
+
+            /** ProbeRegistrationAttempt replacementCommitSha256. */
+            public replacementCommitSha256: string;
+
+            /** ProbeRegistrationAttempt nonce. */
+            public nonce: string;
+
+            /** ProbeRegistrationAttempt candidatePublicKeyPem. */
+            public candidatePublicKeyPem: string;
+
+            /** ProbeRegistrationAttempt committedSourceProbeSha256. */
+            public committedSourceProbeSha256: string;
+
+            /** ProbeRegistrationAttempt targetBundleTarget. */
+            public targetBundleTarget: string;
+
+            /**
+             * Creates a new ProbeRegistrationAttempt instance using the specified properties.
+             * @param [properties] Properties to set
+             * @returns ProbeRegistrationAttempt instance
+             */
+            public static create(properties?: enoki.v1.IProbeRegistrationAttempt): enoki.v1.ProbeRegistrationAttempt;
+
+            /**
+             * Encodes the specified ProbeRegistrationAttempt message. Does not implicitly {@link enoki.v1.ProbeRegistrationAttempt.verify|verify} messages.
+             * @param message ProbeRegistrationAttempt message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encode(message: enoki.v1.IProbeRegistrationAttempt, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Encodes the specified ProbeRegistrationAttempt message, length delimited. Does not implicitly {@link enoki.v1.ProbeRegistrationAttempt.verify|verify} messages.
+             * @param message ProbeRegistrationAttempt message or plain object to encode
+             * @param [writer] Writer to encode to
+             * @returns Writer
+             */
+            public static encodeDelimited(message: enoki.v1.IProbeRegistrationAttempt, writer?: $protobuf.Writer): $protobuf.Writer;
+
+            /**
+             * Decodes a ProbeRegistrationAttempt message from the specified reader or buffer.
+             * @param reader Reader or buffer to decode from
+             * @param [length] Message length if known beforehand
+             * @returns ProbeRegistrationAttempt
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decode(reader: ($protobuf.Reader|Uint8Array), length?: number): enoki.v1.ProbeRegistrationAttempt;
+
+            /**
+             * Decodes a ProbeRegistrationAttempt message from the specified reader or buffer, length delimited.
+             * @param reader Reader or buffer to decode from
+             * @returns ProbeRegistrationAttempt
+             * @throws {Error} If the payload is not a reader or valid buffer
+             * @throws {$protobuf.util.ProtocolError} If required fields are missing
+             */
+            public static decodeDelimited(reader: ($protobuf.Reader|Uint8Array)): enoki.v1.ProbeRegistrationAttempt;
+
+            /**
+             * Verifies a ProbeRegistrationAttempt message.
+             * @param message Plain object to verify
+             * @returns `null` if valid, otherwise the reason why it is not
+             */
+            public static verify(message: { [k: string]: any }): (string|null);
+
+            /**
+             * Creates a ProbeRegistrationAttempt message from a plain object. Also converts values to their respective internal types.
+             * @param object Plain object
+             * @returns ProbeRegistrationAttempt
+             */
+            public static fromObject(object: { [k: string]: any }): enoki.v1.ProbeRegistrationAttempt;
+
+            /**
+             * Creates a plain object from a ProbeRegistrationAttempt message. Also converts values to other types if specified.
+             * @param message ProbeRegistrationAttempt
+             * @param [options] Conversion options
+             * @returns Plain object
+             */
+            public static toObject(message: enoki.v1.ProbeRegistrationAttempt, options?: $protobuf.IConversionOptions): { [k: string]: any };
+
+            /**
+             * Converts this ProbeRegistrationAttempt to JSON.
+             * @returns JSON object
+             */
+            public toJSON(): { [k: string]: any };
+
+            /**
+             * Gets the default type url for ProbeRegistrationAttempt
              * @param [typeUrlPrefix] your custom typeUrlPrefix(default "type.googleapis.com")
              * @returns The default type url
              */

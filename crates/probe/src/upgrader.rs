@@ -312,6 +312,8 @@ const PRODUCTION_BOOTSTRAP_ACQUIRER_PATH: &str = "/usr/local/bin/enoki-probe-boo
 const PRODUCTION_BOOTSTRAP_ACTIVATOR_PATH: &str = "/usr/local/bin/enoki-probe-bootstrap-activate";
 const PRODUCTION_REPLACEMENT_COMMIT_PATH: &str =
     "/var/lib/enoki-probe-bootstrap/replacement-migration.json";
+const PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH: &str =
+    "/var/lib/enoki-probe-registration/attempt.json";
 const PRODUCTION_BOOTSTRAP_STATE_DIR: &str = "/var/lib/enoki-probe-bootstrap";
 const PRODUCTION_INSTALL_STATE_DIR: &str = "/var/lib/enoki-probe";
 const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
@@ -2219,6 +2221,7 @@ fn run_probe_replacement_migration(
         enrollment_token,
         hub_origin,
         target_asset_set_digest,
+        target_bundle_target,
         target_manifest_sha256,
         bundle_version,
     } = request.authority()
@@ -2269,8 +2272,20 @@ fn run_probe_replacement_migration(
         target_asset_set_digest: authority.target_asset_set_digest,
         target_manifest_sha256: target_manifest_sha256.clone(),
     };
+    let Some(registration_binding) = intent.registration_binding(target_bundle_target) else {
+        return LifecycleResponse::failed("lifecycle.authority_invalid");
+    };
+    let enrollment_token = enrollment_token.clone();
     let mut store = FileReplacementCommitStore::at(PRODUCTION_REPLACEMENT_COMMIT_PATH, 0);
     let mut cleanup = || {
+        crate::registration::prepare_root_replacement_registration_attempt(
+            Path::new(PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH),
+            crate::registration::RootReplacementRegistrationAttemptInput {
+                enrollment_token: enrollment_token.clone(),
+                binding: registration_binding.clone(),
+            },
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
         cleanup_trusted_probe_install_for_reenrollment(
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             None,

@@ -47,6 +47,7 @@ function app(
       },
       inspectPending: () => null,
       lifecycleAuthorityTokenHashForHost: () => null,
+      replayRegistrationOutcome: () => null,
       readStatus: () => null,
       registerNewHost: () => null,
       rejectInstallation: () => null,

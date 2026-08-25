@@ -142,6 +142,99 @@ pub fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
     Ok(contents)
 }
 
+/// 读取私有持久化注册尝试材料，并通过持有的目录文件描述符校验其所有者、模式、大小、
+/// 普通文件类型与单硬链接保管约束。
+pub fn read_private_regular_file(
+    path: &Path,
+    mode: u32,
+    owner: (u32, u32),
+    maximum_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    let fd = unsafe {
+        libc::openat(
+            parent.raw(),
+            target.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let stat = stat_fd(file.as_raw_fd())?;
+    if file_type(stat.st_mode) != libc::S_IFREG
+        || stat.st_mode & 0o777 != mode
+        || stat.st_uid != owner.0
+        || stat.st_gid != owner.1
+        || stat.st_nlink != 1
+        || stat.st_size < 0
+        || stat.st_size as usize > maximum_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "managed private file attributes do not match",
+        ));
+    }
+    let mut contents = Vec::with_capacity(stat.st_size as usize);
+    Read::by_ref(&mut file)
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut contents)?;
+    if contents.len() > maximum_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "managed private file is too large",
+        ));
+    }
+    Ok(contents)
+}
+
+/// 读取大小受限的一次性 systemd 凭据。该凭据可归 root 或 DynamicUser
+/// 服务身份所有，但必须是组用户与其他用户均无权限的单硬链接普通文件。
+pub fn read_bounded_private_credential(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    let fd = unsafe {
+        libc::openat(
+            parent.raw(),
+            target.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let stat = stat_fd(file.as_raw_fd())?;
+    let service_owner = (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
+    if file_type(stat.st_mode) != libc::S_IFREG
+        || stat.st_mode & 0o077 != 0
+        || !matches!(stat.st_mode & 0o700, 0o400 | 0o600)
+        || ((stat.st_uid, stat.st_gid) != (0, 0) && (stat.st_uid, stat.st_gid) != service_owner)
+        || stat.st_nlink != 1
+        || stat.st_size < 0
+        || stat.st_size as usize > maximum_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "registration credential attributes do not match",
+        ));
+    }
+    let mut contents = Vec::with_capacity(stat.st_size as usize);
+    Read::by_ref(&mut file)
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut contents)?;
+    (contents.len() <= maximum_bytes)
+        .then_some(contents)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "registration credential is too large",
+            )
+        })
+}
+
 fn open_parent(path: &Path, create: bool) -> io::Result<(DirectoryFd, CString)> {
     let components = absolute_components(path)?;
     let (target, parents) = components.split_last().ok_or_else(|| {

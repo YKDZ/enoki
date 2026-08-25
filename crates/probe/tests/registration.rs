@@ -1,7 +1,10 @@
 use std::fs;
+use std::process::Command;
+
+use enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding;
 
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 
 use enoki_probe::{
     metrics::CollectorId,
@@ -109,6 +112,275 @@ fn probe_registration_rejects_a_legacy_response_without_host_identity() {
 
     assert!(matches!(error, RegistrationError::InvalidResponse(_)));
     assert!(!bootstrap_config_path.exists());
+}
+
+#[test]
+fn probe_registration_restart_reuses_the_candidate_key_and_exact_request_after_response_loss() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let capsule_path = temp.path().join("registration-attempt.json");
+    let binding = enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding {
+        committed_source_probe_sha256: "a".repeat(64),
+        enrollment_id: "enr_0123456789abcdef".to_string(),
+        host_id: "7".to_string(),
+        hub_origin: "https://hub.example".to_string(),
+        old_probe_id: "probe_old_01".to_string(),
+        replacement_commit_sha256: "d".repeat(64),
+        source_probe_version: "0.1.0".to_string(),
+        target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
+        target_bundle_target: "x86_64-unknown-linux-gnu".to_string(),
+        target_manifest_sha256: "c".repeat(64),
+        target_probe_version: "0.2.0".to_string(),
+    };
+    enoki_probe::registration::prepare_root_replacement_registration_attempt(
+        &capsule_path,
+        enoki_probe::registration::RootReplacementRegistrationAttemptInput {
+            enrollment_token: "enk_enroll_response_loss".to_string(),
+            binding,
+        },
+    )
+    .expect("root companion publishes attempt before activation");
+    fs::write(
+        &bootstrap_config_path,
+        [
+            "hub_url = \"https://hub.example\"",
+            "enrollment_token = \"enk_enroll_response_loss\"",
+            &format!(
+                "registration_attempt_credential_path = {:?}",
+                capsule_path.display().to_string()
+            ),
+            "registration_enrollment_id = \"enr_0123456789abcdef\"",
+            "registration_host_id = \"7\"",
+            "registration_hub_origin = \"https://hub.example\"",
+            "registration_old_probe_id = \"probe_old_01\"",
+            "registration_source_probe_version = \"0.1.0\"",
+            &format!(
+                "registration_committed_source_probe_sha256 = \"{}\"",
+                "a".repeat(64)
+            ),
+            "registration_target_probe_version = \"0.2.0\"",
+            "registration_target_bundle_target = \"x86_64-unknown-linux-gnu\"",
+            &format!(
+                "registration_target_asset_set_digest = \"sha256:{}\"",
+                "b".repeat(64)
+            ),
+            &format!(
+                "registration_target_manifest_sha256 = \"{}\"",
+                "c".repeat(64)
+            ),
+            &format!(
+                "registration_replacement_commit_sha256 = \"{}\"",
+                "d".repeat(64)
+            ),
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("replacement bootstrap config");
+    let mut transport = ResponseLossThenSuccessTransport {
+        attempts: 0,
+        bodies: Vec::new(),
+        response: registration_response(),
+    };
+
+    let first = register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path: bootstrap_config_path.clone(),
+            enrollment_token: "enk_enroll_response_loss".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    );
+    assert!(matches!(first, Err(RegistrationError::Attempt(_))));
+
+    register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path,
+            enrollment_token: "enk_enroll_response_loss".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("fresh process replays the committed registration attempt");
+
+    assert_eq!(transport.bodies.len(), 2);
+    assert_eq!(transport.bodies[1], transport.bodies[0]);
+    let first_request = ProbeRegistrationRequest::decode(transport.bodies[0].as_slice())
+        .expect("first request decodes");
+    let replay_request = ProbeRegistrationRequest::decode(transport.bodies[1].as_slice())
+        .expect("replayed request decodes");
+    assert_eq!(
+        replay_request.probe_public_key_pem, first_request.probe_public_key_pem,
+        "restart must not generate a second candidate keypair"
+    );
+}
+
+#[test]
+fn replacement_attempt_capsule_is_explicitly_root_owned_and_private() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("registration-attempt.json");
+    enoki_probe::registration::prepare_root_replacement_registration_attempt(
+        &path,
+        enoki_probe::registration::RootReplacementRegistrationAttemptInput {
+            enrollment_token: "enk_enroll_owner".to_string(),
+            binding: enoki_probe_bootstrap::replacement::ReplacementRegistrationBinding {
+                committed_source_probe_sha256: "a".repeat(64),
+                enrollment_id: "enr_0123456789abcdef".to_string(),
+                host_id: "7".to_string(),
+                hub_origin: "https://hub.example".to_string(),
+                old_probe_id: "probe_old_01".to_string(),
+                replacement_commit_sha256: "d".repeat(64),
+                source_probe_version: "0.1.0".to_string(),
+                target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
+                target_bundle_target: "x86_64-unknown-linux-gnu".to_string(),
+                target_manifest_sha256: "c".repeat(64),
+                target_probe_version: "0.2.0".to_string(),
+            },
+        },
+    )
+    .expect("root companion prepares capsule");
+
+    let metadata = fs::symlink_metadata(&path).expect("capsule metadata");
+    assert_eq!(
+        metadata.uid(),
+        0,
+        "durable capsule custody is root, not service euid"
+    );
+    assert_eq!(metadata.gid(), 0, "durable capsule group is root");
+    assert_eq!(metadata.mode() & 0o777, 0o600);
+    assert_eq!(metadata.nlink(), 1);
+}
+
+#[test]
+fn root_publisher_recovers_at_both_capsule_publish_boundaries_in_fresh_processes() {
+    if let Some(path) = std::env::var_os("ENOKI_TEST_ROOT_CAPSULE_PATH") {
+        let path = std::path::PathBuf::from(path);
+        enoki_probe::registration::prepare_root_replacement_registration_attempt(
+            &path,
+            enoki_probe::registration::RootReplacementRegistrationAttemptInput {
+                enrollment_token: "enk_enroll_publish_recovery".to_string(),
+                binding: replacement_registration_binding(),
+            },
+        )
+        .expect("root production publisher converges");
+        return;
+    }
+
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "test requires real root custody"
+    );
+    assert_eq!(
+        unsafe { libc::getegid() },
+        0,
+        "test requires real root custody"
+    );
+    let temporary = tempfile::tempdir().expect("temporary root state");
+    let before = temporary.path().join("before/attempt.json");
+    let after = temporary.path().join("after/attempt.json");
+
+    let crashed_before = run_root_capsule_publisher(&before, Some("before-rename"));
+    assert!(!crashed_before.success());
+    assert!(
+        !before.exists(),
+        "pre-publish crash cannot expose a capsule"
+    );
+    assert!(run_root_capsule_publisher(&before, None).success());
+
+    let crashed_after = run_root_capsule_publisher(&after, Some("after-rename"));
+    assert!(!crashed_after.success());
+    let published = fs::read(&after).expect("post-publish crash retains durable capsule");
+    assert!(run_root_capsule_publisher(&after, None).success());
+    assert_eq!(fs::read(&after).unwrap(), published);
+
+    for path in [&before, &after] {
+        let parent = fs::symlink_metadata(path.parent().unwrap()).unwrap();
+        let source = fs::symlink_metadata(path).unwrap();
+        assert_eq!(parent.uid(), 0);
+        assert_eq!(parent.gid(), 0);
+        assert_eq!(parent.mode() & 0o777, 0o700);
+        assert_eq!(source.uid(), 0);
+        assert_eq!(source.gid(), 0);
+        assert_eq!(source.mode() & 0o777, 0o600);
+        assert_eq!(source.nlink(), 1);
+    }
+}
+
+fn run_root_capsule_publisher(
+    path: &std::path::Path,
+    crash: Option<&str>,
+) -> std::process::ExitStatus {
+    let mut child = Command::new(std::env::current_exe().expect("current test executable"));
+    child
+        .arg("--exact")
+        .arg("root_publisher_recovers_at_both_capsule_publish_boundaries_in_fresh_processes")
+        .arg("--nocapture")
+        .env("ENOKI_TEST_ROOT_CAPSULE_PATH", path);
+    if let Some(point) = crash {
+        child
+            .env("ENOKI_TEST_SECURE_FILE_PATH", path)
+            .env("ENOKI_TEST_SECURE_FILE_CRASH_POINT", point);
+    }
+    child.status().expect("run fresh root publisher")
+}
+
+fn replacement_registration_binding() -> ReplacementRegistrationBinding {
+    ReplacementRegistrationBinding {
+        committed_source_probe_sha256: "a".repeat(64),
+        enrollment_id: "enr_0123456789abcdef".to_string(),
+        host_id: "7".to_string(),
+        hub_origin: "https://hub.example".to_string(),
+        old_probe_id: "probe_old_01".to_string(),
+        replacement_commit_sha256: "d".repeat(64),
+        source_probe_version: "0.1.0".to_string(),
+        target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
+        target_bundle_target: "x86_64-unknown-linux-gnu".to_string(),
+        target_manifest_sha256: "c".repeat(64),
+        target_probe_version: "0.2.0".to_string(),
+    }
+}
+
+#[test]
+fn production_registration_identity_rename_crash_seam_aborts_before_publish() {
+    let temporary = tempfile::tempdir().expect("temporary directory");
+    let config = temporary.path().join("probe-bootstrap.toml");
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("production_registration_identity_rename_crash_child")
+        .arg("--nocapture")
+        .env("ENOKI_TEST_SECURE_FILE_PATH", &config)
+        .env("ENOKI_TEST_SECURE_FILE_CRASH_POINT", "before-rename")
+        .output()
+        .expect("run abrupt registration child");
+    assert!(
+        !output.status.success(),
+        "production seam must abruptly stop the child"
+    );
+    assert!(
+        !config.exists(),
+        "pre-rename crash cannot publish an identity"
+    );
+}
+
+#[test]
+fn production_registration_identity_rename_crash_child() {
+    let Some(config) = std::env::var_os("ENOKI_TEST_SECURE_FILE_PATH") else {
+        return;
+    };
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response: registration_response(),
+    };
+    let _ = register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path: config.into(),
+            enrollment_token: "enk_enroll_crash".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    );
 }
 
 #[test]
@@ -587,6 +859,27 @@ struct RecordingTransport {
     observed_body: Vec<u8>,
     observed_url: String,
     response: Vec<u8>,
+}
+
+struct ResponseLossThenSuccessTransport {
+    attempts: usize,
+    bodies: Vec<Vec<u8>>,
+    response: Vec<u8>,
+}
+
+impl RegistrationTransport for ResponseLossThenSuccessTransport {
+    fn post_protobuf(&mut self, _url: &str, body: Vec<u8>) -> Result<Vec<u8>, RegistrationError> {
+        self.bodies.push(body);
+        self.attempts += 1;
+        if self.attempts == 1 {
+            return Err(RegistrationError::Attempt(
+                enoki_probe::transport::HttpAttemptError::Network(
+                    "response lost after Hub commit".to_string(),
+                ),
+            ));
+        }
+        Ok(self.response.clone())
+    }
 }
 
 impl RegistrationTransport for RecordingTransport {

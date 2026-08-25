@@ -39,11 +39,76 @@ pub struct ReplacementCommitFact {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReplacementResumeBinding(String);
 
+/// 将已提交的 Replacement 事实以只读投影送入候选注册边界，
+/// 且不引入新的生命周期状态。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplacementRegistrationBinding {
+    pub committed_source_probe_sha256: String,
+    pub enrollment_id: String,
+    pub host_id: String,
+    pub hub_origin: String,
+    pub old_probe_id: String,
+    pub replacement_commit_sha256: String,
+    pub source_probe_version: String,
+    pub target_asset_set_digest: String,
+    pub target_bundle_target: String,
+    pub target_manifest_sha256: String,
+    pub target_probe_version: String,
+}
+
+impl ReplacementIntent {
+    pub fn canonical_sha256(&self) -> Option<String> {
+        canonical_intent_sha256(self).ok()
+    }
+
+    #[must_use]
+    pub fn registration_binding(
+        &self,
+        target_bundle_target: &str,
+    ) -> Option<ReplacementRegistrationBinding> {
+        Some(ReplacementRegistrationBinding {
+            committed_source_probe_sha256: self.source_probe_sha256.clone(),
+            enrollment_id: self.enrollment_id.clone(),
+            host_id: self.host_id.clone(),
+            hub_origin: self.hub_origin.clone(),
+            old_probe_id: self.old_probe_id.clone(),
+            replacement_commit_sha256: self.canonical_sha256()?,
+            source_probe_version: self.source_probe_version.clone(),
+            target_asset_set_digest: self.target_asset_set_digest.clone(),
+            target_bundle_target: target_bundle_target.to_owned(),
+            target_manifest_sha256: self.target_manifest_sha256.clone(),
+            target_probe_version: self.target_probe_version.clone(),
+        })
+    }
+}
+
 impl ReplacementCommitFact {
     #[cfg(feature = "activator")]
     #[must_use]
     pub fn resume_binding(&self) -> ReplacementResumeBinding {
         ReplacementResumeBinding(self.canonical_intent_sha256.clone())
+    }
+
+    #[cfg(feature = "activator")]
+    #[must_use]
+    pub fn registration_binding(
+        &self,
+        target_bundle_target: &str,
+    ) -> Option<ReplacementRegistrationBinding> {
+        self.has_valid_binding()
+            .then(|| ReplacementRegistrationBinding {
+                committed_source_probe_sha256: self.intent.source_probe_sha256.clone(),
+                enrollment_id: self.intent.enrollment_id.clone(),
+                host_id: self.intent.host_id.clone(),
+                hub_origin: self.intent.hub_origin.clone(),
+                old_probe_id: self.intent.old_probe_id.clone(),
+                replacement_commit_sha256: self.canonical_intent_sha256.clone(),
+                source_probe_version: self.intent.source_probe_version.clone(),
+                target_asset_set_digest: self.intent.target_asset_set_digest.clone(),
+                target_bundle_target: target_bundle_target.to_owned(),
+                target_manifest_sha256: self.intent.target_manifest_sha256.clone(),
+                target_probe_version: self.intent.target_probe_version.clone(),
+            })
     }
 
     #[cfg(feature = "activator")]

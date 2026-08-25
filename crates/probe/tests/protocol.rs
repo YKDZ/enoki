@@ -40,6 +40,8 @@ fn generated_rust_protocol_encodes_probe_registration() {
         thread_count: 456,
     };
     let request = ProbeRegistrationRequest {
+        candidate_signature: Vec::new(),
+        canonical_attempt: Vec::new(),
         enrollment_token: "enrollment-token".to_string(),
         installation_inspection: None,
         installation_rejection: None,

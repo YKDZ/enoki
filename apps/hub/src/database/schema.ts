@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  blob,
   check,
   index,
   integer,
@@ -57,6 +58,8 @@ export const enrollmentTokens = sqliteTable(
     expiredAtMs: integer(),
     rejectionCode: text(),
     rejectionMessage: text(),
+    registrationAttemptSha256: text("registration_attempt_sha256"),
+    registrationOutcome: blob("registration_outcome", { mode: "buffer" }),
   },
   (table) => [
     uniqueIndex("enrollment_tokens_token_hash_idx").on(table.tokenHash),

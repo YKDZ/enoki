@@ -2924,6 +2924,7 @@ mod tests {
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
             &trust(),
+            None,
         );
         assert!(!config.contains("upgrader_launch"));
         assert!(!config.contains("operation_sudoers_path"));
@@ -3111,6 +3112,434 @@ mod tests {
     fn committed_replacement_resumes_every_systemd_receipt_without_deleting_the_candidate() {
         for failed_effect in ["reload", "enable", "start", "ready"] {
             assert_committed_replacement_resumes_after(failed_effect);
+        }
+    }
+
+    #[test]
+    fn replacement_registration_drop_in_is_transient_and_canonical_restart_has_no_capsule_dependency() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let replacement_bundle = bundle().with_test_complete_receipts(5);
+        let commit = replacement_commit(&replacement_bundle);
+        let resume = commit.resume_binding();
+        let registration = commit
+            .registration_binding(&replacement_bundle.target)
+            .expect("valid registration projection");
+        let source = paths.replacement_registration_attempt_source();
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        crate::secure_file::atomic_write(
+            &source,
+            b"root-private-attempt",
+            0o600,
+            Some((paths.expected_root_uid(), paths.expected_root_gid())),
+        )
+        .unwrap();
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            fail_ready: true,
+            ..Systemd::default()
+        };
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        let first = activate_complete_replacement_current_probe_with_registration(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &replacement_bundle,
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+            &resume,
+            &registration,
+        );
+        assert_eq!(first, Err(InstallError::Systemd));
+        let drop_in = paths.replacement_registration_drop_in();
+        assert!(drop_in.exists(), "Readiness ambiguity retains one-shot delivery");
+        let canonical_unit = fs::read_to_string(paths.unit()).unwrap();
+        assert!(!canonical_unit.contains("LoadCredential="));
+
+        systemd.fail_ready = false;
+        systemd.registration_identity = Some(paths.identity());
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_replacement_current_probe_with_registration(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &replacement_bundle,
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+            &resume,
+            &registration,
+        )
+        .expect("fresh activation resumes and retires transient delivery");
+        assert!(!drop_in.exists());
+        assert!(source.exists(), "activation cleanup alone cannot retire authority");
+        assert!(!fs::read_to_string(paths.unit()).unwrap().contains("LoadCredential="));
+        systemd.start().expect("canonical production restart needs no capsule");
+        finalize_complete_replacement_current_probe(
+            &paths,
+            &resume,
+            &replacement_bundle,
+            &commit,
+        )
+        .unwrap();
+        retire_replacement_registration_attempt_source(&paths).unwrap();
+        assert!(!source.exists(), "root authority retires only after finalization");
+        assert!(!source.parent().unwrap().exists(), "retirement leaves no state residue");
+        systemd.start().expect("post-retirement canonical restart succeeds");
+    }
+
+    #[test]
+    fn replacement_registration_production_recovery_windows() {
+        if let Some(root) = std::env::var_os("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ROOT") {
+            run_replacement_lifecycle_recovery_child(Path::new(&root));
+            return;
+        }
+
+        assert_eq!(unsafe { libc::geteuid() }, 0, "test requires root custody");
+        assert_eq!(unsafe { libc::getegid() }, 0, "test requires root custody");
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let source = paths.replacement_registration_attempt_source();
+        let drop_in = paths.replacement_registration_drop_in();
+
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "publish-source",
+            Some((&source, "before-rename")),
+        ));
+        assert!(!source.exists());
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "publish-source",
+            None,
+        ));
+        let capsule: serde_json::Value =
+            serde_json::from_slice(&fs::read(&source).unwrap()).unwrap();
+
+        for point in ["before-rename", "after-rename"] {
+            assert!(!run_replacement_lifecycle_child(
+                temporary.path(),
+                "activate",
+                Some((&drop_in, point)),
+            ));
+            assert!(source.exists());
+        }
+        assert!(drop_in.exists());
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "ready-timeout",
+            None,
+        ));
+        assert!(drop_in.exists(), "Readiness ambiguity retains delivery");
+        assert!(source.exists(), "Readiness ambiguity retains root material");
+
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "activate",
+            Some((&drop_in, "before-unlink")),
+        ));
+        assert!(drop_in.exists());
+        let registered_identity = fs::read_to_string(paths.identity()).unwrap();
+        let capsule_key = capsule["candidatePrivateKeyPem"].as_str().unwrap();
+        let other_key = valid_probe_private_key_pem();
+        assert_ne!(other_key, capsule_key);
+        fs::write(
+            paths.identity(),
+            registered_identity.replace(
+                &format!("probe_private_key_pem = {capsule_key:?}"),
+                &format!("probe_private_key_pem = {other_key:?}"),
+            ),
+        )
+        .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "reject-identity",
+            None,
+        ));
+        fs::write(paths.identity(), &registered_identity).unwrap();
+        fs::write(
+            paths.identity(),
+            registered_identity.replace(&"f".repeat(64), &"e".repeat(64)),
+        )
+        .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "reject-identity",
+            None,
+        ));
+        fs::write(paths.identity(), registered_identity).unwrap();
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "activate",
+            Some((&drop_in, "after-unlink")),
+        ));
+        assert!(!drop_in.exists());
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "activate",
+            None,
+        ));
+        assert!(!drop_in.exists());
+        assert!(source.exists());
+        assert!(!fs::read_to_string(paths.unit()).unwrap().contains("LoadCredential="));
+
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&source, "before-unlink")),
+        ));
+        assert!(source.exists());
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&source, "after-unlink")),
+        ));
+        assert!(!source.exists());
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            None,
+        ));
+        assert!(!source.parent().unwrap().exists());
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "canonical-start",
+            None,
+        ));
+    }
+
+    fn run_replacement_lifecycle_child(
+        root: &Path,
+        action: &str,
+        crash: Option<(&Path, &str)>,
+    ) -> bool {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "install::tests::replacement_registration_production_recovery_windows",
+                "--nocapture",
+            ])
+            .env("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ROOT", root)
+            .env("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION", action);
+        if let Some((path, point)) = crash {
+            command
+                .env("ENOKI_TEST_SECURE_FILE_PATH", path)
+                .env("ENOKI_TEST_SECURE_FILE_CRASH_POINT", point);
+        }
+        command.status().unwrap().success()
+    }
+
+    fn run_replacement_lifecycle_recovery_child(root: &Path) {
+        let paths = FixedInstallPaths::under(root);
+        match std::env::var("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION")
+            .unwrap()
+            .as_str()
+        {
+            "publish-source" => {
+                let source = paths.replacement_registration_attempt_source();
+                fs::create_dir_all(source.parent().unwrap()).unwrap();
+                fs::set_permissions(
+                    source.parent().unwrap(),
+                    fs::Permissions::from_mode(0o700),
+                )
+                .unwrap();
+                let capsule = serde_json::to_vec(&serde_json::json!({
+                    "candidatePrivateKeyPem": valid_probe_private_key_pem(),
+                    "enrollmentTokenSha256": "e".repeat(64),
+                    "hubOrigin": "https://hub.example",
+                    "requestHex": "00",
+                    "schemaVersion": 1,
+                    "signedAttemptSha256": "f".repeat(64),
+                }))
+                .unwrap();
+                crate::secure_file::atomic_write(
+                    &source,
+                    &capsule,
+                    0o600,
+                    Some((paths.expected_root_uid(), paths.expected_root_gid())),
+                )
+                .unwrap();
+            }
+            "activate" | "ready-timeout" | "reject-identity" => {
+                let bundle = bundle().with_test_complete_receipts(5);
+                let commit = replacement_commit(&bundle);
+                let resume = commit.resume_binding();
+                let registration = commit
+                    .registration_binding(&bundle.target)
+                    .expect("valid registration binding");
+                let journal = paths.bootstrap_state().join("activation-journal.json");
+                let resumed = journal.exists();
+                let mut accounts = Accounts {
+                    identity_present: resumed,
+                    ipc_present: resumed,
+                    ..Accounts::default()
+                };
+                let mut systemd = ProductionRecoverySystemd {
+                    paths: &paths,
+                    timeout: std::env::var("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION")
+                        .as_deref()
+                        == Ok("ready-timeout"),
+                };
+                let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+                    std::array::from_fn(|_| component());
+                let result = activate_complete_replacement_current_probe_with_registration(
+                    VerifiedCompleteFreshComponents {
+                        probe: &mut probe,
+                        observation_runtime: &mut runtime,
+                        cpu_provider: &mut provider,
+                        disk_health_provider: &mut disk_health,
+                        lifecycle_companion: &mut lifecycle,
+                        bootstrap_acquirer: &mut acquirer,
+                        bootstrap_activator: &mut activator,
+                    },
+                    &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                    &bundle,
+                    &trust(),
+                    &paths,
+                    &mut accounts,
+                    &mut systemd,
+                    &resume,
+                    &registration,
+                );
+                if std::env::var("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION").as_deref()
+                    == Ok("reject-identity")
+                {
+                    assert_eq!(result, Err(InstallError::ExistingResidue));
+                } else if systemd.timeout {
+                    assert_eq!(result, Err(InstallError::Systemd));
+                } else {
+                    result.unwrap();
+                }
+            }
+            "retire-source" => {
+                let bundle = bundle().with_test_complete_receipts(5);
+                let commit = replacement_commit(&bundle);
+                finalize_complete_replacement_current_probe(
+                    &paths,
+                    &commit.resume_binding(),
+                    &bundle,
+                    &commit,
+                )
+                .unwrap();
+                retire_replacement_registration_attempt_source(&paths).unwrap();
+            }
+            "canonical-start" => {
+                ProductionRecoverySystemd {
+                    paths: &paths,
+                    timeout: false,
+                }
+                .start()
+                .unwrap();
+            }
+            action => panic!("unknown recovery action {action}"),
+        }
+    }
+
+    struct ProductionRecoverySystemd<'a> {
+        paths: &'a FixedInstallPaths,
+        timeout: bool,
+    }
+
+    impl SystemdPort for ProductionRecoverySystemd<'_> {
+        fn require_absent(&mut self) -> Result<(), InstallError> {
+            Ok(())
+        }
+
+        fn daemon_reload(&mut self) -> Result<(), InstallError> {
+            Ok(())
+        }
+
+        fn enable(&mut self) -> Result<(), InstallError> {
+            Ok(())
+        }
+
+        fn start(&mut self) -> Result<(), InstallError> {
+            let unit = fs::read_to_string(self.paths.unit()).map_err(|_| InstallError::Io)?;
+            if unit.contains("LoadCredential=") {
+                return Err(InstallError::ExistingResidue);
+            }
+            if self.paths.replacement_registration_drop_in().exists()
+                && !self
+                    .paths
+                    .replacement_registration_attempt_source()
+                    .exists()
+            {
+                return Err(InstallError::ExistingResidue);
+            }
+            Ok(())
+        }
+
+        fn wait_local_activated(&mut self) -> Result<(), InstallError> {
+            if self.timeout {
+                return Err(InstallError::Systemd);
+            }
+            let identity = self.paths.identity();
+            let pending = fs::read_to_string(&identity).map_err(|_| InstallError::Io)?;
+            if pending.contains("enrollment_token = \"enk_enroll_secret\"") {
+                let capsule: serde_json::Value = serde_json::from_slice(
+                    &fs::read(self.paths.replacement_registration_attempt_source())
+                        .map_err(|_| InstallError::Io)?,
+                )
+                .map_err(|_| InstallError::Io)?;
+                let candidate_private_key = capsule["candidatePrivateKeyPem"]
+                    .as_str()
+                    .ok_or(InstallError::Io)?;
+                let signed_attempt_sha256 = capsule["signedAttemptSha256"]
+                    .as_str()
+                    .ok_or(InstallError::Io)?;
+                let registered = pending.replace(
+                    "enrollment_token = \"enk_enroll_secret\"\n",
+                    &format!(
+                        "enrollment_id = \"enrollment_01\"\nprobe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = {candidate_private_key:?}\nregistration_signed_attempt_sha256 = {signed_attempt_sha256:?}\n",
+                    ),
+                );
+                fs::write(identity, registered).map_err(|_| InstallError::Io)?;
+            }
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), InstallError> {
+            Ok(())
+        }
+
+        fn disable(&mut self) -> Result<(), InstallError> {
+            Ok(())
         }
     }
 

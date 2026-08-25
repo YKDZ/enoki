@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+deterministic-test-seams = ["enoki-probe-bootstrap/deterministic-test-seams"]
+
 [dependencies]
 enoki-probe-bootstrap = { path = "../probe-bootstrap", features = [
   "acquirer",

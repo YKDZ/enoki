@@ -428,6 +428,26 @@ impl TransactionJournal {
         self.state.paths.iter().all(OwnedPath::still_owned)
     }
 
+    pub fn all_published_paths_except_are_owned(&self, mutable: &Path) -> bool {
+        self.state
+            .paths
+            .iter()
+            .filter(|owned| owned.path() != mutable)
+            .all(OwnedPath::still_owned)
+    }
+
+    pub fn published_path_is_owned(&self, path: &Path) -> bool {
+        self.state
+            .paths
+            .iter()
+            .find(|owned| owned.path() == path)
+            .is_some_and(OwnedPath::still_owned)
+    }
+
+    pub fn published_path_is_recorded(&self, path: &Path) -> bool {
+        self.state.paths.iter().any(|owned| owned.path() == path)
+    }
+
     pub fn exact_complete_layout_is_owned(&self, paths: &super::FixedInstallPaths) -> bool {
         let mut expected = super::installed_layout::registry(paths)
             .into_iter()
