@@ -142,8 +142,22 @@ export function assertMigrationCandidateJoin({
   releaseBaseline,
   releaseTransition,
 }) {
+  if (
+    releaseTransition !== null &&
+    releaseTransition?.candidateCommit !== identity.commit
+  ) {
+    throw new Error("Release Transition Contract candidate does not match");
+  }
   if (releaseBaseline.kind !== "enoki-trust-epoch-migration-baseline") {
-    if (releaseTransition !== null) {
+    if (
+      releaseTransition !== null &&
+      (!new Set(["compatible", "replacement-required"]).has(
+        releaseTransition.transition,
+      ) ||
+        releaseTransition.source?.version !==
+          releaseBaseline.probeAssetSet?.version ||
+        `v${releaseTransition.target?.version}` !== identity.version)
+    ) {
       throw new Error("Ordinary Release Candidate transition does not match");
     }
     return;
@@ -165,7 +179,6 @@ export function assertMigrationCandidateJoin({
   if (
     releaseTransition === null ||
     releaseTransition.transition !== "replacement-required" ||
-    releaseTransition.candidateCommit !== identity.commit ||
     source.tag !== releaseBaseline.tag ||
     source.commit !== releaseBaseline.githubRelease?.peeledCommitSha ||
     releaseTransition.migrationAuthorizationSha256 !==

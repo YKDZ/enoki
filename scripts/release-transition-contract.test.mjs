@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -7,6 +7,7 @@ import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
 import {
   createReleaseTransitionContract,
   preflightReleaseMigrationConfiguration,
+  releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
 } from "./release-transition-contract.mjs";
 import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
@@ -83,6 +84,119 @@ describe("Trust Epoch release transition", () => {
     ).toThrow("does not match");
   });
 
+  it.each(["compatible", "replacement-required"])(
+    "binds an ordinary signed %s contract to one candidate commit before planning",
+    (transition) => {
+      const targetManifest = JSON.parse(
+        fixture.createInput.targetManifestBytes,
+      );
+      const contract = {
+        candidateCommit: fixture.expected.candidateCommit,
+        distribution: "enoki",
+        kind: "enoki-release-transition-contract",
+        rootKeyId: sha256(Buffer.from(fixture.root.publicKey)),
+        schemaVersion: 1,
+        source: {
+          probeComponents: fixture.sourceProbeComponents,
+          version: "1.2.2",
+        },
+        target: {
+          assetClosure: targetManifest.assets,
+          assetSetManifestSha256: sha256(
+            fixture.createInput.targetManifestBytes,
+          ),
+          delegationGeneration: 1,
+          signingKeyId: targetManifest.signature.delegationKeyId,
+          version: "1.2.3",
+        },
+        transition,
+      };
+      const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
+      const signature = sign(
+        "RSA-SHA256",
+        releaseTransitionContractSigningInput(bytes),
+        fixture.root.privateKey,
+      );
+      const input = {
+        contractBytes: bytes,
+        contractSignature: signature,
+        expected: {
+          candidateCommit: fixture.expected.candidateCommit,
+          sourceVersion: "1.2.2",
+          targetAssetSetManifestSha256: contract.target.assetSetManifestSha256,
+          targetVersion: "1.2.3",
+          classification: transition,
+        },
+        rootPublicKeyPem: fixture.root.publicKey,
+      };
+
+      expect(verifyReleaseTransitionContract(input)).toEqual(contract);
+      expect(
+        preflightReleaseMigrationConfiguration({
+          authorization: "",
+          authorizationSignatureBase64: "",
+          candidateCommit: fixture.expected.candidateCommit,
+          candidateVersion: "v1.2.3",
+          contract: bytes.toString(),
+          contractSignatureBase64: signature.toString("base64"),
+          rootPublicKeyPem: fixture.root.publicKey,
+        }),
+      ).toEqual(contract);
+      expect(
+        preflightReleaseMigrationConfiguration({
+          authorization: fixture.createInput.authorizationBytes.toString(),
+          authorizationSignatureBase64:
+            fixture.createInput.authorizationSignature.toString("base64"),
+          candidateCommit: fixture.expected.candidateCommit,
+          candidateVersion: "v1.2.3",
+          contract: bytes.toString(),
+          contractSignatureBase64: signature.toString("base64"),
+          rootPublicKeyPem: fixture.root.publicKey,
+        }),
+      ).toEqual(contract);
+      const unboundContract = structuredClone(contract);
+      delete unboundContract.candidateCommit;
+      const unboundBytes = Buffer.from(`${JSON.stringify(unboundContract)}\n`);
+      expect(() =>
+        verifyReleaseTransitionContract({
+          contractBytes: unboundBytes,
+          contractSignature: sign(
+            "RSA-SHA256",
+            releaseTransitionContractSigningInput(unboundBytes),
+            fixture.root.privateKey,
+          ),
+          rootPublicKeyPem: fixture.root.publicKey,
+        }),
+      ).toThrow("fields are invalid");
+      expect(() =>
+        verifyReleaseTransitionContract({
+          ...input,
+          expected: {
+            ...input.expected,
+            candidateCommit: "f".repeat(40),
+          },
+        }),
+      ).toThrow("candidate does not match");
+      expect(() =>
+        preflightReleaseMigrationConfiguration({
+          authorization: "",
+          authorizationSignatureBase64: "",
+          candidateCommit: "f".repeat(40),
+          candidateVersion: "v1.2.3",
+          contract: bytes.toString(),
+          contractSignatureBase64: signature.toString("base64"),
+          rootPublicKeyPem: fixture.root.publicKey,
+        }),
+      ).toThrow("candidate does not match");
+      expect(() =>
+        verifyReleaseTransitionContract({
+          ...input,
+          contractSignature: Buffer.from(signature).fill(0),
+        }),
+      ).toThrow("root signature does not match");
+    },
+  );
+
   it.each([
     [
       "authorization",
@@ -145,6 +259,30 @@ describe("Trust Epoch release transition", () => {
         rootPublicKeyPem: fixture.root.publicKey,
       }),
     ).toEqual(signed.contract);
+  });
+
+  it("keeps Trust Epoch migration preflight bound to the fixed legacy source tag", async () => {
+    const signed = await createReleaseTransitionContract(fixture.createInput);
+    const wrongSourceTag = structuredClone(signed.contract);
+    wrongSourceTag.source.tag = "v0.1.75";
+    const contractBytes = Buffer.from(`${JSON.stringify(wrongSourceTag)}\n`);
+
+    expect(() =>
+      preflightReleaseMigrationConfiguration({
+        authorization: fixture.createInput.authorizationBytes.toString(),
+        authorizationSignatureBase64:
+          fixture.createInput.authorizationSignature.toString("base64"),
+        candidateCommit: fixture.expected.candidateCommit,
+        candidateVersion: "v1.2.3",
+        contract: contractBytes.toString(),
+        contractSignatureBase64: sign(
+          "RSA-SHA256",
+          releaseTransitionContractSigningInput(contractBytes),
+          fixture.root.privateKey,
+        ).toString("base64"),
+        rootPublicKeyPem: fixture.root.publicKey,
+      }),
+    ).toThrow(/fields are invalid|candidate does not match/);
   });
 
   it("requires the four public values to be configured together", () => {

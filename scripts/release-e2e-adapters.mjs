@@ -823,7 +823,7 @@ export async function readRunManifest(manifestPath) {
     !value.inputs ||
     (value.inputs.hostAdapter !== "ssh" && value.inputs.hostAdapter !== "ci") ||
     typeof value.hostMutationPossible !== "boolean" ||
-    !/^(?:initialized|matrix-validation|matrix-validated|candidate-prepare|candidate-prepared|scenario-running|succeeded|failed)$/.test(
+    !/^(?:initialized|plan-validated|candidate-prepare|candidate-prepared|scenario-running|succeeded|failed)$/.test(
       value.phase ?? "",
     ) ||
     (value.matrixCell !== null &&
@@ -885,11 +885,17 @@ export function createReleaseEnvironment({
   infrastructure,
   matrixCell,
   ownerPassword,
+  onCleanupManaged = () => {},
   ownershipToken,
   releaseInfrastructure = async () => ({ clean: true }),
 }) {
   if (typeof execute !== "function") {
     throw new Error("Release E2E environment requires a Host connection");
+  }
+  if (typeof onCleanupManaged !== "function") {
+    throw new Error(
+      "Release E2E cleanup ownership callback must be a function",
+    );
   }
   let dockerResources = null;
   return {
@@ -899,6 +905,7 @@ export function createReleaseEnvironment({
       runId,
       scenario = matrixCell?.scenarioId,
     }) {
+      onCleanupManaged();
       dockerResources = await docker.start({
         candidateDir,
         candidateManifest,

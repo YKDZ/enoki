@@ -143,6 +143,32 @@ export function verifyReleaseTransitionContract({
   if (!Buffer.from(contractBytes).equals(canonical)) {
     throw new Error("Release Transition Contract encoding does not match");
   }
+  if (
+    !verify(
+      "RSA-SHA256",
+      releaseTransitionContractSigningInput(canonical),
+      createPublicKey(rootPublicKeyPem),
+      contractSignature,
+    )
+  ) {
+    throw new Error(
+      "Release Transition Contract root signature does not match",
+    );
+  }
+  if (!isMigrationContract(contract)) {
+    if (
+      contract.rootKeyId !==
+      sha256(canonicalPublicKey(createPublicKey(rootPublicKeyPem)))
+    ) {
+      throw new Error(
+        "Release Transition Contract root identity does not match",
+      );
+    }
+    if (expected && !matchesExpectedContract(contract, expected)) {
+      throw new Error("Release Transition Contract candidate does not match");
+    }
+    return contract;
+  }
   const authorization = verifyTrustEpochMigrationAuthorization({
     bytes: authorizationBytes,
     expectedCandidateVersion: `v${contract.target.version}`,
@@ -173,18 +199,6 @@ export function verifyReleaseTransitionContract({
   ) {
     throw new Error("Release Transition Contract authorization does not match");
   }
-  if (
-    !verify(
-      "RSA-SHA256",
-      releaseTransitionContractSigningInput(canonical),
-      createPublicKey(rootPublicKeyPem),
-      contractSignature,
-    )
-  ) {
-    throw new Error(
-      "Release Transition Contract root signature does not match",
-    );
-  }
   if (expected && !matchesExpectedContract(contract, expected)) {
     throw new Error("Release Transition Contract candidate does not match");
   }
@@ -194,16 +208,22 @@ export function verifyReleaseTransitionContract({
 function matchesExpectedContract(contract, expected) {
   const comparisons = [
     ["candidateCommit", contract.candidateCommit],
+    ["classification", contract.transition],
     ["delegationGeneration", contract.target.delegationGeneration],
     ["sourceCommit", contract.source.commit],
     ["sourceTag", contract.source.tag],
+    ["sourceVersion", contract.source.version],
     ["targetAssetSetManifestSha256", contract.target.assetSetManifestSha256],
+    ["targetAssetClosure", contract.target.assetClosure],
     ["targetVersion", contract.target.version],
   ];
-  return comparisons.every(
-    ([name, actual]) =>
-      expected[name] === undefined || expected[name] === actual,
-  );
+  return comparisons.every(([name, actual]) => {
+    if (expected[name] === undefined) return true;
+    if (actual === undefined) return false;
+    return typeof actual === "object"
+      ? JSON.stringify(expected[name]) === JSON.stringify(actual)
+      : expected[name] === actual;
+  });
 }
 
 export function releaseTransitionContractSigningInput(bytes) {
@@ -219,45 +239,66 @@ export function preflightReleaseMigrationConfiguration({
   contractSignatureBase64,
   rootPublicKeyPem,
 }) {
-  const values = [
-    authorization,
-    authorizationSignatureBase64,
-    contract,
-    contractSignatureBase64,
-  ];
-  const configured = values.filter(
+  const contractValues = [contract, contractSignatureBase64];
+  const contractConfigured = contractValues.filter(
     (value) => typeof value === "string" && value.length > 0,
   ).length;
-  if (configured === 0) return null;
-  if (configured !== values.length) {
+  if (contractConfigured !== contractValues.length) {
     throw new Error(
-      "Release migration public configuration must be provided as one complete closure",
+      "Release Transition Contract must be provided as one complete closure",
+    );
+  }
+  const authorizationValues = [authorization, authorizationSignatureBase64];
+  const authorizationConfigured = authorizationValues.filter(
+    (value) => typeof value === "string" && value.length > 0,
+  ).length;
+  if (authorizationConfigured !== 0 && authorizationConfigured !== 2) {
+    throw new Error(
+      "Release migration authorization must be provided as one complete closure",
     );
   }
   if (
-    Buffer.byteLength(authorization) > MAX_CONTRACT_BYTES ||
+    (authorizationConfigured === 2 &&
+      Buffer.byteLength(authorization) > MAX_CONTRACT_BYTES) ||
     Buffer.byteLength(contract) > MAX_CONTRACT_BYTES
   ) {
     throw new Error("Release migration public configuration is invalid");
   }
+  const contractBytes = Buffer.from(contract);
+  const migrationContract =
+    parsedContractUsesMigrationAuthorization(contractBytes);
   return verifyReleaseTransitionContract({
-    authorizationBytes: Buffer.from(authorization),
-    authorizationSignature: decodeBoundedBase64(
-      authorizationSignatureBase64,
-      "authorization signature",
-    ),
-    contractBytes: Buffer.from(contract),
+    ...(authorizationConfigured === 2
+      ? {
+          authorizationBytes: Buffer.from(authorization),
+          authorizationSignature: decodeBoundedBase64(
+            authorizationSignatureBase64,
+            "authorization signature",
+          ),
+        }
+      : {}),
+    contractBytes,
     contractSignature: decodeBoundedBase64(
       contractSignatureBase64,
       "contract signature",
     ),
     expected: {
       candidateCommit,
-      sourceTag: "v0.1.74",
+      ...(migrationContract ? { sourceTag: "v0.1.74" } : {}),
       targetVersion: candidateVersion.replace(/^v/, ""),
     },
     rootPublicKeyPem,
   });
+}
+
+function parsedContractUsesMigrationAuthorization(contractBytes) {
+  try {
+    return isMigrationContract(
+      JSON.parse(Buffer.from(contractBytes).toString("utf8")),
+    );
+  } catch {
+    return false;
+  }
 }
 
 function decodeBoundedBase64(value, description) {
@@ -279,6 +320,9 @@ function decodeBoundedBase64(value, description) {
 }
 
 function validateContract(value) {
+  if (!isMigrationContract(value)) {
+    return validateGenericContract(value);
+  }
   assertPlainObject(value, "Release Transition Contract");
   assertExactKeys(value, [
     "candidateCommit",
@@ -340,6 +384,53 @@ function validateContract(value) {
   validateAssetClosure(value.target.assetClosure);
   validateSourceProbeComponents(value.source.probeComponents);
   return JSON.parse(JSON.stringify(value));
+}
+
+function validateGenericContract(value) {
+  assertPlainObject(value, "Release Transition Contract");
+  assertExactKeys(value, [
+    "candidateCommit",
+    "distribution",
+    "kind",
+    "rootKeyId",
+    "schemaVersion",
+    "source",
+    "target",
+    "transition",
+  ]);
+  assertPlainObject(value.source, "Release Transition Contract source");
+  assertExactKeys(value.source, ["probeComponents", "version"]);
+  assertPlainObject(value.target, "Release Transition Contract target");
+  assertExactKeys(value.target, [
+    "assetClosure",
+    "assetSetManifestSha256",
+    "delegationGeneration",
+    "signingKeyId",
+    "version",
+  ]);
+  if (
+    value.kind !== "enoki-release-transition-contract" ||
+    value.schemaVersion !== 1 ||
+    !["compatible", "replacement-required"].includes(value.transition) ||
+    !/^[0-9a-f]{40}$/.test(value.candidateCommit ?? "") ||
+    !/^[a-z][a-z0-9-]{0,63}$/.test(value.distribution ?? "") ||
+    !digestPattern.test(value.rootKeyId ?? "") ||
+    !semverPattern.test(value.source.version ?? "") ||
+    !semverPattern.test(value.target.version ?? "") ||
+    !digestPattern.test(value.target.assetSetManifestSha256 ?? "") ||
+    !Number.isSafeInteger(value.target.delegationGeneration) ||
+    value.target.delegationGeneration < 1 ||
+    !digestPattern.test(value.target.signingKeyId ?? "")
+  ) {
+    throw new Error("Release Transition Contract fields are invalid");
+  }
+  validateSourceProbeComponents(value.source.probeComponents);
+  validateAssetClosure(value.target.assetClosure);
+  return JSON.parse(JSON.stringify(value));
+}
+
+function isMigrationContract(value) {
+  return Object.hasOwn(value ?? {}, "migrationAuthorizationSha256");
 }
 
 function validateSourceProbeComponents(value) {

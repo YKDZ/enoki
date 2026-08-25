@@ -32,6 +32,8 @@ import {
   createProbeBootstrapPublication,
   createProbeTrustDelegation,
   inspectProbeAssetSet,
+  releaseTransitionForValidatedCandidate,
+  validateReleaseCandidate,
   validateDelegatedProbeSigningIdentity,
   validateProbeSigningIdentity,
   verifyProbeTrustDelegation,
@@ -41,7 +43,10 @@ import {
   verifyActiveHubBootstrapRecipeProvenance,
 } from "./release-e2e-adapters.mjs";
 import { createProbeHostHarness } from "./release-e2e-lib.mjs";
-import { createReleaseTransitionContract } from "./release-transition-contract.mjs";
+import {
+  createReleaseTransitionContract,
+  releaseTransitionContractSigningInput,
+} from "./release-transition-contract.mjs";
 import { createSignedLegacyProbeAssetSetFixture } from "./release-transition-test-fixture.mjs";
 import { createTrustEpochMigrationAuthorization } from "./trust-epoch-migration-lib.mjs";
 
@@ -426,6 +431,7 @@ with open(os.devnull, "rb") as input_stream:
     expect(preflight.indexOf("release-transition-preflight.mjs")).toBeLessThan(
       preflight.indexOf("${{ secrets.probe_asset_signing_key_pem }}"),
     );
+    expect(preflight).toContain('--candidate-commit "${{ inputs.commit }}"');
     for (const variable of [
       "ENOKI_RELEASE_TRANSITION_CONTRACT_JSON",
       "ENOKI_RELEASE_TRANSITION_CONTRACT_SIGNATURE_BASE64",
@@ -885,8 +891,12 @@ with open(os.devnull, "rb") as input_stream:
     const workDir = await mkdtemp(path.join(tmpdir(), "enoki-candidate-sign-"));
 
     try {
-      const { outputDir, privateKey, publicKey, root } =
-        await createProbeAssetSetFixture(workDir);
+      const {
+        outputDir,
+        privateKey,
+        publicKey,
+        root: _root,
+      } = await createProbeAssetSetFixture(workDir);
 
       const expectedFiles = [
         ...probeTargets.flatMap((target) => [
@@ -1782,6 +1792,43 @@ with open(os.devnull, "rb") as input_stream:
     }
   });
 
+  it("rejects a signed ordinary transition for a same-version and same-assets Hub candidate with a different commit", async () => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "enoki-candidate-transition-commit-"),
+    );
+
+    try {
+      const { candidateDir, root } = await createCandidateFixture(workDir, {
+        transitionCandidateCommit: checkedOutCommit,
+      });
+      const validated = await validateReleaseCandidate(candidateDir, {
+        trustedRootPublicKeyPem: root.publicKey,
+      });
+      expect(releaseTransitionForValidatedCandidate(validated)).toMatchObject({
+        candidateCommit: checkedOutCommit,
+        transition: "compatible",
+      });
+
+      const manifestPath = path.join(candidateDir, "candidate-manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.candidate.commit = "f".repeat(40);
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      await expect(
+        (async () => {
+          const wrongCandidate = await validateReleaseCandidate(candidateDir, {
+            trustedRootPublicKeyPem: root.publicKey,
+          });
+          return releaseTransitionForValidatedCandidate(wrongCandidate);
+        })(),
+      ).rejects.toThrow(
+        /release transition contract candidate does not match/i,
+      );
+    } finally {
+      await rm(workDir, { force: true, recursive: true });
+    }
+  });
+
   it("packages a validated Candidate directory reproducibly", async () => {
     const workDir = await mkdtemp(
       path.join(tmpdir(), "enoki-candidate-reproducible-transfer-"),
@@ -1894,7 +1941,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         configMediaType: "application/json",
@@ -1916,7 +1963,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         architecture: "arm64",
@@ -1936,7 +1983,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         os: "windows",
@@ -1956,7 +2003,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         diffIds: [],
@@ -1978,7 +2025,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         diffIds: [`sha256:${"0".repeat(64)}`],
@@ -1998,7 +2045,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         compressLayers: true,
@@ -2018,7 +2065,7 @@ with open(os.devnull, "rb") as input_stream:
     );
 
     try {
-      const { outputDir: probeAssetSetDir, root } =
+      const { outputDir: probeAssetSetDir, root: _root } =
         await createProbeAssetSetFixture(workDir);
       const oci = await createOciFixture(workDir, probeAssetSetDir, {
         extraLayers: [
@@ -2592,13 +2639,23 @@ async function createOciFixture(
   };
 }
 
-async function createCandidateFixture(workDir, { version = "v1.2.3" } = {}) {
+async function createCandidateFixture(
+  workDir,
+  { transitionCandidateCommit, version = "v1.2.3" } = {},
+) {
   const {
     outputDir: probeAssetSetDir,
     privateKey,
     publicKey,
     root,
   } = await createProbeAssetSetFixture(workDir, { version });
+  if (transitionCandidateCommit) {
+    await writeOrdinaryTransitionContract({
+      candidateCommit: transitionCandidateCommit,
+      probeAssetSetDir,
+      root,
+    });
+  }
   const oci = await createOciFixture(workDir, probeAssetSetDir);
   const candidateDir = path.join(workDir, "candidate");
   const releaseBaselineDir = await createReleaseBaselineFixture(workDir, {
@@ -2632,6 +2689,56 @@ async function createCandidateFixture(workDir, { version = "v1.2.3" } = {}) {
     releaseBaselineDir,
     root,
   };
+}
+
+async function writeOrdinaryTransitionContract({
+  candidateCommit,
+  probeAssetSetDir,
+  root,
+}) {
+  const manifestBytes = await readFile(
+    path.join(probeAssetSetDir, "manifest.json"),
+  );
+  const manifest = JSON.parse(manifestBytes);
+  const contract = {
+    candidateCommit,
+    distribution: "enoki",
+    kind: "enoki-release-transition-contract",
+    rootKeyId: sha256(Buffer.from(root.publicKey)),
+    schemaVersion: 1,
+    source: {
+      probeComponents: probeTargets.map((target) => ({
+        file: "enoki-probe",
+        role: "probe",
+        sha256: "c".repeat(64),
+        target,
+      })),
+      version: "1.2.2",
+    },
+    target: {
+      assetClosure: manifest.assets,
+      assetSetManifestSha256: sha256(manifestBytes),
+      delegationGeneration: manifest.signature.delegationGeneration,
+      signingKeyId: manifest.signature.delegationKeyId,
+      version: manifest.version,
+    },
+    transition: "compatible",
+  };
+  const bytes = Buffer.from(`${JSON.stringify(contract)}\n`);
+  await Promise.all([
+    writeFile(
+      path.join(probeAssetSetDir, "release-transition-contract.json"),
+      bytes,
+    ),
+    writeFile(
+      path.join(probeAssetSetDir, "release-transition-contract.json.sig"),
+      signBytes(
+        "RSA-SHA256",
+        releaseTransitionContractSigningInput(bytes),
+        root.privateKey,
+      ),
+    ),
+  ]);
 }
 
 async function createProbeBootstrapArtifactFixture(workDir, { root, version }) {

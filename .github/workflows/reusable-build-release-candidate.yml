@@ -362,17 +362,25 @@ jobs:
             --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM \
             --trust-delegation trust-delegation.json \
             --trust-delegation-signature trust-delegation.json.sig
+          transition_values=0
+          for value in "$RELEASE_TRANSITION_CONTRACT" "$RELEASE_TRANSITION_SIGNATURE"; do
+            if [ -n "$value" ]; then transition_values=$((transition_values + 1)); fi
+          done
+          if [ "$transition_values" -ne 2 ]; then
+            echo "::error::Signed Release Transition Contract is unavailable."
+            exit 1
+          fi
+          printf '%s' "$RELEASE_TRANSITION_CONTRACT" > probe-assets/release-transition-contract.json
+          printf '%s' "$RELEASE_TRANSITION_SIGNATURE" | base64 --decode > probe-assets/release-transition-contract.json.sig
           if [ "$RELEASE_BASELINE_KIND" = "enoki-trust-epoch-migration-baseline" ]; then
-            transition_values=0
-            for value in "$RELEASE_TRANSITION_CONTRACT" "$RELEASE_TRANSITION_SIGNATURE" "$TRUST_EPOCH_MIGRATION_AUTHORIZATION" "$TRUST_EPOCH_MIGRATION_SIGNATURE"; do
-              if [ -n "$value" ]; then transition_values=$((transition_values + 1)); fi
+            authorization_values=0
+            for value in "$TRUST_EPOCH_MIGRATION_AUTHORIZATION" "$TRUST_EPOCH_MIGRATION_SIGNATURE"; do
+              if [ -n "$value" ]; then authorization_values=$((authorization_values + 1)); fi
             done
-            if [ "$transition_values" -ne 4 ]; then
-              echo "::error::Trust Epoch Migration public closure is unavailable."
+            if [ "$authorization_values" -ne 2 ]; then
+              echo "::error::Trust Epoch Migration public authorization is unavailable."
               exit 1
             fi
-            printf '%s' "$RELEASE_TRANSITION_CONTRACT" > probe-assets/release-transition-contract.json
-            printf '%s' "$RELEASE_TRANSITION_SIGNATURE" | base64 --decode > probe-assets/release-transition-contract.json.sig
             printf '%s' "$TRUST_EPOCH_MIGRATION_AUTHORIZATION" > probe-assets/trust-epoch-migration-authorization.json
             printf '%s' "$TRUST_EPOCH_MIGRATION_SIGNATURE" | base64 --decode > probe-assets/trust-epoch-migration-authorization.json.sig
           fi
@@ -551,11 +559,26 @@ jobs:
         with:
           node-version-file: trusted-tool/package.json
 
-      - name: Emit the validated Release E2E matrix
+      - name: Download the immutable candidate before planning Host jobs
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.assemble-candidate.outputs.artifact-name }}
+          path: candidate-transfer
+
+      - name: Extract the immutable candidate
+        run: |
+          mkdir candidate
+          tar --extract --gzip --file candidate-transfer/candidate.tar.gz --directory candidate
+
+      - name: Compile the candidate-bound Release Scenario Plan
         id: release-e2e-matrix
+        env:
+          ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM: ${{ vars.ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM }}
         run: >-
-          node trusted-tool/scripts/release-e2e-matrix.mjs github-actions
+          node trusted-tool/scripts/release-scenario-plan.mjs github-actions
+          --candidate-manifest candidate/candidate-manifest.json
           --matrix trusted-tool/scripts/release-e2e-matrix.json
+          --root-public-key-env ENOKI_PROBE_DISTRIBUTION_ROOT_PUBLIC_KEY_PEM
           > release-e2e-matrix.json
           && echo "matrix=$(jq -c . release-e2e-matrix.json)" >> "$GITHUB_OUTPUT"
 

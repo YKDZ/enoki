@@ -5,7 +5,6 @@ import {
   isSupportedReleaseTestHostVirtualization,
   isCandidateHostReady,
 } from "./release-e2e-lib.mjs";
-import { createGitHubActionsMatrix } from "./release-e2e-matrix.mjs";
 
 const requiredComponentNames = Object.freeze([
   "inputValidation",
@@ -99,7 +98,18 @@ function validateHostScenarioEvidence(
   }
 
   const requiredByScenario = {
-    "baseline-upgrade-uninstall": [
+    "compatible-upgrade-uninstall": [
+      "auditLog",
+      "baselineInstall",
+      "candidateHost",
+      "compatibility",
+      "hostBoundary",
+      "identityContinuity",
+      "metrics",
+      "probeConfiguration",
+      "upgradeOperationTimeline",
+    ],
+    "replacement-migration-uninstall": [
       "auditLog",
       "baselineInstall",
       "candidateHost",
@@ -118,6 +128,7 @@ function validateHostScenarioEvidence(
       "finalLocalUninstall",
       "hubOnlyDeletion",
       "initialInstall",
+      "installedBundleFailureRepair",
       "localUninstall",
       "metrics",
       "metricsHistory",
@@ -155,7 +166,10 @@ function validateHostScenarioEvidence(
 
   if (evidence?.scenario === "fresh-install-uninstall") {
     validateFreshEvidence(evidence, errors, candidateManifest);
-  } else if (evidence?.scenario === "baseline-upgrade-uninstall") {
+  } else if (
+    evidence?.scenario === "compatible-upgrade-uninstall" ||
+    evidence?.scenario === "replacement-migration-uninstall"
+  ) {
     validateBaselineEvidence(evidence, errors, candidateManifest);
   } else if (evidence?.scenario === "post-replacement-repair-uninstall") {
     validateRepairEvidence(evidence, errors, candidateManifest);
@@ -272,6 +286,12 @@ function validateFreshEvidence(evidence, errors, candidateManifest) {
   validateMetrics(evidence?.metrics, "fresh reporting", errors);
   validateMetricsHistoryPreservation(evidence, errors);
   validateProbeConfiguration(evidence?.probeConfiguration, errors);
+  validateInstalledBundleFailureRepair(
+    evidence?.installedBundleFailureRepair,
+    version,
+    evidence?.host?.id,
+    errors,
+  );
   validateFreshLifecycleAuditLog(evidence, errors);
   validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
   validateHostInstallResult(
@@ -300,6 +320,118 @@ function validateFreshEvidence(evidence, errors, candidateManifest) {
     errors,
   );
   validateDiagnosticsEvidence(evidence?.diagnostics, errors);
+}
+
+function validateInstalledBundleFailureRepair(
+  value,
+  version,
+  expectedHostId,
+  errors,
+) {
+  const failure = value?.failure;
+  const bundle = failure?.bundle;
+  const epoch = failure?.failureEpoch;
+  const latch = failure?.latch;
+  const budget = failure?.recoveryBudget;
+  const repair = value?.repair;
+  const sha256 = (candidate) => /^[0-9a-f]{64}$/.test(candidate ?? "");
+  if (
+    !sameKeySet(failure ?? {}, {
+      activeState: null,
+      bundle: null,
+      failureEpoch: null,
+      latch: null,
+      recoveryBudget: null,
+      result: null,
+      role: null,
+      status: null,
+      unit: null,
+      unitSha256: null,
+    }) ||
+    !sameKeySet(bundle ?? {}, {
+      installStateSha256: null,
+      manifestSha256: null,
+      runtimeFaultSha256: null,
+      runtimeSha256: null,
+      version: null,
+    }) ||
+    !sameKeySet(epoch ?? {}, {
+      bootId: null,
+      generation: null,
+      hostId: null,
+      identityReceiptSha256: null,
+      links: null,
+      mode: null,
+      ownerUid: null,
+      probeId: null,
+    }) ||
+    !sameKeySet(latch ?? {}, {
+      generation: null,
+      links: null,
+      mode: null,
+      ownerUid: null,
+    }) ||
+    !sameKeySet(budget ?? {}, {
+      observedStarts: null,
+      startLimitBurst: null,
+      startLimitIntervalSeconds: null,
+    }) ||
+    !sameKeySet(repair ?? {}, {
+      failureEpochRemoved: null,
+      faultRemoved: null,
+      latchRemoved: null,
+      output: null,
+      probeId: null,
+      repairedVersion: null,
+      runtimeSha256: null,
+      sameBundle: null,
+      unit: null,
+    }) ||
+    failure.activeState !== "failed" ||
+    failure.result !== "start-limit-hit" ||
+    failure.role !== "observation_runtime" ||
+    failure.status !== "latched" ||
+    failure.unit !== "enoki-observation-runtime.service" ||
+    !sha256(failure.unitSha256) ||
+    bundle.version !== version ||
+    !sha256(bundle.installStateSha256) ||
+    !sha256(bundle.manifestSha256) ||
+    !sha256(bundle.runtimeFaultSha256) ||
+    !sha256(bundle.runtimeSha256) ||
+    bundle.runtimeFaultSha256 === bundle.runtimeSha256 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(epoch.bootId ?? "") ||
+    !sha256(epoch.generation) ||
+    epoch.hostId !== String(expectedHostId) ||
+    !sha256(epoch.identityReceiptSha256) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(epoch.probeId ?? "") ||
+    epoch.ownerUid !== 0 ||
+    epoch.mode !== "0600" ||
+    epoch.links !== 1 ||
+    latch.generation !== epoch.generation ||
+    latch.ownerUid !== 0 ||
+    latch.mode !== "0600" ||
+    latch.links !== 1 ||
+    budget.startLimitBurst !== 3 ||
+    budget.startLimitIntervalSeconds !== 60 ||
+    budget.observedStarts !== 3 ||
+    repair.failureEpochRemoved !== true ||
+    repair.faultRemoved !== true ||
+    repair.latchRemoved !== true ||
+    repair.output !== "Probe repair completed." ||
+    repair.repairedVersion !== version ||
+    repair.runtimeSha256 !== bundle.runtimeSha256 ||
+    repair.sameBundle !== true ||
+    repair.unit !== failure.unit ||
+    repair.probeId !== epoch.probeId ||
+    repair.probeId !== value?.identity?.after?.probeId ||
+    JSON.stringify(value?.identity?.after) !==
+      JSON.stringify(value?.identity?.before) ||
+    value?.host?.id !== expectedHostId ||
+    !isCandidateHostReady(value?.host, version)
+  ) {
+    errors.push("Installed Bundle Failure Repair evidence is invalid");
+  }
+  validateInstalledHostBoundary(value?.hostBoundary, version, errors);
 }
 
 function validateInstallerEvidence(value, label, errors) {
@@ -870,10 +1002,13 @@ function validateBaselineEvidence(evidence, errors, candidateManifest) {
         expectedRunId: evidence?.runId,
       },
     );
-  } else if (
-    evidence?.manualRecovery === null ||
-    evidence?.manualRecovery === undefined
-  ) {
+  } else {
+    if (
+      evidence?.manualRecovery !== null &&
+      evidence?.manualRecovery !== undefined
+    ) {
+      errors.push("Compatible Upgrade must not use manual recovery");
+    }
     validateTerminalOperation(
       evidence?.upgradeOperationTimeline,
       "probe_upgrade",
@@ -881,24 +1016,6 @@ function validateBaselineEvidence(evidence, errors, candidateManifest) {
       "baseline Upgrade",
       errors,
     );
-  } else {
-    validateTerminalOperation(
-      evidence?.upgradeOperationTimeline,
-      "probe_upgrade",
-      "failed",
-      "baseline Upgrade permission failure",
-      errors,
-    );
-    const failed = evidence?.upgradeOperationTimeline?.at(-1);
-    if (
-      failed?.failure?.code !== "insufficient_privilege" ||
-      evidence.manualRecovery.mode !== "installer" ||
-      evidence.manualRecovery.status !== "succeeded" ||
-      evidence.manualRecovery.failedOperationId !== failed?.id ||
-      evidence.manualRecovery.targetProbeVersion !== version
-    ) {
-      errors.push("Installer Recovery evidence is invalid");
-    }
   }
   if (
     evidence?.compatibility?.status !== "succeeded" ||
@@ -1636,7 +1753,7 @@ export function createReleaseVerificationSummary({
   gateResults,
   hostGates,
   identities = {},
-  matrix,
+  scenarioPlan,
   requested,
   run,
   standardCi,
@@ -1664,7 +1781,7 @@ export function createReleaseVerificationSummary({
     matrixJob: components.hostMatrix ?? gateResults?.matrixJob ?? "missing",
     uiJob: components.candidateUiContract ?? gateResults?.uiJob ?? "missing",
   };
-  const expectedCells = createGitHubActionsMatrix(matrix).include;
+  const expectedCells = validateScenarioPlan(scenarioPlan);
   const artifactUrl = (artifactName) =>
     resolveArtifactUrl(artifactIndex, artifactName, run);
   const providedHostGates = hostGates ?? [];
@@ -1717,6 +1834,7 @@ export function createReleaseVerificationSummary({
     isArtifactName(uiGate?.artifactName) &&
     (!artifactIndex || Boolean(artifactUrl(uiGate?.artifactName))) &&
     sameCandidate(uiGate?.candidate, candidateManifest?.candidate) &&
+    expectedCells.length > 0 &&
     providedHostGates.length === expectedCells.length &&
     gatesByCell.size === expectedCells.length &&
     hostScenarios.every(
@@ -2043,6 +2161,27 @@ function normalizeComponentResults(componentResults) {
         : "missing",
     ]),
   );
+}
+
+function validateScenarioPlan(plan) {
+  if (plan === null || plan === undefined) return [];
+  if (
+    plan?.kind !== "enoki-release-scenario-plan" ||
+    plan.schemaVersion !== 1 ||
+    !Array.isArray(plan.cells) ||
+    plan.cells.length === 0 ||
+    plan.cells.some(
+      (cell) =>
+        typeof cell?.cellId !== "string" ||
+        typeof cell.environmentId !== "string" ||
+        typeof cell.runner !== "string" ||
+        typeof cell.scenarioId !== "string",
+    ) ||
+    new Set(plan.cells.map((cell) => cell.cellId)).size !== plan.cells.length
+  ) {
+    throw new Error("compiled Release Scenario Plan is invalid");
+  }
+  return plan.cells;
 }
 
 function sameCandidate(left, right) {

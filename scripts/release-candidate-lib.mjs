@@ -52,12 +52,20 @@ const dynamicLoaderByProbeTarget = Object.freeze({
 });
 const bootstrapRecipeFile = "enoki-probe-bootstrap.py";
 const bootstrapRecipeRecordFile = "enoki-probe-bootstrap-recipe.json";
+const verifiedCandidateReleaseTransitions = new WeakMap();
 export const probeTargets = Object.freeze([
   "aarch64-unknown-linux-gnu",
   "aarch64-unknown-linux-musl",
   "x86_64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
 ]);
+
+export function releaseTransitionForValidatedCandidate(manifest) {
+  if (!verifiedCandidateReleaseTransitions.has(manifest)) {
+    throw new Error("Candidate Manifest has not passed release verification");
+  }
+  return verifiedCandidateReleaseTransitions.get(manifest);
+}
 
 export function createReleaseCandidateManifest({
   bootstrapRecipe,
@@ -1335,6 +1343,10 @@ export async function validateReleaseCandidate(
     throw new Error("Candidate Hub OCI digest does not match");
   }
 
+  verifiedCandidateReleaseTransitions.set(
+    manifest,
+    inspectedProbe.releaseTransition ?? null,
+  );
   return manifest;
 }
 
@@ -1354,6 +1366,8 @@ export async function inspectProbeAssetSet(
   const transitionFileNames = [
     "release-transition-contract.json",
     "release-transition-contract.json.sig",
+  ];
+  const migrationAuthorizationFileNames = [
     "trust-epoch-migration-authorization.json",
     "trust-epoch-migration-authorization.json.sig",
   ];
@@ -1361,10 +1375,22 @@ export async function inspectProbeAssetSet(
   const transitionFileCount = transitionFileNames.filter((file) =>
     actualFiles.includes(file),
   ).length;
-  if (transitionFileCount !== 0 && transitionFileCount !== 4) {
+  const migrationAuthorizationFileCount =
+    migrationAuthorizationFileNames.filter((file) =>
+      actualFiles.includes(file),
+    ).length;
+  if (
+    (transitionFileCount !== 0 && transitionFileCount !== 2) ||
+    (migrationAuthorizationFileCount !== 0 &&
+      migrationAuthorizationFileCount !== 2) ||
+    (migrationAuthorizationFileCount === 2 && transitionFileCount !== 2)
+  ) {
     throw new Error("Probe Asset Set transition closure is incomplete");
   }
-  if (unsigned && transitionFileCount !== 0) {
+  if (
+    unsigned &&
+    (transitionFileCount !== 0 || migrationAuthorizationFileCount !== 0)
+  ) {
     throw new Error("Unsigned Probe Asset Set cannot declare a transition");
   }
   const expectedFiles = [
@@ -1378,7 +1404,10 @@ export async function inspectProbeAssetSet(
     "signing-key.pem",
     "trust-delegation.json",
     "trust-delegation.json.sig",
-    ...(transitionFileCount === 4 ? transitionFileNames : []),
+    ...(transitionFileCount === 2 ? transitionFileNames : []),
+    ...(migrationAuthorizationFileCount === 2
+      ? migrationAuthorizationFileNames
+      : []),
   ].sort();
   assertSameFileNames(actualFiles, expectedFiles, "Probe Asset Set");
 
@@ -1595,7 +1624,7 @@ export async function inspectProbeAssetSet(
     }
   }
   let releaseTransition = null;
-  if (transitionFileCount === 4) {
+  if (transitionFileCount === 2) {
     const contractBytes = await readFile(
       path.join(assetDir, "release-transition-contract.json"),
     );
@@ -1608,21 +1637,30 @@ export async function inspectProbeAssetSet(
     const { verifyReleaseTransitionContract } =
       await import("./release-transition-contract.mjs");
     releaseTransition = verifyReleaseTransitionContract({
-      authorizationBytes: await readFile(
-        path.join(assetDir, "trust-epoch-migration-authorization.json"),
-      ),
-      authorizationSignature: await readFile(
-        path.join(assetDir, "trust-epoch-migration-authorization.json.sig"),
-      ),
+      ...(migrationAuthorizationFileCount === 2
+        ? {
+            authorizationBytes: await readFile(
+              path.join(assetDir, "trust-epoch-migration-authorization.json"),
+            ),
+            authorizationSignature: await readFile(
+              path.join(
+                assetDir,
+                "trust-epoch-migration-authorization.json.sig",
+              ),
+            ),
+          }
+        : {}),
       contractBytes,
       contractSignature: await readFile(
         path.join(assetDir, "release-transition-contract.json.sig"),
       ),
       expected: {
-        candidateCommit: contract.candidateCommit,
+        classification: contract.transition,
         delegationGeneration: manifest.signature.delegationGeneration,
         sourceCommit: contract.source?.commit,
         sourceTag: contract.source?.tag,
+        sourceVersion: contract.source?.version,
+        targetAssetClosure: manifest.assets,
         targetAssetSetManifestSha256: sha256(manifestBytes),
         targetVersion: manifest.version,
       },

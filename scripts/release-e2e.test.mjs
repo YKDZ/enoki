@@ -23,6 +23,7 @@ import {
   createCiReleaseInfrastructureAdapter,
   createDockerHubController,
   createFileEvidenceSink,
+  createReleaseEnvironment,
   createSshReleaseInfrastructureAdapter,
   parseReleaseE2ECommandLine,
   writeRunManifest,
@@ -39,11 +40,67 @@ import {
   validateSuccessfulRepairBoundaryEvidence,
   validateSuccessfulProbeUpgradeTimeline,
 } from "./release-e2e-lib.mjs";
+import { createInstalledBundleFailureRepairHostDriver } from "./release-installed-bundle-failure-repair.mjs";
 import { createMatrixGateResult } from "./release-verification-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 
 describe("Release E2E business assertions", () => {
+  it("transfers cleanup ownership when the existing runner enters environment start", async () => {
+    const calls = [];
+    const environment = createReleaseEnvironment({
+      candidateDir: "/tmp/release-candidate",
+      docker: {
+        async start() {
+          calls.push("docker.start");
+          throw new Error("Hub initialization failed");
+        },
+      },
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      hubOwnerUrl: "http://hub-owner.test",
+      hubPublicUrl: "http://hub-public.test",
+      onCleanupManaged() {
+        calls.push("cleanup.owned");
+      },
+      ownerPassword: "owner-password",
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+
+    await expect(
+      environment.start({
+        candidateManifest: candidateManifest(),
+        runId: "run-cleanup-ownership",
+      }),
+    ).rejects.toThrow("Hub initialization failed");
+    expect(calls).toEqual(["cleanup.owned", "docker.start"]);
+  });
+
+  it("keeps ForwardTransitions authority behind the typed Hub adapter and out of the Host Harness", async () => {
+    const host = createProbeHostHarness({
+      execute: async () => ({ code: 0, stderr: "", stdout: "" }),
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    });
+    const hostMethods = Object.keys(host);
+    const hubRoutes = await readFile(
+      new URL("../apps/hub/src/hosts/routes.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(hostMethods).not.toEqual(
+      expect.arrayContaining([
+        "authorize",
+        "createEnrollment",
+        "createOperation",
+        "readJournalPhase",
+        "requestProbeUpgrade",
+        "view",
+      ]),
+    );
+    expect(hubRoutes).toContain("createForwardTransitions({");
+    expect(hubRoutes).toContain("}).authorize({");
+    expect(hubRoutes).not.toMatch(/release[-_ ]e2e/i);
+  });
+
   it("accepts the production Bootstrap recipe command and rejects unsafe variants", async () => {
     const enrollment = officialEnrollment();
     const rendered = renderInstallCommand(
@@ -87,7 +144,7 @@ describe("Release E2E business assertions", () => {
         evidenceSink: { write: async () => {} },
         ownerPassword: "owner-password",
         runId: "run-migration-contract",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "replacement-migration-uninstall",
       }),
     ).rejects.toThrow(/typed migration baseline accepted/);
 
@@ -104,31 +161,59 @@ describe("Release E2E business assertions", () => {
         evidenceSink: { write: async () => {} },
         ownerPassword: "owner-password",
         runId: "run-generic-legacy-contract",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "replacement-migration-uninstall",
       }),
     ).rejects.toThrow(/manifest fields must be exactly/i);
   });
 
-  it("fails migration Repair closed before starting a second lifecycle", async () => {
-    let started = false;
+  it("dispatches Replacement participants from the planned scenario instead of the baseline name", async () => {
+    let hostStarted = false;
+    const methodObject = (names) =>
+      Object.fromEntries(names.map((name) => [name, async () => {}]));
+    const host = {
+      ...methodObject([
+        "assertDisposable",
+        "assertInstalled",
+        "beginUpgradeOwnershipTransition",
+        "bindUpgradeOwnershipTransition",
+        "cleanup",
+        "collectEvidence",
+        "completeUpgradeOwnershipTransition",
+        "install",
+        "readProbeIdentity",
+        "verifyUninstallCompletion",
+      ]),
+      async assertDisposable() {
+        hostStarted = true;
+      },
+    };
+    const hub = methodObject([
+      "authenticate",
+      "createEnrollment",
+      "getHost",
+      "getHostMetrics",
+      "isHostSoftDeleted",
+      "listHosts",
+      "requestProbeUninstall",
+      "requestProbeUpgrade",
+      "switchToCandidate",
+      "waitForProbeOperation",
+    ]);
+
     await expect(
       runReleaseE2EScenario({
-        candidateManifest: candidateManifestWithMigrationBaseline(),
+        candidateManifest: candidateManifestWithBaseline(),
         environment: {
           cleanup: async () => ({ clean: true }),
-          start: async () => {
-            started = true;
-          },
+          start: async () => ({ host, hub }),
         },
         evidenceSink: { write: async () => {} },
         ownerPassword: "owner-password",
-        runId: "run-migration-repair-authority",
-        scenario: "post-replacement-repair-uninstall",
+        runId: "run-explicit-replacement-dispatch",
+        scenario: "replacement-migration-uninstall",
       }),
-    ).rejects.toMatchObject({
-      code: "trust_epoch_migration_repair_authority_unavailable",
-    });
-    expect(started).toBe(false);
+    ).rejects.toThrow(/invalid baseline-upgrade participants/);
+    expect(hostStarted).toBe(false);
   });
 
   it("executes Trust Epoch baseline migration through production manual reinstall with replacement evidence", async () => {
@@ -144,7 +229,7 @@ describe("Release E2E business assertions", () => {
         },
         ownerPassword: "owner-password",
         runId: "run-migration-baseline-behavior",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "replacement-migration-uninstall",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
       }),
     ).resolves.toEqual({ status: "succeeded" });
@@ -178,9 +263,9 @@ describe("Release E2E business assertions", () => {
     );
     const gate = createMatrixGateResult({
       artifactName:
-        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+        "release-e2e-ubuntu-22.04-x86_64--replacement-migration-uninstall-1",
       candidateManifest,
-      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      cellId: "ubuntu-22.04-x86_64--replacement-migration-uninstall",
       evidence,
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
@@ -220,6 +305,60 @@ describe("Release E2E business assertions", () => {
     expect(gate.outcome).toBe("succeeded");
   });
 
+  it("keeps the explicit Compatible Repair path independent of baseline descriptor kind", async () => {
+    const methodObject = (names) =>
+      Object.fromEntries(names.map((name) => [name, async () => {}]));
+    const host = methodObject([
+      "armPostReplacementRestartFault",
+      "assertInstalled",
+      "assertPostReplacementUpgradeFailure",
+      "beginUpgradeOwnershipTransition",
+      "bindUpgradeOwnershipTransition",
+      "cleanup",
+      "collectEvidence",
+      "completeRepairOwnershipTransition",
+      "completeUpgradeOwnershipTransition",
+      "install",
+      "readProbeIdentity",
+      "removePostReplacementRestartFault",
+      "repair",
+      "verifyUninstallCompletion",
+    ]);
+    host.assertDisposable = async () => {
+      throw new Error("compatible-repair-entered");
+    };
+    const hub = methodObject([
+      "authenticate",
+      "createEnrollment",
+      "getAuditLog",
+      "getHost",
+      "getHostMetrics",
+      "getHostProbeConfiguration",
+      "getProbeOperation",
+      "isHostSoftDeleted",
+      "listHosts",
+      "requestProbeUninstall",
+      "requestProbeUpgrade",
+      "switchToCandidate",
+      "updateHostProbeConfiguration",
+      "waitForProbeOperation",
+    ]);
+
+    await expect(
+      runReleaseE2EScenario({
+        candidateManifest: candidateManifestWithMigrationBaseline(),
+        environment: {
+          cleanup: async () => ({ clean: true }),
+          start: async () => ({ host, hub }),
+        },
+        evidenceSink: { write: async () => {} },
+        ownerPassword: "owner-password",
+        runId: "run-explicit-compatible-repair",
+        scenario: "post-replacement-repair-uninstall",
+      }),
+    ).rejects.toThrow("compatible-repair-entered");
+  });
+
   it("reports the dedicated migration Configuration retention timeout", async () => {
     const candidateManifest = candidateManifestWithMigrationBaseline();
     await expect(
@@ -231,7 +370,7 @@ describe("Release E2E business assertions", () => {
         evidenceSink: { write: async () => {} },
         ownerPassword: "owner-password",
         runId: "run-migration-configuration-timeout",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "replacement-migration-uninstall",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
       }),
     ).rejects.toMatchObject({
@@ -239,51 +378,11 @@ describe("Release E2E business assertions", () => {
     });
   });
 
-  it("fails Trust Epoch Hub Restore closed before claiming impossible Candidate Probe compatibility", async () => {
-    let started = false;
-    const written = [];
-    await expect(
-      runReleaseE2EScenario({
-        candidateManifest: candidateManifestWithMigrationBaseline(),
-        environment: {
-          cleanup: async () => ({ clean: true }),
-          start: async () => {
-            started = true;
-            throw new Error("migration Restore must fail before start");
-          },
-        },
-        evidenceSink: {
-          write: async (evidence) => written.push(evidence),
-        },
-        ownerPassword: "owner-password",
-        runId: "run-migration-restore-behavior",
-        scenario: "hub-restore-compatibility-window",
-        timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
-      }),
-    ).rejects.toMatchObject({
-      code: "trust_epoch_migration_restore_compatibility_unavailable",
-    });
-    expect(started).toBe(false);
-    expect(written.at(-1)).toMatchObject({
-      failureBoundary: "compatibility",
-      protocol: {
-        baselineProbeToCandidateHub: "pending",
-        candidateProbeToBaselineHub: "blocked",
-      },
-      result: {
-        error: {
-          code: "trust_epoch_migration_restore_compatibility_unavailable",
-        },
-        status: "failed",
-      },
-    });
-  });
-
   it("preserves only the validated public authorization summary in redacted evidence", async () => {
     const written = [];
     await expect(
       runReleaseE2EScenario({
-        candidateManifest: candidateManifestWithMigrationBaseline(),
+        candidateManifest: candidateManifestWithBaseline(),
         environment: {
           cleanup: async () => ({
             clean: true,
@@ -303,7 +402,7 @@ describe("Release E2E business assertions", () => {
             },
           }),
           start: async () => {
-            throw new Error("migration Restore must fail before start");
+            throw new Error("planned scenario failed before Host mutation");
           },
         },
         evidenceSink: {
@@ -311,10 +410,10 @@ describe("Release E2E business assertions", () => {
         },
         ownerPassword: "owner-password",
         runId: "run-redacted-public-summary",
-        scenario: "hub-restore-compatibility-window",
+        scenario: "compatible-upgrade-uninstall",
       }),
     ).rejects.toMatchObject({
-      code: "trust_epoch_migration_restore_compatibility_unavailable",
+      code: "release_e2e_failed",
     });
 
     expect(written.at(-1).cleanup.environment.summaries).toEqual({
@@ -554,6 +653,41 @@ describe("successful Probe Repair boundary evidence", () => {
         candidateManifestWithBaseline(),
       ),
     ).toBe(evidence);
+  });
+
+  it("keeps Compatible failed-Upgrade Repair evidence independent of baseline descriptor kind", () => {
+    const evidence = successfulRepairBoundaryEvidence();
+    const manifest = candidateManifestWithMigrationBaseline();
+    bindRepairEvidenceToBaseline(evidence, manifest.releaseBaseline);
+
+    expect(validateSuccessfulRepairBoundaryEvidence(evidence, manifest)).toBe(
+      evidence,
+    );
+  });
+
+  it("rejects manual-reinstall evidence for an explicit Compatible Repair scenario", () => {
+    const evidence = successfulRepairBoundaryEvidence();
+    const manifest = candidateManifestWithMigrationBaseline();
+    bindRepairEvidenceToBaseline(evidence, manifest.releaseBaseline);
+    evidence.auditLog = lifecycleAuditLog();
+    evidence.failureBoundary = {
+      enrollmentId: "enr_manual_reinstall_0001",
+      hostId: 7,
+      kind: "trust_epoch_manual_reinstall",
+    };
+    evidence.hubEvidence.apiTimeline.find((entry) =>
+      entry.pathname.endsWith("/probe-upgrade-requests"),
+    ).pathname = "/api/web/enrollments/manual-reinstall/7";
+    evidence.operationTimeline = [];
+
+    expect(() =>
+      validateSuccessfulRepairBoundaryEvidence(evidence, manifest),
+    ).toThrow(
+      expect.objectContaining({
+        boundary: "hub-api",
+        code: "repair_boundary_evidence_invalid",
+      }),
+    );
   });
 
   it.each([
@@ -1056,7 +1190,7 @@ describe("Probe Host Harness", () => {
     ).rejects.toThrow(/Probe binary version 9\.9\.9.*Candidate 1\.2\.3/);
   });
 
-  it("uses a run-owned systemd fault and the real root-only Probe Repair command", async () => {
+  it("uses a run-owned post-replacement fault and the real root-only Probe Repair command", async () => {
     const commands = [];
     const harness = createProbeHostHarness({
       execute: async (command, options) => {
@@ -1177,6 +1311,260 @@ describe("Probe Host Harness", () => {
         "# enoki-release-e2e:probe-repair\n/usr/local/bin/enoki-probe repair\n",
       options: { root: true },
     });
+  });
+
+  it("rejects a transient service failure as Installed Bundle Failure Repair eligibility", async () => {
+    const harness = createProbeHostHarness({
+      execute: async (command) => {
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(
+            '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+          );
+        }
+        if (command.includes("installed-bundle")) {
+          return successfulCommand({
+            cause: "installed_bundle_restart_failure",
+            probeVersion: "1.2.3",
+            status: "failed",
+          });
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-repair-eligibility");
+    await harness.install(officialEnrollment(), "run-repair-eligibility");
+    await expect(
+      harness.repairInstalledBundleFailure("run-repair-eligibility", "1.2.3"),
+    ).rejects.toThrow(/durable Observation Runtime failure eligibility/i);
+  });
+
+  it("exhausts the Observation Runtime budget and consumes its durable failure epoch through Repair", async () => {
+    const commands = [];
+    const runtimeSha256 = "a".repeat(64);
+    const harness = createProbeHostHarness({
+      execute: async (command, options) => {
+        commands.push({ command, options });
+        if (command.includes("# enoki-release-e2e:inventory")) {
+          return successfulCommand({
+            accounts: { group: false, user: false },
+            files: [],
+            units: [],
+          });
+        }
+        if (command.includes("# enoki-release-e2e:dependencies")) {
+          return successfulCommandText(
+            '{"curl":"/usr/bin/curl","sudo":"/usr/bin/sudo","systemdRun":"/usr/bin/systemd-run"}\n',
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText(
+            [
+              "activeState=failed",
+              "bootId=4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+              "bundleVersion=1.2.3",
+              `epochGeneration=${"b".repeat(64)}`,
+              "epochLinks=1",
+              "epochMode=600",
+              "epochOwner=0",
+              "hostId=7",
+              `identityReceiptSha256=${"c".repeat(64)}`,
+              `installStateSha256=${"d".repeat(64)}`,
+              `latchGeneration=${"b".repeat(64)}`,
+              "latchLinks=1",
+              "latchMode=600",
+              "latchOwner=0",
+              `manifestSha256=${"e".repeat(64)}`,
+              "probeId=probe_release_01",
+              "result=start-limit-hit",
+              "restartCount=2",
+              "role=observation_runtime",
+              `runtimeFaultSha256=${"f".repeat(64)}`,
+              `runtimeSha256=${runtimeSha256}`,
+              "startLimitBurst=3",
+              "startLimitIntervalSec=60",
+              "unit=enoki-observation-runtime.service",
+              `unitSha256=${"1".repeat(64)}`,
+              "",
+            ].join("\n"),
+          );
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText(
+            [
+              "bundleVersion=1.2.3",
+              "epochExists=0",
+              "faultBackupExists=0",
+              "latchExists=0",
+              "repairOutput=Probe repair completed.",
+              `runtimeSha256=${runtimeSha256}`,
+              "unit=enoki-observation-runtime.service",
+              "",
+            ].join("\n"),
+          );
+        }
+        return successfulCommandText(
+          command.includes("# enoki-release-e2e:record-resources")
+            ? "recorded\n"
+            : "owned\n",
+        );
+      },
+    });
+
+    await harness.assertDisposable("run-runtime-repair");
+    await harness.install(officialEnrollment(), "run-runtime-repair");
+    await expect(
+      harness.repairInstalledBundleFailure("run-runtime-repair", "1.2.3"),
+    ).resolves.toMatchObject({
+      failure: {
+        activeState: "failed",
+        bundle: { runtimeSha256, version: "1.2.3" },
+        failureEpoch: {
+          generation: "b".repeat(64),
+          hostId: "7",
+          ownerUid: 0,
+        },
+        latch: { generation: "b".repeat(64), ownerUid: 0 },
+        recoveryBudget: { observedStarts: 3, startLimitBurst: 3 },
+        result: "start-limit-hit",
+        role: "observation_runtime",
+        status: "latched",
+        unit: "enoki-observation-runtime.service",
+      },
+      repair: {
+        failureEpochRemoved: true,
+        faultRemoved: true,
+        latchRemoved: true,
+        runtimeSha256,
+        sameBundle: true,
+      },
+    });
+
+    const exhausted = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:exhaust-observation-runtime-budget",
+      ),
+    );
+    expect(exhausted.options).toEqual({ root: true });
+    expect(exhausted.command).toContain(
+      "unit_file=/etc/systemd/system/enoki-observation-runtime.service",
+    );
+    expect(exhausted.command).toContain(
+      "runtime=/usr/local/bin/enoki-observation-runtime",
+    );
+    expect(exhausted.command).toContain("StartLimitBurst=");
+    expect(exhausted.command).toContain('$result" = start-limit-hit');
+    expect(exhausted.command).toContain(
+      "epoch=/var/lib/enoki-probe/runtime-failure/epoch.toml",
+    );
+    expect(exhausted.command).toContain(
+      "latch=/var/lib/enoki-probe/runtime-failure/latch",
+    );
+    expect(exhausted.command).not.toContain("enoki-probe.service");
+    expect(exhausted.command).not.toContain("systemctl is-failed");
+    expect(exhausted.command).not.toContain("printf '{");
+    await expect(
+      execFileAsync("/bin/sh", ["-n", "-c", exhausted.command]),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+    const repaired = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:repair-observation-runtime-failure",
+      ),
+    );
+    expect(repaired.command).toContain("/usr/local/bin/enoki-probe repair");
+    expect(repaired.command).toContain('[ ! -e "$epoch" ]');
+    expect(repaired.command).toContain('[ ! -e "$latch" ]');
+    await expect(
+      execFileAsync("/bin/sh", ["-n", "-c", repaired.command]),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
+  });
+
+  it("recovers a durable Observation Runtime fault through the Host driver after process restart", async () => {
+    const commands = [];
+    const driverInput = {
+      assertOwnedRun(runId) {
+        expect(runId).toBe("run-runtime-recovery");
+      },
+      async execute(command, options) {
+        commands.push({ command, options });
+        if (
+          command.includes(
+            "# enoki-release-e2e:exhaust-observation-runtime-budget",
+          )
+        ) {
+          return successfulCommandText(durableRuntimeFailureEvidenceOutput());
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:repair-observation-runtime-failure",
+          )
+        ) {
+          return {
+            code: 1,
+            stderr: "repair interrupted after failure epoch admission",
+            stdout: "",
+          };
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
+        throw new Error("unexpected production Host command");
+      },
+      ownershipToken: "00000000-0000-4000-8000-000000000001",
+    };
+    const interrupted =
+      createInstalledBundleFailureRepairHostDriver(driverInput);
+
+    await expect(
+      interrupted.repair("run-runtime-recovery", "1.2.3"),
+    ).rejects.toThrow("repair interrupted after failure epoch admission");
+
+    const restarted = createInstalledBundleFailureRepairHostDriver(driverInput);
+    await expect(restarted.cleanup("run-runtime-recovery")).resolves.toEqual({
+      clean: true,
+    });
+    const cleanup = commands.find(({ command }) =>
+      command.includes(
+        "# enoki-release-e2e:cleanup-observation-runtime-failure",
+      ),
+    );
+    expect(cleanup.options).toEqual({ root: true });
+    expect(cleanup.command).toContain('mv -- "$backup" "$runtime"');
+    expect(cleanup.command).toContain(
+      "/usr/local/bin/enoki-probe-lifecycle-companion retry-runtime",
+    );
+    expect(cleanup.command).toContain(
+      "systemctl start enoki-observation-runtime.socket",
+    );
+    expect(cleanup.command).not.toMatch(
+      /rm .*runtime-failure\/(?:epoch|latch)/,
+    );
+    await expect(
+      execFileAsync("/bin/sh", ["-n", "-c", cleanup.command]),
+    ).resolves.toMatchObject({ stderr: "", stdout: "" });
   });
 
   it("proves exact uninstall residue while retaining journald and shared dependencies", async () => {
@@ -1706,6 +2094,13 @@ describe("Probe Host Harness", () => {
         if (command.includes("# enoki-release-e2e:inspect-claim")) {
           return successfulCommandText("absent\n");
         }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
+        }
         if (command.includes("# enoki-release-e2e:dependencies")) {
           return successfulCommandText('{"curl":"/usr/bin/curl"}\n');
         }
@@ -1832,6 +2227,13 @@ describe("Probe Host Harness", () => {
         }
         if (command.includes("# enoki-release-e2e:inspect-claim")) {
           return successfulCommandText("absent\n");
+        }
+        if (
+          command.includes(
+            "# enoki-release-e2e:cleanup-observation-runtime-failure",
+          )
+        ) {
+          return successfulCommandText("cleaned\n");
         }
         return successfulCommandText("recorded\n");
       },
@@ -3122,6 +3524,28 @@ describe("Release E2E Orchestrator", () => {
           ? installedState.identity
           : { identitySha256: "d".repeat(64), probeId: "probe_release_02" };
       },
+      async repairInstalledBundleFailure() {
+        calls.push("host.repairInstalledBundleFailure");
+        return {
+          failure: {
+            activeState: "failed",
+            failureEpoch: {
+              hostId: "7",
+              probeId: "probe_release_01",
+            },
+            role: "observation_runtime",
+            status: "latched",
+            result: "start-limit-hit",
+            unit: "enoki-observation-runtime.service",
+          },
+          repair: {
+            failureEpochRemoved: true,
+            faultRemoved: true,
+            latchRemoved: true,
+            sameBundle: true,
+          },
+        };
+      },
       async rejectRepeatedInstall() {
         calls.push("host.rejectRepeatedInstall");
         return {
@@ -3168,6 +3592,7 @@ describe("Release E2E Orchestrator", () => {
     expect(calls).toEqual(
       expect.arrayContaining([
         "host.rejectRepeatedInstall",
+        "host.repairInstalledBundleFailure",
         "host.localUninstall",
         "hub.createEnrollment:existing_host",
         "hub.deleteHostHubOnly:7",
@@ -3197,8 +3622,38 @@ describe("Release E2E Orchestrator", () => {
     expect(calls.filter((call) => call === "host.localUninstall")).toHaveLength(
       2,
     );
+    expect(calls.indexOf("host.repairInstalledBundleFailure")).toBeLessThan(
+      calls.indexOf("host.localUninstall"),
+    );
     expect(offlineObservations).toBe(92);
     expect(written.at(-1)).toMatchObject({
+      installedBundleFailureRepair: {
+        failure: {
+          failureEpoch: {
+            hostId: "7",
+            probeId: "probe_release_01",
+          },
+          result: "start-limit-hit",
+          role: "observation_runtime",
+          status: "latched",
+        },
+        host: {
+          hostProfile: { probeVersion: "1.2.3" },
+          id: 7,
+          status: "online",
+        },
+        identity: {
+          after: installedState.identity,
+          before: installedState.identity,
+        },
+        repair: {
+          failureEpochRemoved: true,
+          faultRemoved: true,
+          latchRemoved: true,
+          repairedVersion: "1.2.3",
+          sameBundle: true,
+        },
+      },
       finalLocalUninstall: { completion: { clean: true } },
       hubOnlyDeletion: {
         deletedHost: { id: 7 },
@@ -3446,9 +3901,6 @@ describe("Release E2E Orchestrator", () => {
           probeId: "probe_release_01",
         };
       },
-      async recoverUpgradeWithInstaller() {
-        throw new Error("automatic Upgrade must not use Installer Recovery");
-      },
       async verifyUninstallCompletion() {
         calls.push("host.verifyUninstallCompletion");
         return {
@@ -3475,7 +3927,7 @@ describe("Release E2E Orchestrator", () => {
       evidenceSink: { write: async (value) => written.push(value) },
       ownerPassword: "owner-password",
       runId: "run-baseline-upgrade",
-      scenario: "baseline-upgrade-uninstall",
+      scenario: "compatible-upgrade-uninstall",
       timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
     });
 
@@ -3538,17 +3990,17 @@ describe("Release E2E Orchestrator", () => {
         evidenceSink: { write: async () => {} },
         ownerPassword: "owner-password",
         runId: "run-baseline-upgrade-reporting-timeout",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "compatible-upgrade-uninstall",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 2 },
       }),
     ).rejects.toMatchObject({ code: "candidate_probe_reporting_timeout" });
   });
 
-  it("recovers a terminal insufficient-privilege Upgrade with the Candidate installer", async () => {
+  it("fails a Compatible insufficient-privilege Upgrade without Enrollment fallback", async () => {
     let activeHub = "baseline";
     let configurationVersion = "default-v1";
     let installed = false;
-    let recovered = false;
+    let candidateEnrollmentCreated = false;
     let metricsEpoch = 0;
     const failedUpgrade = {
       acceptedAtMs: 2,
@@ -3569,6 +4021,7 @@ describe("Release E2E Orchestrator", () => {
     const hub = {
       async authenticate() {},
       async createEnrollment() {
+        if (activeHub === "candidate") candidateEnrollmentCreated = true;
         return { installCommand: officialInstallCommand };
       },
       async getAuditLog() {
@@ -3578,7 +4031,7 @@ describe("Release E2E Orchestrator", () => {
         return readyHost({
           hostProfile: {
             ...readyHost().hostProfile,
-            probeVersion: recovered ? "1.2.3" : "1.2.2",
+            probeVersion: "1.2.2",
           },
           reportedProbeConfigurationVersion: configurationVersion,
         });
@@ -3692,18 +4145,6 @@ describe("Release E2E Orchestrator", () => {
           probeId: "probe_release_01",
         };
       },
-      async recoverUpgradeWithInstaller(command, _runId, operation) {
-        expect(activeHub).toBe("candidate");
-        expect(command.installCommand).toBe(officialInstallCommand);
-        expect(operation).toEqual(failedUpgrade);
-        recovered = true;
-        return {
-          failedOperationId: operation.id,
-          mode: "installer",
-          status: "succeeded",
-          targetProbeVersion: operation.targetProbeVersion,
-        };
-      },
       async verifyUninstallCompletion() {
         return {
           clean: true,
@@ -3728,19 +4169,18 @@ describe("Release E2E Orchestrator", () => {
         evidenceSink: { write: async (value) => written.push(value) },
         ownerPassword: "owner-password",
         runId: "run-permission-recovery",
-        scenario: "baseline-upgrade-uninstall",
+        scenario: "compatible-upgrade-uninstall",
         timing: { intervalMs: 1, sleep: async () => {}, timeoutMs: 10 },
       }),
-    ).resolves.toEqual({ status: "succeeded" });
+    ).rejects.toMatchObject({ code: "compatible_probe_upgrade_failed" });
+    expect(candidateEnrollmentCreated).toBe(false);
     expect(written.at(-1)).toMatchObject({
-      candidateHost: { hostProfile: { probeVersion: "1.2.3" } },
-      manualRecovery: {
-        failedOperationId: 41,
-        mode: "installer",
-        status: "succeeded",
-        targetProbeVersion: "1.2.3",
+      candidateHost: null,
+      manualRecovery: null,
+      result: {
+        error: { code: "compatible_probe_upgrade_failed" },
+        status: "failed",
       },
-      result: { status: "succeeded" },
       upgradeOperationTimeline: expect.arrayContaining([
         expect.objectContaining({ state: "pending" }),
         expect.objectContaining({
@@ -4916,6 +5356,8 @@ describe("Release E2E Orchestrator", () => {
       localUninstall: () => participant("host.localUninstall"),
       readProbeIdentity: () => participant("host.readProbeIdentity"),
       rejectRepeatedInstall: () => participant("host.rejectRepeatedInstall"),
+      repairInstalledBundleFailure: () =>
+        participant("host.repairInstalledBundleFailure"),
       verifyUninstallCompletion: () =>
         participant("host.verifyUninstallCompletion"),
     };
@@ -5062,6 +5504,7 @@ describe("Release E2E Orchestrator", () => {
       localUninstall: async () => {},
       readProbeIdentity: async () => {},
       rejectRepeatedInstall: async () => {},
+      repairInstalledBundleFailure: async () => {},
     };
     const hub = {
       authenticate: async () => {},
@@ -5133,7 +5576,7 @@ describe("Release E2E Orchestrator", () => {
 });
 
 describe("Release E2E command", () => {
-  it("atomically records a matrix-validation failure before candidate preparation", async () => {
+  it("rejects invalid planning inputs before creating artifacts or provisioning", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-release-run-"));
     const evidenceDir = path.join(root, "evidence");
     const matrixPath = path.join(root, "release-e2e-matrix.json");
@@ -5177,58 +5620,18 @@ describe("Release E2E command", () => {
         ),
       ).rejects.toMatchObject({ code: 1 });
 
-      const manifest = JSON.parse(
-        await readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
-      );
-      const evidence = JSON.parse(
-        await readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
-      );
-      expect(manifest).toMatchObject({
-        failure: {
-          error: { message: expect.stringMatching(/schemaVersion/i) },
-          phase: "matrix-validation",
-        },
-        hostMutationPossible: false,
-        phase: "failed",
-        runId: "run-early-matrix",
-        schemaVersion: 3,
-      });
-      expect(manifest.inputs).toMatchObject({
-        hostAdapter: "ci",
-        matrixCellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
-        matrixPath,
-      });
-      expect(evidence).toMatchObject({
-        diagnostics: {
-          error: { message: expect.stringMatching(/schemaVersion/i) },
-        },
-        phase: "failed",
-        result: { status: "failed" },
-        runId: "run-early-matrix",
-        schemaVersion: 2,
-      });
-      expect(JSON.stringify({ evidence, manifest })).not.toContain(
-        "must-not-be-recorded",
-      );
-
       await expect(
-        execFileAsync(process.execPath, [
-          script,
-          "verify-clean",
-          "--run-manifest",
-          path.join(evidenceDir, "run-manifest.json"),
-          "--host-adapter",
-          "ci",
-        ]),
-      ).resolves.toMatchObject({
-        stdout: expect.stringMatching(/no Host mutation was authorized/i),
-      });
+        readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(
+        readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(root, { force: true, recursive: true });
     }
   });
 
-  it("records candidate and CI adapter preparation failures with independently clean manifests", async () => {
+  it("creates no artifacts when candidate verification or the Host adapter fails preflight", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "enoki-release-run-"));
     const script = fileURLToPath(new URL("./release-e2e.mjs", import.meta.url));
     const matrixPath = fileURLToPath(
@@ -5243,7 +5646,6 @@ describe("Release E2E command", () => {
           RUNNER_ARCH: "X64",
           RUNNER_OS: "Linux",
         },
-        expected: /Candidate Manifest|candidate-manifest\.json|ENOENT/i,
         name: "candidate",
       },
       {
@@ -5254,7 +5656,6 @@ describe("Release E2E command", () => {
           RUNNER_ARCH: "",
           RUNNER_OS: "",
         },
-        expected: /GitHub Actions runner identity/i,
         name: "adapter",
       },
     ];
@@ -5298,29 +5699,12 @@ describe("Release E2E command", () => {
             },
           ),
         ).rejects.toMatchObject({ code: 1 });
-        const manifest = JSON.parse(
-          await readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
-        );
-        const evidence = JSON.parse(
-          await readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
-        );
-        expect(manifest).toMatchObject({
-          failure: {
-            error: { message: expect.stringMatching(testCase.expected) },
-            phase: "candidate-prepare",
-          },
-          hostMutationPossible: false,
-          phase: "failed",
-          scenario: "fresh-install-uninstall",
-        });
-        expect(evidence).toMatchObject({
-          phase: "failed",
-          result: { status: "failed" },
-          scenario: "fresh-install-uninstall",
-        });
-        expect(JSON.stringify({ evidence, manifest })).not.toContain(
-          "must-not-be-recorded",
-        );
+        await expect(
+          readFile(path.join(evidenceDir, "run-manifest.json"), "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(
+          readFile(path.join(evidenceDir, "evidence.json"), "utf8"),
+        ).rejects.toMatchObject({ code: "ENOENT" });
       }
     } finally {
       await rm(root, { force: true, recursive: true });
@@ -5329,10 +5713,11 @@ describe("Release E2E command", () => {
 
   it("derives scenario selection from the matrix cell and the shared registry only", () => {
     expect(Object.keys(releaseE2EScenarioRegistry)).toEqual([
-      "baseline-upgrade-uninstall",
+      "compatible-upgrade-uninstall",
       "fresh-install-uninstall",
       "hub-restore-compatibility-window",
       "post-replacement-repair-uninstall",
+      "replacement-migration-uninstall",
     ]);
     const arguments_ = [
       "run",
@@ -5746,6 +6131,7 @@ describe("Release E2E command", () => {
         "localUninstall",
         "readProbeIdentity",
         "rejectRepeatedInstall",
+        "repairInstalledBundleFailure",
         "verifyUninstallCompletion",
       ];
       const host = Object.fromEntries(
@@ -6909,6 +7295,37 @@ function successfulCommandText(stdout) {
   return { code: 0, stderr: "", stdout };
 }
 
+function durableRuntimeFailureEvidenceOutput(runtimeSha256 = "a".repeat(64)) {
+  return [
+    "activeState=failed",
+    "bootId=4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+    "bundleVersion=1.2.3",
+    `epochGeneration=${"b".repeat(64)}`,
+    "epochLinks=1",
+    "epochMode=600",
+    "epochOwner=0",
+    "hostId=7",
+    `identityReceiptSha256=${"c".repeat(64)}`,
+    `installStateSha256=${"d".repeat(64)}`,
+    `latchGeneration=${"b".repeat(64)}`,
+    "latchLinks=1",
+    "latchMode=600",
+    "latchOwner=0",
+    `manifestSha256=${"e".repeat(64)}`,
+    "probeId=probe_release_01",
+    "result=start-limit-hit",
+    "restartCount=2",
+    "role=observation_runtime",
+    `runtimeFaultSha256=${"f".repeat(64)}`,
+    `runtimeSha256=${runtimeSha256}`,
+    "startLimitBurst=3",
+    "startLimitIntervalSec=60",
+    "unit=enoki-observation-runtime.service",
+    `unitSha256=${"1".repeat(64)}`,
+    "",
+  ].join("\n");
+}
+
 function productInstallerOutput() {
   return "ENOKI_PROBE_LOCAL_LIFECYCLE_COMPLETE\nEnoki Probe installed as enoki-probe.service.\n";
 }
@@ -7555,6 +7972,14 @@ function successfulRepairBoundaryEvidence() {
   };
 }
 
+function bindRepairEvidenceToBaseline(evidence, baseline) {
+  const digest = baseline.hub.imageDigest;
+  evidence.hubEvidence.runtime.baselineManifestDigest = digest;
+  evidence.hubEvidence.runtime.runtimeHistory.find(
+    (entry) => entry.hub === "baseline",
+  ).manifestDigest = digest;
+}
+
 function portableMetric(overrides = {}) {
   return {
     collectedAtMs: 10,
@@ -7859,7 +8284,7 @@ function migrationBaselineEnvironment(
           artifactAccess: "github-actions",
           connection: "local",
           kind: "ci",
-          matrixCellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+          matrixCellId: "ubuntu-22.04-x86_64--replacement-migration-uninstall",
           provisioning: "github-hosted-runner",
         },
         releaseTestHost: {

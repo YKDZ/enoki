@@ -262,7 +262,7 @@ describe("verify-only release workflow", () => {
         uiJob: "success",
       },
       hostGates,
-      matrix,
+      scenarioPlan: matrix,
       run: {
         attempt: 1,
         id: "12345",
@@ -343,7 +343,7 @@ describe("verify-only release workflow", () => {
         uiJob: "success",
       },
       hostGates,
-      matrix,
+      scenarioPlan: matrix,
       requested: candidateManifest.candidate,
       run,
       standardCi: standardCiEvidence(candidateManifest.candidate),
@@ -382,7 +382,7 @@ describe("verify-only release workflow", () => {
         uiJob: "success",
       },
       hostGates: expectedHostGateResults(matrix, candidateManifest),
-      matrix,
+      scenarioPlan: matrix,
       requested: candidateManifest.candidate,
       run: {
         attempt: 1,
@@ -402,7 +402,7 @@ describe("verify-only release workflow", () => {
   });
 
   it("emits a schema-valid failed attempt when an early component prevents candidate assembly", async () => {
-    const matrix = JSON.parse(
+    const _matrix = JSON.parse(
       await readFile("scripts/release-e2e-matrix.json", "utf8"),
     );
     const requested = {
@@ -427,7 +427,7 @@ describe("verify-only release workflow", () => {
       candidateManifest: null,
       componentResults,
       hostGates: [],
-      matrix,
+      scenarioPlan: null,
       requested,
       run: {
         attempt: 2,
@@ -465,7 +465,7 @@ describe("verify-only release workflow", () => {
         "Candidate Manifest identity is missing",
       ]),
     );
-    expect(summary.gates.hostScenarios).toHaveLength(7);
+    expect(summary.gates.hostScenarios).toHaveLength(0);
     expect(
       summary.gates.hostScenarios.every((gate) => gate.outcome === "missing"),
     ).toBe(true);
@@ -586,7 +586,7 @@ describe("verify-only release workflow", () => {
         uiJob: "success",
       },
       hostGates: expectedHostGateResults(matrix, candidateManifest),
-      matrix,
+      scenarioPlan: matrix,
       run: {
         attempt: 1,
         id: "12345",
@@ -681,16 +681,16 @@ describe("verify-only release workflow", () => {
     const manifest = releaseCandidateManifest();
     const candidate = manifest.candidate;
     const evidence = successfulHostEvidence(
-      "baseline-upgrade-uninstall",
+      "compatible-upgrade-uninstall",
       candidate,
     );
     evidence.hostBoundary = await currentInstalledHostBoundaryFromHarness();
 
     const gate = createMatrixGateResult({
       artifactName:
-        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+        "release-e2e-ubuntu-22.04-x86_64--compatible-upgrade-uninstall-1",
       candidate,
-      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
       evidence,
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
@@ -713,9 +713,9 @@ describe("verify-only release workflow", () => {
       "enoki-probe ALL=(root) NOPASSWD: /usr/local/bin/enoki-probe-uninstaller\n";
     const rejected = createMatrixGateResult({
       artifactName:
-        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+        "release-e2e-ubuntu-22.04-x86_64--compatible-upgrade-uninstall-1",
       candidate,
-      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
       evidence: legacyBoundary,
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
@@ -756,7 +756,7 @@ describe("verify-only release workflow", () => {
 
   it.each([
     ["fresh-install-uninstall", "hostBoundary"],
-    ["baseline-upgrade-uninstall", "upgradeOperationTimeline"],
+    ["compatible-upgrade-uninstall", "upgradeOperationTimeline"],
     ["post-replacement-repair-uninstall", "boundaryEvidenceValidation"],
     ["hub-restore-compatibility-window", "snapshot"],
   ])(
@@ -848,6 +848,46 @@ describe("verify-only release workflow", () => {
         "missing diagnostics",
         "missing initialInstall",
       ]),
+    );
+  });
+
+  it("rejects transient Probe service failure as Installed Bundle Failure Repair evidence", () => {
+    const candidate = releaseCandidateManifest().candidate;
+    const evidence = successfulHostEvidence(
+      "fresh-install-uninstall",
+      candidate,
+    );
+    evidence.installedBundleFailureRepair = {
+      failure: {
+        cause: "installed_bundle_restart_failure",
+        probeVersion: "1.2.3",
+        status: "failed",
+      },
+      host: evidenceHost("1.2.3"),
+      hostBoundary: installedHostBoundary("1.2.3"),
+      identity: {
+        after: probeIdentityEvidence(),
+        before: probeIdentityEvidence(),
+      },
+      repair: {
+        probeId: "probe_release_01",
+        repairedVersion: "1.2.3",
+      },
+    };
+
+    const gate = createMatrixGateResult({
+      artifactName:
+        "release-e2e-ubuntu-22.04-x86_64--fresh-install-uninstall-1",
+      candidate,
+      cellId: "ubuntu-22.04-x86_64--fresh-install-uninstall",
+      evidence,
+      scenarioOutcome: "success",
+      verifyCleanOutcome: "success",
+    });
+
+    expect(gate.outcome).toBe("failed");
+    expect(gate.evidenceValidationErrors).toContain(
+      "Installed Bundle Failure Repair evidence is invalid",
     );
   });
 
@@ -958,7 +998,7 @@ describe("verify-only release workflow", () => {
 
   it.each([
     [
-      "baseline-upgrade-uninstall",
+      "compatible-upgrade-uninstall",
       (evidence) => {
         evidence.candidateHost = {
           hostProfile: { probeVersion: "1.2.3" },
@@ -1011,7 +1051,7 @@ describe("verify-only release workflow", () => {
 
   it.each([
     "fresh-install-uninstall",
-    "baseline-upgrade-uninstall",
+    "compatible-upgrade-uninstall",
     "post-replacement-repair-uninstall",
     "hub-restore-compatibility-window",
   ])("accepts semantically complete %s evidence", (scenario) => {
@@ -1035,7 +1075,7 @@ describe("verify-only release workflow", () => {
     const candidateManifest = trustEpochMigrationCandidateManifest();
     const candidate = candidateManifest.candidate;
     const evidence = successfulHostEvidence(
-      "baseline-upgrade-uninstall",
+      "replacement-migration-uninstall",
       candidate,
     );
     const before = probeIdentityEvidence();
@@ -1125,9 +1165,9 @@ describe("verify-only release workflow", () => {
     const gateFor = (value) =>
       createMatrixGateResult({
         artifactName:
-          "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+          "release-e2e-ubuntu-22.04-x86_64--replacement-migration-uninstall-1",
         candidateManifest,
-        cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+        cellId: "ubuntu-22.04-x86_64--replacement-migration-uninstall",
         evidence: value,
         scenarioOutcome: "success",
         verifyCleanOutcome: "success",
@@ -1272,15 +1312,15 @@ describe("verify-only release workflow", () => {
     );
 
     const foreignBaselineRecipe = successfulHostEvidence(
-      "baseline-upgrade-uninstall",
+      "compatible-upgrade-uninstall",
       candidate,
     );
     foreignBaselineRecipe.baselineInstall.bootstrapRecipeProvenance.hubDigest = `sha256:${"f".repeat(64)}`;
     const baselineGate = createMatrixGateResult({
       artifactName:
-        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+        "release-e2e-ubuntu-22.04-x86_64--compatible-upgrade-uninstall-1",
       candidateManifest,
-      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
       evidence: foreignBaselineRecipe,
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
@@ -1554,10 +1594,10 @@ describe("verify-only release workflow", () => {
     );
   });
 
-  it("accepts a confirmed insufficient-privilege Upgrade followed by Installer Recovery", () => {
+  it("rejects Compatible insufficient-privilege Upgrade followed by Installer Recovery", () => {
     const candidate = releaseCandidateManifest().candidate;
     const evidence = successfulHostEvidence(
-      "baseline-upgrade-uninstall",
+      "compatible-upgrade-uninstall",
       candidate,
     );
     evidence.upgradeOperationTimeline = evidenceOperationTimeline({
@@ -1576,16 +1616,18 @@ describe("verify-only release workflow", () => {
 
     const gate = createMatrixGateResult({
       artifactName:
-        "release-e2e-ubuntu-22.04-x86_64--baseline-upgrade-uninstall-1",
+        "release-e2e-ubuntu-22.04-x86_64--compatible-upgrade-uninstall-1",
       candidate,
-      cellId: "ubuntu-22.04-x86_64--baseline-upgrade-uninstall",
+      cellId: "ubuntu-22.04-x86_64--compatible-upgrade-uninstall",
       evidence,
       scenarioOutcome: "success",
       verifyCleanOutcome: "success",
     });
 
-    expect(gate.evidenceValidationErrors).toEqual([]);
-    expect(gate.outcome).toBe("succeeded");
+    expect(gate.evidenceValidationErrors).toContain(
+      "Compatible Upgrade must not use manual recovery",
+    );
+    expect(gate.outcome).toBe("failed");
   });
 
   it("records the candidate-image UI Contract as one candidate-bound gate", () => {
@@ -1665,7 +1707,7 @@ describe("verify-only release workflow", () => {
         uiJob: "success",
       },
       hostGates,
-      matrix,
+      scenarioPlan: matrix,
       run: {
         attempt: 1,
         id: "12345",
@@ -1812,7 +1854,22 @@ function standardCiEvidence(candidate) {
 }
 
 function expectedHostGateResults(matrix, candidateManifest) {
-  return matrix.scenarios.flatMap((scenario) => {
+  const scenarioIds =
+    candidateManifest.releaseBaseline.kind ===
+    "enoki-trust-epoch-migration-baseline"
+      ? ["replacement-migration-uninstall", "fresh-install-uninstall"]
+      : [
+          "compatible-upgrade-uninstall",
+          "fresh-install-uninstall",
+          "post-replacement-repair-uninstall",
+          "hub-restore-compatibility-window",
+        ];
+  const scenarios = scenarioIds.map((id) => ({
+    designatedEnvironmentId:
+      id === "hub-restore-compatibility-window" ? "ubuntu-24.04-x86_64" : null,
+    id,
+  }));
+  const cells = scenarios.flatMap((scenario) => {
     const environments = scenario.designatedEnvironmentId
       ? matrix.environments.filter(
           (environment) =>
@@ -1820,17 +1877,32 @@ function expectedHostGateResults(matrix, candidateManifest) {
         )
       : matrix.environments;
     return environments.map((environment) => ({
-      artifactName: `release-e2e-${environment.capabilityId}--${scenario.id}-1`,
-      candidate: candidateManifest.candidate,
-      cellId: `${environment.capabilityId}--${scenario.id}`,
-      evidenceOutcome: "succeeded",
-      outcome: "succeeded",
-      releaseBaselineKind: candidateManifest.releaseBaseline.kind,
+      environmentId: environment.capabilityId,
+      runner: matrix.providers
+        .find((provider) => provider.id === environment.providerId)
+        .capabilities.find(
+          (capability) => capability.id === environment.capabilityId,
+        ).runner,
       scenarioId: scenario.id,
-      scenarioStepOutcome: "success",
-      verifyCleanStepOutcome: "success",
+      cellId: `${environment.capabilityId}--${scenario.id}`,
     }));
   });
+  Object.assign(matrix, {
+    cells,
+    kind: "enoki-release-scenario-plan",
+    schemaVersion: 1,
+  });
+  return cells.map((cell) => ({
+    artifactName: `release-e2e-${cell.cellId}-1`,
+    candidate: candidateManifest.candidate,
+    cellId: cell.cellId,
+    evidenceOutcome: "succeeded",
+    outcome: "succeeded",
+    releaseBaselineKind: candidateManifest.releaseBaseline.kind,
+    scenarioId: cell.scenarioId,
+    scenarioStepOutcome: "success",
+    verifyCleanStepOutcome: "success",
+  }));
 }
 
 function releaseArtifactIndex(hostGates, uiGate) {
@@ -1956,6 +2028,58 @@ function successfulHostEvidence(
         manifest: releaseCandidateManifest(),
         runId,
       }),
+      installedBundleFailureRepair: {
+        failure: {
+          activeState: "failed",
+          bundle: {
+            installStateSha256: "4".repeat(64),
+            manifestSha256: "5".repeat(64),
+            runtimeFaultSha256: "6".repeat(64),
+            runtimeSha256: "7".repeat(64),
+            version: "1.2.3",
+          },
+          failureEpoch: {
+            bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
+            generation: "8".repeat(64),
+            hostId: "7",
+            identityReceiptSha256: "9".repeat(64),
+            links: 1,
+            mode: "0600",
+            ownerUid: 0,
+            probeId: initialIdentity.probeId,
+          },
+          latch: {
+            generation: "8".repeat(64),
+            links: 1,
+            mode: "0600",
+            ownerUid: 0,
+          },
+          recoveryBudget: {
+            observedStarts: 3,
+            startLimitBurst: 3,
+            startLimitIntervalSeconds: 60,
+          },
+          result: "start-limit-hit",
+          role: "observation_runtime",
+          status: "latched",
+          unit: "enoki-observation-runtime.service",
+          unitSha256: "a".repeat(64),
+        },
+        host: evidenceHost("1.2.3"),
+        hostBoundary: installedHostBoundary("1.2.3"),
+        identity: { after: initialIdentity, before: initialIdentity },
+        repair: {
+          failureEpochRemoved: true,
+          faultRemoved: true,
+          latchRemoved: true,
+          output: "Probe repair completed.",
+          probeId: initialIdentity.probeId,
+          repairedVersion: "1.2.3",
+          runtimeSha256: "7".repeat(64),
+          sameBundle: true,
+          unit: "enoki-observation-runtime.service",
+        },
+      },
       localUninstall: {
         activeHost: evidenceHost("1.2.3"),
         completion: common.uninstall.hostCompletion,
@@ -2018,7 +2142,10 @@ function successfulHostEvidence(
       },
     };
   }
-  if (scenario === "baseline-upgrade-uninstall") {
+  if (
+    scenario === "compatible-upgrade-uninstall" ||
+    scenario === "replacement-migration-uninstall"
+  ) {
     return {
       ...common,
       auditLog: lifecycleAuditLog({ upgrade: true }),
