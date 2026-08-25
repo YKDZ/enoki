@@ -360,6 +360,136 @@ mod tests {
         temp.reopen().unwrap()
     }
 
+    fn installed_bundle_repair_binding(
+        installed: &InstalledUpgradeBinding,
+        bundle: &VerifiedBundle,
+        paths: &FixedInstallPaths,
+    ) -> InstalledBundleRepairBinding {
+        let identity = fs::read_to_string(paths.identity()).unwrap();
+        let host_id = upgrade::metadata_string(&identity, "host_id").unwrap();
+        let operation_id = "repair_01".to_owned();
+        let asset_set = format!("sha256:{}", bundle.asset_set_manifest_sha256);
+        InstalledBundleRepairBinding::for_test(
+            crate::lifecycle::InstalledBundleRepairAuthorityV1 {
+                kind: "installed-bundle-repair-authority".to_owned(),
+                schema_version: 1,
+                hub_origin: installed.hub_origin.clone(),
+                host_id,
+                probe_id: installed.probe_id.clone(),
+                generation: "generation_01".to_owned(),
+                boot_id: "boot_01".to_owned(),
+                unit: "enoki-observation-runtime.service".to_owned(),
+                unit_sha256: "1".repeat(64),
+                identity_receipt_sha256: format!("{:x}", Sha256::digest(identity.as_bytes())),
+                install_state_sha256: installed.source_install_state_sha256.clone(),
+                manifest_sha256: installed.source_manifest_sha256.clone(),
+                bundle_version: installed.source_bundle_version.clone(),
+                target_asset_set_digest: asset_set.clone(),
+                repair_operation_id: operation_id.clone(),
+                repair_nonce: "nonce_01".to_owned(),
+                repair_evidence_sha256: "3".repeat(64),
+                expires_at_ms: 1,
+            },
+            unsafe { libc::geteuid() },
+        )
+    }
+
+    fn replacement_commit(bundle: &VerifiedBundle) -> ReplacementCommitFact {
+        ReplacementCommitFact::for_test(
+            crate::replacement::ReplacementIntent {
+                enrollment_id: "enrollment_01".to_owned(),
+                enrollment_token_sha256: "1".repeat(64),
+                host_id: "host-registered".to_owned(),
+                hub_origin: "https://hub.example".to_owned(),
+                old_probe_id: "probe-old".to_owned(),
+                source_probe_version: "1.2.2".to_owned(),
+                source_probe_sha256: "2".repeat(64),
+                target_probe_version: bundle.version.clone(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    bundle.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: bundle.manifest_sha256.clone(),
+            },
+            true,
+            true,
+        )
+    }
+
+    struct InstalledBundleFixture {
+        _temporary: tempfile::TempDir,
+        paths: FixedInstallPaths,
+        bundle: VerifiedBundle,
+        installed: InstalledUpgradeBinding,
+        repair: InstalledBundleRepairBinding,
+    }
+
+    fn installed_bundle_fixture() -> InstalledBundleFixture {
+        let temporary = tempdir().unwrap();
+        for parent in ["usr/local/bin", "var/lib", "etc/systemd/system", "etc/sudoers.d"] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let bundle = bundle().with_test_complete_receipts(5);
+        let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_fresh_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle,
+            &trust(),
+            &paths,
+            &mut Accounts::default(),
+            &mut Systemd::default(),
+        )
+        .unwrap();
+        let mut identity = fs::read_to_string(paths.identity()).unwrap();
+        identity.push_str("probe_id = \"probe_01\"\nhost_id = \"host_01\"\nprobe_private_key_pem = \"key\"\n");
+        fs::write(paths.identity(), identity).unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        let installed = inspect_installed_probe_for_upgrade(&paths).unwrap();
+        let repair = installed_bundle_repair_binding(&installed, &bundle, &paths);
+        InstalledBundleFixture {
+            _temporary: temporary,
+            paths,
+            bundle,
+            installed,
+            repair,
+        }
+    }
+
+    fn restore_bundle_fixture(
+        fixture: &InstalledBundleFixture,
+        systemd: &mut Systemd,
+    ) -> Result<(), InstallError> {
+        let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        restore_installed_bundle_for_repair(
+            VerifiedUpgradeComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                system_state_provider: &mut provider,
+                disk_health_provider: &mut disk,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &fixture.bundle,
+            &fixture.installed,
+            &fixture.repair,
+            &fixture.paths,
+            systemd,
+        )
+    }
+
     struct FailSecondRoleFiles {
         inner: SystemInstallFiles,
         installs: usize,
@@ -1212,7 +1342,7 @@ mod tests {
         )
         .unwrap();
         let mut identity = fs::read_to_string(paths.identity()).unwrap();
-        identity.push_str("probe_id = \"probe_01\"\n");
+        identity.push_str("probe_id = \"probe_01\"\nhost_id = \"host_01\"\n");
         fs::write(paths.identity(), identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
@@ -1371,7 +1501,7 @@ mod tests {
         )
         .unwrap();
         let mut identity = fs::read_to_string(paths.identity()).unwrap();
-        identity.push_str("probe_id = \"probe_01\"\n");
+        identity.push_str("probe_id = \"probe_01\"\nhost_id = \"host_01\"\n");
         fs::write(paths.identity(), identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         let binding = inspect_installed_probe_for_upgrade(&paths).unwrap();
@@ -1393,6 +1523,7 @@ mod tests {
                 },
                 &wrong_manifest,
                 &binding,
+                &installed_bundle_repair_binding(&binding, &wrong_manifest, &paths),
                 &paths,
                 &mut Systemd::default(),
             ),
@@ -1400,6 +1531,31 @@ mod tests {
         );
 
         fs::write(paths.observation_runtime_binary(), b"bad!!").unwrap();
+        let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        let mut systemd = Systemd::default();
+        upgrade::set_repair_rename_crash(0);
+        assert_eq!(
+            restore_installed_bundle_for_repair(
+                VerifiedUpgradeComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    system_state_provider: &mut provider,
+                    disk_health_provider: &mut disk,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &installed_bundle,
+                &binding,
+                &installed_bundle_repair_binding(&binding, &installed_bundle, &paths),
+                &paths,
+                &mut systemd,
+            ),
+            Err(InstallError::Io),
+        );
+        assert_eq!(systemd.calls, ["stop"]);
+
         let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         let mut systemd = Systemd::default();
@@ -1415,13 +1571,152 @@ mod tests {
             },
             &installed_bundle,
             &binding,
+            &installed_bundle_repair_binding(&binding, &installed_bundle, &paths),
             &paths,
             &mut systemd,
         )
         .unwrap();
         assert_eq!(fs::read(paths.observation_runtime_binary()).unwrap(), b"probe");
-        assert_eq!(systemd.calls, ["stop", "reload"]);
+        assert_eq!(systemd.calls, ["reload"]);
         assert_eq!(inspect_installed_probe_for_upgrade(&paths).unwrap(), binding);
+    }
+
+    #[test]
+    fn installed_bundle_repair_resumes_every_filesystem_receipt_window() {
+        let mut crash_points = vec![
+            "journal-publish".to_owned(),
+            "stop".to_owned(),
+            "reload".to_owned(),
+            "complete".to_owned(),
+        ];
+        for phase in ["prepare", "backup", "publish", "cleanup"] {
+            crash_points.extend((0..21).map(|index| format!("{phase}:{index}")));
+        }
+
+        for crash_point in crash_points {
+            let fixture = installed_bundle_fixture();
+            bundle_restore::set_crash(&crash_point);
+            assert_eq!(
+                restore_bundle_fixture(&fixture, &mut Systemd::default()),
+                Err(InstallError::Io),
+                "{crash_point} 必须切断真实 effect/receipt 窗口"
+            );
+
+            let mut resumed_systemd = Systemd::default();
+            restore_bundle_fixture(&fixture, &mut resumed_systemd)
+                .unwrap_or_else(|error| panic!("{crash_point} 恢复失败: {error:?}"));
+            let journal = fixture
+                .paths
+                .bootstrap_state()
+                .join("installed-bundle-repair.json");
+            assert!(journal.exists(), "complete custody 必须保留到 Repair 整体成功");
+            for destination in upgrade_destinations(&fixture.paths) {
+                assert!(destination.is_file(), "{} 缺失", destination.display());
+                let name = destination.file_name().unwrap().to_string_lossy();
+                assert!(!destination.with_file_name(format!(".{name}.enoki-repair-new")).exists());
+                assert!(!destination.with_file_name(format!(".{name}.enoki-repair-old")).exists());
+            }
+            assert_eq!(
+                inspect_installed_probe_for_upgrade(&fixture.paths).unwrap(),
+                fixture.installed,
+                "Repair 必须保留同一 Probe Identity 与安装 binding"
+            );
+            let wrong_retirement = fixture
+                .repair
+                .clone()
+                .with_test_repair_nonce("wrong_retirement_nonce");
+            assert_eq!(
+                cleanup_installed_bundle_repair(&wrong_retirement, &fixture.paths),
+                Err(InstallError::ExistingResidue),
+                "StatusPublished 后也只能由 journal 预写的 exact outer binding 释放 custody"
+            );
+            assert!(journal.exists());
+            cleanup_installed_bundle_repair(&fixture.repair, &fixture.paths).unwrap();
+            assert!(!journal.exists());
+            assert_eq!(
+                verify_installed_bundle_repair_complete(
+                    &fixture.bundle,
+                    &fixture.installed,
+                    &fixture.repair,
+                    &fixture.paths,
+                ),
+                Err(InstallError::ExistingResidue),
+                "success 发布前缺失 complete journal 必须 fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn installed_bundle_repair_rejects_wrong_resume_binding_before_effects() {
+        let fixture = installed_bundle_fixture();
+        bundle_restore::set_crash("prepare:0");
+        assert_eq!(
+            restore_bundle_fixture(&fixture, &mut Systemd::default()),
+            Err(InstallError::Io)
+        );
+        let journal_path = fixture
+            .paths
+            .bootstrap_state()
+            .join("installed-bundle-repair.json");
+        let journal_before = fs::read(&journal_path).unwrap();
+        let residue_before = fs::read_dir(fixture.paths.binary().parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let wrong = fixture
+            .repair
+            .clone()
+            .with_test_repair_nonce("nonce_wrong");
+        let wrong_fixture = InstalledBundleFixture {
+            _temporary: fixture._temporary,
+            paths: fixture.paths,
+            bundle: fixture.bundle,
+            installed: fixture.installed,
+            repair: wrong,
+        };
+        let mut systemd = Systemd::default();
+        assert_eq!(
+            restore_bundle_fixture(&wrong_fixture, &mut systemd),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read(journal_path).unwrap(), journal_before);
+        assert_eq!(
+            fs::read_dir(wrong_fixture.paths.binary().parent().unwrap())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            residue_before
+        );
+    }
+
+    #[test]
+    fn installed_bundle_repair_rejects_changed_host_identity_before_effects() {
+        let fixture = installed_bundle_fixture();
+        let identity_path = fixture.paths.identity();
+        let identity = fs::read_to_string(&identity_path).unwrap();
+        fs::write(
+            &identity_path,
+            identity.replace("host_id = \"host_01\"", "host_id = \"host_wrong\""),
+        )
+        .unwrap();
+        fs::set_permissions(&identity_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut systemd = Systemd::default();
+        assert_eq!(
+            restore_bundle_fixture(&fixture, &mut systemd),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(systemd.calls.is_empty());
+        assert!(!fixture
+            .paths
+            .bootstrap_state()
+            .join("installed-bundle-repair.json")
+            .exists());
+        for destination in upgrade_destinations(&fixture.paths) {
+            let name = destination.file_name().unwrap().to_string_lossy();
+            assert!(!destination.with_file_name(format!(".{name}.enoki-repair-new")).exists());
+            assert!(!destination.with_file_name(format!(".{name}.enoki-repair-old")).exists());
+        }
     }
 
     #[test]
@@ -2673,7 +2968,9 @@ mod tests {
             fail_ready: failed_effect == "ready",
             ..Systemd::default()
         };
-        let resume_binding = ReplacementResumeBinding::for_test("a");
+        let replacement_bundle = bundle().with_test_complete_receipts(5);
+        let replacement_commit = replacement_commit(&replacement_bundle);
+        let resume_binding = replacement_commit.resume_binding();
 
         let result = activate_complete_replacement_current_probe(
             VerifiedCompleteFreshComponents {
@@ -2686,7 +2983,7 @@ mod tests {
                 bootstrap_activator: &mut activator,
             },
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-            &bundle().with_test_observation_receipts(5),
+            &replacement_bundle,
             &trust(),
             &FixedInstallPaths::under(temporary.path()),
             &mut accounts,
@@ -2728,7 +3025,7 @@ mod tests {
                 bootstrap_activator: &mut activator,
             },
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-            &bundle().with_test_observation_receipts(5),
+            &replacement_bundle,
             &trust(),
             &FixedInstallPaths::under(temporary.path()),
             &mut accounts,
@@ -2757,7 +3054,8 @@ mod tests {
         finalize_complete_replacement_current_probe(
             &FixedInstallPaths::under(temporary.path()),
             &resume_binding,
-            "1.2.3",
+            &replacement_bundle,
+            &replacement_commit,
         )
         .unwrap();
         assert!(!temporary
@@ -2948,7 +3246,9 @@ mod tests {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
         let paths = FixedInstallPaths::under(temporary.path());
-        let binding = ReplacementResumeBinding::for_test("candidate-layout-ack");
+        let replacement_bundle = bundle().with_test_complete_receipts(5);
+        let commit = replacement_commit(&replacement_bundle);
+        let binding = commit.resume_binding();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd {
             registration_identity: Some(paths.identity()),
@@ -2967,7 +3267,7 @@ mod tests {
                 bootstrap_activator: &mut activator,
             },
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-            &bundle().with_test_observation_receipts(5),
+            &replacement_bundle,
             &trust(),
             &paths,
             &mut accounts,
@@ -3019,7 +3319,7 @@ mod tests {
                 bootstrap_activator: &mut activator,
             },
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
-            &bundle().with_test_observation_receipts(5),
+            &replacement_bundle,
             &trust(),
             &paths,
             &mut accounts,
@@ -3032,22 +3332,68 @@ mod tests {
             finalize_complete_replacement_current_probe(
                 &paths,
                 &ReplacementResumeBinding::for_test("wrong-candidate"),
-                "1.2.3",
+                &replacement_bundle,
+                &commit,
             ),
             Err(InstallError::ExistingResidue)
         );
         assert!(paths.bootstrap_state().join("activation-journal.json").exists());
-        finalize_complete_replacement_current_probe(&paths, &binding, "1.2.3").unwrap();
+        fs::write(paths.binary(), b"pr0be").unwrap();
+        fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "同 owner/mode/length 的 payload 篡改必须保留 Replacement custody"
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        fs::write(paths.binary(), b"probe").unwrap();
+        fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+        finalize_complete_replacement_current_probe(
+            &paths,
+            &binding,
+            &replacement_bundle,
+            &commit,
+        )
+        .unwrap();
         assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        fs::write(paths.binary(), b"pr0be").unwrap();
+        fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "journal 已清理的幂等 finalize 仍必须重算真实 payload digest"
+        );
+        fs::write(paths.binary(), b"probe").unwrap();
+        fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
         fs::remove_file(paths.binary()).unwrap();
         assert_eq!(
-            finalize_complete_replacement_current_probe(&paths, &binding, "1.2.3"),
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
             Err(InstallError::ExistingResidue),
             "Hub/commit fact 不得替代本机完整安装收据"
         );
         fs::remove_file(paths.bootstrap_state().join("current-layout")).unwrap();
         assert_eq!(
-            finalize_complete_replacement_current_probe(&paths, &binding, "1.2.3"),
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
             Err(InstallError::ExistingResidue),
             "Hub/commit fact 不得替代本机 committed layout receipt"
         );

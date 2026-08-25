@@ -954,13 +954,171 @@ pub struct UpgradeRecoveryReceipt {
     pub activated: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct InstalledUpgradeBinding {
     pub hub_origin: String,
     pub probe_id: String,
     pub source_bundle_version: String,
     pub source_install_state_sha256: String,
     pub source_manifest_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstalledBundleRepairBinding {
+    authority: crate::lifecycle::InstalledBundleRepairAuthorityV1,
+    stage_operation_id: String,
+    stage_target_asset_set_digest: String,
+    stage_target_manifest_sha256: String,
+    stage_target_version: String,
+    verified_stage_sha256: String,
+    stage_owner_uid: u32,
+}
+
+impl InstalledBundleRepairBinding {
+    #[cfg(test)]
+    pub(super) fn for_test(
+        authority: crate::lifecycle::InstalledBundleRepairAuthorityV1,
+        stage_owner_uid: u32,
+    ) -> Self {
+        Self {
+            stage_operation_id: authority.repair_operation_id.clone(),
+            stage_target_asset_set_digest: authority.target_asset_set_digest.clone(),
+            stage_target_manifest_sha256: authority.manifest_sha256.clone(),
+            stage_target_version: authority.bundle_version.clone(),
+            verified_stage_sha256: "4".repeat(64),
+            authority,
+            stage_owner_uid,
+        }
+    }
+
+    #[cfg(feature = "acquirer")]
+    pub fn from_verified_stage(
+        authority: &crate::lifecycle::InstalledBundleRepairAuthorityV1,
+        stage: &crate::acquisition::VerifiedUpgradeStageReceipt,
+        stage_owner_uid: u32,
+    ) -> Result<Self, InstallError> {
+        if authority.repair_operation_id != stage.operation_id
+            || authority.bundle_version != stage.target_version
+            || authority.manifest_sha256 != stage.target_manifest_sha256
+            || authority.target_asset_set_digest != stage.target_asset_set_digest
+            || stage.verified_stage_sha256.len() != 64
+            || !stage
+                .verified_stage_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        Ok(Self {
+            authority: authority.clone(),
+            stage_operation_id: stage.operation_id.clone(),
+            stage_target_asset_set_digest: stage.target_asset_set_digest.clone(),
+            stage_target_manifest_sha256: stage.target_manifest_sha256.clone(),
+            stage_target_version: stage.target_version.clone(),
+            verified_stage_sha256: stage.verified_stage_sha256.clone(),
+            stage_owner_uid,
+        })
+    }
+
+    pub(super) fn binding_sha256(
+        &self,
+        installed: &InstalledUpgradeBinding,
+        bundle: &VerifiedBundle,
+        paths: &FixedInstallPaths,
+    ) -> Result<String, InstallError> {
+        let identity_metadata =
+            fs::symlink_metadata(paths.identity()).map_err(|_| InstallError::ExistingResidue)?;
+        let identity = trusted_text(&paths.identity(), identity_metadata.uid(), 0o600)?;
+        let identity_host_id = metadata_string(&identity, "host_id")
+            .filter(|value| !value.is_empty())
+            .ok_or(InstallError::ExistingResidue)?;
+        let identity_receipt_sha256 = format!("{:x}", Sha256::digest(identity.as_bytes()));
+        if self.authority.repair_operation_id != self.stage_operation_id
+            || self.authority.hub_origin != installed.hub_origin
+            || self.authority.host_id != identity_host_id
+            || self.authority.identity_receipt_sha256 != identity_receipt_sha256
+            || self.authority.probe_id != installed.probe_id
+            || self.authority.bundle_version != installed.source_bundle_version
+            || self.authority.install_state_sha256 != installed.source_install_state_sha256
+            || self.authority.manifest_sha256 != installed.source_manifest_sha256
+            || self.authority.bundle_version != bundle.version
+            || self.authority.manifest_sha256 != bundle.manifest_sha256
+            || self.stage_target_version != bundle.version
+            || self.stage_target_manifest_sha256 != bundle.manifest_sha256
+            || self.stage_target_asset_set_digest
+                != format!("sha256:{}", bundle.asset_set_manifest_sha256)
+            || self.authority.target_asset_set_digest != self.stage_target_asset_set_digest
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Binding<'a> {
+            authority: &'a crate::lifecycle::InstalledBundleRepairAuthorityV1,
+            stage_operation_id: &'a str,
+            stage_target_asset_set_digest: &'a str,
+            stage_target_manifest_sha256: &'a str,
+            stage_target_version: &'a str,
+            verified_stage_sha256: &'a str,
+            stage_owner_uid: u32,
+            installed: &'a InstalledUpgradeBinding,
+            bundle_version: &'a str,
+            bundle_manifest_sha256: &'a str,
+            bundle_asset_set_sha256: &'a str,
+            bundle_install_state_sha256: String,
+            identity_host_id: &'a str,
+            identity_receipt_sha256: &'a str,
+        }
+        serde_json::to_vec(&Binding {
+            authority: &self.authority,
+            stage_operation_id: &self.stage_operation_id,
+            stage_target_asset_set_digest: &self.stage_target_asset_set_digest,
+            stage_target_manifest_sha256: &self.stage_target_manifest_sha256,
+            stage_target_version: &self.stage_target_version,
+            verified_stage_sha256: &self.verified_stage_sha256,
+            stage_owner_uid: self.stage_owner_uid,
+            installed,
+            bundle_version: &bundle.version,
+            bundle_manifest_sha256: &bundle.manifest_sha256,
+            bundle_asset_set_sha256: &bundle.asset_set_manifest_sha256,
+            bundle_install_state_sha256: bundle.install_state_sha256(),
+            identity_host_id: &identity_host_id,
+            identity_receipt_sha256: &identity_receipt_sha256,
+        })
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+        .map_err(|_| InstallError::Io)
+    }
+
+    pub(super) fn retirement_binding_sha256(&self) -> Result<String, InstallError> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetirementBinding<'a> {
+            authority: &'a crate::lifecycle::InstalledBundleRepairAuthorityV1,
+            stage_operation_id: &'a str,
+            stage_target_asset_set_digest: &'a str,
+            stage_target_manifest_sha256: &'a str,
+            stage_target_version: &'a str,
+            verified_stage_sha256: &'a str,
+            stage_owner_uid: u32,
+        }
+        serde_json::to_vec(&RetirementBinding {
+            authority: &self.authority,
+            stage_operation_id: &self.stage_operation_id,
+            stage_target_asset_set_digest: &self.stage_target_asset_set_digest,
+            stage_target_manifest_sha256: &self.stage_target_manifest_sha256,
+            stage_target_version: &self.stage_target_version,
+            verified_stage_sha256: &self.verified_stage_sha256,
+            stage_owner_uid: self.stage_owner_uid,
+        })
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)))
+        .map_err(|_| InstallError::Io)
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_test_repair_nonce(mut self, nonce: &str) -> Self {
+        self.authority.repair_nonce = nonce.to_owned();
+        self
+    }
 }
 
 pub struct VerifiedUpgradeComponents<'a> {
@@ -1003,35 +1161,6 @@ pub fn inspect_installed_probe_for_upgrade(
     })
 }
 
-pub(super) fn verify_installed_activation_receipt(
-    paths: &FixedInstallPaths,
-    expected_version: &str,
-) -> Result<(), InstallError> {
-    let (metadata, identity) = trusted_complete_installed_layout(paths)?;
-    if metadata_string(&metadata, "bundle_version").as_deref() != Some(expected_version) {
-        return Err(InstallError::ExistingResidue);
-    }
-    let hub = metadata_string(&metadata, "hub_url")
-        .filter(|value| !value.is_empty())
-        .ok_or(InstallError::ExistingResidue)?;
-    if metadata_string(&identity, "hub_url")
-        .as_deref()
-        .map(|value| value.trim_end_matches('/'))
-        != Some(hub.trim_end_matches('/'))
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    let registered_identity = ["probe_id", "host_id", "probe_private_key_pem"]
-        .into_iter()
-        .all(|name| metadata_string(&identity, name).is_some_and(|value| !value.is_empty()));
-    if !registered_identity {
-        return Err(InstallError::ExistingResidue);
-    }
-    sha256_field(&metadata, "install_state_sha256")?;
-    sha256_field(&metadata, "target_manifest_sha256")?;
-    Ok(())
-}
-
 fn trusted_complete_installed_layout(
     paths: &FixedInstallPaths,
 ) -> Result<(String, String), InstallError> {
@@ -1068,7 +1197,7 @@ fn trusted_complete_installed_layout(
     Ok((metadata, identity))
 }
 
-fn metadata_scalar(contents: &str, key: &str) -> Option<String> {
+pub(super) fn metadata_scalar(contents: &str, key: &str) -> Option<String> {
     let mut values = contents.lines().filter_map(|line| {
         let (candidate, value) = line.split_once('=')?;
         (candidate.trim() == key).then(|| value.trim().to_owned())
@@ -1077,7 +1206,7 @@ fn metadata_scalar(contents: &str, key: &str) -> Option<String> {
     values.next().is_none().then_some(value)
 }
 
-fn metadata_string(contents: &str, key: &str) -> Option<String> {
+pub(super) fn metadata_string(contents: &str, key: &str) -> Option<String> {
     serde_json::from_str(&metadata_scalar(contents, key)?).ok()
 }
 
@@ -1147,134 +1276,48 @@ pub fn upgrade_current_probe_for_operation(
 }
 
 pub fn restore_installed_bundle_for_repair(
-    mut components: VerifiedUpgradeComponents<'_>,
+    components: VerifiedUpgradeComponents<'_>,
     bundle: &VerifiedBundle,
     expected_installation: &InstalledUpgradeBinding,
+    repair: &InstalledBundleRepairBinding,
     paths: &FixedInstallPaths,
     systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
-    let actual = inspect_installed_probe_for_upgrade(paths)?;
-    if &actual != expected_installation
-        || bundle.version != actual.source_bundle_version
-        || bundle.manifest_sha256 != actual.source_manifest_sha256
+    if bundle.version != expected_installation.source_bundle_version
+        || bundle.manifest_sha256 != expected_installation.source_manifest_sha256
     {
         return Err(InstallError::ExistingResidue);
     }
-    verify_component_lengths(&mut components, bundle)?;
-    let expected_payload = vec![
-        (paths.binary(), component_fingerprint(components.probe)?),
-        (
-            paths.observation_runtime_binary(),
-            component_fingerprint(components.observation_runtime)?,
-        ),
-        (
-            paths.cpu_provider_binary(),
-            component_fingerprint(components.system_state_provider)?,
-        ),
-        (
-            paths.disk_health_provider_binary(),
-            component_fingerprint(components.disk_health_provider)?,
-        ),
-        (
-            paths.lifecycle_companion_binary(),
-            component_fingerprint(components.lifecycle_companion)?,
-        ),
-        (
-            paths.bootstrap_acquirer(),
-            component_fingerprint(components.bootstrap_acquirer)?,
-        ),
-        (
-            paths.bootstrap_activator(),
-            component_fingerprint(components.bootstrap_activator)?,
-        ),
-    ];
-    let mut prepared = prepare_upgrade(&mut components, bundle, paths, &actual)?;
-    systemd.set_command_deadline(Instant::now() + INSTALL_COMMAND_BUDGET);
-    systemd.stop()?;
-    for (temporary, destination) in prepared.staged.iter().zip(&prepared.destinations) {
-        fs::rename(temporary, destination).map_err(|_| InstallError::Io)?;
-        sync_directory(destination.parent().ok_or(InstallError::Io)?)?;
-    }
-    systemd.daemon_reload()?;
-    if inspect_installed_probe_for_upgrade(paths)? != actual {
-        return Err(InstallError::ExistingResidue);
-    }
-    verify_repaired_bundle_payload(paths, &expected_payload)?;
-    for backup in &prepared.backups {
-        fs::remove_file(backup).map_err(|_| InstallError::Io)?;
-        sync_directory(backup.parent().ok_or(InstallError::Io)?)?;
-    }
-    prepared.retain_for_repair = false;
-    Ok(())
+    super::bundle_restore::restore(
+        components,
+        bundle,
+        expected_installation,
+        repair,
+        paths,
+        systemd,
+    )
+    .map(|_| ())
 }
 
-fn verify_repaired_bundle_payload(
+#[cfg(test)]
+pub(super) fn set_repair_rename_crash(index: usize) {
+    super::bundle_restore::set_crash(&format!("publish:{index}"));
+}
+
+pub fn verify_installed_bundle_repair_complete(
+    bundle: &VerifiedBundle,
+    expected_installation: &InstalledUpgradeBinding,
+    repair: &InstalledBundleRepairBinding,
     paths: &FixedInstallPaths,
-    expected_payload: &[(PathBuf, (u64, String))],
 ) -> Result<(), InstallError> {
-    for (path, (expected_len, expected_sha256)) in expected_payload {
-        let mut file = trusted_file(path, paths.expected_root_uid(), 0o755)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
-        if bytes.len() as u64 != *expected_len
-            || format!("{:x}", Sha256::digest(&bytes)) != *expected_sha256
-        {
-            return Err(InstallError::ExistingResidue);
-        }
-    }
-    for (path, expected) in [
-        (paths.unit(), service_unit()),
-        (paths.observation_runtime_unit(), observation_runtime_unit()),
-        (
-            paths.observation_runtime_socket_unit(),
-            observation_runtime_socket_unit().to_owned(),
-        ),
-        (paths.cpu_provider_unit(), cpu_provider_unit()),
-        (
-            paths.cpu_provider_socket_unit(),
-            cpu_provider_socket_unit().to_owned(),
-        ),
-        (
-            paths.disk_health_provider_unit(),
-            disk_health_provider_unit(),
-        ),
-        (
-            paths.disk_health_provider_socket_unit(),
-            disk_health_provider_socket_unit().to_owned(),
-        ),
-        (paths.lifecycle_companion_unit(), lifecycle_companion_unit()),
-        (
-            paths.lifecycle_companion_socket_unit(),
-            lifecycle_companion_socket_unit().to_owned(),
-        ),
-        (paths.lifecycle_upgrade_unit(), lifecycle_upgrade_unit()),
-        (
-            paths.lifecycle_upgrade_socket_unit(),
-            lifecycle_upgrade_socket_unit().to_owned(),
-        ),
-        (
-            paths.observation_runtime_failure_recorder_unit(),
-            observation_runtime_failure_recorder_unit(),
-        ),
-    ] {
-        let mut file = trusted_file(&path, paths.expected_root_uid(), 0o644)?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
-        if bytes != expected.as_bytes() {
-            return Err(InstallError::ExistingResidue);
-        }
-    }
-    Ok(())
+    super::bundle_restore::verify_complete(expected_installation, bundle, repair, paths)
 }
 
-fn component_fingerprint(file: &mut File) -> Result<(u64, String), InstallError> {
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| InstallError::Io)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| InstallError::Io)?;
-    Ok((bytes.len() as u64, format!("{:x}", Sha256::digest(&bytes))))
+pub fn cleanup_installed_bundle_repair(
+    repair: &InstalledBundleRepairBinding,
+    paths: &FixedInstallPaths,
+) -> Result<(), InstallError> {
+    super::bundle_restore::retire_complete(repair, paths)
 }
 
 fn upgrade_current_probe_inner(
@@ -1823,7 +1866,7 @@ fn stage_bytes_owned(
     Ok(path)
 }
 
-fn updated_metadata(
+pub(super) fn updated_metadata(
     current: &str,
     bundle: &VerifiedBundle,
     source: &InstalledUpgradeBinding,
@@ -1859,7 +1902,7 @@ fn updated_metadata(
     Ok(output)
 }
 
-fn updated_receipt_projection(
+pub(super) fn updated_receipt_projection(
     current: &str,
     bundle: &VerifiedBundle,
     source: &InstalledUpgradeBinding,

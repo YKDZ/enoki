@@ -636,7 +636,7 @@ fn valid_identifier(value: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
@@ -691,6 +691,16 @@ mod tests {
         }
     }
 
+    pub(super) fn repair_test_bundle() -> enoki_probe_bootstrap::verifier::VerifiedBundle {
+        enoki_probe_bootstrap::verifier::VerifiedBundle::deterministic_complete_for_test(
+            "1.2.3",
+            "x86_64-unknown-linux-gnu",
+            &"b".repeat(64),
+            &"a".repeat(64),
+            b"probe",
+        )
+    }
+
     fn fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         for directory in [
@@ -706,9 +716,14 @@ mod tests {
             fs::Permissions::from_mode(0o750),
         )
         .unwrap();
-        let metadata = "hub_url = \"https://hub.example\"\ninstall_state_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\ntarget_manifest_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nbundle_version = \"1.2.3\"\nlifecycle_authority_install_key = \"1111111111111111111111111111111111111111111111111111111111111111\"\n";
-        let identity =
-            "hub_url = \"https://hub.example\"\nhost_id = \"7\"\nprobe_id = \"probe_01\"\n";
+        let metadata = format!(
+            "schema_version = 5\nhub_url = \"https://hub.example\"\ninstall_state_sha256 = \"{}\"\ntarget_manifest_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nbundle_version = \"1.2.3\"\nlifecycle_authority_install_key = \"1111111111111111111111111111111111111111111111111111111111111111\"\n",
+            repair_test_bundle().install_state_sha256()
+        );
+        let identity = format!(
+            "hub_url = \"https://hub.example\"\nhost_id = \"7\"\nprobe_id = \"probe_01\"\ninstall_state_sha256 = \"{}\"\ntarget_manifest_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nbundle_version = \"1.2.3\"\n",
+            repair_test_bundle().install_state_sha256()
+        );
         write_fixture(root.path(), METADATA_PATH, metadata.as_bytes(), 0o600);
         write_fixture(root.path(), IDENTITY_PATH, identity.as_bytes(), 0o600);
         let unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
@@ -987,6 +1002,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(identity, ("probe_01".into(), "1.2.3".into()));
+        finish_installed_bundle_repair_success_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            grant.authority(),
+        )
+        .unwrap();
         assert_eq!(systemd.0, 0);
         assert!(!rooted(root.path(), LATCH_PATH).exists());
         assert_eq!(
@@ -1220,6 +1241,12 @@ mod tests {
                 },
                 ("probe_01".into(), "1.2.3".into())
             );
+            finish_installed_bundle_repair_success_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &authority,
+            )
+            .unwrap();
             assert!(!rooted(root.path(), EPOCH_PATH).exists());
             assert!(!rooted(root.path(), LATCH_PATH).exists());
             assert!(!rooted(root.path(), REPAIR_INTENT_PATH).exists());
@@ -1246,6 +1273,7 @@ mod tests {
         canonical_activations: usize,
         canonical_validations: usize,
         fail_canonical: bool,
+        fail_verify: bool,
     }
 
     #[derive(Debug)]
@@ -1289,7 +1317,31 @@ mod tests {
             Ok(())
         }
 
-        fn remove_stage(&mut self, _: &str, _: u32) {}
+        fn verify_bundle_restore_complete(
+            &mut self,
+            _: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+            _: u32,
+            _: &InstalledBundleRepairAuthorityV1,
+        ) -> Result<(), Self::Error> {
+            if self.fail_verify {
+                Err(RepairEffectError("probe_repair_bundle_verification_failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn retire_bundle_restore(
+            &mut self,
+            _: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+            _: u32,
+            _: &InstalledBundleRepairAuthorityV1,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn remove_stage(&mut self, _: &str, _: u32) -> Result<(), Self::Error> {
+            Ok(())
+        }
 
         fn error_code<'a>(&self, error: &'a Self::Error) -> &'a str {
             error.0
@@ -1431,6 +1483,34 @@ mod tests {
     }
 
     #[test]
+    fn exact_bundle_verification_failure_never_publishes_succeeded() {
+        let (root, _) =
+            repair_completion_fixture(InstalledBundleRepairProgress::CanonicalRuntimeHealthy, 63);
+        fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
+        fs::remove_file(rooted(root.path(), LATCH_PATH)).unwrap();
+        let session = resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            drive_installed_bundle_repair(
+                session,
+                &mut RepairEffects {
+                    fail_verify: true,
+                    ..RepairEffects::default()
+                }
+            ),
+            Err(InstalledBundleRepairDriveError::Effect(RepairEffectError(
+                "probe_repair_bundle_verification_failed"
+            )))
+        ));
+        assert!(rooted(root.path(), REPAIR_INTENT_PATH).exists());
+        assert!(
+            !fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH))
+                .is_ok_and(|status| status.contains("status = \"succeeded\""))
+        );
+    }
+
+    #[test]
     fn postcommit_invalidation_error_persists_exact_error_without_publishing_failed() {
         let (root, _authority) =
             repair_completion_fixture(InstalledBundleRepairProgress::ProbeActive, 62);
@@ -1479,7 +1559,7 @@ mod tests {
         assert!(!rooted(root.path(), REPAIR_INTENT_PATH).exists());
     }
 
-    fn repair_completion_fixture(
+    pub(super) fn repair_completion_fixture(
         progress: InstalledBundleRepairProgress,
         generation_byte: u8,
     ) -> (tempfile::TempDir, InstalledBundleRepairAuthorityV1) {

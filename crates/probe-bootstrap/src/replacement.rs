@@ -45,6 +45,27 @@ impl ReplacementCommitFact {
     pub fn resume_binding(&self) -> ReplacementResumeBinding {
         ReplacementResumeBinding(self.canonical_intent_sha256.clone())
     }
+
+    #[cfg(feature = "activator")]
+    pub(crate) fn has_valid_binding(&self) -> bool {
+        canonical_intent_sha256(&self.intent).ok().as_deref()
+            == Some(self.canonical_intent_sha256.as_str())
+    }
+
+    #[cfg(all(test, feature = "activator"))]
+    pub(crate) fn for_test(
+        intent: ReplacementIntent,
+        cleanup_complete: bool,
+        candidate_layout_complete: bool,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            canonical_intent_sha256: canonical_intent_sha256(&intent).expect("canonical intent"),
+            intent,
+            cleanup_complete,
+            candidate_layout_complete,
+        }
+    }
 }
 
 impl ReplacementResumeBinding {

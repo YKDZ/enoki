@@ -10,7 +10,7 @@ use crate::{
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
     replacement::{
-        FileReplacementCommitStore, ReplacementResumeBinding, record_replacement_candidate_layout,
+        FileReplacementCommitStore, ReplacementCommitStore, record_replacement_candidate_layout,
     },
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
@@ -129,12 +129,14 @@ impl ReceivedRootHandoff {
             &self.bundle,
             &mut self.lifecycle_companion,
         )?;
-        if let ReplacementActivation::Complete(resume_binding) = &replacement_activation {
+        if let ReplacementActivation::Complete(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
+            let resume_binding = commit.resume_binding();
             crate::install::finalize_complete_replacement_current_probe(
                 &paths,
-                resume_binding,
-                &self.bundle.version,
+                &resume_binding,
+                &self.bundle,
+                commit,
             )
             .map_err(ActivationError::Install)?;
             return Ok(());
@@ -149,8 +151,8 @@ impl ReceivedRootHandoff {
             bootstrap_activator: activator,
         };
         let paths = FixedInstallPaths::production();
-        let result = if let ReplacementActivation::Resume(resume_binding) = &replacement_activation
-        {
+        let result = if let ReplacementActivation::Resume(commit) = &replacement_activation {
+            let resume_binding = commit.resume_binding();
             activate_complete_replacement_current_probe(
                 components,
                 &self.enrollment,
@@ -159,7 +161,7 @@ impl ReceivedRootHandoff {
                 &paths,
                 &mut accounts,
                 &mut systemd,
-                resume_binding,
+                &resume_binding,
             )
         } else {
             activate_complete_fresh_current_probe(
@@ -173,14 +175,20 @@ impl ReceivedRootHandoff {
             )
         };
         result.map_err(ActivationError::Install)?;
-        if let ReplacementActivation::Resume(resume_binding) = replacement_activation {
+        if let ReplacementActivation::Resume(commit) = replacement_activation {
+            let resume_binding = commit.resume_binding();
             let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
             record_replacement_candidate_layout(&mut store, resume_binding.as_str())
                 .map_err(|_| ActivationError::Replacement)?;
+            let completed = store
+                .load()
+                .map_err(|_| ActivationError::Replacement)?
+                .ok_or(ActivationError::Replacement)?;
             crate::install::finalize_complete_replacement_current_probe(
                 &paths,
                 &resume_binding,
-                &self.bundle.version,
+                &self.bundle,
+                &completed,
             )
             .map_err(ActivationError::Install)?;
         }
@@ -236,14 +244,14 @@ fn prepare_replacement_migration(
 
 enum ReplacementActivation {
     Fresh,
-    Resume(ReplacementResumeBinding),
-    Complete(ReplacementResumeBinding),
+    Resume(crate::replacement::ReplacementCommitFact),
+    Complete(crate::replacement::ReplacementCommitFact),
 }
 
 fn matching_replacement_commit(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
-) -> Result<Option<(ReplacementResumeBinding, bool)>, ActivationError> {
+) -> Result<Option<(crate::replacement::ReplacementCommitFact, bool)>, ActivationError> {
     let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
     matching_replacement_commit_in(&mut store, enrollment, bundle)
 }
@@ -252,7 +260,7 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
     store: &mut S,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
-) -> Result<Option<(ReplacementResumeBinding, bool)>, ActivationError> {
+) -> Result<Option<(crate::replacement::ReplacementCommitFact, bool)>, ActivationError> {
     let Some(fact) = store.load().map_err(|_| ActivationError::Replacement)? else {
         return Ok(None);
     };
@@ -268,10 +276,8 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
             == format!("sha256:{}", bundle.asset_set_manifest_sha256)
         && fact.intent.target_manifest_sha256 == bundle.manifest_sha256;
     if exact_request {
-        return Ok(Some((
-            fact.resume_binding(),
-            fact.candidate_layout_complete,
-        )));
+        let complete = fact.candidate_layout_complete;
+        return Ok(Some((fact, complete)));
     }
     if !fact.candidate_layout_complete {
         return Err(ActivationError::Replacement);
@@ -1118,7 +1124,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(exact.0.as_str(), "exact-binding");
+        assert_eq!(exact.0.canonical_intent_sha256, "exact-binding");
         assert!(exact.1);
 
         let other_enrollment =

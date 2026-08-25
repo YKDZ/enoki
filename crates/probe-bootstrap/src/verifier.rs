@@ -83,8 +83,83 @@ impl VerifiedBundle {
         }
         format!("{:x}", hash.finalize())
     }
+
+    /// 封闭的确定性测试入口：构造已跨过 verifier 边界、且七个固定角色
+    /// 都绑定到同一组测试字节的完整 Bundle 收据。
+    #[cfg(feature = "deterministic-test-seams")]
+    #[doc(hidden)]
+    pub fn deterministic_complete_for_test(
+        version: &str,
+        target: &str,
+        manifest_sha256: &str,
+        asset_set_manifest_sha256: &str,
+        component_bytes: &[u8],
+    ) -> Self {
+        let sha256 = format!("{:x}", Sha256::digest(component_bytes));
+        let mut bootstrap_assets = Vec::new();
+        bootstrap_assets.push(BundleComponent {
+            path: "bin/enoki-probe".to_owned(),
+            permission_profile: "probe".to_owned(),
+            resource_contract: None,
+            role: "probe".to_owned(),
+            sha256: sha256.clone(),
+            size: component_bytes.len() as u64,
+            version: version.to_owned(),
+        });
+        for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
+            if matches!(
+                role,
+                "observation-runtime"
+                    | "system-state-provider"
+                    | "disk-health-provider"
+                    | "lifecycle-companion"
+            ) {
+                bootstrap_assets.push(BundleComponent {
+                    path: path.to_owned(),
+                    permission_profile: permission_profile.to_owned(),
+                    resource_contract: Some(resource_contract.to_owned()),
+                    role: role.to_owned(),
+                    sha256: sha256.clone(),
+                    size: component_bytes.len() as u64,
+                    version: version.to_owned(),
+                });
+            }
+        }
+        for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
+            bootstrap_assets.push(BundleComponent {
+                path: path.to_owned(),
+                permission_profile: permission_profile.to_owned(),
+                resource_contract: None,
+                role: role.to_owned(),
+                sha256: sha256.clone(),
+                size: component_bytes.len() as u64,
+                version: version.to_owned(),
+            });
+        }
+        Self {
+            version: version.to_owned(),
+            target: target.to_owned(),
+            asset_set_manifest_sha256: asset_set_manifest_sha256.to_owned(),
+            manifest_sha256: manifest_sha256.to_owned(),
+            delegation_generation: 1,
+            component_len: component_bytes.len() as u64,
+            bootstrap_assets,
+        }
+    }
     #[cfg(all(test, feature = "activator"))]
     pub(crate) fn with_test_observation_receipts(mut self, size: u64) -> Self {
+        let test_sha256 = format!("{:x}", Sha256::digest(b"probe"));
+        if self.component_receipt("probe").is_none() {
+            self.bootstrap_assets.push(BundleComponent {
+                path: "bin/enoki-probe".to_owned(),
+                permission_profile: "probe".to_owned(),
+                resource_contract: None,
+                role: "probe".to_owned(),
+                sha256: test_sha256.clone(),
+                size,
+                version: self.version.clone(),
+            });
+        }
         for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
             if matches!(
                 role,
@@ -98,7 +173,7 @@ impl VerifiedBundle {
                     permission_profile: permission_profile.to_string(),
                     resource_contract: Some(resource_contract.to_string()),
                     role: role.to_string(),
-                    sha256: "a".repeat(64),
+                    sha256: test_sha256.clone(),
                     size,
                     version: self.version.clone(),
                 });
@@ -110,13 +185,14 @@ impl VerifiedBundle {
     #[cfg(all(test, feature = "activator"))]
     pub(crate) fn with_test_complete_receipts(mut self, size: u64) -> Self {
         self = self.with_test_observation_receipts(size);
+        let test_sha256 = format!("{:x}", Sha256::digest(b"probe"));
         for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
             self.bootstrap_assets.push(BundleComponent {
                 path: path.to_owned(),
                 permission_profile: permission_profile.to_owned(),
                 resource_contract: None,
                 role: role.to_owned(),
-                sha256: "a".repeat(64),
+                sha256: test_sha256.clone(),
                 size,
                 version: self.version.clone(),
             });

@@ -170,6 +170,10 @@ impl InstalledBundleRepairGrant {
     pub fn publish_success(&self) -> Result<(String, String), InstalledBundleRepairError> {
         publish_installed_bundle_repair_success_at(&self.root, self.expected_uid, &self.authority)
     }
+
+    pub fn finish_success(&self) -> Result<(), InstalledBundleRepairError> {
+        finish_installed_bundle_repair_success_at(&self.root, self.expected_uid, &self.authority)
+    }
 }
 
 pub(crate) struct ResumableInstalledBundleRepair {
@@ -192,7 +196,19 @@ pub(crate) trait InstalledBundleRepairEffects {
     fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error>;
     fn validate_canonical_runtime(&mut self) -> Result<(), Self::Error>;
     fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error>;
-    fn remove_stage(&mut self, operation_id: &str, owner_uid: u32);
+    fn verify_bundle_restore_complete(
+        &mut self,
+        receipt: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+        owner_uid: u32,
+        authority: &InstalledBundleRepairAuthorityV1,
+    ) -> Result<(), Self::Error>;
+    fn retire_bundle_restore(
+        &mut self,
+        receipt: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+        owner_uid: u32,
+        authority: &InstalledBundleRepairAuthorityV1,
+    ) -> Result<(), Self::Error>;
+    fn remove_stage(&mut self, operation_id: &str, owner_uid: u32) -> Result<(), Self::Error>;
     fn error_code<'a>(&self, error: &'a Self::Error) -> &'a str;
 }
 
@@ -309,10 +325,31 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
             InstalledBundleRepairDriveError::RecoveryPending("probe_repair_intent_persist_failed")
         })?;
     }
-    let (probe_id, repaired_version) = grant.publish_success().map_err(|_| {
+    let (probe_id, repaired_version) = if progress == InstalledBundleRepairProgress::StatusPublished
+    {
+        (
+            grant.authority().probe_id.clone(),
+            grant.authority().bundle_version.clone(),
+        )
+    } else {
+        effects
+            .verify_bundle_restore_complete(&stage_receipt, stage_owner_uid, grant.authority())
+            .map_err(InstalledBundleRepairDriveError::Effect)?;
+        grant.publish_success().map_err(|_| {
+            InstalledBundleRepairDriveError::RecoveryPending(
+                "probe_repair_completion_persist_failed",
+            )
+        })?
+    };
+    effects
+        .retire_bundle_restore(&stage_receipt, stage_owner_uid, grant.authority())
+        .map_err(InstalledBundleRepairDriveError::Effect)?;
+    effects
+        .remove_stage(&stage_receipt.operation_id, stage_owner_uid)
+        .map_err(InstalledBundleRepairDriveError::Effect)?;
+    grant.finish_success().map_err(|_| {
         InstalledBundleRepairDriveError::RecoveryPending("probe_repair_completion_persist_failed")
     })?;
-    effects.remove_stage(&stage_receipt.operation_id, stage_owner_uid);
     Ok(InstalledBundleRepairOutcome {
         probe_id,
         repaired_version,
@@ -490,7 +527,6 @@ pub(super) fn publish_installed_bundle_repair_success_at(
         return Err(InstalledBundleRepairError::RecoveryPending);
     }
     if intent.state == InstalledBundleRepairProgress::StatusPublished {
-        remove_regular_file_if_present(&intent_path, 0o600, expected_uid)?;
         return Ok((authority.probe_id.clone(), authority.bundle_version.clone()));
     }
     if intent.state != InstalledBundleRepairProgress::CanonicalRuntimeHealthy {
@@ -501,8 +537,26 @@ pub(super) fn publish_installed_bundle_repair_success_at(
     intent.state = InstalledBundleRepairProgress::StatusPublished;
     write_installed_bundle_repair_intent(root, &intent)
         .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
-    remove_regular_file_if_present(&intent_path, 0o600, expected_uid)?;
     Ok((authority.probe_id.clone(), authority.bundle_version.clone()))
+}
+
+pub(super) fn finish_installed_bundle_repair_success_at(
+    root: &Path,
+    expected_uid: u32,
+    authority: &InstalledBundleRepairAuthorityV1,
+) -> Result<(), InstalledBundleRepairError> {
+    let intent_path = rooted(root, REPAIR_INTENT_PATH);
+    let intent_bytes = trusted_file(&intent_path, expected_uid, 0o600)
+        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+    let intent: InstalledBundleRepairIntent = serde_json::from_slice(&intent_bytes)
+        .map_err(|_| InstalledBundleRepairError::RecoveryPending)?;
+    if intent.schema_version != 2
+        || intent.authority != *authority
+        || intent.state != InstalledBundleRepairProgress::StatusPublished
+    {
+        return Err(InstalledBundleRepairError::RecoveryPending);
+    }
+    remove_regular_file_if_present(&intent_path, 0o600, expected_uid)
 }
 
 fn remove_regular_file_if_present(

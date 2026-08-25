@@ -5,6 +5,7 @@
 //! archive, network, command-line interpolation, or candidate-code surface.
 
 mod account;
+mod bundle_restore;
 mod command;
 #[cfg(feature = "acquirer")]
 mod compatible_upgrade;
@@ -14,7 +15,7 @@ mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
 mod upgrade;
 
-use crate::replacement::ReplacementResumeBinding;
+use crate::replacement::{ReplacementCommitFact, ReplacementResumeBinding};
 use crate::{
     bundle_role::{
         DISK_HEALTH_PERMISSION_PROFILE, LIFECYCLE_COMPANION_PERMISSION_PROFILE,
@@ -390,6 +391,12 @@ impl FixedInstallPaths {
         Self { root: root.into() }
     }
 
+    #[cfg(feature = "deterministic-test-seams")]
+    #[doc(hidden)]
+    pub fn under_test_root(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
     fn map(&self, absolute: &str) -> PathBuf {
         self.root.join(absolute.trim_start_matches('/'))
     }
@@ -485,6 +492,50 @@ impl FixedInstallPaths {
             unsafe { libc::geteuid() }
         }
     }
+}
+
+#[cfg(feature = "deterministic-test-seams")]
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InstalledBundleRepairCrashPoint {
+    JournalPublish,
+    Prepare(usize),
+    Backup(usize),
+    Stop,
+    Publish(usize),
+    Reload,
+    Cleanup(usize),
+    Complete,
+    JournalCleanup,
+}
+
+#[cfg(feature = "deterministic-test-seams")]
+#[doc(hidden)]
+pub fn set_installed_bundle_repair_crash_for_test(
+    point: InstalledBundleRepairCrashPoint,
+) -> Result<(), InstallError> {
+    let point = match point {
+        InstalledBundleRepairCrashPoint::JournalPublish => "journal-publish".to_owned(),
+        InstalledBundleRepairCrashPoint::Prepare(index) if index < 21 => {
+            format!("prepare:{index}")
+        }
+        InstalledBundleRepairCrashPoint::Backup(index) if index < 21 => {
+            format!("backup:{index}")
+        }
+        InstalledBundleRepairCrashPoint::Stop => "stop".to_owned(),
+        InstalledBundleRepairCrashPoint::Publish(index) if index < 21 => {
+            format!("publish:{index}")
+        }
+        InstalledBundleRepairCrashPoint::Reload => "reload".to_owned(),
+        InstalledBundleRepairCrashPoint::Cleanup(index) if index < 21 => {
+            format!("cleanup:{index}")
+        }
+        InstalledBundleRepairCrashPoint::Complete => "complete".to_owned(),
+        InstalledBundleRepairCrashPoint::JournalCleanup => "journal-cleanup".to_owned(),
+        _ => return Err(InstallError::ExistingResidue),
+    };
+    bundle_restore::set_crash(&point);
+    Ok(())
 }
 
 /// Activates precisely the verified current `probe` component.  It is a
@@ -666,16 +717,20 @@ pub fn activate_complete_replacement_current_probe(
 pub(crate) fn finalize_complete_replacement_current_probe(
     paths: &FixedInstallPaths,
     resume_binding: &ReplacementResumeBinding,
-    expected_version: &str,
+    bundle: &VerifiedBundle,
+    commit: &ReplacementCommitFact,
 ) -> Result<(), InstallError> {
-    if !TransactionJournal::committed_layout_matches(&paths.bootstrap_state(), expected_version)? {
+    if !commit.has_valid_binding() || commit.resume_binding() != *resume_binding {
         return Err(InstallError::ExistingResidue);
     }
-    upgrade::verify_installed_activation_receipt(paths, expected_version)?;
+    bundle_restore::verify_exact_replacement_layout(paths, bundle, commit)?;
     let Some(journal) = TransactionJournal::load(&paths.bootstrap_state())? else {
         return Ok(());
     };
     if !journal.matches_resume_binding(resume_binding.as_str()) {
+        return Err(InstallError::ExistingResidue);
+    }
+    if !journal.all_immutable_published_paths_are_owned(&paths.identity()) {
         return Err(InstallError::ExistingResidue);
     }
     journal.remove_staging_if_owned()?;
@@ -1839,14 +1894,15 @@ use upgrade::{
     upgrade_current_probe_for_operation,
 };
 pub use upgrade::{
-    ConsumedRepairAuthority, InstalledUpgradeBinding, RepairIntentState, SignedRepairEligibility,
-    SignedRepairEvidence, UpgradeRecoveryReceipt, VerifiedUpgradeComponents,
-    complete_authorized_probe_repair, consume_probe_repair_authority,
-    execute_authorized_probe_repair, finalize_probe_upgrade_stage_cleanup,
-    inspect_installed_probe_for_upgrade, issue_probe_repair_eligibility,
-    issue_probe_repair_evidence, mark_probe_repair_unresolved,
+    ConsumedRepairAuthority, InstalledBundleRepairBinding, InstalledUpgradeBinding,
+    RepairIntentState, SignedRepairEligibility, SignedRepairEvidence, UpgradeRecoveryReceipt,
+    VerifiedUpgradeComponents, cleanup_installed_bundle_repair, complete_authorized_probe_repair,
+    consume_probe_repair_authority, execute_authorized_probe_repair,
+    finalize_probe_upgrade_stage_cleanup, inspect_installed_probe_for_upgrade,
+    issue_probe_repair_eligibility, issue_probe_repair_evidence, mark_probe_repair_unresolved,
     persist_probe_repair_execution_failure, recover_incomplete_probe_upgrade,
     restore_installed_bundle_for_repair, resume_probe_repair_intent,
+    verify_installed_bundle_repair_complete,
 };
 #[cfg(test)]
 use upgrade::{consume_before_upgrade_outer_checks, consume_probe_upgrade_authority};

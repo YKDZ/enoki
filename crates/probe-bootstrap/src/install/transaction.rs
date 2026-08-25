@@ -450,6 +450,14 @@ impl TransactionJournal {
         self.state.paths.iter().all(OwnedPath::still_owned)
     }
 
+    pub fn all_immutable_published_paths_are_owned(&self, identity: &Path) -> bool {
+        self.state
+            .paths
+            .iter()
+            .filter(|owned| owned.path() != identity)
+            .all(OwnedPath::still_owned)
+    }
+
     pub fn owns_published_path(&self, path: &Path) -> Result<bool, InstallError> {
         match self.state.paths.iter().find(|owned| owned.path() == path) {
             Some(owned) if owned.still_owned() => Ok(true),
