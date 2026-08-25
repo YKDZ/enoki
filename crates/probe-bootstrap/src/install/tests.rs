@@ -1571,24 +1571,27 @@ mod tests {
             std::array::from_fn(|_| component());
         let mut systemd = Systemd::default();
         upgrade::set_repair_rename_crash(0);
-        assert_eq!(
-            restore_installed_bundle_for_repair(
-                VerifiedUpgradeComponents {
-                    probe: &mut probe,
-                    observation_runtime: &mut runtime,
-                    system_state_provider: &mut provider,
-                    disk_health_provider: &mut disk,
-                    lifecycle_companion: &mut lifecycle,
-                    bootstrap_acquirer: &mut acquirer,
-                    bootstrap_activator: &mut activator,
-                },
-                &installed_bundle,
-                &binding,
-                &installed_bundle_repair_binding(&binding, &installed_bundle, &paths),
-                &paths,
-                &mut systemd,
-            ),
-            Err(InstallError::Io),
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = restore_installed_bundle_for_repair(
+                    VerifiedUpgradeComponents {
+                        probe: &mut probe,
+                        observation_runtime: &mut runtime,
+                        system_state_provider: &mut provider,
+                        disk_health_provider: &mut disk,
+                        lifecycle_companion: &mut lifecycle,
+                        bootstrap_acquirer: &mut acquirer,
+                        bootstrap_activator: &mut activator,
+                    },
+                    &installed_bundle,
+                    &binding,
+                    &installed_bundle_repair_binding(&binding, &installed_bundle, &paths),
+                    &paths,
+                    &mut systemd,
+                );
+            }))
+            .is_err(),
+            "publish effect 后必须模拟进程骤停，不能返回 ordinary effect error"
         );
         assert_eq!(systemd.calls, ["stop"]);
 
@@ -1632,9 +1635,11 @@ mod tests {
         for crash_point in crash_points {
             let fixture = installed_bundle_fixture();
             bundle_restore::set_crash(&crash_point);
-            assert_eq!(
-                restore_bundle_fixture(&fixture, &mut Systemd::default()),
-                Err(InstallError::Io),
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = restore_bundle_fixture(&fixture, &mut Systemd::default());
+                }))
+                .is_err(),
                 "{crash_point} 必须切断真实 effect/receipt 窗口"
             );
 
@@ -1686,9 +1691,11 @@ mod tests {
     fn installed_bundle_repair_rejects_wrong_resume_binding_before_effects() {
         let fixture = installed_bundle_fixture();
         bundle_restore::set_crash("prepare:0");
-        assert_eq!(
-            restore_bundle_fixture(&fixture, &mut Systemd::default()),
-            Err(InstallError::Io)
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = restore_bundle_fixture(&fixture, &mut Systemd::default());
+            }))
+            .is_err()
         );
         let journal_path = fixture
             .paths

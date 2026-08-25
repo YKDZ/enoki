@@ -118,7 +118,7 @@ pub(super) fn restore(
     if !journal.stopped {
         systemd.set_command_deadline(Instant::now() + super::INSTALL_COMMAND_BUDGET);
         systemd.stop()?;
-        crash("stop")?;
+        crash("stop");
         journal.stopped = true;
         persist_journal(&journal_path, &journal)?;
     }
@@ -127,7 +127,7 @@ pub(super) fn restore(
     }
     if !journal.reloaded {
         systemd.daemon_reload()?;
-        crash("reload")?;
+        crash("reload");
         journal.reloaded = true;
         persist_journal(&journal_path, &journal)?;
     }
@@ -142,7 +142,7 @@ pub(super) fn restore(
     if !journal.complete {
         journal.complete = true;
         persist_journal(&journal_path, &journal)?;
-        crash("complete")?;
+        crash("complete");
     }
     Ok(BundleRestoreReceipt { binding_sha256 })
 }
@@ -191,7 +191,8 @@ pub(super) fn retire_complete(
     verify_journal_destinations(&journal, paths)?;
     fs::remove_file(&journal_path).map_err(|_| InstallError::Io)?;
     sync_parent(&journal_path)?;
-    crash("journal-cleanup")
+    crash("journal-cleanup");
+    Ok(())
 }
 
 fn begin_journal(
@@ -244,7 +245,7 @@ fn begin_journal(
         return Err(InstallError::ExistingResidue);
     }
     persist_journal(path, &journal)?;
-    crash("journal-publish")?;
+    crash("journal-publish");
     Ok(journal)
 }
 
@@ -301,7 +302,7 @@ fn prepare_target(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             write_staged(&staged, &target.bytes, &target.fingerprint)?;
             sync_parent(&staged)?;
-            crash(&format!("prepare:{index}"))?;
+            crash(&format!("prepare:{index}"));
         }
         Err(_) => return Err(InstallError::Io),
     }
@@ -365,7 +366,7 @@ fn backup_target(
                 )?;
             }
             sync_parent(&backup)?;
-            crash(&format!("backup:{index}"))?;
+            crash(&format!("backup:{index}"));
         }
         Err(_) => return Err(InstallError::Io),
     }
@@ -419,7 +420,7 @@ fn publish_target(
         }
         fs::rename(&staged, &target.destination).map_err(|_| InstallError::Io)?;
         sync_parent(&target.destination)?;
-        crash(&format!("publish:{index}"))?;
+        crash(&format!("publish:{index}"));
     } else {
         verify_fingerprint(&target.destination, &target.fingerprint)?;
     }
@@ -451,7 +452,7 @@ fn cleanup_target(
             )?;
             fs::remove_file(&backup).map_err(|_| InstallError::Io)?;
             sync_parent(&backup)?;
-            crash(&format!("cleanup:{index}"))?;
+            crash(&format!("cleanup:{index}"));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(InstallError::Io),
@@ -798,7 +799,7 @@ pub(super) fn set_crash(point: &str) {
     CRASH_POINT.with(|configured| *configured.borrow_mut() = Some(point.to_owned()));
 }
 
-fn crash(point: &str) -> Result<(), InstallError> {
+fn crash(point: &str) {
     #[cfg(any(test, feature = "deterministic-test-seams"))]
     if CRASH_POINT.with(|configured| {
         let mut configured = configured.borrow_mut();
@@ -809,8 +810,7 @@ fn crash(point: &str) -> Result<(), InstallError> {
             false
         }
     }) {
-        return Err(InstallError::Io);
+        panic!("simulated abrupt process disappearance after {point}");
     }
     let _ = point;
-    Ok(())
 }

@@ -1130,6 +1130,7 @@ mod tests {
                 InstalledBundleRepairCrashPoint::Cleanup(index),
             ]);
         }
+        assert_eq!(points.len(), 89);
         for point in points {
             let fixture = LiveFixture::new();
             let identity_before = fs::read(
@@ -1141,8 +1142,65 @@ mod tests {
             .unwrap();
             set_installed_bundle_repair_crash_for_test(point).unwrap();
             assert!(
-                drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context())
-                    .is_err()
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _ = drive_live_installed_bundle_repair_with(
+                        fixture.resume(),
+                        fixture.context(),
+                    );
+                }))
+                .is_err(),
+                "{point:?} must abruptly disappear instead of returning an ordinary effect error"
+            );
+            let transcript = fixture.fault.borrow().transcript.clone();
+            let baseline = fixed_live_effect_order();
+            let expected_cut = match point {
+                InstalledBundleRepairCrashPoint::JournalPublish
+                | InstalledBundleRepairCrashPoint::Prepare(_)
+                | InstalledBundleRepairCrashPoint::Backup(_) => 4,
+                InstalledBundleRepairCrashPoint::Stop
+                | InstalledBundleRepairCrashPoint::Publish(_) => 5,
+                InstalledBundleRepairCrashPoint::Reload
+                | InstalledBundleRepairCrashPoint::Cleanup(_)
+                | InstalledBundleRepairCrashPoint::Complete => 6,
+                InstalledBundleRepairCrashPoint::JournalCleanup => 21,
+            };
+            assert_eq!(
+                transcript,
+                baseline[..expected_cut],
+                "{point:?} crash path must stop at the effect and must not run ordinary-error compensation"
+            );
+            let intent: serde_json::Value = serde_json::from_slice(
+                &fs::read(
+                    fixture
+                        .root
+                        .path()
+                        .join("var/lib/enoki-probe/runtime-failure/repair-intent.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let expected_progress = match point {
+                InstalledBundleRepairCrashPoint::JournalCleanup => "status-published",
+                _ => "admitted",
+            };
+            assert_eq!(intent["state"], expected_progress);
+            assert_eq!(
+                intent["lastErrorCode"],
+                serde_json::Value::Null,
+                "{point:?} crash path must not persist an ordinary failure"
+            );
+            let status_path = fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/probe-operation-status.toml");
+            let status = match fs::read_to_string(status_path) {
+                Ok(status) => status,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => panic!("{point:?} status read failed: {error}"),
+            };
+            assert!(
+                !status.contains("status = \"failed\""),
+                "{point:?} crash path must not publish failed status"
             );
             let outcome =
                 drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context())
