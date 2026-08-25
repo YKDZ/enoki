@@ -337,29 +337,19 @@ impl TransactionJournal {
     pub fn load(state_directory: &Path) -> Result<Option<Self>, InstallError> {
         remove_unpublished_journal_candidates(state_directory)?;
         let path = state_directory.join(JOURNAL_NAME);
-        let file = match OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&path)
-        {
-            Ok(file) => file,
+        match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(InstallError::ExistingResidue),
-        };
-        let metadata = file.metadata().map_err(|_| InstallError::Io)?;
-        let state_metadata = fs::symlink_metadata(state_directory).map_err(|_| InstallError::Io)?;
-        if !metadata.is_file()
-            || metadata.uid() != state_metadata.uid()
-            || metadata.mode() & 0o777 != 0o600
-        {
-            return Err(InstallError::ExistingResidue);
+            Err(_) => return Err(InstallError::Io),
+            Ok(_) => {}
         }
-        let mut bytes = Vec::new();
-        use std::io::Read;
-        file.take(1024 * 1024)
-            .read_to_end(&mut bytes)
-            .map_err(|_| InstallError::Io)?;
-        let state: JournalState = serde_json::from_slice(&bytes).map_err(|_| InstallError::Io)?;
+        let state_metadata = fs::symlink_metadata(state_directory).map_err(|_| InstallError::Io)?;
+        let contents = super::installed_layout::trusted_text(
+            &path,
+            state_metadata.uid(),
+            state_metadata.gid(),
+            0o600,
+        )?;
+        let state: JournalState = serde_json::from_str(&contents).map_err(|_| InstallError::Io)?;
         let valid_transaction_id = state.transaction_id.len() == 32
             && state
                 .transaction_id
@@ -383,18 +373,6 @@ impl TransactionJournal {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(_) => Err(InstallError::Io),
         }
-    }
-
-    pub fn committed_layout_matches(
-        state_directory: &Path,
-        expected_version: &str,
-    ) -> Result<bool, InstallError> {
-        if !Self::layout_is_committed(state_directory)? {
-            return Ok(false);
-        }
-        fs::read_to_string(state_directory.join(LAYOUT_NAME))
-            .map(|contents| contents == format!("schema_version=1\nversion={expected_version}\n"))
-            .map_err(|_| InstallError::Io)
     }
 
     pub fn record_identity(&mut self, uid: u32, gid: u32) -> Result<(), InstallError> {
@@ -450,12 +428,33 @@ impl TransactionJournal {
         self.state.paths.iter().all(OwnedPath::still_owned)
     }
 
-    pub fn all_immutable_published_paths_are_owned(&self, identity: &Path) -> bool {
-        self.state
+    pub fn exact_complete_layout_is_owned(&self, paths: &super::FixedInstallPaths) -> bool {
+        let mut expected = super::installed_layout::registry(paths)
+            .into_iter()
+            .map(|target| target.destination)
+            .collect::<std::collections::BTreeSet<_>>();
+        expected.extend([paths.etc_enoki(), paths.state(), paths.identity_dir()]);
+        if self.state.paths.len() != expected.len() || self.state.identity.is_none() {
+            return false;
+        }
+        let actual = self
+            .state
             .paths
             .iter()
-            .filter(|owned| owned.path() != identity)
-            .all(OwnedPath::still_owned)
+            .map(|owned| owned.path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        actual.len() == self.state.paths.len()
+            && actual == expected
+            && self
+                .state
+                .paths
+                .iter()
+                .filter(|owned| {
+                    ![paths.state(), paths.identity_dir(), paths.identity()]
+                        .iter()
+                        .any(|mutable| owned.path() == mutable)
+                })
+                .all(OwnedPath::still_owned)
     }
 
     pub fn owns_published_path(&self, path: &Path) -> Result<bool, InstallError> {

@@ -10,6 +10,8 @@ mod command;
 #[cfg(feature = "acquirer")]
 mod compatible_upgrade;
 mod filesystem;
+mod installed_layout;
+mod replacement_finalize;
 mod systemd;
 mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
@@ -377,24 +379,44 @@ impl InstallFilePort for SystemInstallFiles {
 #[derive(Clone, Debug)]
 pub struct FixedInstallPaths {
     root: PathBuf,
+    #[cfg(test)]
+    test_identity_owner_mapping: Option<(ServiceIdentity, ServiceIdentity)>,
 }
 
 impl FixedInstallPaths {
     pub fn production() -> Self {
         Self {
             root: PathBuf::from("/"),
+            #[cfg(test)]
+            test_identity_owner_mapping: None,
         }
     }
 
     #[cfg(test)]
     fn under(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            test_identity_owner_mapping: Some((
+                ServiceIdentity {
+                    uid: 2_000_000_001,
+                    gid: 2_000_000_002,
+                },
+                ServiceIdentity {
+                    uid: unsafe { libc::geteuid() },
+                    gid: unsafe { libc::getegid() },
+                },
+            )),
+        }
     }
 
     #[cfg(feature = "deterministic-test-seams")]
     #[doc(hidden)]
     pub fn under_test_root(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            #[cfg(test)]
+            test_identity_owner_mapping: None,
+        }
     }
 
     fn map(&self, absolute: &str) -> PathBuf {
@@ -491,6 +513,39 @@ impl FixedInstallPaths {
         } else {
             unsafe { libc::geteuid() }
         }
+    }
+
+    fn expected_root_gid(&self) -> u32 {
+        if self.root == Path::new("/") {
+            0
+        } else {
+            unsafe { libc::getegid() }
+        }
+    }
+
+    fn observed_identity_owner(&self, receipt: ServiceIdentity) -> ServiceIdentity {
+        #[cfg(test)]
+        if let Some((logical, observed)) = self.test_identity_owner_mapping
+            && receipt == logical
+        {
+            return observed;
+        }
+        receipt
+    }
+
+    #[cfg(test)]
+    fn map_identity_owner_for_test(&mut self, logical: ServiceIdentity, observed: ServiceIdentity) {
+        self.test_identity_owner_mapping = Some((logical, observed));
+    }
+
+    fn identity_owner_receipt(&self, observed: ServiceIdentity) -> ServiceIdentity {
+        #[cfg(test)]
+        if let Some((logical, mapped_observed)) = self.test_identity_owner_mapping
+            && observed == mapped_observed
+        {
+            return logical;
+        }
+        observed
     }
 }
 
@@ -723,18 +778,19 @@ pub(crate) fn finalize_complete_replacement_current_probe(
     if !commit.has_valid_binding() || commit.resume_binding() != *resume_binding {
         return Err(InstallError::ExistingResidue);
     }
-    bundle_restore::verify_exact_replacement_layout(paths, bundle, commit)?;
-    let Some(journal) = TransactionJournal::load(&paths.bootstrap_state())? else {
-        return Ok(());
-    };
-    if !journal.matches_resume_binding(resume_binding.as_str()) {
+    let journal = TransactionJournal::load(&paths.bootstrap_state())?;
+    if let Some(journal) = journal.as_ref()
+        && (!journal.matches_resume_binding(resume_binding.as_str())
+            || !journal.exact_complete_layout_is_owned(paths))
+    {
         return Err(InstallError::ExistingResidue);
     }
-    if !journal.all_immutable_published_paths_are_owned(&paths.identity()) {
-        return Err(InstallError::ExistingResidue);
+    replacement_finalize::verify_exact_layout(paths, bundle, commit)?;
+    if let Some(journal) = journal {
+        journal.remove_staging_if_owned()?;
+        journal.remove()?;
     }
-    journal.remove_staging_if_owned()?;
-    journal.remove()
+    Ok(())
 }
 
 struct BootstrapRolePath {

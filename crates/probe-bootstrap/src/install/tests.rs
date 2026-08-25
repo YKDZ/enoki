@@ -11,8 +11,30 @@ mod tests {
     use crate::lifecycle::UpgradeCompletion;
     use crate::trust::BootstrapRole;
     use hmac::{Hmac, Mac};
+    use rsa::{
+        RsaPrivateKey,
+        pkcs8::{EncodePrivateKey, LineEnding},
+        rand_core::OsRng,
+    };
     use sha2::{Digest, Sha256};
+    use std::sync::OnceLock;
     use tempfile::tempdir;
+
+    #[test]
+    fn installed_layout_mechanics_are_shared_without_replacement_or_repair_policy() {
+        let mechanics = include_str!("installed_layout.rs");
+        let repair = include_str!("bundle_restore.rs");
+        let replacement = include_str!("replacement_finalize.rs");
+        let compatible = include_str!("upgrade.rs");
+
+        assert!(!mechanics.contains("ReplacementCommitFact"));
+        assert!(!mechanics.contains("InstalledBundleRepairBinding"));
+        assert!(!repair.contains("ReplacementCommitFact"));
+        assert!(replacement.contains("ReplacementCommitFact"));
+        for consumer in [repair, replacement, compatible] {
+            assert!(consumer.contains("installed_layout::registry"));
+        }
+    }
 
     #[test]
     fn system_state_boundary_assigns_host_facts_only_to_the_fixed_provider() {
@@ -289,7 +311,10 @@ mod tests {
                 let pending = fs::read_to_string(identity).map_err(|_| InstallError::Io)?;
                 let registered = pending.replace(
                     "enrollment_token = \"enk_enroll_secret\"\n",
-                    "probe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = \"private-key\"\n",
+                    &format!(
+                        "enrollment_id = \"enrollment_01\"\nprobe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = {:?}\n",
+                        valid_probe_private_key_pem()
+                    ),
                 );
                 fs::write(identity, registered).map_err(|_| InstallError::Io)?;
             }
@@ -358,6 +383,17 @@ mod tests {
         let temp = tempfile::NamedTempFile::new().unwrap();
         fs::write(temp.path(), b"probe").unwrap();
         temp.reopen().unwrap()
+    }
+
+    fn valid_probe_private_key_pem() -> &'static str {
+        static KEY: OnceLock<String> = OnceLock::new();
+        KEY.get_or_init(|| {
+            RsaPrivateKey::new(&mut OsRng, 1024)
+                .unwrap()
+                .to_pkcs8_pem(LineEnding::LF)
+                .unwrap()
+                .to_string()
+        })
     }
 
     fn installed_bundle_repair_binding(
@@ -3245,10 +3281,14 @@ mod tests {
         ] {
             fs::create_dir_all(temporary.path().join(parent)).unwrap();
         }
-        let paths = FixedInstallPaths::under(temporary.path());
+        let mut paths = FixedInstallPaths::under(temporary.path());
         let replacement_bundle = bundle().with_test_complete_receipts(5);
         let commit = replacement_commit(&replacement_bundle);
         let binding = commit.resume_binding();
+        let probe_identity = ServiceIdentity {
+            uid: 12_345,
+            gid: 12_346,
+        };
         let mut accounts = Accounts::default();
         let mut systemd = Systemd {
             registration_identity: Some(paths.identity()),
@@ -3277,6 +3317,77 @@ mod tests {
         .unwrap();
         assert!(paths.bootstrap_state().join("current-layout").exists());
         assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        let observed_identity = fs::symlink_metadata(paths.identity()).unwrap();
+        let test_root_owner = ServiceIdentity {
+            uid: observed_identity.uid(),
+            gid: observed_identity.gid(),
+        };
+        paths.map_identity_owner_for_test(test_root_owner, test_root_owner);
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "root-owned pending identity 不能冒充 DynamicUser 注册结果"
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        paths.map_identity_owner_for_test(
+            probe_identity,
+            test_root_owner,
+        );
+        assert_ne!(probe_identity.uid, paths.expected_root_uid());
+
+        let journal_path = paths.bootstrap_state().join("activation-journal.json");
+        let mut production_shape_journal: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        for receipt in production_shape_journal["paths"].as_array_mut().unwrap() {
+            if receipt["path"] == serde_json::json!(paths.state())
+                || receipt["path"] == serde_json::json!(paths.identity_dir())
+            {
+                receipt["uid"] = serde_json::json!(42_424_u32);
+                receipt["gid"] = serde_json::json!(42_425_u32);
+            }
+        }
+        let original_journal = serde_json::to_vec(&production_shape_journal).unwrap();
+        fs::write(&journal_path, &original_journal).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+        for case in ["empty", "missing", "duplicate", "unknown", "wrong-receipt"] {
+            let mut changed: serde_json::Value =
+                serde_json::from_slice(&original_journal).unwrap();
+            let entries = changed["paths"].as_array_mut().unwrap();
+            match case {
+                "empty" => entries.clear(),
+                "missing" => {
+                    entries.pop();
+                }
+                "duplicate" => entries.push(entries[0].clone()),
+                "unknown" => {
+                    entries[0]["path"] = serde_json::json!(temporary.path().join("unknown"));
+                }
+                "wrong-receipt" => {
+                    entries[0]["size"] = serde_json::json!(u64::MAX);
+                }
+                _ => unreachable!(),
+            }
+            fs::write(&journal_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert_eq!(
+                finalize_complete_replacement_current_probe(
+                    &paths,
+                    &binding,
+                    &replacement_bundle,
+                    &commit,
+                ),
+                Err(InstallError::ExistingResidue),
+                "activation journal {case} 必须 fail closed"
+            );
+            assert!(journal_path.exists());
+        }
+        fs::write(&journal_path, original_journal).unwrap();
+        fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o600)).unwrap();
 
         let effects_before = (accounts.calls.len(), accounts.ipc_calls.len(), systemd.calls.len());
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
@@ -3338,6 +3449,68 @@ mod tests {
             Err(InstallError::ExistingResidue)
         );
         assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        let identity_backup = paths.identity().with_extension("identity-backup");
+        fs::rename(paths.identity(), &identity_backup).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", paths.identity()).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "identity 必须在读取前以 O_NOFOLLOW 拒绝 /dev/zero symlink"
+        );
+        assert!(journal_path.exists());
+        fs::remove_file(paths.identity()).unwrap();
+        fs::rename(identity_backup, paths.identity()).unwrap();
+        let registered_identity = fs::read_to_string(paths.identity()).unwrap();
+        fs::write(
+            paths.identity(),
+            registered_identity.replace(
+                &format!(
+                    "probe_private_key_pem = {:?}",
+                    valid_probe_private_key_pem()
+                ),
+                "probe_private_key_pem = \"not-a-private-key\"",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "非空垃圾字符串不是生产可用的 PKCS#8/RSA Probe Identity"
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        fs::write(paths.identity(), registered_identity).unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        let registered_identity = fs::read_to_string(paths.identity()).unwrap();
+        fs::write(
+            paths.identity(),
+            registered_identity.replace("enrollment_01", "enrollment_wrong"),
+        )
+        .unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "registration Enrollment receipt 必须绑定当前 Replacement commit"
+        );
+        assert!(journal_path.exists());
+        fs::write(paths.identity(), registered_identity).unwrap();
+        fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         fs::write(paths.binary(), b"pr0be").unwrap();
         fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
@@ -3353,6 +3526,19 @@ mod tests {
         assert!(paths.bootstrap_state().join("activation-journal.json").exists());
         fs::write(paths.binary(), b"probe").unwrap();
         fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o4600)).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &binding,
+                &replacement_bundle,
+                &commit,
+            ),
+            Err(InstallError::ExistingResidue),
+            "exact mode 必须拒绝额外 setuid/setgid/sticky bits"
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        fs::set_permissions(paths.metadata(), fs::Permissions::from_mode(0o600)).unwrap();
         finalize_complete_replacement_current_probe(
             &paths,
             &binding,
@@ -3361,6 +3547,23 @@ mod tests {
         )
         .unwrap();
         assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        for guarded in [paths.identity(), paths.metadata()] {
+            let backup = guarded.with_extension("safe-open-backup");
+            fs::rename(&guarded, &backup).unwrap();
+            std::os::unix::fs::symlink("/dev/zero", &guarded).unwrap();
+            assert_eq!(
+                finalize_complete_replacement_current_probe(
+                    &paths,
+                    &binding,
+                    &replacement_bundle,
+                    &commit,
+                ),
+                Err(InstallError::ExistingResidue),
+                "journal absent 重算必须在读取前拒绝 /dev/zero symlink"
+            );
+            fs::remove_file(&guarded).unwrap();
+            fs::rename(backup, guarded).unwrap();
+        }
         fs::write(paths.binary(), b"pr0be").unwrap();
         fs::set_permissions(paths.binary(), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(

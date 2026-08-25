@@ -6,7 +6,6 @@ use crate::lifecycle::{
 };
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use std::io::Read;
 use std::os::fd::AsRawFd;
 
 const UPGRADE_ATTEMPT_FILE: &str = "probe-upgrade-attempt.toml";
@@ -1218,34 +1217,13 @@ fn sha256_field(contents: &str, name: &str) -> Result<String, InstallError> {
 }
 
 fn trusted_text(path: &Path, uid: u32, mode: u32) -> Result<String, InstallError> {
-    let mut file = trusted_file(path, uid, mode)?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
-    if bytes.is_empty() || bytes.len() > 256 * 1024 {
-        return Err(InstallError::ExistingResidue);
-    }
-    String::from_utf8(bytes).map_err(|_| InstallError::ExistingResidue)
+    let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::ExistingResidue)?;
+    super::installed_layout::trusted_text(path, uid, metadata.gid(), mode)
 }
 
 fn trusted_file(path: &Path, uid: u32, mode: u32) -> Result<File, InstallError> {
-    let path_metadata = fs::symlink_metadata(path).map_err(|_| InstallError::ExistingResidue)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| InstallError::ExistingResidue)?;
-    let opened = file.metadata().map_err(|_| InstallError::ExistingResidue)?;
-    if path_metadata.dev() != opened.dev()
-        || path_metadata.ino() != opened.ino()
-        || path_metadata.file_type().is_symlink()
-        || !opened.is_file()
-        || opened.uid() != uid
-        || opened.mode() & 0o777 != mode
-        || opened.nlink() != 1
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    Ok(file)
+    let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::ExistingResidue)?;
+    super::installed_layout::trusted_file(path, uid, metadata.gid(), mode, metadata.len())
 }
 
 pub fn upgrade_current_probe_for_operation(
@@ -1657,120 +1635,68 @@ fn prepare_upgrade(
     paths: &FixedInstallPaths,
     source: &InstalledUpgradeBinding,
 ) -> Result<PreparedUpgrade, InstallError> {
-    let destinations = vec![
-        paths.binary(),
-        paths.observation_runtime_binary(),
-        paths.cpu_provider_binary(),
-        paths.disk_health_provider_binary(),
-        paths.lifecycle_companion_binary(),
-        paths.bootstrap_acquirer(),
-        paths.bootstrap_activator(),
-        paths.unit(),
-        paths.observation_runtime_unit(),
-        paths.observation_runtime_socket_unit(),
-        paths.cpu_provider_unit(),
-        paths.cpu_provider_socket_unit(),
-        paths.disk_health_provider_unit(),
-        paths.disk_health_provider_socket_unit(),
-        paths.lifecycle_companion_unit(),
-        paths.lifecycle_companion_socket_unit(),
-        paths.lifecycle_upgrade_unit(),
-        paths.lifecycle_upgrade_socket_unit(),
-        paths.identity(),
-        paths.metadata(),
-        paths.observation_runtime_failure_recorder_unit(),
-    ];
+    let registry = super::installed_layout::registry(paths);
+    let destinations = registry
+        .iter()
+        .map(|target| target.destination.clone())
+        .collect();
     let mut prepared = PreparedUpgrade {
         staged: Vec::new(),
         destinations,
         backups: Vec::new(),
         retain_for_repair: false,
     };
-    for (source, destination) in [
-        (&mut *components.probe, &prepared.destinations[0]),
-        (
-            &mut *components.observation_runtime,
-            &prepared.destinations[1],
-        ),
-        (
-            &mut *components.system_state_provider,
-            &prepared.destinations[2],
-        ),
-        (
-            &mut *components.disk_health_provider,
-            &prepared.destinations[3],
-        ),
-        (
-            &mut *components.lifecycle_companion,
-            &prepared.destinations[4],
-        ),
-        (
-            &mut *components.bootstrap_acquirer,
-            &prepared.destinations[5],
-        ),
-        (
-            &mut *components.bootstrap_activator,
-            &prepared.destinations[6],
-        ),
-    ] {
-        prepared
-            .staged
-            .push(stage_reader(source, destination, 0o755)?);
+    for target in registry {
+        use super::installed_layout::TargetKind;
+        let staged = match target.kind {
+            TargetKind::Bundle(role) => {
+                let component = match role {
+                    "probe" => &mut *components.probe,
+                    "observation-runtime" => &mut *components.observation_runtime,
+                    "system-state-provider" => &mut *components.system_state_provider,
+                    "disk-health-provider" => &mut *components.disk_health_provider,
+                    "lifecycle-companion" => &mut *components.lifecycle_companion,
+                    "bootstrap-acquirer" => &mut *components.bootstrap_acquirer,
+                    "bootstrap-activator" => &mut *components.bootstrap_activator,
+                    _ => return Err(InstallError::InvalidVerifiedComponent),
+                };
+                stage_reader(component, &target.destination, target.mode)?
+            }
+            TargetKind::Unit(generate) => {
+                stage_bytes(generate().as_bytes(), &target.destination, target.mode)?
+            }
+            TargetKind::Identity => {
+                let metadata = fs::symlink_metadata(&target.destination)
+                    .map_err(|_| InstallError::ExistingResidue)?;
+                let current = super::installed_layout::trusted_text(
+                    &target.destination,
+                    metadata.uid(),
+                    metadata.gid(),
+                    target.mode,
+                )?;
+                let updated = updated_receipt_projection(&current, bundle, source)?;
+                stage_bytes_owned(
+                    updated.as_bytes(),
+                    &target.destination,
+                    target.mode,
+                    metadata.uid(),
+                    metadata.gid(),
+                )?
+            }
+            TargetKind::Metadata => {
+                let root = paths.expected_root_uid();
+                let current = super::installed_layout::trusted_text(
+                    &target.destination,
+                    root,
+                    root,
+                    target.mode,
+                )?;
+                let updated = updated_metadata(&current, bundle, source)?;
+                stage_bytes(updated.as_bytes(), &target.destination, target.mode)?
+            }
+        };
+        prepared.staged.push(staged);
     }
-    for (contents, destination) in [
-        (service_unit(), &prepared.destinations[7]),
-        (observation_runtime_unit(), &prepared.destinations[8]),
-        (
-            observation_runtime_socket_unit().to_owned(),
-            &prepared.destinations[9],
-        ),
-        (cpu_provider_unit(), &prepared.destinations[10]),
-        (
-            cpu_provider_socket_unit().to_owned(),
-            &prepared.destinations[11],
-        ),
-        (disk_health_provider_unit(), &prepared.destinations[12]),
-        (
-            disk_health_provider_socket_unit().to_owned(),
-            &prepared.destinations[13],
-        ),
-        (lifecycle_companion_unit(), &prepared.destinations[14]),
-        (
-            lifecycle_companion_socket_unit().to_owned(),
-            &prepared.destinations[15],
-        ),
-        (lifecycle_upgrade_unit(), &prepared.destinations[16]),
-        (
-            lifecycle_upgrade_socket_unit().to_owned(),
-            &prepared.destinations[17],
-        ),
-    ] {
-        prepared
-            .staged
-            .push(stage_bytes(contents.as_bytes(), destination, 0o644)?);
-    }
-    let current_identity = fs::read_to_string(paths.identity()).map_err(|_| InstallError::Io)?;
-    let identity_metadata = fs::metadata(paths.identity()).map_err(|_| InstallError::Io)?;
-    let updated_identity = updated_receipt_projection(&current_identity, bundle, source)?;
-    prepared.staged.push(stage_bytes_owned(
-        updated_identity.as_bytes(),
-        &prepared.destinations[18],
-        0o600,
-        identity_metadata.uid(),
-        identity_metadata.gid(),
-    )?);
-    let current_metadata = fs::read_to_string(paths.metadata()).map_err(|_| InstallError::Io)?;
-    let updated = updated_metadata(&current_metadata, bundle, source)?;
-    prepared.staged.push(stage_bytes(
-        updated.as_bytes(),
-        &prepared.destinations[19],
-        0o600,
-    )?);
-    prepared.staged.push(stage_bytes(
-        observation_runtime_failure_recorder_unit().as_bytes(),
-        &prepared.destinations[20],
-        0o644,
-    )?);
     for destination in &prepared.destinations {
         let name = destination
             .file_name()
@@ -2724,29 +2650,10 @@ fn sync_directory(path: &Path) -> Result<(), InstallError> {
 }
 
 pub(super) fn upgrade_destinations(paths: &FixedInstallPaths) -> Vec<PathBuf> {
-    vec![
-        paths.binary(),
-        paths.observation_runtime_binary(),
-        paths.cpu_provider_binary(),
-        paths.disk_health_provider_binary(),
-        paths.lifecycle_companion_binary(),
-        paths.bootstrap_acquirer(),
-        paths.bootstrap_activator(),
-        paths.unit(),
-        paths.observation_runtime_unit(),
-        paths.observation_runtime_socket_unit(),
-        paths.cpu_provider_unit(),
-        paths.cpu_provider_socket_unit(),
-        paths.disk_health_provider_unit(),
-        paths.disk_health_provider_socket_unit(),
-        paths.lifecycle_companion_unit(),
-        paths.lifecycle_companion_socket_unit(),
-        paths.lifecycle_upgrade_unit(),
-        paths.lifecycle_upgrade_socket_unit(),
-        paths.identity(),
-        paths.metadata(),
-        paths.observation_runtime_failure_recorder_unit(),
-    ]
+    super::installed_layout::registry(paths)
+        .into_iter()
+        .map(|target| target.destination)
+        .collect()
 }
 
 fn version_is_newer(target: &str, source: &str) -> bool {

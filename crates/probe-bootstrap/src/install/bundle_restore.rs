@@ -5,7 +5,6 @@ use super::{
         updated_receipt_projection,
     },
 };
-use crate::replacement::ReplacementCommitFact;
 use crate::verifier::VerifiedBundle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,22 +21,14 @@ use std::{
 
 const JOURNAL_NAME: &str = "installed-bundle-repair.json";
 const MAX_JOURNAL_BYTES: u64 = 256 * 1024;
-const TARGET_COUNT: usize = 21;
+const TARGET_COUNT: usize = installed_layout::TARGET_COUNT;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct BundleRestoreReceipt {
     pub(super) binding_sha256: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Fingerprint {
-    length: u64,
-    sha256: String,
-    uid: u32,
-    gid: u32,
-    mode: u32,
-}
+use super::installed_layout::{self, Fingerprint, TargetKind};
 
 #[derive(Clone, Debug)]
 struct PlannedTarget {
@@ -202,160 +193,6 @@ pub(super) fn retire_complete(
     crash("journal-cleanup")
 }
 
-pub(super) fn verify_exact_replacement_layout(
-    paths: &FixedInstallPaths,
-    bundle: &VerifiedBundle,
-    commit: &ReplacementCommitFact,
-) -> Result<(), InstallError> {
-    if commit.schema_version != 1
-        || !commit.cleanup_complete
-        || !commit.candidate_layout_complete
-        || commit.intent.target_probe_version != bundle.version
-        || commit.intent.target_manifest_sha256 != bundle.manifest_sha256
-        || commit.intent.target_asset_set_digest
-            != format!("sha256:{}", bundle.asset_set_manifest_sha256)
-        || !super::transaction::TransactionJournal::committed_layout_matches(
-            &paths.bootstrap_state(),
-            &bundle.version,
-        )?
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    let root_uid = paths.expected_root_uid();
-    for (path, role) in [
-        (paths.binary(), "probe"),
-        (paths.observation_runtime_binary(), "observation-runtime"),
-        (paths.cpu_provider_binary(), "system-state-provider"),
-        (paths.disk_health_provider_binary(), "disk-health-provider"),
-        (paths.lifecycle_companion_binary(), "lifecycle-companion"),
-        (paths.bootstrap_acquirer(), "bootstrap-acquirer"),
-        (paths.bootstrap_activator(), "bootstrap-activator"),
-    ] {
-        let (sha256, length) = bundle
-            .component_receipt(role)
-            .ok_or(InstallError::InvalidVerifiedComponent)?;
-        verify_fingerprint(
-            &path,
-            &Fingerprint {
-                length,
-                sha256: sha256.to_owned(),
-                uid: root_uid,
-                gid: root_uid,
-                mode: 0o755,
-            },
-        )?;
-        require_single_link(&path)?;
-    }
-    for (path, contents) in canonical_unit_registry(paths) {
-        verify_fingerprint(
-            &path,
-            &Fingerprint {
-                length: contents.len() as u64,
-                sha256: sha256(contents.as_bytes()),
-                uid: root_uid,
-                gid: root_uid,
-                mode: 0o644,
-            },
-        )?;
-        require_single_link(&path)?;
-    }
-    let metadata_path = paths.metadata();
-    let metadata = fs::read_to_string(&metadata_path).map_err(|_| InstallError::Io)?;
-    let metadata_fingerprint = fingerprint(&metadata_path)?;
-    if metadata_fingerprint.uid != root_uid
-        || metadata_fingerprint.gid != root_uid
-        || metadata_fingerprint.mode != 0o600
-        || super::upgrade::metadata_scalar(&metadata, "schema_version").as_deref() != Some("5")
-        || super::upgrade::metadata_string(&metadata, "bundle_version").as_deref()
-            != Some(bundle.version.as_str())
-        || super::upgrade::metadata_string(&metadata, "target_manifest_sha256").as_deref()
-            != Some(bundle.manifest_sha256.as_str())
-        || super::upgrade::metadata_string(&metadata, "install_state_sha256").as_deref()
-            != Some(bundle.install_state_sha256().as_str())
-        || super::upgrade::metadata_string(&metadata, "hub_url")
-            .as_deref()
-            .map(|value| value.trim_end_matches('/'))
-            != Some(commit.intent.hub_origin.trim_end_matches('/'))
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    require_single_link(&metadata_path)?;
-
-    let identity_path = paths.identity();
-    let identity = fs::read_to_string(&identity_path).map_err(|_| InstallError::Io)?;
-    let identity_fingerprint = fingerprint(&identity_path)?;
-    if identity_fingerprint.uid != root_uid
-        || identity_fingerprint.gid != root_uid
-        || identity_fingerprint.mode != 0o600
-        || super::upgrade::metadata_string(&identity, "hub_url")
-            .as_deref()
-            .map(|value| value.trim_end_matches('/'))
-            != Some(commit.intent.hub_origin.trim_end_matches('/'))
-        || super::upgrade::metadata_string(&identity, "host_id").as_deref()
-            != Some(commit.intent.host_id.as_str())
-        || super::upgrade::metadata_string(&identity, "probe_id")
-            .is_none_or(|probe_id| probe_id.is_empty() || probe_id == commit.intent.old_probe_id)
-        || super::upgrade::metadata_string(&identity, "probe_private_key_pem")
-            .is_none_or(|key| key.is_empty())
-        || super::upgrade::metadata_string(&identity, "bundle_version").as_deref()
-            != Some(bundle.version.as_str())
-        || super::upgrade::metadata_string(&identity, "target_manifest_sha256").as_deref()
-            != Some(bundle.manifest_sha256.as_str())
-        || super::upgrade::metadata_string(&identity, "install_state_sha256").as_deref()
-            != Some(bundle.install_state_sha256().as_str())
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    require_single_link(&identity_path)
-}
-
-fn canonical_unit_registry(paths: &FixedInstallPaths) -> Vec<(PathBuf, String)> {
-    vec![
-        (paths.unit(), super::service_unit()),
-        (
-            paths.observation_runtime_unit(),
-            super::observation_runtime_unit(),
-        ),
-        (
-            paths.observation_runtime_socket_unit(),
-            super::observation_runtime_socket_unit().to_owned(),
-        ),
-        (paths.cpu_provider_unit(), super::cpu_provider_unit()),
-        (
-            paths.cpu_provider_socket_unit(),
-            super::cpu_provider_socket_unit().to_owned(),
-        ),
-        (
-            paths.disk_health_provider_unit(),
-            super::disk_health_provider_unit(),
-        ),
-        (
-            paths.disk_health_provider_socket_unit(),
-            super::disk_health_provider_socket_unit().to_owned(),
-        ),
-        (
-            paths.lifecycle_companion_unit(),
-            super::lifecycle_companion_unit(),
-        ),
-        (
-            paths.lifecycle_companion_socket_unit(),
-            super::lifecycle_companion_socket_unit().to_owned(),
-        ),
-        (
-            paths.lifecycle_upgrade_unit(),
-            super::lifecycle_upgrade_unit(),
-        ),
-        (
-            paths.lifecycle_upgrade_socket_unit(),
-            super::lifecycle_upgrade_socket_unit().to_owned(),
-        ),
-        (
-            paths.observation_runtime_failure_recorder_unit(),
-            super::observation_runtime_failure_recorder_unit(),
-        ),
-    ]
-}
-
 fn begin_journal(
     path: &Path,
     binding_sha256: &str,
@@ -400,7 +237,7 @@ fn begin_journal(
         .metadata()
         .map_err(|_| InstallError::Io)?
         .mode()
-        & 0o777
+        & 0o7777
         != 0o700
     {
         return Err(InstallError::ExistingResidue);
@@ -630,143 +467,67 @@ fn planned_targets(
 ) -> Result<Vec<PlannedTarget>, InstallError> {
     let root_uid = paths.expected_root_uid();
     let mut targets = Vec::with_capacity(TARGET_COUNT);
-    for (id, source, destination, role) in [
-        ("probe", &mut *components.probe, paths.binary(), "probe"),
-        (
-            "observation-runtime",
-            &mut *components.observation_runtime,
-            paths.observation_runtime_binary(),
-            "observation-runtime",
-        ),
-        (
-            "system-state-provider",
-            &mut *components.system_state_provider,
-            paths.cpu_provider_binary(),
-            "system-state-provider",
-        ),
-        (
-            "disk-health-provider",
-            &mut *components.disk_health_provider,
-            paths.disk_health_provider_binary(),
-            "disk-health-provider",
-        ),
-        (
-            "lifecycle-companion",
-            &mut *components.lifecycle_companion,
-            paths.lifecycle_companion_binary(),
-            "lifecycle-companion",
-        ),
-        (
-            "bootstrap-acquirer",
-            &mut *components.bootstrap_acquirer,
-            paths.bootstrap_acquirer(),
-            "bootstrap-acquirer",
-        ),
-        (
-            "bootstrap-activator",
-            &mut *components.bootstrap_activator,
-            paths.bootstrap_activator(),
-            "bootstrap-activator",
-        ),
-    ] {
-        let bytes = read_component(source)?;
-        let (expected_sha256, expected_length) = bundle
-            .component_receipt(role)
-            .ok_or(InstallError::InvalidVerifiedComponent)?;
-        if bytes.len() as u64 != expected_length || sha256(&bytes) != expected_sha256 {
-            return Err(InstallError::InvalidVerifiedComponent);
-        }
-        targets.push(planned(id, destination, bytes, root_uid, root_uid, 0o755));
-    }
-    for (id, destination, contents) in [
-        ("probe-unit", paths.unit(), super::service_unit()),
-        (
-            "runtime-unit",
-            paths.observation_runtime_unit(),
-            super::observation_runtime_unit(),
-        ),
-        (
-            "runtime-socket",
-            paths.observation_runtime_socket_unit(),
-            super::observation_runtime_socket_unit().to_owned(),
-        ),
-        (
-            "cpu-unit",
-            paths.cpu_provider_unit(),
-            super::cpu_provider_unit(),
-        ),
-        (
-            "cpu-socket",
-            paths.cpu_provider_socket_unit(),
-            super::cpu_provider_socket_unit().to_owned(),
-        ),
-        (
-            "disk-unit",
-            paths.disk_health_provider_unit(),
-            super::disk_health_provider_unit(),
-        ),
-        (
-            "disk-socket",
-            paths.disk_health_provider_socket_unit(),
-            super::disk_health_provider_socket_unit().to_owned(),
-        ),
-        (
-            "lifecycle-unit",
-            paths.lifecycle_companion_unit(),
-            super::lifecycle_companion_unit(),
-        ),
-        (
-            "lifecycle-socket",
-            paths.lifecycle_companion_socket_unit(),
-            super::lifecycle_companion_socket_unit().to_owned(),
-        ),
-        (
-            "upgrade-unit",
-            paths.lifecycle_upgrade_unit(),
-            super::lifecycle_upgrade_unit(),
-        ),
-        (
-            "upgrade-socket",
-            paths.lifecycle_upgrade_socket_unit(),
-            super::lifecycle_upgrade_socket_unit().to_owned(),
-        ),
-    ] {
+    for target in installed_layout::registry(paths) {
+        let (bytes, uid, gid) = match target.kind {
+            TargetKind::Bundle(role) => {
+                let source = match role {
+                    "probe" => &mut *components.probe,
+                    "observation-runtime" => &mut *components.observation_runtime,
+                    "system-state-provider" => &mut *components.system_state_provider,
+                    "disk-health-provider" => &mut *components.disk_health_provider,
+                    "lifecycle-companion" => &mut *components.lifecycle_companion,
+                    "bootstrap-acquirer" => &mut *components.bootstrap_acquirer,
+                    "bootstrap-activator" => &mut *components.bootstrap_activator,
+                    _ => return Err(InstallError::InvalidVerifiedComponent),
+                };
+                let bytes = read_component(source)?;
+                let (expected_sha256, expected_length) = bundle
+                    .component_receipt(role)
+                    .ok_or(InstallError::InvalidVerifiedComponent)?;
+                if bytes.len() as u64 != expected_length || sha256(&bytes) != expected_sha256 {
+                    return Err(InstallError::InvalidVerifiedComponent);
+                }
+                (bytes, root_uid, root_uid)
+            }
+            TargetKind::Unit(generate) => (generate().into_bytes(), root_uid, root_uid),
+            TargetKind::Identity => {
+                let metadata = fs::symlink_metadata(&target.destination)
+                    .map_err(|_| InstallError::ExistingResidue)?;
+                let current = installed_layout::trusted_text(
+                    &target.destination,
+                    metadata.uid(),
+                    metadata.gid(),
+                    target.mode,
+                )?;
+                (
+                    updated_receipt_projection(&current, bundle, installed)?.into_bytes(),
+                    metadata.uid(),
+                    metadata.gid(),
+                )
+            }
+            TargetKind::Metadata => {
+                let current = installed_layout::trusted_text(
+                    &target.destination,
+                    root_uid,
+                    root_uid,
+                    target.mode,
+                )?;
+                (
+                    updated_metadata(&current, bundle, installed)?.into_bytes(),
+                    root_uid,
+                    root_uid,
+                )
+            }
+        };
         targets.push(planned(
-            id,
-            destination,
-            contents.into_bytes(),
-            root_uid,
-            root_uid,
-            0o644,
+            target.id,
+            target.destination,
+            bytes,
+            uid,
+            gid,
+            target.mode,
         ));
     }
-    let identity_metadata = fs::metadata(paths.identity()).map_err(|_| InstallError::Io)?;
-    let current_identity = fs::read_to_string(paths.identity()).map_err(|_| InstallError::Io)?;
-    targets.push(planned(
-        "identity",
-        paths.identity(),
-        updated_receipt_projection(&current_identity, bundle, installed)?.into_bytes(),
-        identity_metadata.uid(),
-        identity_metadata.gid(),
-        0o600,
-    ));
-    let current_metadata = fs::read_to_string(paths.metadata()).map_err(|_| InstallError::Io)?;
-    targets.push(planned(
-        "metadata",
-        paths.metadata(),
-        updated_metadata(&current_metadata, bundle, installed)?.into_bytes(),
-        root_uid,
-        root_uid,
-        0o600,
-    ));
-    targets.push(planned(
-        "runtime-failure-recorder-unit",
-        paths.observation_runtime_failure_recorder_unit(),
-        super::observation_runtime_failure_recorder_unit().into_bytes(),
-        root_uid,
-        root_uid,
-        0o644,
-    ));
     Ok(targets)
 }
 
@@ -804,7 +565,10 @@ fn verify_journal_destinations(
     journal: &Journal,
     paths: &FixedInstallPaths,
 ) -> Result<(), InstallError> {
-    let destinations = super::upgrade::upgrade_destinations(paths);
+    let destinations = installed_layout::registry(paths)
+        .into_iter()
+        .map(|target| target.destination)
+        .collect::<Vec<_>>();
     if destinations.len() != journal.targets.len() {
         return Err(InstallError::ExistingResidue);
     }
@@ -835,35 +599,11 @@ fn fingerprint_if_present(path: &Path) -> Result<Option<Fingerprint>, InstallErr
 }
 
 fn fingerprint(path: &Path) -> Result<Fingerprint, InstallError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| InstallError::ExistingResidue)?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|_| InstallError::ExistingResidue)?;
-    let opened = file.metadata().map_err(|_| InstallError::ExistingResidue)?;
-    if metadata.file_type().is_symlink()
-        || !opened.is_file()
-        || metadata.dev() != opened.dev()
-        || metadata.ino() != opened.ino()
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|_| InstallError::Io)?;
-    Ok(Fingerprint {
-        length: bytes.len() as u64,
-        sha256: sha256(&bytes),
-        uid: opened.uid(),
-        gid: opened.gid(),
-        mode: opened.mode() & 0o777,
-    })
+    installed_layout::fingerprint(path)
 }
 
 fn verify_fingerprint(path: &Path, expected: &Fingerprint) -> Result<(), InstallError> {
-    (fingerprint(path)? == *expected)
-        .then_some(())
-        .ok_or(InstallError::ExistingResidue)
+    installed_layout::verify_fingerprint(path, expected)
 }
 
 fn require_single_link(path: &Path) -> Result<(), InstallError> {
@@ -938,7 +678,7 @@ fn load_journal(path: &Path, expected_uid: u32) -> Result<Option<Journal>, Insta
     let metadata = file.metadata().map_err(|_| InstallError::ExistingResidue)?;
     if !metadata.is_file()
         || metadata.uid() != expected_uid
-        || metadata.mode() & 0o777 != 0o600
+        || metadata.mode() & 0o7777 != 0o600
         || metadata.nlink() != 1
         || metadata.len() > MAX_JOURNAL_BYTES
     {
