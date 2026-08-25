@@ -22,6 +22,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        host_id: "7".to_string(),
         installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
@@ -50,6 +51,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     .expect("Probe registration succeeds");
 
     assert_eq!(outcome.probe_id, "probe_01");
+    assert_eq!(outcome.host_id, "7");
     assert_eq!(
         transport.observed_url,
         "https://hub.example/api/probe/register",
@@ -68,6 +70,7 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
     let bootstrap_config =
         fs::read_to_string(bootstrap_config_path).expect("bootstrap config exists");
     assert!(bootstrap_config.contains("hub_url = \"https://hub.example\""));
+    assert!(bootstrap_config.contains("host_id = \"7\""));
     assert!(bootstrap_config.contains("probe_id = \"probe_01\""));
     assert!(bootstrap_config.contains("probe_private_key_pem = \"-----BEGIN PRIVATE KEY-----"));
     assert!(bootstrap_config.contains("server_time_offset_ms = "));
@@ -79,10 +82,41 @@ fn probe_registration_posts_protobuf_and_stores_probe_identity() {
 }
 
 #[test]
+fn probe_registration_rejects_a_legacy_response_without_host_identity() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
+    let response = ProbeRegistrationResponse {
+        host_id: String::new(),
+        probe_id: "probe_01".to_string(),
+        server_time_ms: 1_725_000_000_000,
+        ..Default::default()
+    };
+    let mut transport = RecordingTransport {
+        observed_body: Vec::new(),
+        observed_url: String::new(),
+        response: response.encode_to_vec(),
+    };
+
+    let error = register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path: bootstrap_config_path.clone(),
+            enrollment_token: "enk_enroll_secret".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect_err("旧 registration outcome 无法证明 Host binding");
+
+    assert!(matches!(error, RegistrationError::InvalidResponse(_)));
+    assert!(!bootstrap_config_path.exists());
+}
+
+#[test]
 fn installation_inspection_uses_registration_without_generating_an_identity() {
     let response =
         ProbeRegistrationResponse {
             enrollment_id: String::new(),
+            host_id: "7".to_string(),
             initial_configuration: None,
             installation_inspection: Some(
                 enoki_probe::protocol::enoki::v1::ProbeInstallationInspectionResponse {
@@ -247,6 +281,7 @@ fn probe_registration_preserves_installer_owned_bootstrap_fields() {
     .expect("write installer bootstrap config");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        host_id: "7".to_string(),
         installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),
@@ -319,6 +354,7 @@ fn probe_registration_does_not_persist_required_host_profile_as_configurable_col
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        host_id: "7".to_string(),
         installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: vec![
@@ -364,6 +400,7 @@ fn probe_registration_drops_unknown_initial_collector_ids_from_bootstrap_config(
     let bootstrap_config_path = temp.path().join("probe-bootstrap.toml");
     let response = ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        host_id: "7".to_string(),
         installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: vec![
@@ -532,6 +569,7 @@ fn all_collector_ids() -> Vec<String> {
 fn registration_response() -> Vec<u8> {
     ProbeRegistrationResponse {
         enrollment_id: String::new(),
+        host_id: "7".to_string(),
         installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),

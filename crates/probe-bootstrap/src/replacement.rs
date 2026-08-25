@@ -34,6 +34,31 @@ pub struct ReplacementCommitFact {
     pub candidate_layout_complete: bool,
 }
 
+/// Probe Local Lifecycle kernel 只持有这个不透明绑定；Enrollment、身份与候选语义
+/// 仍由 Replacement coordinator 在生成 commit fact 时封闭验证。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplacementResumeBinding(String);
+
+impl ReplacementCommitFact {
+    #[cfg(feature = "activator")]
+    #[must_use]
+    pub fn resume_binding(&self) -> ReplacementResumeBinding {
+        ReplacementResumeBinding(self.canonical_intent_sha256.clone())
+    }
+}
+
+impl ReplacementResumeBinding {
+    #[cfg(feature = "activator")]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(all(test, feature = "activator"))]
+    pub(crate) fn for_test(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
 pub trait ReplacementCommitStore {
     type Error;
 
@@ -295,6 +320,30 @@ mod tests {
             target_probe_version: "1.2.3".to_owned(),
             target_asset_set_digest: format!("sha256:{}", "b".repeat(64)),
             target_manifest_sha256: "c".repeat(64),
+        }
+    }
+
+    #[test]
+    fn resume_binding_covers_every_canonical_replacement_fact() {
+        let original = intent();
+        let expected = canonical_intent_sha256(&original).unwrap();
+        let mutations: [fn(&mut ReplacementIntent); 10] = [
+            |intent| intent.enrollment_id.push_str("_other"),
+            |intent| intent.enrollment_token_sha256.replace_range(..1, "e"),
+            |intent| intent.host_id.push('8'),
+            |intent| intent.hub_origin.push_str("/other"),
+            |intent| intent.old_probe_id.push_str("_other"),
+            |intent| intent.source_probe_version.push_str("+other"),
+            |intent| intent.source_probe_sha256.replace_range(..1, "f"),
+            |intent| intent.target_probe_version.push_str("+other"),
+            |intent| intent.target_asset_set_digest.replace_range(7..8, "e"),
+            |intent| intent.target_manifest_sha256.replace_range(..1, "f"),
+        ];
+
+        for mutate in mutations {
+            let mut changed = original.clone();
+            mutate(&mut changed);
+            assert_ne!(canonical_intent_sha256(&changed).unwrap(), expected);
         }
     }
 

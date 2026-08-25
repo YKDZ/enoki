@@ -254,6 +254,7 @@ fn probe_run_registers_from_enrollment_token_and_removes_token_from_config() {
     );
     let response = ProbeRegistrationResponse {
         enrollment_id: "enrollment-01".to_string(),
+        host_id: "7".to_string(),
         installation_inspection: None,
         initial_configuration: Some(ProbeConfigurationResponse {
             enabled_collector_ids: all_collector_ids(),

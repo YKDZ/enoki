@@ -61,6 +61,9 @@ message ProbeRegistrationResponse {
   // Probes omit it without changing the frame shape.
   string enrollment_id = 5;
   ProbeInstallationInspectionResponse installation_inspection = 6;
+  // Hub 在 registration transaction 中持久绑定的 Host；本机身份 receipt
+  // 必须保存它，不能从后续 Probe route 反向推断。
+  string host_id = 7;
 }
 
 message ProbeReportRequest {

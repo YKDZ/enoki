@@ -976,6 +976,65 @@ pub struct VerifiedUpgradeComponents<'a> {
 pub fn inspect_installed_probe_for_upgrade(
     paths: &FixedInstallPaths,
 ) -> Result<InstalledUpgradeBinding, InstallError> {
+    let (metadata, identity) = trusted_complete_installed_layout(paths)?;
+    let field = |name: &str| {
+        metadata_string(&metadata, name)
+            .filter(|value| !value.is_empty())
+            .ok_or(InstallError::ExistingResidue)
+    };
+    let hub_origin = field("hub_url")?;
+    if metadata_string(&identity, "hub_url")
+        .as_deref()
+        .map(|value| value.trim_end_matches('/'))
+        != Some(hub_origin.trim_end_matches('/'))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let probe_id = metadata_string(&identity, "probe_id")
+        .filter(|value| !value.is_empty())
+        .ok_or(InstallError::ExistingResidue)?
+        .to_owned();
+    Ok(InstalledUpgradeBinding {
+        hub_origin,
+        probe_id,
+        source_bundle_version: field("bundle_version")?,
+        source_install_state_sha256: sha256_field(&metadata, "install_state_sha256")?,
+        source_manifest_sha256: sha256_field(&metadata, "target_manifest_sha256")?,
+    })
+}
+
+pub(super) fn verify_installed_activation_receipt(
+    paths: &FixedInstallPaths,
+    expected_version: &str,
+) -> Result<(), InstallError> {
+    let (metadata, identity) = trusted_complete_installed_layout(paths)?;
+    if metadata_string(&metadata, "bundle_version").as_deref() != Some(expected_version) {
+        return Err(InstallError::ExistingResidue);
+    }
+    let hub = metadata_string(&metadata, "hub_url")
+        .filter(|value| !value.is_empty())
+        .ok_or(InstallError::ExistingResidue)?;
+    if metadata_string(&identity, "hub_url")
+        .as_deref()
+        .map(|value| value.trim_end_matches('/'))
+        != Some(hub.trim_end_matches('/'))
+    {
+        return Err(InstallError::ExistingResidue);
+    }
+    let registered_identity = ["probe_id", "host_id", "probe_private_key_pem"]
+        .into_iter()
+        .all(|name| metadata_string(&identity, name).is_some_and(|value| !value.is_empty()));
+    if !registered_identity {
+        return Err(InstallError::ExistingResidue);
+    }
+    sha256_field(&metadata, "install_state_sha256")?;
+    sha256_field(&metadata, "target_manifest_sha256")?;
+    Ok(())
+}
+
+fn trusted_complete_installed_layout(
+    paths: &FixedInstallPaths,
+) -> Result<(String, String), InstallError> {
     let metadata = trusted_text(&paths.metadata(), paths.expected_root_uid(), 0o600)?;
     if metadata_scalar(&metadata, "schema_version").as_deref() != Some("5") {
         return Err(InstallError::ExistingResidue);
@@ -1006,30 +1065,7 @@ pub fn inspect_installed_probe_for_upgrade(
         .map_err(|_| InstallError::ExistingResidue)?
         .uid();
     let identity = trusted_text(&paths.identity(), identity_uid, 0o600)?;
-    let field = |name: &str| {
-        metadata_string(&metadata, name)
-            .filter(|value| !value.is_empty())
-            .ok_or(InstallError::ExistingResidue)
-    };
-    let hub_origin = field("hub_url")?;
-    if metadata_string(&identity, "hub_url")
-        .as_deref()
-        .map(|value| value.trim_end_matches('/'))
-        != Some(hub_origin.trim_end_matches('/'))
-    {
-        return Err(InstallError::ExistingResidue);
-    }
-    let probe_id = metadata_string(&identity, "probe_id")
-        .filter(|value| !value.is_empty())
-        .ok_or(InstallError::ExistingResidue)?
-        .to_owned();
-    Ok(InstalledUpgradeBinding {
-        hub_origin,
-        probe_id,
-        source_bundle_version: field("bundle_version")?,
-        source_install_state_sha256: sha256_field(&metadata, "install_state_sha256")?,
-        source_manifest_sha256: sha256_field(&metadata, "target_manifest_sha256")?,
-    })
+    Ok((metadata, identity))
 }
 
 fn metadata_scalar(contents: &str, key: &str) -> Option<String> {

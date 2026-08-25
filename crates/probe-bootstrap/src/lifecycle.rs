@@ -205,6 +205,7 @@ pub struct InstalledBundleFailureEvidenceV1 {
     pub kind: String,
     pub schema_version: u16,
     pub hub_origin: String,
+    pub host_id: String,
     pub probe_id: String,
     pub generation: String,
     pub boot_id: String,
@@ -222,6 +223,7 @@ pub struct InstalledBundleFailureEvidenceV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstalledBundleBindingsV1 {
     pub hub_origin: String,
+    pub host_id: String,
     pub probe_id: String,
     pub generation: String,
     pub boot_id: String,
@@ -238,6 +240,7 @@ impl InstalledBundleFailureEvidenceV1 {
     pub fn bindings(&self) -> InstalledBundleBindingsV1 {
         InstalledBundleBindingsV1 {
             hub_origin: self.hub_origin.clone(),
+            host_id: self.host_id.clone(),
             probe_id: self.probe_id.clone(),
             generation: self.generation.clone(),
             boot_id: self.boot_id.clone(),
@@ -304,6 +307,7 @@ impl InstalledBundleRepairAuthorityV1 {
     pub fn bindings(&self) -> InstalledBundleBindingsV1 {
         InstalledBundleBindingsV1 {
             hub_origin: self.hub_origin.clone(),
+            host_id: self.host_id.clone(),
             probe_id: self.probe_id.clone(),
             generation: self.generation.clone(),
             boot_id: self.boot_id.clone(),
@@ -1229,6 +1233,7 @@ mod tests {
             kind: "installed_bundle_failure".into(),
             schema_version: 1,
             hub_origin: "https://hub.example".into(),
+            host_id: "7".into(),
             probe_id: "probe_01".into(),
             generation: "a".repeat(64),
             boot_id: "boot-01".into(),
@@ -1243,7 +1248,7 @@ mod tests {
             request_nonce: "request-01".into(),
         };
         let expected = format!(
-            "{{\"kind\":\"installed_bundle_failure\",\"schemaVersion\":1,\"hubOrigin\":\"https://hub.example\",\"probeId\":\"probe_01\",\"generation\":\"{}\",\"bootId\":\"boot-01\",\"unit\":\"enoki-observation-runtime.service\",\"unitSha256\":\"{}\",\"identityReceiptSha256\":\"{}\",\"installStateSha256\":\"{}\",\"manifestSha256\":\"{}\",\"bundleVersion\":\"1.2.3\",\"issuedAtMs\":10,\"expiresAtMs\":20,\"requestNonce\":\"request-01\"}}",
+            "{{\"kind\":\"installed_bundle_failure\",\"schemaVersion\":1,\"hubOrigin\":\"https://hub.example\",\"hostId\":\"7\",\"probeId\":\"probe_01\",\"generation\":\"{}\",\"bootId\":\"boot-01\",\"unit\":\"enoki-observation-runtime.service\",\"unitSha256\":\"{}\",\"identityReceiptSha256\":\"{}\",\"installStateSha256\":\"{}\",\"manifestSha256\":\"{}\",\"bundleVersion\":\"1.2.3\",\"issuedAtMs\":10,\"expiresAtMs\":20,\"requestNonce\":\"request-01\"}}",
             "a".repeat(64),
             "b".repeat(64),
             "c".repeat(64),

@@ -17,6 +17,7 @@ describe("Probe Repair authority", () => {
       kind: "installed_bundle_failure" as const,
       schemaVersion: 1 as const,
       hubOrigin: "https://hub.example",
+      hostId: "7",
       probeId: "probe_01",
       generation: "a".repeat(64),
       bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
@@ -37,7 +38,7 @@ describe("Probe Repair authority", () => {
     expect(
       canonicalInstalledBundleFailureEvidence(evidence).toString("utf8"),
     ).toBe(
-      `{"kind":"installed_bundle_failure","schemaVersion":1,"hubOrigin":"https://hub.example","probeId":"probe_01","generation":"${"a".repeat(64)}","bootId":"4f7d3e15-63cc-4d61-8fe4-f5d42773dd51","unit":"enoki-observation-runtime.service","unitSha256":"${"b".repeat(64)}","identityReceiptSha256":"${"c".repeat(64)}","installStateSha256":"${"d".repeat(64)}","manifestSha256":"${"e".repeat(64)}","bundleVersion":"1.2.3","issuedAtMs":1725000001000,"expiresAtMs":1725000061000,"requestNonce":"request_nonce_01"}`,
+      `{"kind":"installed_bundle_failure","schemaVersion":1,"hubOrigin":"https://hub.example","hostId":"7","probeId":"probe_01","generation":"${"a".repeat(64)}","bootId":"4f7d3e15-63cc-4d61-8fe4-f5d42773dd51","unit":"enoki-observation-runtime.service","unitSha256":"${"b".repeat(64)}","identityReceiptSha256":"${"c".repeat(64)}","installStateSha256":"${"d".repeat(64)}","manifestSha256":"${"e".repeat(64)}","bundleVersion":"1.2.3","issuedAtMs":1725000001000,"expiresAtMs":1725000061000,"requestNonce":"request_nonce_01"}`,
     );
     const decision = authorizeInstalledBundleRepair({
       authorityExpiresAtMs: 1_725_000_061_000,
@@ -45,8 +46,8 @@ describe("Probe Repair authority", () => {
       evidenceSignature,
       expectedBundleVersion: "1.2.3",
       expectedHubOrigin: "https://hub.example",
+      expectedHostId: "7",
       expectedProbeId: "probe_01",
-      hostId: 7,
       installKey,
       nowMs: 1_725_000_001_000,
       repairNonce: "repair_nonce_01",
@@ -74,12 +75,28 @@ describe("Probe Repair authority", () => {
         evidenceSignature,
         expectedBundleVersion: "1.2.3",
         expectedHubOrigin: "https://hub.example",
+        expectedHostId: "7",
         expectedProbeId: "probe_01",
-        hostId: 7,
         installKey,
         nowMs: 1_725_000_001_000,
         repairNonce: "repair_nonce_02",
         repairOperationId: "43",
+        targetAssetSetDigest: `sha256:${"f".repeat(64)}`,
+      }).disposition,
+    ).toBe("manual_reinstall_required");
+    expect(
+      authorizeInstalledBundleRepair({
+        authorityExpiresAtMs: 1_725_000_061_000,
+        evidence: { ...evidence, hostId: "8" },
+        evidenceSignature,
+        expectedBundleVersion: "1.2.3",
+        expectedHubOrigin: "https://hub.example",
+        expectedHostId: "7",
+        expectedProbeId: "probe_01",
+        installKey,
+        nowMs: 1_725_000_001_000,
+        repairNonce: "repair_nonce_03",
+        repairOperationId: "44",
         targetAssetSetDigest: `sha256:${"f".repeat(64)}`,
       }).disposition,
     ).toBe("manual_reinstall_required");

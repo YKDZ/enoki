@@ -14,6 +14,7 @@ mod transaction;
 #[cfg_attr(not(feature = "acquirer"), allow(dead_code))]
 mod upgrade;
 
+use crate::replacement::ReplacementResumeBinding;
 use crate::{
     bundle_role::{
         DISK_HEALTH_PERMISSION_PROFILE, LIFECYCLE_COMPANION_PERMISSION_PROFILE,
@@ -246,6 +247,9 @@ pub trait AccountPort {
         _transaction_id: &str,
         _identity: Option<ServiceIdentity>,
     ) -> Result<bool, InstallError> {
+        Ok(false)
+    }
+    fn owns_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<bool, InstallError> {
         Ok(false)
     }
     fn create_observation_ipc_group(&mut self, _transaction_id: &str) -> Result<(), InstallError> {
@@ -530,10 +534,23 @@ pub struct VerifiedCompleteFreshComponents<'a> {
     pub bootstrap_activator: &'a mut File,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum InstallFailureSemantics {
+#[derive(Clone, Copy)]
+enum InstallFailureSemantics<'a> {
     FreshRollback,
-    CommittedReplacement,
+    CommittedReplacement(&'a ReplacementResumeBinding),
+}
+
+impl<'a> InstallFailureSemantics<'a> {
+    fn committed_replacement_binding(self) -> Option<&'a ReplacementResumeBinding> {
+        match self {
+            Self::FreshRollback => None,
+            Self::CommittedReplacement(binding) => Some(binding),
+        }
+    }
+
+    fn is_committed_replacement(self) -> bool {
+        matches!(self, Self::CommittedReplacement(_))
+    }
 }
 
 enum InterruptedInstall {
@@ -607,6 +624,7 @@ pub fn activate_complete_fresh_current_probe(
 
 /// 仅用于 Replacement；调用者已持久化精确的 Replacement Migration commit fact，
 /// 因此候选激活失败时保留 durable journal，绝不调用普通 fresh-install rollback。
+#[allow(clippy::too_many_arguments)]
 pub fn activate_complete_replacement_current_probe(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
@@ -615,6 +633,7 @@ pub fn activate_complete_replacement_current_probe(
     paths: &FixedInstallPaths,
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
+    resume_binding: &ReplacementResumeBinding,
 ) -> Result<(), InstallError> {
     let mut files = SystemInstallFiles;
     activate_current_probe_with_observation_files(
@@ -638,8 +657,29 @@ pub fn activate_complete_replacement_current_probe(
             systemd,
             files: &mut files,
         },
-        InstallFailureSemantics::CommittedReplacement,
+        InstallFailureSemantics::CommittedReplacement(resume_binding),
     )
+}
+
+/// Replacement coordinator 在 candidate-layout receipt 持久化后调用；只有完全相同
+/// 的不透明绑定可以释放 activation journal custody。
+pub(crate) fn finalize_complete_replacement_current_probe(
+    paths: &FixedInstallPaths,
+    resume_binding: &ReplacementResumeBinding,
+    expected_version: &str,
+) -> Result<(), InstallError> {
+    if !TransactionJournal::committed_layout_matches(&paths.bootstrap_state(), expected_version)? {
+        return Err(InstallError::ExistingResidue);
+    }
+    upgrade::verify_installed_activation_receipt(paths, expected_version)?;
+    let Some(journal) = TransactionJournal::load(&paths.bootstrap_state())? else {
+        return Ok(());
+    };
+    if !journal.matches_resume_binding(resume_binding.as_str()) {
+        return Err(InstallError::ExistingResidue);
+    }
+    journal.remove_staging_if_owned()?;
+    journal.remove()
 }
 
 struct BootstrapRolePath {
@@ -712,7 +752,7 @@ fn activate_current_probe_with_observation_files(
     trust: &BuildTrust,
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-    failure_semantics: InstallFailureSemantics,
+    failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
     let mut effects = FreshInstallEffects {
         component,
@@ -742,7 +782,7 @@ struct FreshInstallEffects<'input, 'ports, A, S, F> {
     trust: &'input BuildTrust,
     paths: &'input FixedInstallPaths,
     ports: &'input mut InstallPorts<'ports, A, S, F>,
-    failure_semantics: InstallFailureSemantics,
+    failure_semantics: InstallFailureSemantics<'input>,
 }
 
 impl<A, S, F> FreshInstallLifecycleEffects for FreshInstallEffects<'_, '_, A, S, F>
@@ -828,7 +868,7 @@ fn activate_verified_fresh_install(
     trust: &BuildTrust,
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-    failure_semantics: InstallFailureSemantics,
+    failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
     let install_observation = observation_components.is_some();
     let _activation_lock = ActivationLock::acquire(
@@ -862,7 +902,12 @@ fn activate_verified_fresh_install(
 
     let mut journal = match resumed_journal {
         Some(journal) => journal,
-        None => TransactionJournal::begin(&paths.bootstrap_state())?,
+        None => TransactionJournal::begin_with_binding(
+            &paths.bootstrap_state(),
+            failure_semantics
+                .committed_replacement_binding()
+                .map(ReplacementResumeBinding::as_str),
+        )?,
     };
     if let Some((acquirer, activator)) = bootstrap_components {
         let role_sources = [acquirer, activator];
@@ -875,17 +920,26 @@ fn activate_verified_fresh_install(
                     .files
                     .install_binary(source, &role.path, &mut journal, role.rollback)
             {
-                return Err(abort_prepared_install(
+                return Err(handle_prepared_install_failure(
                     error,
                     &journal,
                     ports.accounts,
                     ports.files,
+                    failure_semantics,
                 ));
             }
         }
     }
     let identity = if let Some((uid, gid)) = journal.identity() {
         ServiceIdentity { uid, gid }
+    } else if is_committed_resume
+        && ports
+            .accounts
+            .owns_transaction_identity(journal.transaction_id(), None)?
+    {
+        let identity = ServiceIdentity { uid: 0, gid: 0 };
+        journal.record_identity(identity.uid, identity.gid)?;
+        identity
     } else {
         let identity = match ports
             .accounts
@@ -893,36 +947,55 @@ fn activate_verified_fresh_install(
         {
             Ok(identity) => identity,
             Err(error) => {
-                return Err(abort_prepared_install(
+                return Err(handle_prepared_install_failure(
                     error,
                     &journal,
                     ports.accounts,
                     ports.files,
+                    failure_semantics,
                 ));
             }
         };
         if let Err(error) = journal.record_identity(identity.uid, identity.gid) {
-            return Err(abort_prepared_install(
+            return Err(handle_prepared_install_failure(
                 error,
                 &journal,
                 ports.accounts,
                 ports.files,
+                failure_semantics,
             ));
         }
         identity
     };
-    if install_observation
-        && !is_committed_resume
-        && let Err(error) = ports
-            .accounts
-            .create_observation_ipc_group(journal.transaction_id())
-    {
-        return Err(abort_prepared_install(
-            error,
-            &journal,
-            ports.accounts,
-            ports.files,
-        ));
+    if install_observation {
+        if !journal.observation_ipc_group_may_exist()
+            && let Err(error) = journal.record_observation_ipc_group_intent()
+        {
+            return Err(handle_prepared_install_failure(
+                error,
+                &journal,
+                ports.accounts,
+                ports.files,
+                failure_semantics,
+            ));
+        }
+        let already_owned = is_committed_resume
+            && ports
+                .accounts
+                .owns_observation_ipc_group(journal.transaction_id())?;
+        if !already_owned
+            && let Err(error) = ports
+                .accounts
+                .create_observation_ipc_group(journal.transaction_id())
+        {
+            return Err(handle_prepared_install_failure(
+                error,
+                &journal,
+                ports.accounts,
+                ports.files,
+                failure_semantics,
+            ));
+        }
     }
     if is_committed_resume {
         for staged_name in [
@@ -949,11 +1022,12 @@ fn activate_verified_fresh_install(
     ) {
         Ok(staged) => staged,
         Err(error) => {
-            return Err(abort_prepared_install(
+            return Err(handle_prepared_install_failure(
                 error,
                 &journal,
                 ports.accounts,
                 ports.files,
+                failure_semantics,
             ));
         }
     };
@@ -1106,11 +1180,15 @@ fn activate_verified_fresh_install(
     })();
     match result {
         Ok(()) => {
-            journal.commit_layout(&paths.bootstrap_state(), &bundle.version)?;
+            journal.commit_layout(
+                &paths.bootstrap_state(),
+                &bundle.version,
+                failure_semantics.is_committed_replacement(),
+            )?;
             Ok(())
         }
         Err(install_error) => {
-            if failure_semantics == InstallFailureSemantics::CommittedReplacement {
+            if failure_semantics.is_committed_replacement() {
                 // journal 与所有由 receipt 持有的候选路径继续作为恢复事实源；后续精确
                 // 候选调用只向前修复或重新暂存，绝不恢复 P0。
                 return Err(install_error);
@@ -1214,6 +1292,20 @@ fn abort_prepared_install(
     }
 }
 
+fn handle_prepared_install_failure(
+    cause: InstallError,
+    journal: &TransactionJournal,
+    accounts: &mut impl AccountPort,
+    files: &mut impl InstallFilePort,
+    failure_semantics: InstallFailureSemantics<'_>,
+) -> InstallError {
+    if failure_semantics.is_committed_replacement() {
+        cause
+    } else {
+        abort_prepared_install(cause, journal, accounts, files)
+    }
+}
+
 fn cleanup_owned_paths(
     files: &mut impl InstallFilePort,
     journal: &TransactionJournal,
@@ -1275,21 +1367,29 @@ fn cleanup_failed_install(
 fn recover_interrupted_install(
     paths: &FixedInstallPaths,
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-    failure_semantics: InstallFailureSemantics,
+    failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<InterruptedInstall, InstallError> {
     let Some(journal) = TransactionJournal::load(&paths.bootstrap_state())? else {
         return Ok(InterruptedInstall::Fresh);
     };
+    if journal.has_resume_binding() && failure_semantics.committed_replacement_binding().is_none() {
+        return Err(InstallError::ExistingResidue);
+    }
+    if let Some(binding) = failure_semantics.committed_replacement_binding()
+        && !journal.matches_resume_binding(binding.as_str())
+    {
+        return Err(InstallError::ExistingResidue);
+    }
     if TransactionJournal::layout_is_committed(&paths.bootstrap_state())? {
         journal.remove_staging_if_owned()?;
-        journal.remove()?;
-        return if failure_semantics == InstallFailureSemantics::CommittedReplacement {
+        return if failure_semantics.is_committed_replacement() {
             Ok(InterruptedInstall::Complete)
         } else {
+            journal.remove()?;
             Err(InstallError::ExistingResidue)
         };
     }
-    if failure_semantics == InstallFailureSemantics::CommittedReplacement {
+    if failure_semantics.is_committed_replacement() {
         if !journal.all_published_paths_are_owned() {
             return Err(InstallError::ExistingResidue);
         }

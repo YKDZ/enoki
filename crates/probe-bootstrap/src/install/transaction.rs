@@ -237,7 +237,11 @@ impl OwnedPath {
 struct JournalState {
     schema_version: u8,
     transaction_id: String,
+    #[serde(default)]
+    resume_binding: Option<String>,
     identity: Option<(u32, u32)>,
+    #[serde(default)]
+    observation_ipc_group_may_exist: bool,
     enabled_may_exist: bool,
     started_may_exist: bool,
     staging: OwnedPath,
@@ -250,12 +254,21 @@ pub(super) struct TransactionJournal {
 }
 
 impl TransactionJournal {
+    #[cfg(test)]
     pub fn begin(state_directory: &Path) -> Result<Self, InstallError> {
-        Self::begin_with_stage(state_directory, |path| fs::create_dir(path))
+        Self::begin_with_binding(state_directory, None)
+    }
+
+    pub fn begin_with_binding(
+        state_directory: &Path,
+        resume_binding: Option<&str>,
+    ) -> Result<Self, InstallError> {
+        Self::begin_with_stage(state_directory, resume_binding, |path| fs::create_dir(path))
     }
 
     fn begin_with_stage(
         state_directory: &Path,
+        resume_binding: Option<&str>,
         mut create_stage: impl FnMut(&Path) -> std::io::Result<()>,
     ) -> Result<Self, InstallError> {
         if state_directory.join(LAYOUT_NAME).exists() {
@@ -266,9 +279,11 @@ impl TransactionJournal {
         let journal = Self {
             path: state_directory.join(JOURNAL_NAME),
             state: JournalState {
-                schema_version: 2,
+                schema_version: 3,
                 transaction_id,
+                resume_binding: resume_binding.map(ToOwned::to_owned),
                 identity: None,
+                observation_ipc_group_may_exist: false,
                 enabled_may_exist: false,
                 started_may_exist: false,
                 // 先持久化唯一路径 intent；它是事务开始后的首份可恢复证据。
@@ -350,7 +365,7 @@ impl TransactionJournal {
                 .transaction_id
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
-        if state.schema_version != 2
+        if !matches!(state.schema_version, 2 | 3)
             || !valid_transaction_id
             || state.staging.path
                 != state_directory.join(format!("{STAGING_NAME}-{}", state.transaction_id))
@@ -370,13 +385,42 @@ impl TransactionJournal {
         }
     }
 
+    pub fn committed_layout_matches(
+        state_directory: &Path,
+        expected_version: &str,
+    ) -> Result<bool, InstallError> {
+        if !Self::layout_is_committed(state_directory)? {
+            return Ok(false);
+        }
+        fs::read_to_string(state_directory.join(LAYOUT_NAME))
+            .map(|contents| contents == format!("schema_version=1\nversion={expected_version}\n"))
+            .map_err(|_| InstallError::Io)
+    }
+
     pub fn record_identity(&mut self, uid: u32, gid: u32) -> Result<(), InstallError> {
         self.state.identity = Some((uid, gid));
         self.persist()
     }
 
+    pub fn record_observation_ipc_group_intent(&mut self) -> Result<(), InstallError> {
+        self.state.observation_ipc_group_may_exist = true;
+        self.persist()
+    }
+
+    pub fn observation_ipc_group_may_exist(&self) -> bool {
+        self.state.observation_ipc_group_may_exist
+    }
+
     pub fn transaction_id(&self) -> &str {
         &self.state.transaction_id
+    }
+
+    pub fn matches_resume_binding(&self, expected: &str) -> bool {
+        self.state.schema_version == 3 && self.state.resume_binding.as_deref() == Some(expected)
+    }
+
+    pub fn has_resume_binding(&self) -> bool {
+        self.state.resume_binding.is_some()
     }
 
     pub fn record_path(&mut self, path: OwnedPath) -> Result<(), InstallError> {
@@ -441,6 +485,7 @@ impl TransactionJournal {
         &mut self,
         state_directory: &Path,
         version: &str,
+        retain_journal: bool,
     ) -> Result<(), InstallError> {
         self.remove_staging_if_owned()?;
         self.retire_directory_markers()?;
@@ -450,7 +495,9 @@ impl TransactionJournal {
             format!("schema_version=1\nversion={version}\n").as_bytes(),
         )?;
         // `current-layout` 是成功的唯一提交点；其后 journal 清理失败由下次启动完成。
-        let _ = self.remove();
+        if !retain_journal {
+            let _ = self.remove();
+        }
         Ok(())
     }
 
@@ -729,11 +776,11 @@ mod tests {
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
         let journal_path = state.join(JOURNAL_NAME);
 
-        let journal = TransactionJournal::begin_with_stage(&state, |stage| {
+        let journal = TransactionJournal::begin_with_stage(&state, None, |stage| {
             assert!(journal_path.is_file());
             let bytes = fs::read(&journal_path).unwrap();
             let persisted: JournalState = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(persisted.schema_version, 2);
+            assert_eq!(persisted.schema_version, 3);
             assert_eq!(persisted.staging.path(), stage);
             fs::create_dir(stage)
         })

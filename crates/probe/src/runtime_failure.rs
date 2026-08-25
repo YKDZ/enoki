@@ -30,10 +30,16 @@ mod installed_bundle_repair;
 use installed_bundle_repair::write_installed_bundle_repair_status;
 #[cfg(test)]
 use installed_bundle_repair::*;
+#[cfg(test)]
+use installed_bundle_repair::{
+    InstalledBundleRepairDriveError, InstalledBundleRepairEffects, drive_installed_bundle_repair,
+};
 pub use installed_bundle_repair::{
-    InstalledBundleRepairError, InstalledBundleRepairGrant, InstalledBundleRepairProgress,
-    ResumableInstalledBundleRepair, installed_bundle_failure_is_current,
-    resume_installed_bundle_repair,
+    InstalledBundleRepairError, InstalledBundleRepairGrant, installed_bundle_failure_is_current,
+};
+pub(crate) use installed_bundle_repair::{
+    InstalledBundleRepairOutcome, LiveInstalledBundleRepairError, begin_installed_bundle_repair,
+    drive_live_installed_bundle_repair, resume_installed_bundle_repair,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -136,6 +142,7 @@ struct RuntimeFailureEpoch {
     unit: String,
     unit_sha256: String,
     hub_origin: String,
+    host_id: String,
     probe_id: String,
     identity_receipt_sha256: String,
     install_state_sha256: String,
@@ -277,6 +284,7 @@ fn issue_installed_bundle_failure_evidence_at(
         kind: "installed_bundle_failure".to_owned(),
         schema_version: 1,
         hub_origin: epoch.hub_origin,
+        host_id: epoch.host_id,
         probe_id: epoch.probe_id,
         generation: epoch.generation,
         boot_id: epoch.boot_id,
@@ -339,6 +347,8 @@ fn validate_installed_bundle_repair_authority_at(
         authority: authority.clone(),
         authority_signature: authority_signature.to_owned(),
         signed_evidence: signed.clone(),
+        root: root.to_path_buf(),
+        expected_uid,
     })
 }
 
@@ -385,6 +395,7 @@ fn current_epoch_at(
         || epoch.identity_receipt_sha256 != sha256(&identity)
         || epoch.hub_origin != metadata_string(&metadata, "hub_url").unwrap_or_default()
         || epoch.hub_origin != metadata_string(&identity_value, "hub_url").unwrap_or_default()
+        || epoch.host_id != metadata_string(&identity_value, "host_id").unwrap_or_default()
         || epoch.probe_id != metadata_string(&identity_value, "probe_id").unwrap_or_default()
         || epoch.install_state_sha256
             != metadata_string(&metadata, "install_state_sha256").unwrap_or_default()
@@ -472,6 +483,7 @@ fn record_runtime_failure_at(
         unit: RUNTIME_UNIT.to_owned(),
         unit_sha256: sha256(&unit),
         hub_origin,
+        host_id: string(&identity_value, "host_id")?,
         probe_id: string(&identity_value, "probe_id")?,
         identity_receipt_sha256: sha256(&identity),
         install_state_sha256: string(&metadata, "install_state_sha256")?,
@@ -695,7 +707,8 @@ mod tests {
         )
         .unwrap();
         let metadata = "hub_url = \"https://hub.example\"\ninstall_state_sha256 = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\ntarget_manifest_sha256 = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\nbundle_version = \"1.2.3\"\nlifecycle_authority_install_key = \"1111111111111111111111111111111111111111111111111111111111111111\"\n";
-        let identity = "hub_url = \"https://hub.example\"\nprobe_id = \"probe_01\"\n";
+        let identity =
+            "hub_url = \"https://hub.example\"\nhost_id = \"7\"\nprobe_id = \"probe_01\"\n";
         write_fixture(root.path(), METADATA_PATH, metadata.as_bytes(), 0o600);
         write_fixture(root.path(), IDENTITY_PATH, identity.as_bytes(), 0o600);
         let unit = enoki_probe_bootstrap::install::fixed_execution_role_units()
@@ -730,6 +743,63 @@ mod tests {
         assert_eq!(outcome, RuntimeFailureRecordOutcome::Ignored);
         assert!(!rooted(root.path(), EPOCH_PATH).exists());
         assert!(!rooted(root.path(), LATCH_PATH).exists());
+    }
+
+    #[test]
+    fn legacy_identity_without_authenticated_host_id_cannot_create_failure_evidence() {
+        let root = fixture();
+        write_fixture(
+            root.path(),
+            IDENTITY_PATH,
+            b"hub_url = \"https://hub.example\"\nprobe_id = \"probe_01\"\n",
+            0o600,
+        );
+        assert!(
+            record_runtime_failure_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut State(RuntimeUnitState {
+                    active_state: "failed".into(),
+                    result: "start-limit-hit".into(),
+                }),
+                &mut Generation(2),
+            )
+            .is_err()
+        );
+        assert!(!rooted(root.path(), EPOCH_PATH).exists());
+        assert!(!rooted(root.path(), LATCH_PATH).exists());
+    }
+
+    #[test]
+    fn failure_epoch_rejects_a_later_identity_with_a_different_host_id() {
+        let root = fixture();
+        record_runtime_failure_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            &mut State(RuntimeUnitState {
+                active_state: "failed".into(),
+                result: "start-limit-hit".into(),
+            }),
+            &mut Generation(3),
+        )
+        .unwrap();
+        write_fixture(
+            root.path(),
+            IDENTITY_PATH,
+            b"hub_url = \"https://hub.example\"\nhost_id = \"8\"\nprobe_id = \"probe_01\"\n",
+            0o600,
+        );
+        assert!(
+            issue_installed_bundle_failure_evidence_at(
+                root.path(),
+                unsafe { libc::geteuid() },
+                &mut FailedRuntime(0),
+                100,
+                60_100,
+                "request_nonce_wrong_host",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -858,8 +928,9 @@ mod tests {
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
-                schema_version: 1,
-                state: InstalledBundleRepairProgress::RuntimeHealthy,
+                schema_version: 2,
+                state: InstalledBundleRepairProgress::TemporaryRuntimeHealthy,
+                last_error_code: None,
                 stage_owner_uid: unsafe { libc::geteuid() },
                 stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt {
                     operation_id: authority.repair_operation_id.clone(),
@@ -875,7 +946,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            complete_installed_bundle_repair_at(
+            invalidate_installed_bundle_failure_at(
                 root.path(),
                 unsafe { libc::geteuid() },
                 grant.authority(),
@@ -892,7 +963,24 @@ mod tests {
                 .unwrap();
         intent.state = InstalledBundleRepairProgress::ProbeActive;
         write_installed_bundle_repair_intent(root.path(), &intent).unwrap();
-        let identity = complete_installed_bundle_repair_at(
+        invalidate_installed_bundle_failure_at(
+            root.path(),
+            unsafe { libc::geteuid() },
+            grant.authority(),
+        )
+        .unwrap();
+        let mut intent: InstalledBundleRepairIntent =
+            serde_json::from_slice(&fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(intent.state, InstalledBundleRepairProgress::LatchRemoved);
+        assert!(
+            !fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH))
+                .unwrap()
+                .contains("status = \"succeeded\"")
+        );
+        intent.state = InstalledBundleRepairProgress::CanonicalRuntimeHealthy;
+        write_installed_bundle_repair_intent(root.path(), &intent).unwrap();
+        let identity = publish_installed_bundle_repair_success_at(
             root.path(),
             unsafe { libc::geteuid() },
             grant.authority(),
@@ -1008,8 +1096,9 @@ mod tests {
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
-                schema_version: 1,
+                schema_version: 2,
                 state: InstalledBundleRepairProgress::ValidationPending,
+                last_error_code: None,
                 stage_owner_uid: unsafe { libc::geteuid() },
                 stage_receipt: receipt.clone(),
                 signed_evidence: signed,
@@ -1037,14 +1126,14 @@ mod tests {
         )
         .unwrap();
         let mut healthy: InstalledBundleRepairIntent = serde_json::from_slice(&bytes).unwrap();
-        healthy.state = InstalledBundleRepairProgress::RuntimeHealthy;
+        healthy.state = InstalledBundleRepairProgress::TemporaryRuntimeHealthy;
         write_installed_bundle_repair_intent(root.path(), &healthy).unwrap();
         assert_eq!(
             resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
                 .unwrap()
                 .unwrap()
                 .progress,
-            InstalledBundleRepairProgress::RuntimeHealthy
+            InstalledBundleRepairProgress::TemporaryRuntimeHealthy
         );
         fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
         assert_eq!(
@@ -1052,7 +1141,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .progress,
-            InstalledBundleRepairProgress::RuntimeHealthy
+            InstalledBundleRepairProgress::TemporaryRuntimeHealthy
         );
         healthy.stage_receipt.target_asset_set_digest = format!("sha256:{}", "c".repeat(64));
         write_installed_bundle_repair_intent(root.path(), &healthy).unwrap();
@@ -1101,12 +1190,34 @@ mod tests {
                 });
 
             assert_eq!(
-                complete_installed_bundle_repair_at(
-                    root.path(),
-                    unsafe { libc::geteuid() },
-                    &authority,
-                )
-                .unwrap(),
+                if progress == InstalledBundleRepairProgress::StatusPublished {
+                    publish_installed_bundle_repair_success_at(
+                        root.path(),
+                        unsafe { libc::geteuid() },
+                        &authority,
+                    )
+                    .unwrap()
+                } else {
+                    invalidate_installed_bundle_failure_at(
+                        root.path(),
+                        unsafe { libc::geteuid() },
+                        &authority,
+                    )
+                    .unwrap();
+                    let mut intent: InstalledBundleRepairIntent = serde_json::from_slice(
+                        &fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(intent.state, InstalledBundleRepairProgress::LatchRemoved);
+                    intent.state = InstalledBundleRepairProgress::CanonicalRuntimeHealthy;
+                    write_installed_bundle_repair_intent(root.path(), &intent).unwrap();
+                    publish_installed_bundle_repair_success_at(
+                        root.path(),
+                        unsafe { libc::geteuid() },
+                        &authority,
+                    )
+                    .unwrap()
+                },
                 ("probe_01".into(), "1.2.3".into())
             );
             assert!(!rooted(root.path(), EPOCH_PATH).exists());
@@ -1126,6 +1237,246 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[derive(Default)]
+    struct RepairEffects {
+        restored: usize,
+        temporary_validations: usize,
+        canonical_activations: usize,
+        canonical_validations: usize,
+        fail_canonical: bool,
+    }
+
+    #[derive(Debug)]
+    struct RepairEffectError(&'static str);
+
+    impl InstalledBundleRepairEffects for RepairEffects {
+        type Error = RepairEffectError;
+
+        fn restore_bundle(
+            &mut self,
+            _: &enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt,
+            _: u32,
+            _: &InstalledBundleRepairAuthorityV1,
+        ) -> Result<(), Self::Error> {
+            self.restored += 1;
+            Ok(())
+        }
+
+        fn validate_temporary_runtime(&mut self) -> Result<(), Self::Error> {
+            self.temporary_validations += 1;
+            Ok(())
+        }
+
+        fn activate_probe_on_canonical_gate(&mut self) -> Result<(), Self::Error> {
+            self.canonical_activations += 1;
+            Ok(())
+        }
+
+        fn validate_canonical_runtime(&mut self) -> Result<(), Self::Error> {
+            self.canonical_validations += 1;
+            if self.fail_canonical {
+                Err(RepairEffectError(
+                    "probe_repair_canonical_runtime_validation_failed",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn recover_preboundary_reporting(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn remove_stage(&mut self, _: &str, _: u32) {}
+
+        fn error_code<'a>(&self, error: &'a Self::Error) -> &'a str {
+            error.0
+        }
+    }
+
+    #[test]
+    fn repair_module_resumes_every_persisted_checkpoint_through_its_interface() {
+        for (index, progress) in [
+            InstalledBundleRepairProgress::Admitted,
+            InstalledBundleRepairProgress::ValidationPending,
+            InstalledBundleRepairProgress::TemporaryRuntimeHealthy,
+            InstalledBundleRepairProgress::ProbeActive,
+            InstalledBundleRepairProgress::InvalidationCommitted,
+            InstalledBundleRepairProgress::EpochRemoved,
+            InstalledBundleRepairProgress::LatchRemoved,
+            InstalledBundleRepairProgress::CanonicalRuntimeHealthy,
+            InstalledBundleRepairProgress::StatusPublished,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (root, authority) = repair_completion_fixture(progress, (index + 40) as u8);
+            if matches!(
+                progress,
+                InstalledBundleRepairProgress::EpochRemoved
+                    | InstalledBundleRepairProgress::LatchRemoved
+                    | InstalledBundleRepairProgress::CanonicalRuntimeHealthy
+                    | InstalledBundleRepairProgress::StatusPublished
+            ) {
+                fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
+            }
+            if matches!(
+                progress,
+                InstalledBundleRepairProgress::LatchRemoved
+                    | InstalledBundleRepairProgress::CanonicalRuntimeHealthy
+                    | InstalledBundleRepairProgress::StatusPublished
+            ) {
+                fs::remove_file(rooted(root.path(), LATCH_PATH)).unwrap();
+            }
+            if progress == InstalledBundleRepairProgress::StatusPublished {
+                write_installed_bundle_repair_status(root.path(), &authority, "succeeded", None)
+                    .unwrap();
+            }
+            let session =
+                resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
+                    .unwrap()
+                    .unwrap();
+            let mut effects = RepairEffects::default();
+            let outcome = drive_installed_bundle_repair(session, &mut effects).unwrap();
+
+            assert_eq!(outcome.probe_id, authority.probe_id);
+            assert_eq!(outcome.repaired_version, authority.bundle_version);
+            assert!(!rooted(root.path(), REPAIR_INTENT_PATH).exists());
+            assert!(
+                fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH))
+                    .unwrap()
+                    .contains("status = \"succeeded\"")
+            );
+            assert_eq!(
+                effects.canonical_validations,
+                usize::from(matches!(
+                    progress,
+                    InstalledBundleRepairProgress::Admitted
+                        | InstalledBundleRepairProgress::ValidationPending
+                        | InstalledBundleRepairProgress::TemporaryRuntimeHealthy
+                        | InstalledBundleRepairProgress::ProbeActive
+                        | InstalledBundleRepairProgress::InvalidationCommitted
+                        | InstalledBundleRepairProgress::EpochRemoved
+                        | InstalledBundleRepairProgress::LatchRemoved
+                )),
+                "成功只能由 latch 移除后的 canonical Runtime 验证产生"
+            );
+        }
+    }
+
+    #[test]
+    fn upgrader_adapter_cannot_observe_or_drive_private_repair_checkpoints() {
+        let upgrader = include_str!("upgrader.rs");
+        assert!(upgrader.contains("drive_live_installed_bundle_repair"));
+        for private_detail in [
+            "InstalledBundleRepairProgress",
+            "mark_validation_pending",
+            "mark_temporary_runtime_healthy",
+            "mark_probe_active",
+            "mark_canonical_runtime_healthy",
+            "invalidate_failure_evidence",
+            "publish_success",
+        ] {
+            assert!(
+                !upgrader.contains(private_detail),
+                "upgrader Adapter 不得观察 Repair 私有 checkpoint：{private_detail}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_runtime_failure_after_latch_removal_stays_forward_only_and_resumes() {
+        let (root, _authority) =
+            repair_completion_fixture(InstalledBundleRepairProgress::LatchRemoved, 61);
+        fs::remove_file(rooted(root.path(), EPOCH_PATH)).unwrap();
+        fs::remove_file(rooted(root.path(), LATCH_PATH)).unwrap();
+        let session = resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
+            .unwrap()
+            .unwrap();
+        let mut failed = RepairEffects {
+            fail_canonical: true,
+            ..RepairEffects::default()
+        };
+        assert!(matches!(
+            drive_installed_bundle_repair(session, &mut failed),
+            Err(InstalledBundleRepairDriveError::Effect(RepairEffectError(
+                "probe_repair_canonical_runtime_validation_failed"
+            )))
+        ));
+        let intent: InstalledBundleRepairIntent =
+            serde_json::from_slice(&fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(intent.state, InstalledBundleRepairProgress::LatchRemoved);
+        assert_eq!(
+            intent.last_error_code.as_deref(),
+            Some("probe_repair_canonical_runtime_validation_failed")
+        );
+        assert!(
+            !fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH))
+                .is_ok_and(|status| status.contains("status = \"succeeded\""))
+        );
+
+        let resumed = resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
+            .unwrap()
+            .unwrap();
+        drive_installed_bundle_repair(resumed, &mut RepairEffects::default()).unwrap();
+        assert!(!rooted(root.path(), REPAIR_INTENT_PATH).exists());
+        assert!(
+            fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH))
+                .unwrap()
+                .contains("status = \"succeeded\"")
+        );
+    }
+
+    #[test]
+    fn postcommit_invalidation_error_persists_exact_error_without_publishing_failed() {
+        let (root, _authority) =
+            repair_completion_fixture(InstalledBundleRepairProgress::ProbeActive, 62);
+        let epoch_path = rooted(root.path(), EPOCH_PATH);
+        let epoch_bytes = fs::read(&epoch_path).unwrap();
+        let session = resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
+            .unwrap()
+            .unwrap();
+        let mut epoch: RuntimeFailureEpoch =
+            toml::from_str(std::str::from_utf8(&epoch_bytes).unwrap()).unwrap();
+        epoch.generation = "f".repeat(64);
+        write_fixture(
+            root.path(),
+            EPOCH_PATH,
+            toml::to_string(&epoch).unwrap().as_bytes(),
+            0o600,
+        );
+
+        assert!(matches!(
+            drive_installed_bundle_repair(session, &mut RepairEffects::default()),
+            Err(InstalledBundleRepairDriveError::RecoveryPending(
+                "probe_repair_completion_persist_failed"
+            ))
+        ));
+        let intent: InstalledBundleRepairIntent =
+            serde_json::from_slice(&fs::read(rooted(root.path(), REPAIR_INTENT_PATH)).unwrap())
+                .unwrap();
+        assert_eq!(
+            intent.state,
+            InstalledBundleRepairProgress::InvalidationCommitted
+        );
+        assert_eq!(
+            intent.last_error_code.as_deref(),
+            Some("probe_repair_completion_persist_failed")
+        );
+        assert!(
+            !fs::read_to_string(rooted(root.path(), OPERATION_STATUS_PATH))
+                .is_ok_and(|status| status.contains("status = \"failed\""))
+        );
+
+        write_fixture(root.path(), EPOCH_PATH, &epoch_bytes, 0o600);
+        let resumed = resume_installed_bundle_repair_at(root.path(), unsafe { libc::geteuid() })
+            .unwrap()
+            .unwrap();
+        drive_installed_bundle_repair(resumed, &mut RepairEffects::default()).unwrap();
+        assert!(!rooted(root.path(), REPAIR_INTENT_PATH).exists());
     }
 
     fn repair_completion_fixture(
@@ -1161,8 +1512,9 @@ mod tests {
         write_installed_bundle_repair_intent(
             root.path(),
             &InstalledBundleRepairIntent {
-                schema_version: 1,
+                schema_version: 2,
                 state: progress,
+                last_error_code: None,
                 stage_owner_uid: unsafe { libc::geteuid() },
                 stage_receipt: enoki_probe_bootstrap::acquisition::VerifiedUpgradeStageReceipt {
                     operation_id: authority.repair_operation_id.clone(),

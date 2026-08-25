@@ -10,7 +10,7 @@ use crate::{
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
     replacement::{
-        FileReplacementCommitStore, ReplacementCommitStore, record_replacement_candidate_layout,
+        FileReplacementCommitStore, ReplacementResumeBinding, record_replacement_candidate_layout,
     },
     trust::{BootstrapRole, embedded_production_trust_for},
     verifier::{
@@ -124,11 +124,21 @@ impl ReceivedRootHandoff {
             .activator
             .as_mut()
             .ok_or(ActivationError::Verification)?;
-        let replacement_intent_sha256 = prepare_replacement_migration(
+        let replacement_activation = prepare_replacement_migration(
             &self.enrollment,
             &self.bundle,
             &mut self.lifecycle_companion,
         )?;
+        if let ReplacementActivation::Complete(resume_binding) = &replacement_activation {
+            let paths = FixedInstallPaths::production();
+            crate::install::finalize_complete_replacement_current_probe(
+                &paths,
+                resume_binding,
+                &self.bundle.version,
+            )
+            .map_err(ActivationError::Install)?;
+            return Ok(());
+        }
         let components = VerifiedCompleteFreshComponents {
             probe: &mut self.component,
             observation_runtime: &mut self.runtime,
@@ -139,7 +149,8 @@ impl ReceivedRootHandoff {
             bootstrap_activator: activator,
         };
         let paths = FixedInstallPaths::production();
-        let result = if replacement_intent_sha256.is_some() {
+        let result = if let ReplacementActivation::Resume(resume_binding) = &replacement_activation
+        {
             activate_complete_replacement_current_probe(
                 components,
                 &self.enrollment,
@@ -148,6 +159,7 @@ impl ReceivedRootHandoff {
                 &paths,
                 &mut accounts,
                 &mut systemd,
+                resume_binding,
             )
         } else {
             activate_complete_fresh_current_probe(
@@ -161,10 +173,16 @@ impl ReceivedRootHandoff {
             )
         };
         result.map_err(ActivationError::Install)?;
-        if let Some(intent_sha256) = replacement_intent_sha256 {
+        if let ReplacementActivation::Resume(resume_binding) = replacement_activation {
             let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
-            record_replacement_candidate_layout(&mut store, &intent_sha256)
+            record_replacement_candidate_layout(&mut store, resume_binding.as_str())
                 .map_err(|_| ActivationError::Replacement)?;
+            crate::install::finalize_complete_replacement_current_probe(
+                &paths,
+                &resume_binding,
+                &self.bundle.version,
+            )
+            .map_err(ActivationError::Install)?;
         }
         Ok(())
     }
@@ -185,24 +203,56 @@ fn prepare_replacement_migration(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
     companion: &mut File,
-) -> Result<Option<String>, ActivationError> {
+) -> Result<ReplacementActivation, ActivationError> {
+    if let Some((resume_binding, candidate_layout_complete)) =
+        matching_replacement_commit(enrollment, bundle)?
+    {
+        return Ok(if candidate_layout_complete {
+            ReplacementActivation::Complete(resume_binding)
+        } else {
+            ReplacementActivation::Resume(resume_binding)
+        });
+    }
     let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
         .try_exists()
         .map_err(|_| ActivationError::Io)?;
     let Some(request) =
         replacement_request_for_installed_state(has_installed_metadata, enrollment, bundle)?
     else {
-        return committed_replacement_matches(enrollment, bundle);
+        return Ok(ReplacementActivation::Fresh);
     };
     invoke_replacement_companion(&request, companion, bundle)?;
-    committed_replacement_matches(enrollment, bundle)
+    let Some((resume_binding, candidate_layout_complete)) =
+        matching_replacement_commit(enrollment, bundle)?
+    else {
+        return Err(ActivationError::Replacement);
+    };
+    Ok(if candidate_layout_complete {
+        ReplacementActivation::Complete(resume_binding)
+    } else {
+        ReplacementActivation::Resume(resume_binding)
+    })
 }
 
-fn committed_replacement_matches(
+enum ReplacementActivation {
+    Fresh,
+    Resume(ReplacementResumeBinding),
+    Complete(ReplacementResumeBinding),
+}
+
+fn matching_replacement_commit(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
-) -> Result<Option<String>, ActivationError> {
+) -> Result<Option<(ReplacementResumeBinding, bool)>, ActivationError> {
     let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+    matching_replacement_commit_in(&mut store, enrollment, bundle)
+}
+
+fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>(
+    store: &mut S,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> Result<Option<(ReplacementResumeBinding, bool)>, ActivationError> {
     let Some(fact) = store.load().map_err(|_| ActivationError::Replacement)? else {
         return Ok(None);
     };
@@ -210,17 +260,26 @@ fn committed_replacement_matches(
         "{:x}",
         Sha256::digest(enrollment.enrollment_token().as_bytes())
     );
-    if !fact.cleanup_complete
-        || fact.intent.enrollment_token_sha256 != token_sha256
-        || fact.intent.hub_origin != enrollment.hub_origin()
-        || fact.intent.target_probe_version != bundle.version
-        || fact.intent.target_asset_set_digest
-            != format!("sha256:{}", bundle.asset_set_manifest_sha256)
-        || fact.intent.target_manifest_sha256 != bundle.manifest_sha256
-    {
+    let exact_request = fact.cleanup_complete
+        && fact.intent.enrollment_token_sha256 == token_sha256
+        && fact.intent.hub_origin == enrollment.hub_origin()
+        && fact.intent.target_probe_version == bundle.version
+        && fact.intent.target_asset_set_digest
+            == format!("sha256:{}", bundle.asset_set_manifest_sha256)
+        && fact.intent.target_manifest_sha256 == bundle.manifest_sha256;
+    if exact_request {
+        return Ok(Some((
+            fact.resume_binding(),
+            fact.candidate_layout_complete,
+        )));
+    }
+    if !fact.candidate_layout_complete {
         return Err(ActivationError::Replacement);
     }
-    Ok(Some(fact.canonical_intent_sha256))
+    if !fact.cleanup_complete || fact.intent.hub_origin != enrollment.hub_origin() {
+        return Err(ActivationError::Replacement);
+    }
+    Ok(None)
 }
 
 fn replacement_request_for_installed_state(
@@ -996,6 +1055,94 @@ mod tests {
                 bundle_version: "1.2.3".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn completed_exact_replacement_is_idempotent_before_a_new_enrollment_can_start() {
+        struct Store(Option<crate::replacement::ReplacementCommitFact>);
+        impl crate::replacement::ReplacementCommitStore for Store {
+            type Error = ();
+
+            fn load(
+                &mut self,
+            ) -> Result<Option<crate::replacement::ReplacementCommitFact>, Self::Error>
+            {
+                Ok(self.0.clone())
+            }
+
+            fn persist(
+                &mut self,
+                _: &crate::replacement::ReplacementCommitFact,
+            ) -> Result<(), Self::Error> {
+                unreachable!()
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+        let token_sha256 = format!(
+            "{:x}",
+            Sha256::digest(received.enrollment.enrollment_token().as_bytes())
+        );
+        let fact = crate::replacement::ReplacementCommitFact {
+            schema_version: 1,
+            canonical_intent_sha256: "exact-binding".to_owned(),
+            intent: crate::replacement::ReplacementIntent {
+                enrollment_id: "enrollment-1".to_owned(),
+                enrollment_token_sha256: token_sha256,
+                host_id: "7".to_owned(),
+                hub_origin: received.enrollment.hub_origin().to_owned(),
+                old_probe_id: "probe-old".to_owned(),
+                source_probe_version: "1.2.2".to_owned(),
+                source_probe_sha256: "a".repeat(64),
+                target_probe_version: received.bundle.version.clone(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    received.bundle.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+            },
+            cleanup_complete: true,
+            candidate_layout_complete: true,
+        };
+        let exact = matching_replacement_commit_in(
+            &mut Store(Some(fact.clone())),
+            &received.enrollment,
+            &received.bundle,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(exact.0.as_str(), "exact-binding");
+        assert!(exact.1);
+
+        let other_enrollment =
+            Enrollment::new(received.enrollment.hub_origin(), "enk_enroll_other").unwrap();
+        assert!(
+            matching_replacement_commit_in(
+                &mut Store(Some(fact.clone())),
+                &other_enrollment,
+                &received.bundle,
+            )
+            .unwrap()
+            .is_none(),
+            "只有 candidate receipt 完成后，新 Enrollment 才能显式开始"
+        );
+        let mut incomplete = fact;
+        incomplete.candidate_layout_complete = false;
+        assert!(matches!(
+            matching_replacement_commit_in(
+                &mut Store(Some(incomplete)),
+                &other_enrollment,
+                &received.bundle,
+            ),
+            Err(ActivationError::Replacement)
+        ));
     }
 
     #[test]

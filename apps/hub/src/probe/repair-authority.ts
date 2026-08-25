@@ -93,6 +93,7 @@ export type InstalledBundleFailureEvidence = {
   kind: "installed_bundle_failure";
   schemaVersion: 1;
   hubOrigin: string;
+  hostId: string;
   probeId: string;
   generation: string;
   bootId: string;
@@ -141,6 +142,7 @@ type InstalledBundleBindings = {
   bundleVersion: string;
   generation: string;
   hubOrigin: string;
+  hostId: string;
   identityReceiptSha256: string;
   installStateSha256: string;
   manifestSha256: string;
@@ -157,6 +159,7 @@ function installedBundleBindings(
     bundleVersion: evidence.bundleVersion,
     generation: evidence.generation,
     hubOrigin: evidence.hubOrigin,
+    hostId: evidence.hostId,
     identityReceiptSha256: evidence.identityReceiptSha256,
     installStateSha256: evidence.installStateSha256,
     manifestSha256: evidence.manifestSha256,
@@ -203,6 +206,7 @@ export function verifyInstalledBundleFailureEvidence(input: {
   evidenceSignature: string;
   expectedBundleVersion: string;
   expectedHubOrigin: string;
+  expectedHostId: string;
   expectedProbeId: string;
   installKey: Uint8Array;
   nowMs: number;
@@ -216,6 +220,7 @@ export function verifyInstalledBundleFailureEvidence(input: {
     bundleVersion: input.expectedBundleVersion,
     generation: input.evidence.generation,
     hubOrigin: input.expectedHubOrigin,
+    hostId: input.expectedHostId,
     identityReceiptSha256: input.evidence.identityReceiptSha256,
     installStateSha256: input.evidence.installStateSha256,
     manifestSha256: input.evidence.manifestSha256,
@@ -264,8 +269,8 @@ export function authorizeInstalledBundleRepair(input: {
   evidenceSignature: string;
   expectedBundleVersion: string;
   expectedHubOrigin: string;
+  expectedHostId: string;
   expectedProbeId: string;
-  hostId: number;
   installKey: Uint8Array;
   nowMs: number;
   repairNonce: string;
@@ -287,7 +292,7 @@ export function authorizeInstalledBundleRepair(input: {
     kind: "installed_bundle_failure",
     schemaVersion: 1,
     hubOrigin: input.expectedHubOrigin,
-    hostId: String(input.hostId),
+    hostId: input.expectedHostId,
     probeId: input.expectedProbeId,
     generation: input.evidence.generation,
     bootId: input.evidence.bootId,

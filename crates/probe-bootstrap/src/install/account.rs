@@ -75,6 +75,14 @@ impl AccountPort for SystemAccounts {
             deadline,
         )
     }
+    fn owns_observation_ipc_group(&mut self, transaction_id: &str) -> Result<bool, InstallError> {
+        inspect_owned_ipc_group(
+            OBSERVATION_IPC_GROUP,
+            transaction_id,
+            None,
+            self.command_deadline,
+        )
+    }
     fn remove_observation_ipc_group(&mut self, transaction_id: &str) -> Result<(), InstallError> {
         let deadline = self
             .command_deadline

@@ -702,6 +702,10 @@ pub struct ProbeRegistrationResponse {
     pub installation_inspection: ::core::option::Option<
         ProbeInstallationInspectionResponse,
     >,
+    /// Hub 在 registration transaction 中持久绑定的 Host；本机身份 receipt
+    /// 必须保存它，不能从后续 Probe route 反向推断。
+    #[prost(string, tag = "7")]
+    pub host_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProbeReportRequest {

@@ -33,6 +33,7 @@ pub struct ProbeRegistrationInput {
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRegistrationOutcome {
     pub initial_probe_configuration_version: Option<String>,
+    pub host_id: String,
     pub probe_id: String,
 }
 
@@ -152,8 +153,10 @@ pub fn register_probe(
     let response = ProbeRegistrationResponse::decode(response_body.as_slice())
         .map_err(|error| RegistrationError::Decode(error.to_string()))?;
 
-    if response.probe_id.is_empty() {
-        return Err(RegistrationError::InvalidResponse("missing Probe ID"));
+    if response.probe_id.is_empty() || response.host_id.is_empty() {
+        return Err(RegistrationError::InvalidResponse(
+            "missing Probe or Host identity",
+        ));
     }
 
     let server_time_offset_ms = response.server_time_ms as i128 - current_unix_time_ms_i128();
@@ -171,6 +174,7 @@ pub fn register_probe(
             enrollment_id: (!response.enrollment_id.is_empty())
                 .then_some(response.enrollment_id.as_str()),
             hub_url: input.hub_url,
+            host_id: response.host_id.as_str(),
             metrics_collection_interval_seconds: response.initial_configuration.as_ref().and_then(
                 |configuration| {
                     (configuration.metrics_collection_interval_seconds > 0)
@@ -192,6 +196,7 @@ pub fn register_probe(
         initial_probe_configuration_version: response
             .initial_configuration
             .map(|configuration| configuration.version),
+        host_id: response.host_id,
         probe_id: response.probe_id,
     })
 }
@@ -399,6 +404,7 @@ struct BootstrapConfig<'a> {
     enabled_collector_ids: Option<Vec<String>>,
     enrollment_id: Option<&'a str>,
     hub_url: String,
+    host_id: &'a str,
     metrics_collection_interval_seconds: Option<u32>,
     probe_configuration_version: Option<&'a str>,
     probe_id: &'a str,
@@ -473,6 +479,7 @@ fn store_bootstrap_config(
 fn render_bootstrap_config(config: &BootstrapConfig<'_>) -> String {
     let mut output = String::new();
     output.push_str(&format!("hub_url = {}\n", toml_string(&config.hub_url)));
+    output.push_str(&format!("host_id = {}\n", toml_string(config.host_id)));
     output.push_str(&format!("probe_id = {}\n", toml_string(config.probe_id)));
     output.push_str(&format!(
         "probe_private_key_pem = {}\n",

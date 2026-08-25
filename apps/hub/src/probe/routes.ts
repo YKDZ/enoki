@@ -342,6 +342,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       RegistrationResponse.create({
         initialConfiguration: defaultProbeConfiguration,
         enrollmentId: registration.enrollment.enrollmentId,
+        hostId: String(registration.enrollment.hostId),
         probeId,
         serverTimeMs: registeredAtMs,
       }),

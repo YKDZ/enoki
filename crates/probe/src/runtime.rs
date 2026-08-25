@@ -2981,6 +2981,7 @@ mod tests {
             registration_response: ProbeRegistrationResponse {
                 installation_inspection: None,
                 enrollment_id: String::new(),
+                host_id: "7".to_string(),
                 initial_configuration: Some(ProbeConfigurationResponse {
                     enabled_collector_ids: Vec::new(),
                     metrics_collection_interval_seconds: 1,

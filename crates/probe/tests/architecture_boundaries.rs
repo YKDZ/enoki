@@ -12,6 +12,10 @@ const LIFECYCLE_COMPANION_BINARY: &str =
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
+const INSTALLED_BUNDLE_REPAIR: &str =
+    include_str!("../src/runtime_failure/installed_bundle_repair.rs");
+const INSTALLED_BUNDLE_REPAIR_LIVE: &str =
+    include_str!("../src/runtime_failure/installed_bundle_repair/live.rs");
 const COMPATIBLE_UPGRADE: &str =
     include_str!("../../probe-bootstrap/src/install/compatible_upgrade.rs");
 const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
@@ -203,6 +207,18 @@ fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechani
 
 #[test]
 fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validation_gate() {
+    for forbidden in [
+        "crate::upgrader",
+        "ProbeRepairResult",
+        "ProbeRepairRunError",
+        "ProbeUpgraderRunError",
+        "repair_contract_failure",
+    ] {
+        assert!(
+            !INSTALLED_BUNDLE_REPAIR_LIVE.contains(forbidden),
+            "Installed Bundle Repair live Module 不得反向依赖调用它的 upgrader Adapter：{forbidden}",
+        );
+    }
     for required in [
         "open_verified_probe_upgrade_stage",
         "restore_installed_bundle_for_repair",
@@ -210,33 +226,45 @@ fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validati
         "mask\", \"--runtime\", \"enoki-observation-runtime.socket",
         "ConditionPathExists=\\nConditionPathExists=/run/enoki-probe/runtime-repair-permit",
         "request_finalized_window(Duration::from_secs(1), 0)",
-        "mark_runtime_healthy()",
-        ".complete()",
+        "restore_canonical_runtime_gate",
+        "probe_repair_canonical_runtime_validation_failed",
     ] {
         assert!(
-            UPGRADER.contains(required),
+            INSTALLED_BUNDLE_REPAIR_LIVE.contains(required),
             "Installed Bundle Repair 缺少 {required}"
         );
     }
-    let installed_repair = UPGRADER
-        .split("fn run_authorized_installed_bundle_repair")
+    assert!(UPGRADER.contains("drive_live_installed_bundle_repair"));
+    for private_detail in [
+        "InstalledBundleRepairProgress",
+        "mark_validation_pending",
+        "mark_temporary_runtime_healthy",
+        "mark_probe_active",
+        "mark_canonical_runtime_healthy",
+        "invalidate_failure_evidence",
+        "publish_success",
+    ] {
+        assert!(
+            !UPGRADER.contains(private_detail),
+            "upgrader Adapter 不得知道 Repair 私有 checkpoint：{private_detail}"
+        );
+    }
+    for forbidden in ["retry_runtime", "activate_complete_fresh", "Replacement"] {
+        assert!(!INSTALLED_BUNDLE_REPAIR_LIVE.contains(forbidden));
+    }
+    let drive = INSTALLED_BUNDLE_REPAIR
+        .split("pub(crate) fn drive_installed_bundle_repair")
         .nth(1)
-        .expect("Installed Bundle Repair coordinator 必须存在")
-        .split("fn repair_acquirer_exit_failure")
-        .next()
-        .expect("Installed Bundle Repair coordinator 必须封闭");
-    assert!(!installed_repair.contains("retry_runtime"));
-    assert!(!installed_repair.contains("activate_complete_fresh"));
-    assert!(!installed_repair.contains("Replacement"));
-    assert!(!installed_repair.contains("systemd.stop()"));
-    let prepared_repair = installed_repair.split("let prepared").nth(1).unwrap();
-    let runtime_healthy = prepared_repair.find("mark_runtime_healthy()").unwrap();
-    let probe_reporting = prepared_repair.find("start_probe_reporting").unwrap();
-    let invalidation_boundary = prepared_repair.find("mark_probe_active()").unwrap();
-    let completion = prepared_repair.find(".complete()").unwrap();
-    assert!(runtime_healthy < probe_reporting);
-    assert!(probe_reporting < invalidation_boundary);
-    assert!(invalidation_boundary < completion);
+        .expect("Repair Module 必须封闭 drive/resume 顺序");
+    let probe_active = drive.find("mark_probe_active").unwrap();
+    let invalidation = drive.find("invalidate_failure_evidence").unwrap();
+    let canonical = drive.find("validate_canonical_runtime").unwrap();
+    let canonical_receipt = drive.find("mark_canonical_runtime_healthy").unwrap();
+    let publish = drive.find("publish_success").unwrap();
+    assert!(probe_active < invalidation);
+    assert!(invalidation < canonical);
+    assert!(canonical < canonical_receipt);
+    assert!(canonical_receipt < publish);
 
     let exchange = UPGRADER
         .split("fn exchange_repair_authority(")

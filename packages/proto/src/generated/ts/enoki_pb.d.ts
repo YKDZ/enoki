@@ -500,6 +500,9 @@ export namespace enoki {
 
             /** ProbeRegistrationResponse installationInspection */
             installationInspection?: (enoki.v1.IProbeInstallationInspectionResponse|null);
+
+            /** ProbeRegistrationResponse hostId */
+            hostId?: (string|null);
         }
 
         /** Represents a ProbeRegistrationResponse. */
@@ -528,6 +531,9 @@ export namespace enoki {
 
             /** ProbeRegistrationResponse installationInspection. */
             public installationInspection?: (enoki.v1.IProbeInstallationInspectionResponse|null);
+
+            /** ProbeRegistrationResponse hostId. */
+            public hostId: string;
 
             /**
              * Creates a new ProbeRegistrationResponse instance using the specified properties.

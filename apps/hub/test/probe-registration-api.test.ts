@@ -135,6 +135,7 @@ async function decodeRegisteredProbe(response: Response) {
   const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  expect(registration.hostId).toMatch(/^[1-9][0-9]*$/);
 
   if (!privateKeyPem) {
     throw new Error("missing test Probe private key");

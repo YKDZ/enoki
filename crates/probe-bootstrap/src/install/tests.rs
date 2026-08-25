@@ -147,6 +147,13 @@ mod tests {
         calls: Vec<&'static str>,
         ipc_calls: Vec<&'static str>,
         reject: bool,
+        identity_present: bool,
+        ipc_present: bool,
+        crash_after: Option<&'static str>,
+        fail_identity: bool,
+        fail_ipc: bool,
+        poison_staging: Option<PathBuf>,
+        break_state_on_identity: Option<(PathBuf, PathBuf)>,
     }
     impl AccountPort for Accounts {
         fn require_absent(&mut self) -> Result<(), InstallError> {
@@ -160,6 +167,17 @@ mod tests {
             _transaction_id: &str,
         ) -> Result<ServiceIdentity, InstallError> {
             self.calls.push("create");
+            if self.fail_identity {
+                return Err(InstallError::Account);
+            }
+            self.identity_present = true;
+            if let Some((state, backup)) = &self.break_state_on_identity {
+                fs::rename(state, backup).unwrap();
+                fs::write(state, b"journal-parent-fault").unwrap();
+            }
+            if self.crash_after == Some("identity") {
+                panic!("模拟 identity effect 后进程退出");
+            }
             Ok(ServiceIdentity {
                 uid: unsafe { libc::geteuid() },
                 gid: unsafe { libc::getegid() },
@@ -171,6 +189,7 @@ mod tests {
             _identity: Option<ServiceIdentity>,
         ) -> Result<(), InstallError> {
             self.calls.push("remove");
+            self.identity_present = false;
             Ok(())
         }
         fn owns_transaction_identity(
@@ -179,20 +198,48 @@ mod tests {
             _identity: Option<ServiceIdentity>,
         ) -> Result<bool, InstallError> {
             self.calls.push("owns");
-            Ok(true)
+            Ok(self.identity_present)
         }
         fn create_observation_ipc_group(
             &mut self,
             _transaction_id: &str,
         ) -> Result<(), InstallError> {
             self.ipc_calls.push("create");
+            if self.fail_ipc {
+                return Err(InstallError::Account);
+            }
+            self.ipc_present = true;
+            if let Some(state) = &self.poison_staging {
+                let staging = fs::read_dir(state)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.starts_with("activation-stage-"))
+                    })
+                    .unwrap();
+                fs::write(staging.join("enoki-probe"), b"crash-window-residue").unwrap();
+            }
+            if self.crash_after == Some("ipc") {
+                panic!("模拟 IPC group effect 后进程退出");
+            }
             Ok(())
+        }
+        fn owns_observation_ipc_group(
+            &mut self,
+            _transaction_id: &str,
+        ) -> Result<bool, InstallError> {
+            self.ipc_calls.push("owns");
+            Ok(self.ipc_present)
         }
         fn remove_observation_ipc_group(
             &mut self,
             _transaction_id: &str,
         ) -> Result<(), InstallError> {
             self.ipc_calls.push("remove");
+            self.ipc_present = false;
             Ok(())
         }
     }
@@ -204,6 +251,7 @@ mod tests {
         fail_start: bool,
         fail_ready: bool,
         residue: bool,
+        registration_identity: Option<PathBuf>,
     }
     impl SystemdPort for Systemd {
         fn require_absent(&mut self) -> Result<(), InstallError> {
@@ -232,9 +280,20 @@ mod tests {
         }
         fn wait_local_activated(&mut self) -> Result<(), InstallError> {
             self.calls.push("ready");
-            (!self.fail_ready)
-                .then_some(())
-                .ok_or(InstallError::Systemd)
+            if self.fail_ready {
+                return Err(InstallError::Systemd);
+            }
+            // 生产 Type=notify unit 只有在注册事务原子持久化 identity 并完成启动
+            // report 后才 READY；此 seam 复现该顺序，而不把 active 伪装成注册收据。
+            if let Some(identity) = &self.registration_identity {
+                let pending = fs::read_to_string(identity).map_err(|_| InstallError::Io)?;
+                let registered = pending.replace(
+                    "enrollment_token = \"enk_enroll_secret\"\n",
+                    "probe_id = \"probe-registered\"\nhost_id = \"host-registered\"\nprobe_private_key_pem = \"private-key\"\n",
+                );
+                fs::write(identity, registered).map_err(|_| InstallError::Io)?;
+            }
+            Ok(())
         }
         fn stop(&mut self) -> Result<(), InstallError> {
             self.calls.push("stop");
@@ -366,6 +425,68 @@ mod tests {
     struct FailFirstCandidateDirectoryFiles {
         inner: SystemInstallFiles,
         failed: bool,
+    }
+
+    struct FailFirstBootstrapRoleFiles {
+        inner: SystemInstallFiles,
+        failed: bool,
+    }
+
+    impl InstallFilePort for FailFirstBootstrapRoleFiles {
+        fn ensure_metadata_directory(
+            &mut self,
+            path: &Path,
+            journal: &mut TransactionJournal,
+        ) -> Result<bool, InstallError> {
+            self.inner.ensure_metadata_directory(path, journal)
+        }
+
+        fn create_directory(
+            &mut self,
+            path: &Path,
+            mode: u32,
+            identity: ServiceIdentity,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.inner
+                .create_directory(path, mode, identity, journal, step)
+        }
+
+        fn install_binary(
+            &mut self,
+            component: &mut File,
+            path: &Path,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            if !self.failed {
+                self.failed = true;
+                return Err(InstallError::Io);
+            }
+            self.inner.install_binary(component, path, journal, step)
+        }
+
+        fn write_owned(
+            &mut self,
+            path: &Path,
+            contents: &[u8],
+            mode: u32,
+            owner: ServiceIdentity,
+            journal: &mut TransactionJournal,
+            step: RollbackStep,
+        ) -> Result<(), InstallError> {
+            self.inner
+                .write_owned(path, contents, mode, owner, journal, step)
+        }
+
+        fn remove_path(&mut self, path: &Path) -> Result<(), InstallError> {
+            self.inner.remove_path(path)
+        }
+
+        fn remove_directory(&mut self, path: &Path) -> Result<(), InstallError> {
+            self.inner.remove_directory(path)
+        }
     }
 
     impl InstallFilePort for FailFirstCandidateDirectoryFiles {
@@ -2552,6 +2673,7 @@ mod tests {
             fail_ready: failed_effect == "ready",
             ..Systemd::default()
         };
+        let resume_binding = ReplacementResumeBinding::for_test("a");
 
         let result = activate_complete_replacement_current_probe(
             VerifiedCompleteFreshComponents {
@@ -2569,6 +2691,7 @@ mod tests {
             &FixedInstallPaths::under(temporary.path()),
             &mut accounts,
             &mut systemd,
+            &resume_binding,
         );
 
         assert_eq!(result, Err(InstallError::Systemd));
@@ -2590,6 +2713,8 @@ mod tests {
         systemd.fail_enable = false;
         systemd.fail_start = false;
         systemd.fail_ready = false;
+        systemd.registration_identity =
+            Some(FixedInstallPaths::under(temporary.path()).identity());
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         activate_complete_replacement_current_probe(
@@ -2608,6 +2733,7 @@ mod tests {
             &FixedInstallPaths::under(temporary.path()),
             &mut accounts,
             &mut systemd,
+            &resume_binding,
         )
         .expect("exact committed candidate resumes to the current layout");
         assert!(
@@ -2624,6 +2750,16 @@ mod tests {
             .path()
             .join("var/lib/enoki-probe-bootstrap/current-layout")
             .exists());
+        assert!(temporary
+            .path()
+            .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
+            .exists());
+        finalize_complete_replacement_current_probe(
+            &FixedInstallPaths::under(temporary.path()),
+            &resume_binding,
+            "1.2.3",
+        )
+        .unwrap();
         assert!(!temporary
             .path()
             .join("var/lib/enoki-probe-bootstrap/activation-journal.json")
@@ -2635,6 +2771,286 @@ mod tests {
         for failed_effect in ["reload", "enable", "start", "ready"] {
             assert_committed_replacement_resumes_after(failed_effect);
         }
+    }
+
+    #[test]
+    fn committed_replacement_rejects_a_stale_journal_from_another_enrollment() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            fail_reload: true,
+            ..Systemd::default()
+        };
+        let candidate_a = ReplacementResumeBinding::for_test("candidate-a");
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_complete_replacement_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_candidate_a").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+                &candidate_a,
+            ),
+            Err(InstallError::Systemd)
+        );
+
+        systemd.fail_reload = false;
+        let effects_before = (accounts.calls.len(), accounts.ipc_calls.len(), systemd.calls.len());
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_complete_fresh_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_fresh").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert_eq!(
+            (accounts.calls.len(), accounts.ipc_calls.len(), systemd.calls.len()),
+            effects_before,
+            "Fresh 入口不得 rollback committed Replacement custody"
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        let candidate_b = ReplacementResumeBinding::for_test("candidate-b");
+        assert_eq!(
+            activate_complete_replacement_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_candidate_b").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+                &candidate_b,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert_eq!(
+            (accounts.calls.len(), accounts.ipc_calls.len(), systemd.calls.len()),
+            effects_before,
+            "错误绑定必须在任何新 Host 效果前关闭"
+        );
+    }
+
+    #[test]
+    fn fresh_interface_preserves_layout_committed_replacement_custody() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib/enoki-probe-bootstrap",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        fs::set_permissions(
+            paths.bootstrap_state(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let journal = TransactionJournal::begin_with_binding(
+            &paths.bootstrap_state(),
+            Some("committed-candidate"),
+        )
+        .unwrap();
+        fs::write(
+            paths.bootstrap_state().join("current-layout"),
+            "schema_version=1\nversion=1.2.3\n",
+        )
+        .unwrap();
+        drop(journal);
+
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_complete_fresh_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_fresh").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(paths.bootstrap_state().join("current-layout").exists());
+        assert!(accounts.calls.is_empty());
+        assert!(systemd.calls.is_empty());
+    }
+
+    #[test]
+    fn successful_replacement_keeps_exact_custody_until_candidate_receipt_is_acknowledged() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let binding = ReplacementResumeBinding::for_test("candidate-layout-ack");
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd {
+            registration_identity: Some(paths.identity()),
+            ..Systemd::default()
+        };
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_replacement_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+            &binding,
+        )
+        .unwrap();
+        assert!(paths.bootstrap_state().join("current-layout").exists());
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+
+        let effects_before = (accounts.calls.len(), accounts.ipc_calls.len(), systemd.calls.len());
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_complete_fresh_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_other").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert_eq!(
+            (accounts.calls.len(), accounts.ipc_calls.len(), systemd.calls.len()),
+            effects_before
+        );
+
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_replacement_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+            &binding,
+        )
+        .unwrap();
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        assert_eq!(
+            finalize_complete_replacement_current_probe(
+                &paths,
+                &ReplacementResumeBinding::for_test("wrong-candidate"),
+                "1.2.3",
+            ),
+            Err(InstallError::ExistingResidue)
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        finalize_complete_replacement_current_probe(&paths, &binding, "1.2.3").unwrap();
+        assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        fs::remove_file(paths.binary()).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(&paths, &binding, "1.2.3"),
+            Err(InstallError::ExistingResidue),
+            "Hub/commit fact 不得替代本机完整安装收据"
+        );
+        fs::remove_file(paths.bootstrap_state().join("current-layout")).unwrap();
+        assert_eq!(
+            finalize_complete_replacement_current_probe(&paths, &binding, "1.2.3"),
+            Err(InstallError::ExistingResidue),
+            "Hub/commit fact 不得替代本机 committed layout receipt"
+        );
     }
 
     #[test]
@@ -2655,6 +3071,7 @@ mod tests {
             inner: SystemInstallFiles,
             failed: false,
         };
+        let resume_binding = ReplacementResumeBinding::for_test("candidate-a");
 
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
@@ -2677,7 +3094,7 @@ mod tests {
                     systemd: &mut systemd,
                     files: &mut files,
                 },
-                InstallFailureSemantics::CommittedReplacement,
+                InstallFailureSemantics::CommittedReplacement(&resume_binding),
             ),
             Err(InstallError::Io)
         );
@@ -2705,7 +3122,7 @@ mod tests {
                 systemd: &mut systemd,
                 files: &mut files,
             },
-            InstallFailureSemantics::CommittedReplacement,
+            InstallFailureSemantics::CommittedReplacement(&resume_binding),
         )
         .expect("已提交 Replacement 从首个缺失 candidate effect 继续");
 
@@ -2713,6 +3130,325 @@ mod tests {
         assert!(!accounts.calls.contains(&"remove"));
         assert!(!accounts.ipc_calls.contains(&"remove"));
         assert!(paths.bootstrap_state().join("current-layout").exists());
+    }
+
+    #[test]
+    fn committed_replacement_resumes_account_effect_crash_windows_without_recreating_them() {
+        for crash_after in ["identity", "ipc"] {
+            let temporary = tempdir().unwrap();
+            for parent in [
+                "usr/local/bin",
+                "var/lib",
+                "etc/systemd/system",
+                "etc/sudoers.d",
+            ] {
+                fs::create_dir_all(temporary.path().join(parent)).unwrap();
+            }
+            let paths = FixedInstallPaths::under(temporary.path());
+            let mut accounts = Accounts {
+                crash_after: Some(crash_after),
+                ..Accounts::default()
+            };
+            let mut systemd = Systemd::default();
+            let resume_binding = ReplacementResumeBinding::for_test("candidate-account-window");
+            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+                    std::array::from_fn(|_| component());
+                let _ = activate_complete_replacement_current_probe(
+                    VerifiedCompleteFreshComponents {
+                        probe: &mut probe,
+                        observation_runtime: &mut runtime,
+                        cpu_provider: &mut provider,
+                        disk_health_provider: &mut disk_health,
+                        lifecycle_companion: &mut lifecycle,
+                        bootstrap_acquirer: &mut acquirer,
+                        bootstrap_activator: &mut activator,
+                    },
+                    &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                    &bundle().with_test_observation_receipts(5),
+                    &trust(),
+                    &paths,
+                    &mut accounts,
+                    &mut systemd,
+                    &resume_binding,
+                );
+            }));
+            assert!(crashed.is_err());
+            assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+
+            accounts.crash_after = None;
+            let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+                std::array::from_fn(|_| component());
+            activate_complete_replacement_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+                &resume_binding,
+            )
+            .unwrap();
+
+            assert_eq!(
+                accounts.calls.iter().filter(|call| **call == "create").count(),
+                1,
+                "identity effect 后崩溃必须由 transaction marker 恢复"
+            );
+            assert_eq!(
+                accounts
+                    .ipc_calls
+                    .iter()
+                    .filter(|call| **call == "create")
+                    .count(),
+                1,
+                "IPC group effect 后崩溃必须由 transaction marker 恢复"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_replacement_preserves_preparation_receipts_on_account_result_errors() {
+        for failed_effect in ["identity", "ipc", "stage"] {
+            let temporary = tempdir().unwrap();
+            for parent in [
+                "usr/local/bin",
+                "var/lib",
+                "etc/systemd/system",
+                "etc/sudoers.d",
+            ] {
+                fs::create_dir_all(temporary.path().join(parent)).unwrap();
+            }
+            let paths = FixedInstallPaths::under(temporary.path());
+            let binding = ReplacementResumeBinding::for_test("candidate-account-result");
+            let mut accounts = Accounts {
+                fail_identity: failed_effect == "identity",
+                fail_ipc: failed_effect == "ipc",
+                poison_staging: (failed_effect == "stage")
+                    .then(|| paths.bootstrap_state()),
+                ..Accounts::default()
+            };
+            let mut systemd = Systemd::default();
+            let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+                std::array::from_fn(|_| component());
+            assert_eq!(
+                activate_complete_replacement_current_probe(
+                    VerifiedCompleteFreshComponents {
+                        probe: &mut probe,
+                        observation_runtime: &mut runtime,
+                        cpu_provider: &mut provider,
+                        disk_health_provider: &mut disk_health,
+                        lifecycle_companion: &mut lifecycle,
+                        bootstrap_acquirer: &mut acquirer,
+                        bootstrap_activator: &mut activator,
+                    },
+                    &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                    &bundle().with_test_observation_receipts(5),
+                    &trust(),
+                    &paths,
+                    &mut accounts,
+                    &mut systemd,
+                    &binding,
+                ),
+                Err(if failed_effect == "stage" {
+                    InstallError::Io
+                } else {
+                    InstallError::Account
+                })
+            );
+            assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+            assert!(paths.bootstrap_acquirer().exists());
+            assert!(paths.bootstrap_activator().exists());
+            assert!(!accounts.calls.contains(&"remove"));
+            assert!(!accounts.ipc_calls.contains(&"remove"));
+
+            accounts.fail_identity = false;
+            accounts.fail_ipc = false;
+            accounts.poison_staging = None;
+            let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+                std::array::from_fn(|_| component());
+            activate_complete_replacement_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+                &binding,
+            )
+            .unwrap();
+            assert!(!accounts.calls.contains(&"remove"));
+            assert!(!accounts.ipc_calls.contains(&"remove"));
+        }
+    }
+
+    #[test]
+    fn committed_replacement_preserves_journal_when_bootstrap_role_publication_returns_error() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let binding = ReplacementResumeBinding::for_test("candidate-bootstrap-role");
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+        let mut files = FailFirstBootstrapRoleFiles {
+            inner: SystemInstallFiles,
+            failed: false,
+        };
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_verified_fresh_install(
+                &mut probe,
+                Some((
+                    &mut runtime,
+                    &mut provider,
+                    &mut disk_health,
+                    &mut lifecycle,
+                )),
+                Some((&mut acquirer, &mut activator)),
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut InstallPorts {
+                    accounts: &mut accounts,
+                    systemd: &mut systemd,
+                    files: &mut files,
+                },
+                InstallFailureSemantics::CommittedReplacement(&binding),
+            ),
+            Err(InstallError::Io)
+        );
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(!accounts.calls.contains(&"remove"));
+        assert!(!accounts.ipc_calls.contains(&"remove"));
+
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_verified_fresh_install(
+            &mut probe,
+            Some((
+                &mut runtime,
+                &mut provider,
+                &mut disk_health,
+                &mut lifecycle,
+            )),
+            Some((&mut acquirer, &mut activator)),
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &paths,
+            &mut InstallPorts {
+                accounts: &mut accounts,
+                systemd: &mut systemd,
+                files: &mut files,
+            },
+            InstallFailureSemantics::CommittedReplacement(&binding),
+        )
+        .unwrap();
+        assert!(paths.bootstrap_state().join("current-layout").exists());
+    }
+
+    #[test]
+    fn committed_replacement_preserves_identity_effect_when_its_receipt_write_fails() {
+        let temporary = tempdir().unwrap();
+        for parent in [
+            "usr/local/bin",
+            "var/lib",
+            "etc/systemd/system",
+            "etc/sudoers.d",
+        ] {
+            fs::create_dir_all(temporary.path().join(parent)).unwrap();
+        }
+        let paths = FixedInstallPaths::under(temporary.path());
+        let backup = temporary.path().join("activation-state-backup");
+        let binding = ReplacementResumeBinding::for_test("candidate-identity-receipt");
+        let mut accounts = Accounts {
+            break_state_on_identity: Some((paths.bootstrap_state(), backup.clone())),
+            ..Accounts::default()
+        };
+        let mut systemd = Systemd::default();
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        assert_eq!(
+            activate_complete_replacement_current_probe(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+                &binding,
+            ),
+            Err(InstallError::Io)
+        );
+        assert!(accounts.identity_present);
+        assert!(!accounts.calls.contains(&"remove"));
+        fs::remove_file(paths.bootstrap_state()).unwrap();
+        fs::rename(&backup, paths.bootstrap_state()).unwrap();
+        assert!(paths.bootstrap_state().join("activation-journal.json").exists());
+
+        accounts.break_state_on_identity = None;
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        activate_complete_replacement_current_probe(
+            VerifiedCompleteFreshComponents {
+                probe: &mut probe,
+                observation_runtime: &mut runtime,
+                cpu_provider: &mut provider,
+                disk_health_provider: &mut disk_health,
+                lifecycle_companion: &mut lifecycle,
+                bootstrap_acquirer: &mut acquirer,
+                bootstrap_activator: &mut activator,
+            },
+            &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
+            &bundle().with_test_observation_receipts(5),
+            &trust(),
+            &paths,
+            &mut accounts,
+            &mut systemd,
+            &binding,
+        )
+        .unwrap();
+        assert_eq!(
+            accounts.calls.iter().filter(|call| **call == "create").count(),
+            1
+        );
+        assert!(!accounts.calls.contains(&"remove"));
     }
 
     #[test]
@@ -3299,7 +4035,10 @@ mod tests {
         drop(journal);
 
         let mut component = component();
-        let mut accounts = Accounts::default();
+        let mut accounts = Accounts {
+            identity_present: true,
+            ..Accounts::default()
+        };
         let mut systemd = Systemd::default();
         activate_current_probe(
             &mut component,

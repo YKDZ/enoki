@@ -134,6 +134,7 @@ async function registerProbe(
   const registration = RegistrationResponse.decode(
     new Uint8Array(await response.arrayBuffer()),
   );
+  expect(registration.hostId).toMatch(/^[1-9][0-9]*$/);
 
   return {
     ...registration,
@@ -3499,6 +3500,7 @@ describe("Probe report API", () => {
       kind: "installed_bundle_failure" as const,
       schemaVersion: 1 as const,
       hubOrigin: "https://hub.example",
+      hostId: String(host.id),
       probeId: registration.probeId,
       generation: "a".repeat(64),
       bootId: "4f7d3e15-63cc-4d61-8fe4-f5d42773dd51",
@@ -3517,6 +3519,30 @@ describe("Probe report API", () => {
       "https://hub.example",
     );
     const repairPath = `/api/probe/runtime-failures/${evidence.generation}/repair-authorize`;
+    const wrongHostEvidence = { ...evidence, hostId: String(host.id + 1) };
+    const wrongHost = await app.request(repairPath, {
+      body: JSON.stringify({
+        evidence: wrongHostEvidence,
+        evidenceSignature: signInstalledBundleFailureEvidence(
+          canonicalInstalledBundleFailureEvidence(wrongHostEvidence),
+          installKey,
+        ),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(wrongHost.status).toBe(409);
+    const missingHost = await app.request(repairPath, {
+      body: JSON.stringify({
+        evidence: Object.fromEntries(
+          Object.entries(evidence).filter(([key]) => key !== "hostId"),
+        ),
+        evidenceSignature: "a".repeat(64),
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(missingHost.status).toBe(409);
     const response = await app.request(repairPath, {
       body: JSON.stringify({
         evidence,

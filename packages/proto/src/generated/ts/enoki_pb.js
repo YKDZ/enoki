@@ -1328,6 +1328,7 @@ export const enoki = $root.enoki = (() => {
              * @property {enoki.v1.IProbeConfigurationResponse|null} [initialConfiguration] ProbeRegistrationResponse initialConfiguration
              * @property {string|null} [enrollmentId] ProbeRegistrationResponse enrollmentId
              * @property {enoki.v1.IProbeInstallationInspectionResponse|null} [installationInspection] ProbeRegistrationResponse installationInspection
+             * @property {string|null} [hostId] ProbeRegistrationResponse hostId
              */
 
             /**
@@ -1394,6 +1395,14 @@ export const enoki = $root.enoki = (() => {
             ProbeRegistrationResponse.prototype.installationInspection = null;
 
             /**
+             * ProbeRegistrationResponse hostId.
+             * @member {string} hostId
+             * @memberof enoki.v1.ProbeRegistrationResponse
+             * @instance
+             */
+            ProbeRegistrationResponse.prototype.hostId = "";
+
+            /**
              * Creates a new ProbeRegistrationResponse instance using the specified properties.
              * @function create
              * @memberof enoki.v1.ProbeRegistrationResponse
@@ -1433,6 +1442,8 @@ export const enoki = $root.enoki = (() => {
                     writer.uint32(/* id 5, wireType 2 =*/42).string(message.enrollmentId);
                 if (message.installationInspection != null && Object.hasOwnProperty.call(message, "installationInspection"))
                     $root.enoki.v1.ProbeInstallationInspectionResponse.encode(message.installationInspection, writer.uint32(/* id 6, wireType 2 =*/50).fork(), q + 1).ldelim();
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    writer.uint32(/* id 7, wireType 2 =*/58).string(message.hostId);
                 return writer;
             };
 
@@ -1497,6 +1508,10 @@ export const enoki = $root.enoki = (() => {
                             message.installationInspection = $root.enoki.v1.ProbeInstallationInspectionResponse.decode(reader, reader.uint32(), undefined, long + 1);
                             break;
                         }
+                    case 7: {
+                            message.hostId = reader.string();
+                            break;
+                        }
                     default:
                         reader.skipType(tag & 7, long);
                         break;
@@ -1558,6 +1573,9 @@ export const enoki = $root.enoki = (() => {
                     if (error)
                         return "installationInspection." + error;
                 }
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    if (!$util.isString(message.hostId))
+                        return "hostId: string expected";
                 return null;
             };
 
@@ -1604,6 +1622,8 @@ export const enoki = $root.enoki = (() => {
                         throw TypeError(".enoki.v1.ProbeRegistrationResponse.installationInspection: object expected");
                     message.installationInspection = $root.enoki.v1.ProbeInstallationInspectionResponse.fromObject(object.installationInspection, long + 1);
                 }
+                if (object.hostId != null)
+                    message.hostId = String(object.hostId);
                 return message;
             };
 
@@ -1635,6 +1655,7 @@ export const enoki = $root.enoki = (() => {
                     object.initialConfiguration = null;
                     object.enrollmentId = "";
                     object.installationInspection = null;
+                    object.hostId = "";
                 }
                 if (message.probeId != null && Object.hasOwnProperty.call(message, "probeId"))
                     object.probeId = message.probeId;
@@ -1653,6 +1674,8 @@ export const enoki = $root.enoki = (() => {
                     object.enrollmentId = message.enrollmentId;
                 if (message.installationInspection != null && Object.hasOwnProperty.call(message, "installationInspection"))
                     object.installationInspection = $root.enoki.v1.ProbeInstallationInspectionResponse.toObject(message.installationInspection, options, q + 1);
+                if (message.hostId != null && Object.hasOwnProperty.call(message, "hostId"))
+                    object.hostId = message.hostId;
                 return object;
             };
 

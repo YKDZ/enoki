@@ -2486,6 +2486,7 @@ mod tests {
             };
             Ok(crate::protocol::enoki::v1::ProbeRegistrationResponse {
                 enrollment_id: String::new(),
+                host_id: String::new(),
                 initial_configuration: None,
                 installation_inspection: Some(
                     crate::protocol::enoki::v1::ProbeInstallationInspectionResponse {

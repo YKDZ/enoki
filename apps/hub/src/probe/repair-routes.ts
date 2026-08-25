@@ -146,6 +146,7 @@ export function createProbeRepairAuthorizationRoutes(
         evidenceSignature: body.evidenceSignature,
         expectedBundleVersion: host.probeVersion,
         expectedHubOrigin: hubOrigin,
+        expectedHostId: String(host.id),
         expectedProbeId: host.probeId,
         installKey,
         nowMs: operationNowMs,
@@ -214,8 +215,8 @@ export function createProbeRepairAuthorizationRoutes(
         evidenceSignature: body.evidenceSignature,
         expectedBundleVersion: host.probeVersion,
         expectedHubOrigin: hubOrigin,
+        expectedHostId: String(host.id),
         expectedProbeId: host.probeId,
-        hostId: host.id,
         installKey,
         nowMs: operationNowMs,
         repairNonce: repair.repairNonce,
@@ -353,26 +354,16 @@ function readInstalledBundleRepairAuthorizationBody(requestBody: Uint8Array): {
   evidence: InstalledBundleFailureEvidence;
   evidenceSignature: string;
 } | null {
+  const envelope = readSignedEvidenceEnvelope(requestBody);
+  if (!envelope) return null;
   try {
-    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
-      string,
-      unknown
-    >;
-    if (
-      Object.keys(body).sort().join("\0") !==
-        ["evidence", "evidenceSignature"].sort().join("\0") ||
-      typeof body.evidence !== "object" ||
-      body.evidence === null ||
-      typeof body.evidenceSignature !== "string" ||
-      !/^[0-9a-f]{64}$/.test(body.evidenceSignature)
-    )
-      return null;
-    const evidence = body.evidence as Record<string, unknown>;
+    const evidence = envelope.evidence;
     const stringKeys = [
       "bootId",
       "bundleVersion",
       "generation",
       "hubOrigin",
+      "hostId",
       "identityReceiptSha256",
       "installStateSha256",
       "kind",
@@ -394,7 +385,7 @@ function readInstalledBundleRepairAuthorizationBody(requestBody: Uint8Array): {
       return null;
     return {
       evidence: evidence as InstalledBundleFailureEvidence,
-      evidenceSignature: body.evidenceSignature,
+      evidenceSignature: envelope.evidenceSignature,
     };
   } catch {
     return null;
@@ -405,21 +396,10 @@ function readRepairAuthorizationBody(requestBody: Uint8Array): {
   evidence: ProbeRepairEvidence;
   evidenceSignature: string;
 } | null {
+  const envelope = readSignedEvidenceEnvelope(requestBody);
+  if (!envelope) return null;
   try {
-    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
-      string,
-      unknown
-    >;
-    if (
-      Object.keys(body).sort().join("\0") !==
-        ["evidence", "evidenceSignature"].sort().join("\0") ||
-      typeof body.evidence !== "object" ||
-      body.evidence === null ||
-      typeof body.evidenceSignature !== "string" ||
-      !/^[0-9a-f]{64}$/.test(body.evidenceSignature)
-    )
-      return null;
-    const evidence = body.evidence as Record<string, unknown>;
+    const evidence = envelope.evidence;
     const stringKeys = [
       "failedAuthoritySha256",
       "failedOperationId",
@@ -455,6 +435,37 @@ function readRepairAuthorizationBody(requestBody: Uint8Array): {
       return null;
     return {
       evidence: evidence as ProbeRepairEvidence,
+      evidenceSignature: envelope.evidenceSignature,
+    };
+  } catch {
+    return null;
+  }
+}
+
+type SignedEvidenceEnvelope = {
+  evidence: Record<string, unknown>;
+  evidenceSignature: string;
+};
+
+function readSignedEvidenceEnvelope(
+  requestBody: Uint8Array,
+): SignedEvidenceEnvelope | null {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
+      string,
+      unknown
+    >;
+    if (
+      Object.keys(body).sort().join("\0") !==
+        ["evidence", "evidenceSignature"].sort().join("\0") ||
+      typeof body.evidence !== "object" ||
+      body.evidence === null ||
+      typeof body.evidenceSignature !== "string" ||
+      !/^[0-9a-f]{64}$/.test(body.evidenceSignature)
+    )
+      return null;
+    return {
+      evidence: body.evidence as Record<string, unknown>,
       evidenceSignature: body.evidenceSignature,
     };
   } catch {
