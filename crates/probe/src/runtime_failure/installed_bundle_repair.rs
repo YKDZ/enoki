@@ -209,6 +209,9 @@ pub(crate) trait InstalledBundleRepairEffects {
         authority: &InstalledBundleRepairAuthorityV1,
     ) -> Result<(), Self::Error>;
     fn remove_stage(&mut self, operation_id: &str, owner_uid: u32) -> Result<(), Self::Error>;
+    fn after_intent_retirement(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
     fn error_code<'a>(&self, error: &'a Self::Error) -> &'a str;
 }
 
@@ -350,6 +353,9 @@ pub(crate) fn drive_installed_bundle_repair<E: InstalledBundleRepairEffects>(
     grant.finish_success().map_err(|_| {
         InstalledBundleRepairDriveError::RecoveryPending("probe_repair_completion_persist_failed")
     })?;
+    effects
+        .after_intent_retirement()
+        .map_err(InstalledBundleRepairDriveError::Effect)?;
     Ok(InstalledBundleRepairOutcome {
         probe_id,
         repaired_version,
@@ -368,15 +374,25 @@ pub fn installed_bundle_failure_is_current() -> bool {
     if unsafe { libc::geteuid() } != 0 {
         return false;
     }
-    if matches!(resume_installed_bundle_repair(), Ok(Some(_))) {
+    installed_bundle_failure_is_current_at(Path::new("/"), 0, &mut SystemRuntimeFailureSystemd)
+}
+
+pub(super) fn installed_bundle_failure_is_current_at(
+    root: &Path,
+    expected_uid: u32,
+    systemd: &mut impl RuntimeFailureSystemd,
+) -> bool {
+    if matches!(
+        resume_installed_bundle_repair_at(root, expected_uid),
+        Ok(Some(_))
+    ) {
         return true;
     }
-    let mut systemd = SystemRuntimeFailureSystemd;
     matches!(
         systemd.fixed_runtime_state(),
         Ok(RuntimeUnitState { active_state, result })
             if active_state == "failed" && result == "start-limit-hit"
-    ) && current_epoch_at(Path::new("/"), 0).is_ok()
+    ) && current_epoch_at(root, expected_uid).is_ok()
 }
 
 pub(super) fn resume_installed_bundle_repair_at(

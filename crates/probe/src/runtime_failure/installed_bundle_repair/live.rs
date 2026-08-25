@@ -292,6 +292,10 @@ where
         self.context.stages.remove(operation_id, owner_uid)
     }
 
+    fn after_intent_retirement(&mut self) -> Result<(), Self::Error> {
+        self.context.crash.after(LiveRepairEffect::IntentRetired)
+    }
+
     fn error_code<'a>(&self, error: &'a Self::Error) -> &'a str {
         error.code()
     }
@@ -421,6 +425,7 @@ enum LiveRepairEffect {
     TemporaryGateInstalled,
     CanonicalGateRemoved,
     StatusPublishedBeforeRetirement,
+    IntentRetired,
 }
 
 trait LiveRepairCrashHook {
@@ -551,12 +556,30 @@ mod tests {
     use enoki_probe_bootstrap::install::{
         InstallError, InstalledBundleRepairCrashPoint, set_installed_bundle_repair_crash_for_test,
     };
-    use std::{cell::RefCell, fs, os::unix::fs::PermissionsExt, rc::Rc};
+    use std::{
+        cell::RefCell,
+        fs,
+        os::unix::fs::PermissionsExt,
+        panic::{AssertUnwindSafe, catch_unwind},
+        rc::Rc,
+    };
 
     use crate::runtime_failure::{
-        InstalledBundleRepairProgress, resume_installed_bundle_repair_at,
+        InstalledBundleRepairProgress, RuntimeFailureSystemd, RuntimeUnitState,
+        installed_bundle_failure_is_current_at, resume_installed_bundle_repair_at,
         tests::{repair_completion_fixture, repair_test_bundle},
     };
+
+    struct TerminalRuntime;
+
+    impl RuntimeFailureSystemd for TerminalRuntime {
+        fn fixed_runtime_state(&mut self) -> std::io::Result<RuntimeUnitState> {
+            Ok(RuntimeUnitState {
+                active_state: "failed".into(),
+                result: "start-limit-hit".into(),
+            })
+        }
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum FaultEvent {
@@ -578,29 +601,44 @@ mod tests {
     }
 
     impl FaultPlan {
-        fn hit(&mut self, event: FaultEvent) -> bool {
+        fn effect(&mut self, event: FaultEvent) {
             self.transcript.push(event);
             let Some((target, occurrence)) = self.target else {
-                return false;
+                return;
             };
             if event != target {
-                return false;
+                return;
             }
             self.seen += 1;
             if self.seen == occurrence {
                 self.target = None;
-                return true;
+                panic!("simulated abrupt process disappearance after {event:?}");
             }
-            false
         }
     }
 
     type SharedFault = Rc<RefCell<FaultPlan>>;
 
+    #[derive(Clone, Debug, Default, Eq, PartialEq)]
+    struct ObservableSystemState {
+        services_stopped: bool,
+        socket_masked: bool,
+        socket_started: bool,
+        runtime_stopped: bool,
+        temporary_runtime_healthy: bool,
+        canonical_runtime_healthy: bool,
+        probe_started: bool,
+        probe_active: bool,
+        reload_generation: usize,
+    }
+
+    type SharedSystemState = Rc<RefCell<ObservableSystemState>>;
+
     #[derive(Clone)]
     struct TestSystemd {
         transcript: Rc<RefCell<Vec<&'static str>>>,
         fault: SharedFault,
+        state: SharedSystemState,
     }
 
     impl SystemdPort for TestSystemd {
@@ -609,30 +647,44 @@ mod tests {
         }
         fn daemon_reload(&mut self) -> Result<(), InstallError> {
             self.transcript.borrow_mut().push("reload");
-            (!self.fault.borrow_mut().hit(FaultEvent::SystemdReload))
-                .then_some(())
-                .ok_or(InstallError::Systemd)
+            self.state.borrow_mut().reload_generation += 1;
+            self.fault.borrow_mut().effect(FaultEvent::SystemdReload);
+            Ok(())
         }
         fn enable(&mut self) -> Result<(), InstallError> {
             Ok(())
         }
         fn start(&mut self) -> Result<(), InstallError> {
             self.transcript.borrow_mut().push("start-probe");
-            (!self.fault.borrow_mut().hit(FaultEvent::ProbeStart))
-                .then_some(())
-                .ok_or(InstallError::Systemd)
+            let mut state = self.state.borrow_mut();
+            assert!(
+                !state.socket_masked,
+                "Probe cannot start behind a masked gate"
+            );
+            state.services_stopped = false;
+            state.probe_started = true;
+            drop(state);
+            self.fault.borrow_mut().effect(FaultEvent::ProbeStart);
+            Ok(())
         }
         fn wait_local_activated(&mut self) -> Result<(), InstallError> {
             self.transcript.borrow_mut().push("probe-active");
-            (!self.fault.borrow_mut().hit(FaultEvent::ProbeWait))
-                .then_some(())
-                .ok_or(InstallError::Systemd)
+            let mut state = self.state.borrow_mut();
+            assert!(state.probe_started, "Probe activation requires Probe start");
+            state.probe_active = true;
+            drop(state);
+            self.fault.borrow_mut().effect(FaultEvent::ProbeWait);
+            Ok(())
         }
         fn stop(&mut self) -> Result<(), InstallError> {
             self.transcript.borrow_mut().push("stop");
-            (!self.fault.borrow_mut().hit(FaultEvent::SystemdStop))
-                .then_some(())
-                .ok_or(InstallError::Systemd)
+            let mut state = self.state.borrow_mut();
+            state.services_stopped = true;
+            state.probe_started = false;
+            state.probe_active = false;
+            drop(state);
+            self.fault.borrow_mut().effect(FaultEvent::SystemdStop);
+            Ok(())
         }
         fn disable(&mut self) -> Result<(), InstallError> {
             Ok(())
@@ -643,6 +695,7 @@ mod tests {
     struct TestRunner {
         transcript: Rc<RefCell<Vec<RepairSystemdAction>>>,
         fault: SharedFault,
+        state: SharedSystemState,
     }
 
     impl FixedRepairSystemdRunner for TestRunner {
@@ -651,9 +704,36 @@ mod tests {
             action: RepairSystemdAction,
         ) -> Result<(), LiveInstalledBundleRepairError> {
             self.transcript.borrow_mut().push(action);
-            (!self.fault.borrow_mut().hit(FaultEvent::Runner(action)))
-                .then_some(())
-                .ok_or_else(|| contract_failure("probe_repair_systemd_failed"))
+            let mut state = self.state.borrow_mut();
+            match action {
+                RepairSystemdAction::StopRepairServices => {
+                    state.services_stopped = true;
+                    state.probe_started = false;
+                    state.probe_active = false;
+                    state.socket_started = false;
+                }
+                RepairSystemdAction::MaskRuntimeSocket => {
+                    assert!(state.services_stopped);
+                    state.socket_masked = true;
+                    state.socket_started = false;
+                }
+                RepairSystemdAction::ResetRuntimeFailed => {
+                    assert!(state.probe_active);
+                }
+                RepairSystemdAction::StartRuntimeSocket => {
+                    assert!(!state.socket_masked);
+                    state.socket_started = true;
+                    state.runtime_stopped = false;
+                }
+                RepairSystemdAction::StopRuntime => {
+                    state.runtime_stopped = true;
+                    state.socket_started = false;
+                }
+                RepairSystemdAction::UnmaskRuntimeSocket => state.socket_masked = false,
+            }
+            drop(state);
+            self.fault.borrow_mut().effect(FaultEvent::Runner(action));
+            Ok(())
         }
     }
 
@@ -661,6 +741,7 @@ mod tests {
     struct TestRuntime {
         transcript: Rc<RefCell<Vec<RuntimeValidation>>>,
         fault: SharedFault,
+        state: SharedSystemState,
     }
 
     impl RuntimeValidator for TestRuntime {
@@ -669,9 +750,23 @@ mod tests {
             validation: RuntimeValidation,
         ) -> Result<(), LiveInstalledBundleRepairError> {
             self.transcript.borrow_mut().push(validation);
-            (!self.fault.borrow_mut().hit(FaultEvent::Runtime(validation)))
-                .then_some(())
-                .ok_or_else(|| contract_failure("probe_repair_runtime_validation_failed"))
+            let mut state = self.state.borrow_mut();
+            assert!(
+                state.socket_started,
+                "Runtime validation requires its socket"
+            );
+            match validation {
+                RuntimeValidation::Temporary => state.temporary_runtime_healthy = true,
+                RuntimeValidation::Canonical => {
+                    assert!(state.probe_active);
+                    state.canonical_runtime_healthy = true;
+                }
+            }
+            drop(state);
+            self.fault
+                .borrow_mut()
+                .effect(FaultEvent::Runtime(validation));
+            Ok(())
         }
     }
 
@@ -683,9 +778,8 @@ mod tests {
             &mut self,
             effect: LiveRepairEffect,
         ) -> Result<(), LiveInstalledBundleRepairError> {
-            (!self.0.borrow_mut().hit(FaultEvent::Gate(effect)))
-                .then_some(())
-                .ok_or_else(|| contract_failure("probe_repair_test_crash"))
+            self.0.borrow_mut().effect(FaultEvent::Gate(effect));
+            Ok(())
         }
     }
 
@@ -719,19 +813,23 @@ mod tests {
         }
 
         fn remove(&mut self, _: &str, _: u32) -> Result<(), LiveInstalledBundleRepairError> {
-            *self.removed.borrow_mut() += 1;
-            (!self.fault.borrow_mut().hit(FaultEvent::StageRetirement))
-                .then_some(())
-                .ok_or_else(|| contract_failure("probe_repair_stage_cleanup_failed"))
+            if self.directory.exists() {
+                fs::remove_dir_all(&self.directory)
+                    .map_err(|_| contract_failure("probe_repair_stage_cleanup_failed"))?;
+                *self.removed.borrow_mut() += 1;
+            }
+            self.fault.borrow_mut().effect(FaultEvent::StageRetirement);
+            Ok(())
         }
     }
 
     struct LiveFixture {
         root: tempfile::TempDir,
-        stage: tempfile::TempDir,
+        stage: PathBuf,
         systemd: TestSystemd,
         runner: TestRunner,
         runtime: TestRuntime,
+        state: SharedSystemState,
         removed: Rc<RefCell<usize>>,
         fault: SharedFault,
     }
@@ -781,7 +879,8 @@ mod tests {
             ] {
                 write_mode(root.path().join(path), b"old-unit", 0o644);
             }
-            let stage = tempfile::tempdir().unwrap();
+            let stage = root.path().join("var/lib/enoki-probe/upgrade-stages/50");
+            fs::create_dir_all(&stage).unwrap();
             for name in [
                 "probe",
                 "runtime",
@@ -791,28 +890,33 @@ mod tests {
                 "acquirer",
                 "activator",
             ] {
-                write_mode(stage.path().join(name), b"probe", 0o600);
+                write_mode(stage.join(name), b"probe", 0o600);
             }
             let fault = Rc::new(RefCell::new(FaultPlan {
                 target,
                 seen: 0,
                 transcript: Vec::new(),
             }));
+            let state = Rc::new(RefCell::new(ObservableSystemState::default()));
             Self {
                 root,
                 stage,
                 systemd: TestSystemd {
                     transcript: Rc::new(RefCell::new(Vec::new())),
                     fault: fault.clone(),
+                    state: state.clone(),
                 },
                 runner: TestRunner {
                     transcript: Rc::new(RefCell::new(Vec::new())),
                     fault: fault.clone(),
+                    state: state.clone(),
                 },
                 runtime: TestRuntime {
                     transcript: Rc::new(RefCell::new(Vec::new())),
                     fault: fault.clone(),
+                    state: state.clone(),
                 },
+                state,
                 removed: Rc::new(RefCell::new(0)),
                 fault,
             }
@@ -829,7 +933,7 @@ mod tests {
                 runner: self.runner.clone(),
                 runtime: self.runtime.clone(),
                 stages: TestStageOpener {
-                    directory: self.stage.path().to_owned(),
+                    directory: self.stage.clone(),
                     bundle: repair_test_bundle(),
                     removed: self.removed.clone(),
                     fault: self.fault.clone(),
@@ -870,6 +974,21 @@ mod tests {
                 .join("var/lib/enoki-probe-bootstrap/installed-bundle-repair.json")
                 .exists()
         );
+        assert!(!fixture.stage.exists(), "verified stage must be retired");
+        assert!(
+            !fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .exists(),
+            "repair intent must be retired"
+        );
+        for path in [RUNTIME_REPAIR_PERMIT, RUNTIME_REPAIR_DROP_IN] {
+            assert!(
+                !rooted(fixture.root.path(), path).exists(),
+                "temporary Runtime gate residue: {path}"
+            );
+        }
         for directory in [
             "usr/local/bin",
             "etc/systemd/system",
@@ -889,10 +1008,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(status.matches("status = \"succeeded\"").count(), 1);
+        assert!(!status.contains("status = \"failed\""));
+        let state = fixture.state.borrow();
+        assert!(!state.services_stopped);
+        assert!(!state.socket_masked);
+        assert!(state.socket_started);
+        assert!(!state.runtime_stopped);
+        assert!(state.temporary_runtime_healthy);
+        assert!(state.canonical_runtime_healthy);
+        assert!(state.probe_started);
+        assert!(state.probe_active);
+        assert!(state.reload_generation >= 4);
     }
 
-    fn assert_fixed_live_effect_order(fixture: &LiveFixture) {
-        let expected = [
+    fn assert_effect_state_after_crash(fixture: &LiveFixture, fault: (FaultEvent, usize)) {
+        let state = fixture.state.borrow();
+        match fault.0 {
+            FaultEvent::SystemdStop => assert!(state.services_stopped),
+            FaultEvent::SystemdReload => assert_eq!(state.reload_generation, fault.1),
+            FaultEvent::ProbeStart => assert!(state.probe_started),
+            FaultEvent::ProbeWait => assert!(state.probe_active),
+            FaultEvent::Runner(action) => match action {
+                RepairSystemdAction::StopRepairServices => assert!(state.services_stopped),
+                RepairSystemdAction::MaskRuntimeSocket => assert!(state.socket_masked),
+                RepairSystemdAction::ResetRuntimeFailed => assert!(state.probe_active),
+                RepairSystemdAction::StartRuntimeSocket => assert!(state.socket_started),
+                RepairSystemdAction::StopRuntime => {
+                    assert!(state.runtime_stopped);
+                    assert!(!state.socket_started);
+                }
+                RepairSystemdAction::UnmaskRuntimeSocket => assert!(!state.socket_masked),
+            },
+            FaultEvent::Runtime(RuntimeValidation::Temporary) => {
+                assert!(state.temporary_runtime_healthy)
+            }
+            FaultEvent::Runtime(RuntimeValidation::Canonical) => {
+                assert!(state.canonical_runtime_healthy)
+            }
+            FaultEvent::Gate(_) | FaultEvent::StageRetirement => {}
+        }
+    }
+
+    fn fixed_live_effect_order() -> [FaultEvent; 23] {
+        [
             FaultEvent::Runner(RepairSystemdAction::StopRepairServices),
             FaultEvent::Runner(RepairSystemdAction::MaskRuntimeSocket),
             FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved),
@@ -915,18 +1073,43 @@ mod tests {
             FaultEvent::Runtime(RuntimeValidation::Canonical),
             FaultEvent::Gate(LiveRepairEffect::StatusPublishedBeforeRetirement),
             FaultEvent::StageRetirement,
-        ];
-        let transcript = &fixture.fault.borrow().transcript;
-        let mut cursor = 0;
-        for event in transcript {
-            if expected.get(cursor) == Some(event) {
-                cursor += 1;
-            }
-        }
+            FaultEvent::Gate(LiveRepairEffect::IntentRetired),
+        ]
+    }
+
+    fn assert_exact_crash_restart_transcript(fixture: &LiveFixture, fault: (FaultEvent, usize)) {
+        let baseline = fixed_live_effect_order();
+        let mut seen = 0;
+        let cut = baseline
+            .iter()
+            .position(|event| {
+                if *event == fault.0 {
+                    seen += 1;
+                }
+                *event == fault.0 && seen == fault.1
+            })
+            .unwrap();
+        let restart: Vec<FaultEvent> = match cut {
+            0..=4 => baseline.to_vec(),
+            5 => baseline[..4]
+                .iter()
+                .chain(&baseline[5..])
+                .copied()
+                .collect(),
+            6..=10 => baseline[6..].to_vec(),
+            11..=16 => baseline[11..].to_vec(),
+            17..=19 => baseline[17..].to_vec(),
+            _ => unreachable!(),
+        };
+        let expected = baseline[..=cut]
+            .iter()
+            .copied()
+            .chain(restart)
+            .collect::<Vec<_>>();
         assert_eq!(
-            cursor,
-            expected.len(),
-            "production effect 顺序未闭合；transcript={transcript:?}"
+            fixture.fault.borrow().transcript,
+            expected,
+            "abrupt crash must not run compensation and restart may replay only its persisted outer checkpoint"
         );
     }
 
@@ -1028,21 +1211,45 @@ mod tests {
             )
             .unwrap();
             assert!(
-                drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context())
-                    .is_err()
+                catch_unwind(AssertUnwindSafe(|| {
+                    let _ = drive_live_installed_bundle_repair_with(
+                        fixture.resume(),
+                        fixture.context(),
+                    );
+                }))
+                .is_err(),
+                "effect-after fault must disappear abruptly rather than return an ordinary error"
             );
             assert!(
                 fixture.fault.borrow().target.is_none(),
                 "typed fault 未命中: {fault:?}"
             );
             assert_eq!(fixture.fault.borrow().seen, fault.1);
+            assert_eq!(
+                fixture.fault.borrow().transcript.last(),
+                Some(&fault.0),
+                "the selected observable effect must complete before abrupt disappearance"
+            );
+            match fault.0 {
+                FaultEvent::Gate(LiveRepairEffect::TemporaryGateInstalled) => {
+                    assert!(rooted(fixture.root.path(), RUNTIME_REPAIR_PERMIT).exists());
+                    assert!(rooted(fixture.root.path(), RUNTIME_REPAIR_DROP_IN).exists());
+                }
+                FaultEvent::Gate(LiveRepairEffect::RuntimeGateRemoved)
+                | FaultEvent::Gate(LiveRepairEffect::CanonicalGateRemoved) => {
+                    assert!(!rooted(fixture.root.path(), RUNTIME_REPAIR_PERMIT).exists());
+                    assert!(!rooted(fixture.root.path(), RUNTIME_REPAIR_DROP_IN).exists());
+                }
+                _ => {}
+            }
+            assert_effect_state_after_crash(&fixture, fault);
             let outcome =
                 drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context())
                     .unwrap_or_else(|error| panic!("{fault:?} resume failed: {error:?}"));
             assert_eq!(outcome.probe_id, "probe_01");
             assert_eq!(outcome.repaired_version, "1.2.3");
             assert_converged(&fixture, &identity_before);
-            assert_fixed_live_effect_order(&fixture);
+            assert_exact_crash_restart_transcript(&fixture, fault);
         }
     }
 
@@ -1061,7 +1268,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_err()
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err()
         );
         assert!(fixture.fault.borrow().target.is_none());
         assert!(
@@ -1081,10 +1292,56 @@ mod tests {
         .unwrap();
         assert_eq!(status.matches("status = \"succeeded\"").count(), 1);
 
-        let outcome =
-            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).unwrap();
-        assert_eq!(outcome.probe_id, "probe_01");
-        assert_converged(&fixture, &identity_before);
+        let installed_probe = fixture.root.path().join("usr/local/bin/enoki-probe");
+        let metadata = fs::metadata(&installed_probe).unwrap();
+        let original = fs::read(&installed_probe).unwrap();
+        let tampered = vec![b'x'; original.len()];
+        assert_ne!(tampered, original);
+        fs::write(&installed_probe, tampered).unwrap();
+        fs::set_permissions(&installed_probe, metadata.permissions()).unwrap();
+
+        assert!(
+            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_err(),
+            "StatusPublished recovery must re-verify the journal's exact destination fingerprints"
+        );
+        assert!(
+            fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe-bootstrap/installed-bundle-repair.json")
+                .exists(),
+            "payload mismatch must retain transaction custody"
+        );
+        assert!(
+            fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
+                .exists(),
+            "payload mismatch must retain StatusPublished intent"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture
+                    .root
+                    .path()
+                    .join("var/lib/enoki-probe/probe-operation-status.toml")
+            )
+            .unwrap()
+            .matches("status = \"succeeded\"")
+            .count(),
+            1
+        );
+        assert_eq!(
+            fs::read(
+                fixture
+                    .root
+                    .path()
+                    .join("var/lib/enoki-probe/identity/probe-bootstrap.toml")
+            )
+            .unwrap(),
+            identity_before
+        );
     }
 
     #[test]
@@ -1092,7 +1349,11 @@ mod tests {
         let fault = (FaultEvent::StageRetirement, 1);
         let fixture = LiveFixture::with_fault(Some(fault));
         assert!(
-            drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context()).is_err()
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err()
         );
         assert!(fixture.fault.borrow().target.is_none());
         assert!(
@@ -1109,8 +1370,8 @@ mod tests {
         assert_eq!(outcome.probe_id, "probe_01");
         assert_eq!(
             *fixture.removed.borrow(),
-            2,
-            "effect-after crash 后必须幂等重试 stage retirement"
+            1,
+            "effect-after crash 后重试不得产生第二次 stage unlink"
         );
         assert!(
             !fixture
@@ -1119,5 +1380,41 @@ mod tests {
                 .join("var/lib/enoki-probe/runtime-failure/repair-intent.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn fresh_recovery_detector_stays_terminal_after_real_intent_unlink() {
+        let fixture =
+            LiveFixture::with_fault(Some((FaultEvent::Gate(LiveRepairEffect::IntentRetired), 1)));
+        let identity_before = fs::read(
+            fixture
+                .root
+                .path()
+                .join("var/lib/enoki-probe/identity/probe-bootstrap.toml"),
+        )
+        .unwrap();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _ =
+                    drive_live_installed_bundle_repair_with(fixture.resume(), fixture.context());
+            }))
+            .is_err()
+        );
+        assert!(
+            resume_installed_bundle_repair_at(fixture.root.path(), unsafe { libc::geteuid() })
+                .unwrap()
+                .is_none(),
+            "fresh process must observe the real intent unlink"
+        );
+        assert!(
+            !installed_bundle_failure_is_current_at(
+                fixture.root.path(),
+                unsafe { libc::geteuid() },
+                &mut TerminalRuntime,
+            ),
+            "without intent or epoch, a fresh process must not re-enter Installed Bundle Repair"
+        );
+        assert_eq!(fixture.fault.borrow().transcript, fixed_live_effect_order());
+        assert_converged(&fixture, &identity_before);
     }
 }

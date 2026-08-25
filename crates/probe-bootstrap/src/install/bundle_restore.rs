@@ -188,6 +188,7 @@ pub(super) fn retire_complete(
     {
         return Err(InstallError::ExistingResidue);
     }
+    verify_journal_destinations(&journal, paths)?;
     fs::remove_file(&journal_path).map_err(|_| InstallError::Io)?;
     sync_parent(&journal_path)?;
     crash("journal-cleanup")
