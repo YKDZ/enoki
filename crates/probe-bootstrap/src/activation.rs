@@ -213,34 +213,17 @@ fn prepare_replacement_migration(
     bundle: &VerifiedBundle,
     companion: &mut File,
 ) -> Result<ReplacementActivation, ActivationError> {
-    if let Some((resume_binding, candidate_layout_complete)) =
-        matching_replacement_commit(enrollment, bundle)?
-    {
-        return Ok(if candidate_layout_complete {
-            ReplacementActivation::Complete(resume_binding)
-        } else {
-            ReplacementActivation::Resume(resume_binding)
-        });
-    }
     let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
         .try_exists()
         .map_err(|_| ActivationError::Io)?;
-    let Some(request) =
-        replacement_request_for_installed_state(has_installed_metadata, enrollment, bundle)?
-    else {
-        return Ok(ReplacementActivation::Fresh);
-    };
-    invoke_replacement_companion(&request, companion, bundle)?;
-    let Some((resume_binding, candidate_layout_complete)) =
-        matching_replacement_commit(enrollment, bundle)?
-    else {
-        return Err(ActivationError::Replacement);
-    };
-    Ok(if candidate_layout_complete {
-        ReplacementActivation::Complete(resume_binding)
-    } else {
-        ReplacementActivation::Resume(resume_binding)
-    })
+    let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+    prepare_replacement_migration_in(
+        enrollment,
+        bundle,
+        &mut store,
+        has_installed_metadata,
+        |request| invoke_replacement_companion(request, companion, bundle),
+    )
 }
 
 enum ReplacementActivation {
@@ -249,19 +232,58 @@ enum ReplacementActivation {
     Complete(crate::replacement::ReplacementCommitFact),
 }
 
-fn matching_replacement_commit(
+enum MatchingReplacementCommit {
+    CleanupRequired,
+    Ready(Box<crate::replacement::ReplacementCommitFact>),
+}
+
+fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStore>(
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
-) -> Result<Option<(crate::replacement::ReplacementCommitFact, bool)>, ActivationError> {
-    let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
-    matching_replacement_commit_in(&mut store, enrollment, bundle)
+    store: &mut S,
+    has_installed_metadata: bool,
+    mut invoke: impl FnMut(&LifecycleRequest) -> Result<(), ActivationError>,
+) -> Result<ReplacementActivation, ActivationError> {
+    if let Some(commit) = matching_replacement_commit_in(store, enrollment, bundle)? {
+        match commit {
+            MatchingReplacementCommit::CleanupRequired => {
+                let request = replacement_request_for_installed_state(true, enrollment, bundle)?
+                    .ok_or(ActivationError::Replacement)?;
+                invoke(&request)?;
+            }
+            MatchingReplacementCommit::Ready(fact) => {
+                return Ok(if fact.candidate_layout_complete {
+                    ReplacementActivation::Complete(*fact)
+                } else {
+                    ReplacementActivation::Resume(*fact)
+                });
+            }
+        }
+    } else {
+        let Some(request) =
+            replacement_request_for_installed_state(has_installed_metadata, enrollment, bundle)?
+        else {
+            return Ok(ReplacementActivation::Fresh);
+        };
+        invoke(&request)?;
+    }
+    let Some(MatchingReplacementCommit::Ready(fact)) =
+        matching_replacement_commit_in(store, enrollment, bundle)?
+    else {
+        return Err(ActivationError::Replacement);
+    };
+    Ok(if fact.candidate_layout_complete {
+        ReplacementActivation::Complete(*fact)
+    } else {
+        ReplacementActivation::Resume(*fact)
+    })
 }
 
 fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>(
     store: &mut S,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
-) -> Result<Option<(crate::replacement::ReplacementCommitFact, bool)>, ActivationError> {
+) -> Result<Option<MatchingReplacementCommit>, ActivationError> {
     let Some(fact) = store.load().map_err(|_| ActivationError::Replacement)? else {
         return Ok(None);
     };
@@ -269,16 +291,31 @@ fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>
         "{:x}",
         Sha256::digest(enrollment.enrollment_token().as_bytes())
     );
-    let exact_request = fact.cleanup_complete
+    let replacement = enrollment.replacement_migration();
+    let exact_request = fact.has_valid_binding()
         && fact.intent.enrollment_token_sha256 == token_sha256
         && fact.intent.hub_origin == enrollment.hub_origin()
+        && replacement.is_some_and(|replacement| {
+            fact.intent.enrollment_id == replacement.enrollment_id()
+                && fact.intent.host_id == replacement.target_host_id()
+                && fact.intent.old_probe_id == replacement.expected_probe_id()
+                && fact.intent.source_probe_version == replacement.source_probe_version()
+                && replacement
+                    .source_probe_sha256()
+                    .contains(&fact.intent.source_probe_sha256)
+                && fact.intent.target_probe_version == replacement.target_probe_version()
+                && fact.intent.target_asset_set_digest == replacement.target_asset_set_digest()
+        })
         && fact.intent.target_probe_version == bundle.version
         && fact.intent.target_asset_set_digest
             == format!("sha256:{}", bundle.asset_set_manifest_sha256)
         && fact.intent.target_manifest_sha256 == bundle.manifest_sha256;
     if exact_request {
-        let complete = fact.candidate_layout_complete;
-        return Ok(Some((fact, complete)));
+        return Ok(Some(if fact.cleanup_complete {
+            MatchingReplacementCommit::Ready(Box::new(fact))
+        } else {
+            MatchingReplacementCommit::CleanupRequired
+        }));
     }
     if !fact.candidate_layout_complete {
         return Err(ActivationError::Replacement);
@@ -1149,11 +1186,9 @@ mod tests {
             "{:x}",
             Sha256::digest(received.enrollment.enrollment_token().as_bytes())
         );
-        let fact = crate::replacement::ReplacementCommitFact {
-            schema_version: 1,
-            canonical_intent_sha256: "exact-binding".to_owned(),
-            intent: crate::replacement::ReplacementIntent {
-                enrollment_id: "enrollment-1".to_owned(),
+        let fact = crate::replacement::ReplacementCommitFact::for_test(
+            crate::replacement::ReplacementIntent {
+                enrollment_id: "enr_0123456789abcdef".to_owned(),
                 enrollment_token_sha256: token_sha256,
                 host_id: "7".to_owned(),
                 hub_origin: received.enrollment.hub_origin().to_owned(),
@@ -1167,18 +1202,32 @@ mod tests {
                 ),
                 target_manifest_sha256: received.bundle.manifest_sha256.clone(),
             },
-            cleanup_complete: true,
-            candidate_layout_complete: true,
-        };
+            true,
+            true,
+        );
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"{}\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe-old\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"{}\"}},\"schemaVersion\":1}}",
+            received.enrollment.enrollment_token(),
+            "a".repeat(64),
+            received.bundle.asset_set_manifest_sha256,
+            received.bundle.version,
+        );
+        let exact_enrollment = Enrollment::from_install_input(
+            received.enrollment.hub_origin(),
+            enrollment_input.as_bytes(),
+        )
+        .unwrap();
         let exact = matching_replacement_commit_in(
             &mut Store(Some(fact.clone())),
-            &received.enrollment,
+            &exact_enrollment,
             &received.bundle,
         )
         .unwrap()
         .unwrap();
-        assert_eq!(exact.0.canonical_intent_sha256, "exact-binding");
-        assert!(exact.1);
+        let MatchingReplacementCommit::Ready(exact) = exact else {
+            panic!("completed exact commit must be ready")
+        };
+        assert_eq!(*exact, fact);
 
         let other_enrollment =
             Enrollment::new(received.enrollment.hub_origin(), "enk_enroll_other").unwrap();
@@ -1202,6 +1251,177 @@ mod tests {
             ),
             Err(ActivationError::Replacement)
         ));
+    }
+
+    #[test]
+    fn fresh_invocation_recognizes_the_exact_incomplete_replacement_commit() {
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Store(Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>);
+        impl crate::replacement::ReplacementCommitStore for Store {
+            type Error = ();
+
+            fn load(
+                &mut self,
+            ) -> Result<Option<crate::replacement::ReplacementCommitFact>, Self::Error>
+            {
+                Ok(self.0.borrow().clone())
+            }
+
+            fn persist(
+                &mut self,
+                fact: &crate::replacement::ReplacementCommitFact,
+            ) -> Result<(), Self::Error> {
+                *self.0.borrow_mut() = Some(fact.clone());
+                Ok(())
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            "c".repeat(64),
+            received.bundle.asset_set_manifest_sha256,
+        );
+        let enrollment =
+            Enrollment::from_install_input("https://hub.example", enrollment_input.as_bytes())
+                .unwrap();
+        let intent = crate::replacement::ReplacementIntent {
+            enrollment_id: "enr_0123456789abcdef".to_owned(),
+            enrollment_token_sha256: format!(
+                "{:x}",
+                Sha256::digest(enrollment.enrollment_token().as_bytes())
+            ),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_old_01".to_owned(),
+            source_probe_version: "1.2.2".to_owned(),
+            source_probe_sha256: "c".repeat(64),
+            target_probe_version: received.bundle.version.clone(),
+            target_asset_set_digest: format!(
+                "sha256:{}",
+                received.bundle.asset_set_manifest_sha256
+            ),
+            target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+        };
+        let fact = crate::replacement::ReplacementCommitFact::for_test(intent, false, false);
+        let shared = Rc::new(RefCell::new(Some(fact)));
+        let invoked = Rc::new(RefCell::new(Vec::new()));
+        let invoked_from_fresh_instance = Rc::clone(&invoked);
+        let committed_by_companion = Rc::clone(&shared);
+
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(Rc::clone(&shared)),
+            false,
+            move |request| {
+                invoked_from_fresh_instance
+                    .borrow_mut()
+                    .push(request.clone());
+                let mut completed = committed_by_companion
+                    .borrow()
+                    .clone()
+                    .expect("durable commit");
+                completed.cleanup_complete = true;
+                *committed_by_companion.borrow_mut() = Some(completed);
+                Ok(())
+            },
+        )
+        .expect("fresh activation resumes exact incomplete commit");
+
+        assert!(
+            matches!(activation, ReplacementActivation::Resume(_)),
+            "cleanup 后必须继续 committed candidate activation"
+        );
+        let invoked = invoked.borrow();
+        assert_eq!(
+            invoked.len(),
+            1,
+            "fresh instance invokes one candidate Companion"
+        );
+        assert_eq!(
+            invoked[0].transition(),
+            crate::lifecycle::LifecycleTransition::ReplacementMigration
+        );
+
+        let wrong = Enrollment::new("https://hub.example", "enk_enroll_wrong").unwrap();
+        let wrong_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_invocations = Rc::clone(&wrong_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &wrong,
+                &received.bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                move |_| {
+                    *observed_wrong_invocations.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_invocations.borrow(),
+            0,
+            "wrong token has zero effects"
+        );
+
+        let mut wrong_bundle = received.bundle.clone();
+        wrong_bundle.manifest_sha256 = "f".repeat(64);
+        let wrong_bundle_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_bundle = Rc::clone(&wrong_bundle_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &wrong_bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                move |_| {
+                    *observed_wrong_bundle.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_bundle_invocations.borrow(),
+            0,
+            "wrong verified bundle binding has zero effects"
+        );
+
+        let wrong_intent_input =
+            enrollment_input.replace("\"targetHostId\":\"7\"", "\"targetHostId\":\"8\"");
+        let wrong_intent =
+            Enrollment::from_install_input("https://hub.example", wrong_intent_input.as_bytes())
+                .unwrap();
+        let wrong_intent_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_intent = Rc::clone(&wrong_intent_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &wrong_intent,
+                &received.bundle,
+                &mut Store(shared),
+                false,
+                move |_| {
+                    *observed_wrong_intent.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_intent_invocations.borrow(),
+            0,
+            "wrong Replacement intent has zero effects"
+        );
     }
 
     #[test]

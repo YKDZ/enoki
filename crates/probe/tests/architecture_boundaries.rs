@@ -11,6 +11,8 @@ const LIFECYCLE_COMPANION_BINARY: &str =
     include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
+const UNINSTALL: &str = include_str!("../src/upgrader/uninstall/mod.rs");
+const UNINSTALL_CLEANUP: &str = include_str!("../src/upgrader/uninstall/cleanup.rs");
 const INSTALLED_BUNDLE_REPAIR: &str =
     include_str!("../src/runtime_failure/installed_bundle_repair.rs");
 const INSTALLED_BUNDLE_REPAIR_LIVE: &str =
@@ -193,19 +195,23 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
             "浅 uninstall lifecycle surface 必须删除：{retired}",
         );
         assert!(
-            !UPGRADER.contains(retired),
+            !UPGRADER.contains(retired)
+                && !UNINSTALL.contains(retired)
+                && !UNINSTALL_CLEANUP.contains(retired),
             "Probe Uninstall 不得重建浅 runner surface：{retired}",
         );
     }
     assert!(
-        !UPGRADER.contains("UninstallCleanupExtent"),
+        !UPGRADER.contains("UninstallCleanupExtent")
+            && !UNINSTALL.contains("UninstallCleanupExtent")
+            && !UNINSTALL_CLEANUP.contains("UninstallCleanupExtent"),
         "cleanup extent 不得成为 caller-selected interface",
     );
-    assert!(UPGRADER.contains("fn cleanup_committed_replacement_install("));
-    assert!(UPGRADER.contains("fn execute_committed_replacement_cleanup("));
-    assert!(!UPGRADER.contains("cleanup_trusted_probe_install_for_reenrollment"));
-    assert!(UPGRADER.contains("enum HubUninstallResult"));
-    assert!(UPGRADER.contains("struct LocalUninstallComplete"));
+    assert!(UNINSTALL_CLEANUP.contains("fn cleanup_committed_replacement_install("));
+    assert!(UNINSTALL_CLEANUP.contains("fn execute_committed_replacement_cleanup("));
+    assert!(!UNINSTALL_CLEANUP.contains("cleanup_trusted_probe_install_for_reenrollment"));
+    assert!(UNINSTALL.contains("enum HubUninstallResult"));
+    assert!(UNINSTALL.contains("struct LocalUninstallComplete"));
 
     for retired_bypass in [
         "SealedUninstallCleanup",
@@ -218,7 +224,9 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
         "internal_probe_uninstaller",
     ] {
         assert!(
-            !UPGRADER.contains(retired_bypass),
+            !UPGRADER.contains(retired_bypass)
+                && !UNINSTALL.contains(retired_bypass)
+                && !UNINSTALL_CLEANUP.contains(retired_bypass),
             "Uninstall 不得保留 mode marker 或平行业务入口：{retired_bypass}",
         );
     }
@@ -227,7 +235,7 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
         ("fn coordinate_hub_uninstall(", false),
         ("fn coordinate_local_uninstall(", true),
     ] {
-        let interface = UPGRADER
+        let interface = UNINSTALL
             .split(coordinator)
             .nth(1)
             .unwrap_or_else(|| panic!("缺少封闭 coordinator：{coordinator}"))
@@ -269,6 +277,37 @@ fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics()
 }
 
 #[test]
+fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
+    assert!(UPGRADER.contains("mod uninstall;"));
+    let production_adapter = UPGRADER
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("production upgrader adapter");
+    assert!(
+        !production_adapter.contains("use uninstall::*"),
+        "production upgrader 只能导入窄 Uninstall entry points",
+    );
+    for implementation in [
+        "struct HubUninstallIntent",
+        "struct LocalUninstallIntent",
+        "struct UninstallRecoveryCapsule",
+        "fn plan_probe_uninstall_cleanup",
+        "fn prepare_probe_uninstall_cleanup",
+        "fn finalize_recoverable_uninstall_cleanup",
+        "fn execute_committed_replacement_cleanup",
+    ] {
+        assert!(
+            !UPGRADER.contains(implementation),
+            "upgrader adapter 不得继续拥有 Uninstall implementation：{implementation}",
+        );
+        assert!(
+            UNINSTALL.contains(implementation) || UNINSTALL_CLEANUP.contains(implementation),
+            "focused Uninstall module 必须封装 implementation：{implementation}",
+        );
+    }
+}
+
+#[test]
 fn uninstall_has_no_parallel_stdin_business_or_failed_status_path() {
     for retired_bypass in [
         "run_probe_uninstaller_with_systemd_runner_and_install_metadata",
@@ -277,11 +316,13 @@ fn uninstall_has_no_parallel_stdin_business_or_failed_status_path() {
         "failed_probe_uninstaller_result",
     ] {
         assert!(
-            !UPGRADER.contains(retired_bypass),
+            !UPGRADER.contains(retired_bypass)
+                && !UNINSTALL.contains(retired_bypass)
+                && !UNINSTALL_CLEANUP.contains(retired_bypass),
             "Uninstall 业务测试与生产必须共用 classified adapter：{retired_bypass}",
         );
     }
-    let mechanics_oracle = UPGRADER
+    let mechanics_oracle = UNINSTALL_CLEANUP
         .split("fn execute_probe_uninstall(")
         .nth(1)
         .expect("legacy schema oracle must stay narrow")
@@ -315,7 +356,7 @@ fn replacement_commit_enters_the_same_dedicated_cleanup_seam_used_by_production(
     assert!(production.contains("commit_replacement_and_cleanup_install_with_systemd("));
     assert!(!production.contains("commit_and_cleanup_replacement("));
 
-    let dedicated = UPGRADER
+    let dedicated = UNINSTALL_CLEANUP
         .split("fn commit_replacement_and_cleanup_install_with_systemd")
         .nth(1)
         .expect("dedicated committed Replacement cleanup coordinator")
