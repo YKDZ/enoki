@@ -59,6 +59,17 @@ function app(
 }
 
 describe("Existing Host Enrollment API", () => {
+  it("does not expose the retired legacy ExistingHost creation endpoint", async () => {
+    const { calls, routes } = app("offline");
+
+    const response = await routes.request("/existing-host/7", {
+      method: "POST",
+    });
+
+    expect(response.status).toBe(404);
+    expect(calls).toEqual([]);
+  });
+
   it("creates a persisted existing_host pending Enrollment only for an offline active Host", async () => {
     const { calls, routes } = app("offline");
     const response = await routes.request("/", {
@@ -129,7 +140,11 @@ describe("Existing Host Enrollment API", () => {
   for (const status of [null, "online", "stale"] as const) {
     it(`rejects ${status ?? "missing"} Hosts without creating an Enrollment`, async () => {
       const { calls, routes } = app(status);
-      const response = await routes.request("/existing-host/7", {
+      const response = await routes.request("/", {
+        body: JSON.stringify({
+          target: { hostId: 7, kind: "existing_host" },
+        }),
+        headers: { "content-type": "application/json" },
         method: "POST",
       });
       expect(response.status).toBe(409);

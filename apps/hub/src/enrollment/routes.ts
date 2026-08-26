@@ -52,20 +52,6 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
     return createOwnerEnrollment(context, services, installation, now, target);
   });
 
-  routes.post("/existing-host/:hostId", (context) => {
-    const hostId = Number(context.req.param("hostId"));
-    if (!Number.isInteger(hostId) || hostId <= 0) {
-      return context.json(
-        { error: "existing_host_reenrollment_unavailable" },
-        409,
-      );
-    }
-    return createOwnerEnrollment(context, services, installation, now, {
-      hostId,
-      kind: "existing_host",
-    });
-  });
-
   routes.post("/manual-reinstall/:hostId", async (context) => {
     const hostId = positiveInteger(context.req.param("hostId"));
     if (!hostId || !services.hosts) {

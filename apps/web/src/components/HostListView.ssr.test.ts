@@ -5,7 +5,11 @@ import { createSSRApp } from "vue";
 import type { HostSummary } from "../types";
 import HostListView from "./HostListView.vue";
 
-const host = (id: number, displayName: string) =>
+const host = (
+  id: number,
+  displayName: string,
+  status: HostSummary["status"] = "online",
+) =>
   ({
     clockSkew: { detected: false, lastDeltaMs: null },
     collectorCapabilities: null,
@@ -21,7 +25,7 @@ const host = (id: number, displayName: string) =>
     probeConfiguration: { mode: "inherit", version: "default-v1" },
     probeUpgradeProblem: null,
     probeVersion: "dev",
-    status: "online",
+    status,
     system: "Linux",
   }) as HostSummary;
 
@@ -61,5 +65,23 @@ describe("Host list ready reveal", () => {
 
     expect(html).toContain("探针升级失败");
     expect(html).not.toContain("探针升级中");
+  });
+
+  it("exposes ordinary Probe re-enrollment only on offline rows", async () => {
+    const html = await renderToString(
+      createSSRApp(HostListView, {
+        hosts: [
+          host(7, "offline", "offline"),
+          host(8, "stale", "stale"),
+          host(9, "online"),
+        ],
+        page: 1,
+        pageSize: 3,
+        sortDirection: "asc",
+        sortKey: null,
+      }),
+    );
+
+    expect(html.match(/重新注册探针/g)).toHaveLength(1);
   });
 });

@@ -1474,10 +1474,16 @@ describe("Probe registration API", () => {
       subjectType: "host",
     });
 
-    const enrollmentResponse = await app.request(
-      `/api/web/enrollments/existing-host/${host.id}`,
-      { headers: { cookie: ownerSession }, method: "POST" },
-    );
+    const enrollmentResponse = await app.request("/api/web/enrollments", {
+      body: JSON.stringify({
+        target: { hostId: host.id, kind: "existing_host" },
+      }),
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerSession,
+      },
+      method: "POST",
+    });
     expect(enrollmentResponse.status).toBe(201);
     const enrollment = (await enrollmentResponse.json()) as {
       enrollmentToken: string;
@@ -1647,10 +1653,16 @@ describe("Probe registration API", () => {
       .prepare("select id from managed_hosts where probe_id = ?")
       .get(firstIdentity.probeId) as { id: number };
 
-    const enrollmentResponse = await app.request(
-      `/api/web/enrollments/existing-host/${host.id}`,
-      { headers: { cookie: ownerSession }, method: "POST" },
-    );
+    const enrollmentResponse = await app.request("/api/web/enrollments", {
+      body: JSON.stringify({
+        target: { hostId: host.id, kind: "existing_host" },
+      }),
+      headers: {
+        "content-type": "application/json",
+        cookie: ownerSession,
+      },
+      method: "POST",
+    });
     const enrollment = (await enrollmentResponse.json()) as {
       enrollmentToken: string;
     };
@@ -1697,8 +1709,14 @@ describe("Probe registration API", () => {
 
     const creations = await Promise.all(
       [0, 1].map(() =>
-        app.request(`/api/web/enrollments/existing-host/${host.id}`, {
-          headers: { cookie: ownerSession },
+        app.request("/api/web/enrollments", {
+          body: JSON.stringify({
+            target: { hostId: host.id, kind: "existing_host" },
+          }),
+          headers: {
+            "content-type": "application/json",
+            cookie: ownerSession,
+          },
           method: "POST",
         }),
       ),

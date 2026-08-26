@@ -21,6 +21,7 @@ import { hostStatusText } from "@/lib/host-display";
 
 import type { HostSummary } from "../types";
 import HostCardProbeUpgradeProblemBadge from "./HostCardProbeUpgradeProblemBadge.vue";
+import HostReenrollmentAction from "./HostReenrollmentAction.vue";
 
 const props = defineProps<{
   host: HostSummary;
@@ -28,6 +29,7 @@ const props = defineProps<{
 }>();
 
 defineEmits<{
+  createExistingHostEnrollment: [hostId: number];
   openHostDetail: [hostId: number];
 }>();
 
@@ -86,17 +88,22 @@ function memoryPercent() {
 
 <template>
   <Card
-    :data-enoki-host-id="host.id"
-    :class="[
-      'border-border bg-card text-card-foreground cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md',
-      highlighted && 'ring-primary ring-2 ring-offset-2',
-    ]"
-    role="button"
-    tabindex="0"
-    @click="$emit('openHostDetail', host.id)"
-    @keydown.enter="$emit('openHostDetail', host.id)"
+    :data-enoki-host-card-id="host.id"
+    class="border-border bg-card text-card-foreground relative cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md"
   >
-    <CardHeader class="pb-3">
+    <button
+      type="button"
+      :aria-label="`打开主机 ${host.displayName}`"
+      :data-enoki-host-id="host.id"
+      :class="[
+        'absolute inset-0 z-0 rounded-xl',
+        highlighted && 'ring-primary ring-2 ring-offset-2',
+      ]"
+      tabindex="0"
+      @click="$emit('openHostDetail', host.id)"
+    />
+
+    <CardHeader class="pointer-events-none relative z-10 pb-3">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <div class="flex min-w-0 items-center gap-2">
@@ -136,7 +143,7 @@ function memoryPercent() {
       </div>
     </CardHeader>
 
-    <CardContent class="grid gap-4">
+    <CardContent class="pointer-events-none relative z-10 grid gap-4">
       <div class="grid gap-3">
         <div
           class="grid grid-cols-[72px_minmax(0,1fr)_max-content] items-center gap-3 text-sm"
@@ -213,6 +220,15 @@ function memoryPercent() {
             }}
           </span>
         </div>
+      </div>
+
+      <div class="pointer-events-auto flex justify-end">
+        <HostReenrollmentAction
+          :host="host"
+          @create-existing-host-enrollment="
+            $emit('createExistingHostEnrollment', $event)
+          "
+        />
       </div>
     </CardContent>
   </Card>

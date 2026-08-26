@@ -49,7 +49,8 @@ describe("Host overview card", () => {
       }),
     );
 
-    expect(html).toContain('role="button"');
+    expect(html).toContain('aria-label="打开主机 managed-host-01"');
+    expect(html).not.toContain('role="button"');
     expect(html).toContain("border-border");
     expect(html).not.toContain("border-slate-200");
     expect(html).toContain("CPU");
@@ -96,5 +97,17 @@ describe("Host overview card", () => {
 
     expect(html).toContain("探针升级中");
     expect(html).not.toContain("探针升级失败");
+  });
+
+  it("exposes ordinary Probe re-enrollment only for an offline Host", async () => {
+    const offlineHtml = await renderToString(
+      createSSRApp(HostCard, {
+        host: { ...host, status: "offline" },
+      }),
+    );
+    const onlineHtml = await renderToString(createSSRApp(HostCard, { host }));
+
+    expect(offlineHtml).toContain("重新注册探针");
+    expect(onlineHtml).not.toContain("重新注册探针");
   });
 });
