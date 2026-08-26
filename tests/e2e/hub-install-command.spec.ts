@@ -21,6 +21,20 @@ type BrowserEnrollmentStatus = {
 };
 
 type BrowserEnrollmentResponse = BrowserEnrollmentStatus & {
+  bootstrapRecipe: {
+    bundleVersion: string;
+    distribution: string;
+    kind: "enoki-probe-bootstrap-recipe-record";
+    recipe: {
+      file: string;
+      sha256: string;
+      size: number;
+      version: string;
+    };
+    rootFingerprint: string;
+    schemaVersion: 1;
+    targets: string[];
+  };
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
@@ -610,6 +624,20 @@ for (const scenario of [
 
 function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
   return {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recipe: {
+        file: "enoki-probe-bootstrap.py",
+        sha256: "a".repeat(64),
+        size: 123,
+        version: "v1",
+      },
+      rootFingerprint: "b".repeat(64),
+      schemaVersion: 1,
+      targets: ["x86_64-unknown-linux-musl"],
+    },
     createdAtMs: Date.now(),
     enrollmentId,
     enrollmentToken: "enk_enroll_ready_browser",
