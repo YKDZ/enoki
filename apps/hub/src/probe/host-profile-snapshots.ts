@@ -10,8 +10,8 @@ export const hostProfileCollectorId = "official.host-profile";
 type ProtoMessage = Record<string, any>;
 
 /**
- * Owns canonical Host Profile snapshot identity across registration and
- * reports, so both delivery paths persist and compare the same payload.
+ * 统一持有 registration 与 report 的 canonical Host Profile snapshot identity，
+ * 确保两条交付路径持久化并比较同一 payload。
  */
 export function hostProfileSnapshotFromRegistration(request: ProtoMessage) {
   const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(

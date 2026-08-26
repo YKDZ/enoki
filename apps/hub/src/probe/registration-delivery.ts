@@ -43,8 +43,8 @@ type RegistrationDeliveryServices = Pick<
 >;
 
 /**
- * Owns protobuf registration admission, inspection/rejection and the
- * one-shot Host enrollment write. It never depends on route composition.
+ * 持有 protobuf registration admission、inspection/rejection 与一次性 Host
+ * enrollment 写入，且不依赖 route composition。
  */
 export function createProbeRegistrationRoutes(
   services: RegistrationDeliveryServices,

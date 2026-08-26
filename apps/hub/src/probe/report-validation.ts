@@ -1,16 +1,17 @@
-import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
-
 import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
+
+import {
+  hostProfileCollectorId,
+  hostProfileSnapshotFromReport,
+  snapshotPayloadBranchesMatchCollectorIds,
+} from "./host-profile-snapshots.js";
 
 export type ProtoMessage = Record<string, any>;
 
 const ReportRequest = enoki.v1.ProbeReportRequest as any;
 
-const HostProfileSnapshotMessage = enoki.v1.HostProfileSnapshot as any;
-
-export const hostProfileCollectorId = "official.host-profile";
+export { hostProfileCollectorId } from "./host-profile-snapshots.js";
 
 const maxReportObservationRange = 10_000;
 
@@ -172,75 +173,6 @@ export function admitProbeReport(request: ProtoMessage) {
     : null;
 }
 
-export function hostProfileSnapshotFromReport(request: ProtoMessage) {
-  const snapshot = ((request.snapshots ?? []) as ProtoMessage[]).find(
-    (snapshot) => snapshot.collectorId === hostProfileCollectorId,
-  );
-
-  if (!snapshot) {
-    return null;
-  }
-
-  const snapshotHash =
-    typeof snapshot.snapshotHash === "string" && snapshot.snapshotHash.trim()
-      ? snapshot.snapshotHash
-      : null;
-  const hostProfile = snapshot.hostProfile ?? null;
-
-  return {
-    canonicalHash: hostProfile ? hashHostProfile(hostProfile) : null,
-    hostProfile,
-    snapshotHash,
-  };
-}
-
-export function snapshotPayloadBranchesMatchCollectorIds(
-  request: ProtoMessage,
-) {
-  return ((request.snapshots ?? []) as ProtoMessage[]).every((snapshot) => {
-    if (snapshot.hostProfile) {
-      return snapshot.collectorId === hostProfileCollectorId;
-    }
-
-    return true;
-  });
-}
-
-function hashHostProfile(hostProfile: ProtoMessage) {
-  const bytes = HostProfileSnapshotMessage.encode(
-    HostProfileSnapshotMessage.create(stableHostProfile(hostProfile)),
-  ).finish();
-
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
-function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
-  const { probeAssetBundleVersion: _bundleVersion, ...stable } = hostProfile;
-  return {
-    ...stable,
-    filesystems: [...(hostProfile.filesystems ?? [])].sort(
-      (left, right) =>
-        compareProtoStrings(left.mountPoint, right.mountPoint) ||
-        compareProtoStrings(left.filesystemType, right.filesystemType),
-    ),
-    networkInterfaces: [...(hostProfile.networkInterfaces ?? [])]
-      .map((networkInterface) => ({
-        ...networkInterface,
-        addresses: [...new Set(networkInterface.addresses ?? [])].sort(
-          compareProtoStrings,
-        ),
-      }))
-      .sort((left, right) => compareProtoStrings(left.name, right.name)),
-  };
-}
-
-function compareProtoStrings(left: unknown, right: unknown) {
-  return Buffer.compare(
-    Buffer.from(String(left ?? ""), "utf8"),
-    Buffer.from(String(right ?? ""), "utf8"),
-  );
-}
-
 export function validateReportEnvelope(request: ProtoMessage) {
   const sequenceStart = unsignedNumber(request.sequenceStart);
   const sequenceEnd = unsignedNumber(request.sequenceEnd);
@@ -388,10 +320,9 @@ export function reportResponsibilityFor(input: {
   const snapshots = (input.request.snapshots ?? []) as ProtoMessage[];
   const snapshot = input.hostProfileSnapshot;
 
-  // Older Probes predate compact snapshot references. Keep their ordinary
-  // Observation Batches compatible, including a legacy sequence-one metrics
-  // batch that was never a Probe Startup Report, while requiring current
-  // Probes to use the typed constructor shape below.
+  // 旧版 Probe 早于紧凑 snapshot reference。保留其普通 Observation Batch
+  // 兼容性，包括从未作为 Probe Startup Report 的旧版 sequence-one metrics
+  // batch；当前 Probe 则必须使用下方的 typed constructor shape。
   if (snapshots.length === 0) {
     return isStartupReportShape(input.report, input.request) &&
       nonemptyString(input.request.probeAssetBundleVersion)
