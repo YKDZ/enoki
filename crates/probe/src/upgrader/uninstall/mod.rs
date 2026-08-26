@@ -17,8 +17,6 @@ use enoki_probe_bootstrap::lifecycle::{
     LifecycleRequest, LifecycleRequestAuthority, LifecycleResponse,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     os::unix::fs::MetadataExt,
@@ -35,279 +33,22 @@ use cleanup::{
 mod tests;
 
 #[cfg(test)]
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::upgrader) struct UninstallWorkflowObservation {
-    pub(in crate::upgrader) response: LifecycleResponse,
-    pub(in crate::upgrader) recovery_available: bool,
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn run_uninstall_workflow_for_test(
+pub(super) fn run_uninstall_workflow_for_test(
     request: &LifecycleRequest,
     input: &ProbeUninstallerRunInput,
     metadata: &TrustedProbeInstallMetadata,
     install_metadata_path: &Path,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> UninstallWorkflowObservation {
-    let response = lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
+) -> LifecycleResponse {
+    lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
         request,
         input,
         metadata,
         install_metadata_path,
         transport,
         systemd,
-    ));
-    let recovery_available = uninstall_capsule_path(install_metadata_path)
-        .ok()
-        .is_some_and(|path| path.exists());
-    UninstallWorkflowObservation {
-        response,
-        recovery_available,
-    }
-}
-
-#[cfg(test)]
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::upgrader) struct HubAcknowledgementRecoveryObservation {
-    pub(in crate::upgrader) interrupted: UninstallWorkflowObservation,
-    pub(in crate::upgrader) resumed: UninstallWorkflowObservation,
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn observe_hub_acknowledgement_persistence_recovery_for_test(
-    request: &LifecycleRequest,
-    input: &ProbeUninstallerRunInput,
-    metadata: &TrustedProbeInstallMetadata,
-    install_metadata_path: &Path,
-    first_transport: &mut impl ProbeUpgraderValidationTransport,
-    retry_transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<HubAcknowledgementRecoveryObservation, ProbeUpgraderRunError> {
-    struct PersistenceInterruptionTransport<'a, T> {
-        inner: &'a mut T,
-        recovery_path: PathBuf,
-        saved_recovery: Option<Vec<u8>>,
-    }
-
-    impl<T: ProbeUpgraderValidationTransport> ProbeUpgraderValidationTransport
-        for PersistenceInterruptionTransport<'_, T>
-    {
-        fn get_asset(&mut self, url: &str) -> Result<Vec<u8>, ProbeUpgraderRunError> {
-            self.inner.get_asset(url)
-        }
-
-        fn post_token_validation(
-            &mut self,
-            url: &str,
-            auth: &ProbeRequestAuth<'_>,
-            body: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.inner.post_token_validation(url, auth, body)
-        }
-
-        fn post_operation_status(
-            &mut self,
-            url: &str,
-            auth: &ProbeRequestAuth<'_>,
-            body: &str,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.inner.post_operation_status(url, auth, body)?;
-            self.saved_recovery =
-                Some(fs::read(&self.recovery_path).map_err(ProbeUpgraderRunError::Io)?);
-            fs::remove_file(&self.recovery_path).map_err(ProbeUpgraderRunError::Io)?;
-            fs::create_dir(&self.recovery_path).map_err(ProbeUpgraderRunError::Io)
-        }
-
-        fn validate_probe_identity(
-            &mut self,
-            url: &str,
-            auth: &ProbeRequestAuth<'_>,
-        ) -> Result<(), ProbeUpgraderRunError> {
-            self.inner.validate_probe_identity(url, auth)
-        }
-    }
-
-    let recovery_path = uninstall_capsule_path(install_metadata_path)?;
-    let mut interrupted_transport = PersistenceInterruptionTransport {
-        inner: first_transport,
-        recovery_path: recovery_path.clone(),
-        saved_recovery: None,
-    };
-    let interrupted = run_uninstall_workflow_for_test(
-        request,
-        input,
-        metadata,
-        install_metadata_path,
-        &mut interrupted_transport,
-        systemd,
-    );
-    let saved_recovery = interrupted_transport.saved_recovery.ok_or(
-        ProbeUpgraderRunError::InvalidInstallMetadata(
-            "acknowledgement interruption did not preserve recovery",
-        ),
-    )?;
-    fs::remove_dir(&recovery_path).map_err(ProbeUpgraderRunError::Io)?;
-    fs::write(&recovery_path, saved_recovery).map_err(ProbeUpgraderRunError::Io)?;
-    fs::set_permissions(&recovery_path, fs::Permissions::from_mode(0o600))
-        .map_err(ProbeUpgraderRunError::Io)?;
-    let resumed = run_uninstall_workflow_for_test(
-        request,
-        input,
-        metadata,
-        install_metadata_path,
-        retry_transport,
-        systemd,
-    );
-    Ok(HubAcknowledgementRecoveryObservation {
-        interrupted,
-        resumed,
-    })
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn observe_legacy_uninstall_for_test(
-    input: &ProbeUninstallerRunInput,
-    metadata: &TrustedProbeInstallMetadata,
-    install_metadata_path: &Path,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> LifecycleResponse {
-    match cleanup::execute_probe_uninstall_with_install_metadata_path(
-        input,
-        metadata,
-        systemd,
-        install_metadata_path,
-    ) {
-        Ok(()) => LifecycleResponse::succeeded(),
-        Err(error) => LifecycleResponse::failed(error.code()),
-    }
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn observe_schema_four_complete_uninstall_for_test(
-    input: &ProbeUninstallerRunInput,
-    metadata: &TrustedProbeInstallMetadata,
-    install_metadata_path: &Path,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<bool, ProbeUpgraderRunError> {
-    let plan = cleanup::plan_probe_uninstall_cleanup(input, metadata, install_metadata_path)?;
-    cleanup::prepare_probe_uninstall_cleanup(&plan, systemd)?;
-    let entries_survived = [
-        Some(input.bootstrap_config_path.as_path()),
-        Some(install_metadata_path),
-        metadata.lifecycle_companion_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .chain(
-        metadata
-            .observation_unit_paths
-            .iter()
-            .filter(|path| path.to_string_lossy().contains("lifecycle-companion"))
-            .map(PathBuf::as_path),
-    )
-    .all(Path::exists);
-    cleanup::finalize_recoverable_uninstall_cleanup(&plan, systemd)?;
-    cleanup::remove_lifecycle_companion_binary(&plan)?;
-    Ok(entries_survived)
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn observe_uninstall_state_failure_preserves_recovery_for_test(
-    input: &ProbeUninstallerRunInput,
-    metadata: &TrustedProbeInstallMetadata,
-    install_metadata_path: &Path,
-) -> Result<bool, ProbeUpgraderRunError> {
-    let plan = cleanup::plan_probe_uninstall_recovery(input, metadata, install_metadata_path)?;
-    let mut calls = Vec::new();
-    let result = cleanup::remove_uninstall_local_state_with(&plan, |path| {
-        calls.push(path.to_path_buf());
-        if path == metadata.state_dir {
-            return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                "injected ordinary state cleanup failure",
-            )));
-        }
-        Ok(())
-    });
-    result.expect_err("state cleanup failure must remain observable");
-    Ok(calls
-        == [
-            install_metadata_path.to_path_buf(),
-            input.bootstrap_config_path.clone(),
-            metadata.state_dir.clone(),
-        ]
-        && uninstall_capsule_path(install_metadata_path)?.exists()
-        && metadata
-            .lifecycle_companion_path
-            .as_deref()
-            .is_some_and(Path::exists))
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn observe_replacement_metadata_custody_for_test(
-    bootstrap_config_path: &Path,
-    state_dir: &Path,
-    metadata_path: &Path,
-) -> Result<bool, ProbeUpgraderRunError> {
-    let mut failed_calls = Vec::new();
-    let failed = cleanup::finalize_replacement_local_state_with(
-        bootstrap_config_path,
-        state_dir,
-        |path| {
-            failed_calls.push(path.to_path_buf());
-            Ok(())
-        },
-        || {
-            Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                "ordinary cleanup verification failure",
-            )))
-        },
-    );
-    failed.expect_err("verification failure must remain observable");
-    let mut completed_calls = Vec::new();
-    cleanup::finalize_replacement_local_state_with(
-        bootstrap_config_path,
-        state_dir,
-        |path| {
-            completed_calls.push(path.to_path_buf());
-            Ok(())
-        },
-        || Ok(()),
-    )?;
-    let metadata_was_excluded = !failed_calls
-        .iter()
-        .chain(&completed_calls)
-        .any(|path| path == metadata_path);
-    Ok(metadata_was_excluded
-        && failed_calls == [bootstrap_config_path, state_dir]
-        && completed_calls == [bootstrap_config_path, state_dir])
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn observe_replacement_retirement_retry_for_test<
-    S: enoki_probe_bootstrap::replacement::ReplacementCommitStore,
->(
-    intent: enoki_probe_bootstrap::replacement::ReplacementIntent,
-    store: &mut S,
-    install_metadata_path: &Path,
-    test_root: Option<&Path>,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> bool {
-    matches!(
-        cleanup::commit_replacement_cleanup_with_metadata_retirement(
-            intent,
-            store,
-            install_metadata_path,
-            test_root,
-            systemd,
-            |_| {
-                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                    "retire failed",
-                )))
-            },
-        ),
-        Err(enoki_probe_bootstrap::replacement::ReplacementCommitError::Effect(_))
-    )
+    ))
 }
 
 const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";

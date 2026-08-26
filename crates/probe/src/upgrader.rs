@@ -5120,14 +5120,7 @@ fn input_token(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::uninstall::{
-        observe_hub_acknowledgement_persistence_recovery_for_test,
-        observe_legacy_uninstall_for_test, observe_replacement_metadata_custody_for_test,
-        observe_replacement_retirement_retry_for_test,
-        observe_schema_four_complete_uninstall_for_test,
-        observe_uninstall_state_failure_preserves_recovery_for_test,
-        run_uninstall_workflow_for_test,
-    };
+    use super::uninstall::run_uninstall_workflow_for_test;
     use super::*;
     use flate2::{Compression, write::GzEncoder};
     use rsa::{
@@ -5430,17 +5423,6 @@ mod tests {
                 &installed_digest,
             ),
             ReplacementAuthorityMatch::Matches
-        );
-    }
-
-    #[test]
-    fn replacement_cleanup_excludes_metadata_until_the_durable_receipt_exists() {
-        let config = PathBuf::from("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
-        let state = PathBuf::from("/var/lib/enoki-probe");
-        let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
-        assert!(
-            observe_replacement_metadata_custody_for_test(&config, &state, &metadata)
-                .expect("observe both complete workflows")
         );
     }
 
@@ -6268,494 +6250,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn legacy_uninstall_removes_owned_files_without_contacting_hub() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let state_dir = temp.path().join("var/lib/enoki-probe");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        fs::create_dir_all(bootstrap_config_path.parent().expect("config dir"))
-            .expect("config dir");
-        fs::create_dir_all(install_path.parent().expect("install dir")).expect("install dir");
-        fs::create_dir_all(&state_dir).expect("state dir");
-        let sudoers_dir = temp.path().join("etc/sudoers.d");
-        fs::create_dir_all(&sudoers_dir).expect("sudoers dir");
-        let operation_sudoers_path = sudoers_dir.join("enoki-probe-operations");
-        let collector_helper_sudoers_path = sudoers_dir.join("enoki-probe-collector-helpers");
-        let legacy_sudoers_path = sudoers_dir.join("enoki-probe-upgrader");
-        fs::write(&install_path, "probe binary").expect("install binary");
-        fs::write(state_dir.join("state"), "state").expect("state");
-        fs::write(&operation_sudoers_path, "operation sudoers").expect("operation sudoers");
-        fs::write(&collector_helper_sudoers_path, "collector helper sudoers")
-            .expect("collector helper sudoers");
-        fs::write(&legacy_sudoers_path, "legacy sudoers").expect("legacy sudoers");
-        fs::write(
-            &bootstrap_config_path,
-            [
-                "hub_url = \"https://hub.example\"",
-                "probe_id = \"probe_01\"",
-                "probe_private_key_pem = \"test-private-key\"",
-                &format!(
-                    "install_path = {}",
-                    toml_string(install_path.to_str().expect("install path")),
-                ),
-                &format!(
-                    "operation_status_path = {}",
-                    toml_string(status_path.to_str().expect("status path")),
-                ),
-                &format!(
-                    "state_dir = {}",
-                    toml_string(state_dir.to_str().expect("state dir")),
-                ),
-                "service_name = \"enoki-probe\"",
-                &format!(
-                    "probe_asset_public_key_sha256 = {}",
-                    toml_string(&"a".repeat(64))
-                ),
-                "",
-            ]
-            .join("\n"),
-        )
-        .expect("bootstrap config");
-        let mut install_metadata =
-            trusted_install_metadata(&install_path, &status_path, "a".repeat(64));
-        install_metadata.operation_sudoers_path = Some(operation_sudoers_path.clone());
-        install_metadata.collector_helper_sudoers_path =
-            Some(collector_helper_sudoers_path.clone());
-        install_metadata.old_sudoers_paths = vec![legacy_sudoers_path.clone()];
-        let mut systemd = RecordingSystemdRunner::default();
-
-        assert_eq!(
-            observe_legacy_uninstall_for_test(
-                &ProbeUninstallerRunInput {
-                    bootstrap_config_path: bootstrap_config_path.clone(),
-                },
-                &install_metadata,
-                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-                &mut systemd,
-            ),
-            LifecycleResponse::succeeded()
-        );
-
-        assert_eq!(
-            systemd.calls,
-            vec![
-                "stop enoki-probe",
-                "disable enoki-probe",
-                "daemon-reload",
-                "reset-failed enoki-probe",
-                "verify-service-absent enoki-probe",
-                "remove-service-identity enoki-probe:enoki-probe",
-                "verify-service-absent enoki-probe",
-            ],
-        );
-        assert!(!install_path.exists());
-        assert!(!bootstrap_config_path.exists());
-        assert!(!state_dir.exists());
-        assert!(!operation_sudoers_path.exists());
-        assert!(!collector_helper_sudoers_path.exists());
-        assert!(!legacy_sudoers_path.exists());
-    }
-
-    #[test]
-    fn schema_two_uninstall_keeps_preexisting_legacy_sudoers_untouched() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        let install_metadata_path = temp.path().join("etc/enoki/probe-install.toml");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let state_dir = temp.path().join("var/lib/enoki-probe");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        let service_unit_path = temp.path().join("etc/systemd/system/enoki-probe.service");
-        let bootstrap_acquirer_path = temp
-            .path()
-            .join("usr/local/bin/enoki-probe-bootstrap-acquire");
-        let bootstrap_activator_path = temp
-            .path()
-            .join("usr/local/bin/enoki-probe-bootstrap-activate");
-        let bootstrap_state_dir = temp.path().join("var/lib/enoki-probe-bootstrap");
-        let legacy_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-upgrader");
-        for path in [
-            bootstrap_config_path.parent().expect("config parent"),
-            install_metadata_path.parent().expect("metadata parent"),
-            install_path.parent().expect("binary parent"),
-            service_unit_path.parent().expect("unit parent"),
-            legacy_sudoers_path.parent().expect("sudoers parent"),
-            &state_dir,
-            &bootstrap_state_dir,
-        ] {
-            fs::create_dir_all(path).expect("owned parent");
-        }
-        fs::write(&bootstrap_config_path, "owned bootstrap config").expect("config");
-        fs::write(&install_metadata_path, "owned metadata").expect("metadata");
-        fs::write(&install_path, "owned probe binary").expect("binary");
-        fs::write(&service_unit_path, "owned service unit").expect("unit");
-        fs::write(&bootstrap_acquirer_path, "owned Bootstrap acquirer").expect("acquirer");
-        fs::write(&bootstrap_activator_path, "owned Bootstrap activator").expect("activator");
-        fs::set_permissions(&bootstrap_acquirer_path, fs::Permissions::from_mode(0o755))
-            .expect("acquirer mode");
-        fs::set_permissions(&bootstrap_activator_path, fs::Permissions::from_mode(0o755))
-            .expect("activator mode");
-        fs::set_permissions(&bootstrap_state_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap state mode");
-        let bootstrap_trust_dir = bootstrap_state_dir.join("trust");
-        let bootstrap_inbox_dir = bootstrap_state_dir.join("inbox");
-        fs::create_dir(&bootstrap_trust_dir).expect("Bootstrap trust directory");
-        fs::create_dir(&bootstrap_inbox_dir).expect("Bootstrap inbox directory");
-        fs::set_permissions(&bootstrap_trust_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap trust mode");
-        fs::set_permissions(&bootstrap_inbox_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap inbox mode");
-        for name in ["delegation-generation", ".delegation-generation.lock"] {
-            let entry = bootstrap_trust_dir.join(name);
-            fs::write(&entry, "owned Bootstrap state").expect("Bootstrap state entry");
-            fs::set_permissions(&entry, fs::Permissions::from_mode(0o600))
-                .expect("Bootstrap state entry mode");
-        }
-        fs::write(state_dir.join("state"), "owned state").expect("state");
-        fs::write(&legacy_sudoers_path, "preexisting legacy sudoers").expect("legacy sudoers");
-        fs::set_permissions(&legacy_sudoers_path, fs::Permissions::from_mode(0o440))
-            .expect("legacy mode");
-        let before_bytes = fs::read(&legacy_sudoers_path).expect("legacy bytes");
-        let before_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy metadata");
-
-        let install_metadata = TrustedProbeInstallMetadata {
-            schema_version: 2,
-            hub_url: "https://hub.example".to_string(),
-            identity_path: bootstrap_config_path.clone(),
-            install_path: install_path.clone(),
-            operation_status_path: status_path,
-            probe_asset_public_key_sha256: "a".repeat(64),
-            probe_distribution_root_sha256: Some("a".repeat(64)),
-            bootstrap_acquirer_path: Some(bootstrap_acquirer_path.clone()),
-            bootstrap_activator_path: Some(bootstrap_activator_path.clone()),
-            bootstrap_state_dir: Some(bootstrap_state_dir.clone()),
-            service_name: "enoki-probe".to_string(),
-            service_group: "enoki-probe".to_string(),
-            service_unit_path: service_unit_path.clone(),
-            service_user: "enoki-probe".to_string(),
-            state_dir: state_dir.clone(),
-            operation_sudoers_path: None,
-            collector_helper_sudoers_path: None,
-            old_sudoers_paths: Vec::new(),
-            observation_runtime_path: None,
-            cpu_provider_path: None,
-            disk_health_provider_path: None,
-            lifecycle_companion_path: None,
-            observation_unit_paths: Vec::new(),
-            probe_ipc_group: None,
-            probe_ipc_group_ownership: None,
-            observation_ipc_group: None,
-            install_state_sha256: None,
-            target_manifest_sha256: None,
-            bundle_version: None,
-            lifecycle_authority_install_key: None,
-        };
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: bootstrap_config_path.clone(),
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        assert_eq!(
-            observe_legacy_uninstall_for_test(
-                &input,
-                &install_metadata,
-                &install_metadata_path,
-                &mut systemd,
-            ),
-            LifecycleResponse::succeeded()
-        );
-
-        let after_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy remains");
-        assert_eq!(
-            fs::read(&legacy_sudoers_path).expect("legacy bytes"),
-            before_bytes
-        );
-        assert_eq!(
-            after_metadata.mode() & 0o777,
-            before_metadata.mode() & 0o777
-        );
-        assert_eq!(after_metadata.ino(), before_metadata.ino());
-        assert!(!install_path.exists());
-        assert!(!bootstrap_config_path.exists());
-        assert!(!install_metadata_path.exists());
-        assert!(!service_unit_path.exists());
-        assert!(!state_dir.exists());
-        assert!(!bootstrap_acquirer_path.exists());
-        assert!(!bootstrap_activator_path.exists());
-        assert!(!bootstrap_state_dir.exists());
-    }
-
-    #[test]
-    fn schema_three_uninstall_removes_every_fixed_observation_role() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path();
-        let state_dir = root.join("var/lib/enoki-probe");
-        let identity_path = state_dir.join("identity/probe-bootstrap.toml");
-        let install_path = root.join("usr/local/bin/enoki-probe");
-        let metadata_path = root.join("etc/enoki/probe-install.toml");
-        let service_unit_path = root.join("etc/systemd/system/enoki-probe.service");
-        let runtime_path = root.join("usr/local/bin/enoki-observation-runtime");
-        let provider_path = root.join("usr/local/bin/enoki-cpu-resource-provider");
-        let bootstrap_acquirer = root.join("usr/local/bin/enoki-probe-bootstrap-acquire");
-        let bootstrap_activator = root.join("usr/local/bin/enoki-probe-bootstrap-activate");
-        let bootstrap_state = root.join("var/lib/enoki-probe-bootstrap");
-        let observation_units = [
-            root.join("etc/systemd/system/enoki-observation-runtime.service"),
-            root.join("etc/systemd/system/enoki-observation-runtime.socket"),
-            root.join("etc/systemd/system/enoki-cpu-resource-provider@.service"),
-            root.join("etc/systemd/system/enoki-cpu-resource-provider.socket"),
-        ];
-        for path in [
-            identity_path.parent().unwrap(),
-            install_path.parent().unwrap(),
-            metadata_path.parent().unwrap(),
-            service_unit_path.parent().unwrap(),
-        ] {
-            fs::create_dir_all(path).unwrap();
-        }
-        for path in [
-            &identity_path,
-            &install_path,
-            &metadata_path,
-            &service_unit_path,
-            &runtime_path,
-            &provider_path,
-            &bootstrap_acquirer,
-            &bootstrap_activator,
-        ]
-        .into_iter()
-        .chain(observation_units.iter())
-        {
-            fs::write(path, "owned").unwrap();
-        }
-        for path in [&bootstrap_acquirer, &bootstrap_activator] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        fs::create_dir_all(bootstrap_state.join("trust")).unwrap();
-        fs::create_dir(bootstrap_state.join("inbox")).unwrap();
-        for path in [
-            &bootstrap_state,
-            &bootstrap_state.join("trust"),
-            &bootstrap_state.join("inbox"),
-        ] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        for entry in ["delegation-generation", ".delegation-generation.lock"] {
-            let path = bootstrap_state.join("trust").join(entry);
-            fs::write(&path, "owned").unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let metadata = TrustedProbeInstallMetadata {
-            schema_version: 3,
-            hub_url: "https://hub.example".into(),
-            identity_path: identity_path.clone(),
-            install_path: install_path.clone(),
-            operation_status_path: state_dir.join("probe-operation-status.toml"),
-            probe_asset_public_key_sha256: "a".repeat(64),
-            probe_distribution_root_sha256: Some("a".repeat(64)),
-            bootstrap_acquirer_path: Some(bootstrap_acquirer),
-            bootstrap_activator_path: Some(bootstrap_activator),
-            bootstrap_state_dir: Some(bootstrap_state),
-            service_name: "enoki-probe".into(),
-            service_group: "enoki-probe".into(),
-            service_unit_path: service_unit_path.clone(),
-            service_user: "enoki-probe".into(),
-            state_dir,
-            operation_sudoers_path: None,
-            collector_helper_sudoers_path: None,
-            old_sudoers_paths: Vec::new(),
-            observation_runtime_path: Some(runtime_path.clone()),
-            cpu_provider_path: Some(provider_path.clone()),
-            disk_health_provider_path: None,
-            lifecycle_companion_path: None,
-            observation_unit_paths: observation_units.to_vec(),
-            probe_ipc_group: None,
-            probe_ipc_group_ownership: None,
-            observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_string()),
-            install_state_sha256: None,
-            target_manifest_sha256: None,
-            bundle_version: None,
-            lifecycle_authority_install_key: None,
-        };
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: identity_path,
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-
-        assert_eq!(
-            observe_legacy_uninstall_for_test(&input, &metadata, &metadata_path, &mut systemd,),
-            LifecycleResponse::succeeded()
-        );
-
-        for path in [install_path, runtime_path, provider_path, service_unit_path]
-            .into_iter()
-            .chain(observation_units)
-        {
-            assert!(!path.exists(), "{} remains", path.display());
-        }
-        for service in OBSERVATION_SERVICES_SCHEMA_THREE {
-            assert!(systemd.calls.contains(&format!("stop {service}")));
-            assert!(systemd.calls.contains(&format!("disable {service}")));
-        }
-        assert!(systemd.calls.iter().all(|call| !call.contains("@.service")));
-        assert_eq!(
-            systemd.calls.first().map(String::as_str),
-            Some("stop enoki-disk-health-resource-provider.socket")
-        );
-        assert!(systemd.calls.contains(&format!(
-            "remove-service-identity {OBSERVATION_IPC_GROUP}:{OBSERVATION_IPC_GROUP}"
-        )));
-    }
-
-    #[test]
-    fn schema_four_uninstall_removes_the_companion_and_complete_fixed_layout() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = temporary.path();
-        let state_dir = root.join("var/lib/enoki-probe");
-        let identity_path = state_dir.join("identity/probe-bootstrap.toml");
-        let metadata_path = root.join("etc/enoki/probe-install.toml");
-        let binaries = [
-            root.join("usr/local/bin/enoki-probe"),
-            root.join("usr/local/bin/enoki-observation-runtime"),
-            root.join("usr/local/bin/enoki-cpu-resource-provider"),
-            root.join("usr/local/bin/enoki-disk-health-resource-provider"),
-            root.join("usr/local/bin/enoki-probe-lifecycle-companion"),
-        ];
-        let units = [
-            root.join("etc/systemd/system/enoki-probe.service"),
-            root.join("etc/systemd/system/enoki-observation-runtime.service"),
-            root.join("etc/systemd/system/enoki-observation-runtime.socket"),
-            root.join("etc/systemd/system/enoki-cpu-resource-provider@.service"),
-            root.join("etc/systemd/system/enoki-cpu-resource-provider.socket"),
-            root.join("etc/systemd/system/enoki-disk-health-resource-provider@.service"),
-            root.join("etc/systemd/system/enoki-disk-health-resource-provider.socket"),
-            root.join("etc/systemd/system/enoki-probe-lifecycle-companion@.service"),
-            root.join("etc/systemd/system/enoki-probe-lifecycle-companion.socket"),
-        ];
-        let bootstrap_roles = [
-            root.join("usr/local/bin/enoki-probe-bootstrap-acquire"),
-            root.join("usr/local/bin/enoki-probe-bootstrap-activate"),
-        ];
-        let bootstrap_state = root.join("var/lib/enoki-probe-bootstrap");
-        for parent in [
-            identity_path.parent().unwrap(),
-            metadata_path.parent().unwrap(),
-            binaries[0].parent().unwrap(),
-            units[0].parent().unwrap(),
-        ] {
-            fs::create_dir_all(parent).unwrap();
-        }
-        for path in binaries
-            .iter()
-            .chain(units.iter())
-            .chain(bootstrap_roles.iter())
-            .chain([&identity_path, &metadata_path])
-        {
-            fs::write(path, "owned").unwrap();
-        }
-        for path in &bootstrap_roles {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        fs::create_dir_all(bootstrap_state.join("trust")).unwrap();
-        fs::create_dir(bootstrap_state.join("inbox")).unwrap();
-        for path in [
-            &bootstrap_state,
-            &bootstrap_state.join("trust"),
-            &bootstrap_state.join("inbox"),
-        ] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        for entry in ["delegation-generation", ".delegation-generation.lock"] {
-            let path = bootstrap_state.join("trust").join(entry);
-            fs::write(&path, "owned").unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let metadata = TrustedProbeInstallMetadata {
-            schema_version: 4,
-            hub_url: "https://hub.example".into(),
-            identity_path: identity_path.clone(),
-            install_path: binaries[0].clone(),
-            operation_status_path: state_dir.join("probe-operation-status.toml"),
-            probe_asset_public_key_sha256: "a".repeat(64),
-            probe_distribution_root_sha256: Some("a".repeat(64)),
-            bootstrap_acquirer_path: Some(bootstrap_roles[0].clone()),
-            bootstrap_activator_path: Some(bootstrap_roles[1].clone()),
-            bootstrap_state_dir: Some(bootstrap_state),
-            service_name: "enoki-probe".into(),
-            service_group: "enoki-probe".into(),
-            service_unit_path: units[0].clone(),
-            service_user: "enoki-probe".into(),
-            state_dir,
-            operation_sudoers_path: None,
-            collector_helper_sudoers_path: None,
-            old_sudoers_paths: Vec::new(),
-            observation_runtime_path: Some(binaries[1].clone()),
-            cpu_provider_path: Some(binaries[2].clone()),
-            disk_health_provider_path: Some(binaries[3].clone()),
-            lifecycle_companion_path: Some(binaries[4].clone()),
-            observation_unit_paths: units[1..].to_vec(),
-            probe_ipc_group: Some(PROBE_IPC_GROUP.to_owned()),
-            probe_ipc_group_ownership: Some(format!("!enoki-bootstrap-{}", "d".repeat(32))),
-            observation_ipc_group: Some(OBSERVATION_IPC_GROUP.to_owned()),
-            install_state_sha256: Some("b".repeat(64)),
-            target_manifest_sha256: Some("c".repeat(64)),
-            bundle_version: Some("1.2.3".to_owned()),
-            lifecycle_authority_install_key: None,
-        };
-        let mut systemd = RecordingSystemdRunner {
-            paths_required_during_identity_removal: vec![
-                binaries[4].clone(),
-                units[7].clone(),
-                units[8].clone(),
-                metadata_path.clone(),
-            ],
-            ..RecordingSystemdRunner::default()
-        };
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: identity_path.clone(),
-        };
-        let entries_survived = observe_schema_four_complete_uninstall_for_test(
-            &input,
-            &metadata,
-            &metadata_path,
-            &mut systemd,
-        )
-        .expect("schema four uninstall succeeds");
-        assert!(
-            entries_survived,
-            "pre-ack recovery entries must survive prepare"
-        );
-
-        for path in binaries.into_iter().chain(units) {
-            assert!(!path.exists(), "{} remains", path.display());
-        }
-        for service in OBSERVATION_SERVICES_SCHEMA_FOUR {
-            assert!(systemd.calls.contains(&format!("stop {service}")));
-            assert!(systemd.calls.contains(&format!("disable {service}")));
-        }
-        let identity_removed = systemd
-            .calls
-            .iter()
-            .position(|call| call == "remove-service-identity enoki-probe:enoki-probe")
-            .expect("service identity cleanup");
-        let companion_stopped = systemd
-            .calls
-            .iter()
-            .position(|call| call == "stop enoki-probe-lifecycle-companion.socket")
-            .expect("companion socket cleanup");
-        assert!(identity_removed < companion_stopped);
-        assert!(systemd.calls.contains(&format!(
-            "remove-service-identity {PROBE_IPC_GROUP}:{PROBE_IPC_GROUP}"
-        )));
-        assert!(
-            systemd
-                .calls
-                .iter()
-                .all(|call| !call.contains("lifecycle-companion@"))
-        );
-    }
-
     struct UninstallCoordinatorFixture {
         metadata: TrustedProbeInstallMetadata,
         metadata_path: PathBuf,
@@ -7131,20 +6625,16 @@ mod tests {
             "committed Replacement preserves candidate Bootstrap custody"
         );
 
-        let mut cleanup_systemd = RecordingSystemdRunner::default();
-        let retirement_failure = observe_replacement_retirement_retry_for_test(
+        let completed = commit_replacement_and_cleanup_install_with_systemd(
             intent.clone(),
             &mut store,
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             Some(temporary.path()),
-            &mut cleanup_systemd,
-        );
-        assert!(retirement_failure);
-        assert!(store.fact.as_ref().unwrap().cleanup_complete);
-        assert!(
-            metadata_path.exists(),
-            "cleanup receipt owns metadata until retirement retries"
-        );
+            &mut RecordingSystemdRunner::default(),
+        )
+        .expect("production Replacement seam converges the committed cleanup");
+        assert!(completed.cleanup_complete);
+        assert!(!metadata_path.exists());
 
         let commit_path =
             replacement_production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, Some(temporary.path()));
@@ -7504,12 +6994,11 @@ mod tests {
         );
 
         assert_eq!(
-            result.response,
+            result,
             LifecycleResponse::failed("probe_uninstall_service_account_remove_failed")
         );
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
-        assert!(result.recovery_available);
         assert!(fixture.companion_path.exists());
     }
 
@@ -7660,13 +7149,9 @@ mod tests {
             &mut systemd,
         );
 
-        assert_eq!(
-            result.response,
-            LifecycleResponse::failed("probe_uninstall_failed")
-        );
+        assert_eq!(result, LifecycleResponse::failed("probe_uninstall_failed"));
         assert!(transport.url.contains("operation_mechanics"));
         assert!(transport.status_url.contains("operation_mechanics"));
-        assert!(result.recovery_available);
 
         let conflicting_request = LifecycleRequest::hub_uninstall(
             "probe_01",
@@ -7688,10 +7173,9 @@ mod tests {
             &mut conflicting_systemd,
         );
         assert_eq!(
-            conflicting.response,
+            conflicting,
             LifecycleResponse::failed("probe_uninstall_metadata_invalid")
         );
-        assert!(conflicting.recovery_available);
         assert!(conflicting_transport.url.is_empty());
         assert!(conflicting_transport.status_url.is_empty());
         assert!(conflicting_transport.downloads.is_empty());
@@ -7707,13 +7191,27 @@ mod tests {
             &mut retry_transport,
             &mut retry_systemd,
         );
-        assert_eq!(retry.response, LifecycleResponse::succeeded());
-        assert!(!retry.recovery_available);
+        assert_eq!(retry, LifecycleResponse::succeeded());
         assert!(retry_transport.url.is_empty());
         assert!(
             retry_transport
                 .status_body
                 .contains("\"status\":\"succeeded\"")
+        );
+        for path in [
+            &fixture.metadata_path,
+            &fixture.identity_path,
+            &fixture.metadata.state_dir,
+        ] {
+            assert!(
+                !path.exists(),
+                "{} remains after convergence",
+                path.display()
+            );
+        }
+        assert!(
+            fixture.companion_path.exists(),
+            "response-flush self-unlink remains the only final effect"
         );
     }
 
@@ -7748,10 +7246,9 @@ mod tests {
             &mut failed_systemd,
         );
         assert_eq!(
-            first.response,
+            first,
             LifecycleResponse::failed("probe_uninstall_service_stop_failed")
         );
-        assert!(first.recovery_available);
         assert!(!first_transport.url.is_empty());
         assert!(first_transport.status_url.is_empty());
 
@@ -7765,60 +7262,13 @@ mod tests {
             &mut retry_transport,
             &mut retry_systemd,
         );
-        assert_eq!(retry.response, LifecycleResponse::succeeded());
+        assert_eq!(retry, LifecycleResponse::succeeded());
         assert!(retry_transport.url.is_empty());
         assert!(
             retry_transport
                 .status_body
                 .contains("\"status\":\"succeeded\"")
         );
-        assert!(!retry.recovery_available);
-    }
-
-    #[test]
-    fn hub_succeeded_then_ack_persistence_failure_remains_recoverable_from_prepared() {
-        let temporary = tempfile::tempdir().expect("temporary directory");
-        let fixture = uninstall_coordinator_fixture(temporary.path());
-        let request = LifecycleRequest::hub_uninstall(
-            "probe_01",
-            "operation_42",
-            "operation-token",
-            &"b".repeat(64),
-            &"c".repeat(64),
-            "1.2.3",
-        )
-        .expect("bound uninstall request");
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: fixture.identity_path.clone(),
-        };
-        let mut transport = RecordingValidationTransport::default();
-        let mut retry_transport = RecordingValidationTransport::default();
-        let mut systemd = RecordingSystemdRunner::default();
-
-        let observation = observe_hub_acknowledgement_persistence_recovery_for_test(
-            &request,
-            &input,
-            &fixture.metadata,
-            &fixture.metadata_path,
-            &mut transport,
-            &mut retry_transport,
-            &mut systemd,
-        )
-        .expect("observe acknowledgement persistence recovery");
-        assert_eq!(
-            observation.interrupted.response,
-            LifecycleResponse::recovery_pending()
-        );
-        assert!(observation.interrupted.recovery_available);
-        assert!(transport.status_body.contains("\"status\":\"succeeded\""));
-        assert_eq!(observation.resumed.response, LifecycleResponse::succeeded());
-        assert!(retry_transport.url.is_empty());
-        assert!(
-            retry_transport
-                .status_body
-                .contains("\"status\":\"succeeded\"")
-        );
-        assert!(!observation.resumed.recovery_available);
     }
 
     #[test]
@@ -7868,11 +7318,7 @@ mod tests {
             &mut failed_transport,
             &mut systemd,
         );
-        assert_eq!(
-            first.response,
-            LifecycleResponse::failed("probe_uninstall_failed")
-        );
-        assert!(first.recovery_available);
+        assert_eq!(first, LifecycleResponse::failed("probe_uninstall_failed"));
         for path in [
             identity_path.as_path(),
             metadata_path.as_path(),
@@ -7893,7 +7339,7 @@ mod tests {
             &mut retry_transport,
             &mut systemd,
         );
-        assert_eq!(completed.response, LifecycleResponse::recovery_pending());
+        assert_eq!(completed, LifecycleResponse::recovery_pending());
         assert!(
             retry_transport.url.is_empty(),
             "trusted capsule skips revalidation"
@@ -7903,19 +7349,10 @@ mod tests {
                 .status_body
                 .contains("\"status\":\"succeeded\"")
         );
-        assert!(completed.recovery_available);
         assert!(metadata_path.exists());
         assert!(identity_path.exists());
         assert!(companion_path.exists());
 
-        assert!(
-            observe_uninstall_state_failure_preserves_recovery_for_test(
-                &input,
-                &metadata,
-                &metadata_path
-            )
-            .expect("observe stable recovery behavior after local-state failure")
-        );
         assert!(
             companion_path.exists(),
             "fixed resume entry remains recoverable"
@@ -7997,105 +7434,6 @@ mod tests {
         assert!(binary.exists());
         assert!(transport.url.is_empty());
         assert!(systemd.calls.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn schema_two_uninstall_rejects_a_bootstrap_symlink_without_touching_its_target() {
-        use std::os::unix::fs::symlink;
-        let temp = tempfile::tempdir().expect("temp dir");
-        let target = temp.path().join("outside-bootstrap");
-        let acquirer = temp.path().join("bootstrap-acquire");
-        let activator = temp.path().join("bootstrap-activate");
-        fs::write(&target, "outside").expect("target");
-        symlink(&target, &acquirer).expect("symlink");
-        fs::write(&activator, "owned activator").expect("activator");
-        fs::set_permissions(&activator, fs::Permissions::from_mode(0o755)).expect("activator mode");
-        let state_dir = temp.path().join("state");
-        fs::create_dir_all(&state_dir).expect("state");
-        let bootstrap_state_dir = temp.path().join("bootstrap-state");
-        fs::create_dir(&bootstrap_state_dir).expect("Bootstrap state");
-        fs::set_permissions(&bootstrap_state_dir, fs::Permissions::from_mode(0o700))
-            .expect("Bootstrap state mode");
-        let metadata = TrustedProbeInstallMetadata {
-            schema_version: 2,
-            hub_url: "https://hub.example".to_string(),
-            identity_path: temp.path().join("identity"),
-            install_path: temp.path().join("probe"),
-            operation_status_path: state_dir.join("status"),
-            probe_asset_public_key_sha256: "a".repeat(64),
-            probe_distribution_root_sha256: Some("a".repeat(64)),
-            bootstrap_acquirer_path: Some(acquirer.clone()),
-            bootstrap_activator_path: Some(activator.clone()),
-            bootstrap_state_dir: Some(bootstrap_state_dir),
-            service_name: "enoki-probe".to_string(),
-            service_group: "enoki-probe".to_string(),
-            service_unit_path: temp.path().join("unit"),
-            service_user: "enoki-probe".to_string(),
-            state_dir,
-            operation_sudoers_path: None,
-            collector_helper_sudoers_path: None,
-            old_sudoers_paths: Vec::new(),
-            observation_runtime_path: None,
-            cpu_provider_path: None,
-            disk_health_provider_path: None,
-            lifecycle_companion_path: None,
-            observation_unit_paths: Vec::new(),
-            probe_ipc_group: None,
-            probe_ipc_group_ownership: None,
-            observation_ipc_group: None,
-            install_state_sha256: None,
-            target_manifest_sha256: None,
-            bundle_version: None,
-            lifecycle_authority_install_key: None,
-        };
-        let input = ProbeUninstallerRunInput {
-            bootstrap_config_path: metadata.identity_path.clone(),
-        };
-        let mut systemd = RecordingSystemdRunner::default();
-        let response = observe_legacy_uninstall_for_test(
-            &input,
-            &metadata,
-            &temp.path().join("metadata"),
-            &mut systemd,
-        );
-        assert_eq!(
-            response,
-            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
-        );
-        assert_eq!(fs::read(&target).expect("outside target"), b"outside");
-        assert!(systemd.calls.is_empty());
-    }
-
-    #[test]
-    fn legacy_uninstall_reports_required_service_disable_failure() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(&install_metadata.state_dir).expect("state dir");
-        write_test_bootstrap_config(&install_metadata.identity_path, &install_metadata)
-            .expect("bootstrap config");
-        let mut systemd = RecordingSystemdRunner {
-            failure_step: Some("disable"),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let response = observe_legacy_uninstall_for_test(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: install_metadata.identity_path.clone(),
-            },
-            &install_metadata,
-            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-            &mut systemd,
-        );
-
-        assert_eq!(
-            response,
-            LifecycleResponse::failed("probe_uninstall_service_disable_failed")
-        );
-        assert_eq!(systemd.calls, ["stop enoki-probe", "disable enoki-probe"]);
     }
 
     #[test]
@@ -8370,165 +7708,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uninstall_reports_loaded_service_residue() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(&install_metadata.state_dir).expect("state dir");
-        write_test_bootstrap_config(&install_metadata.identity_path, &install_metadata)
-            .expect("bootstrap config");
-        let mut systemd = RecordingSystemdRunner {
-            failure_step: Some("verify-service"),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let response = observe_legacy_uninstall_for_test(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: install_metadata.identity_path.clone(),
-            },
-            &install_metadata,
-            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-            &mut systemd,
-        );
-
-        assert_eq!(
-            response,
-            LifecycleResponse::failed("probe_uninstall_service_residue")
-        );
-    }
-
-    #[test]
-    fn legacy_uninstall_reports_service_account_removal_failure() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let install_path = temp.path().join("bin/enoki-probe");
-        let install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        fs::create_dir_all(&install_metadata.state_dir).expect("state dir");
-        write_test_bootstrap_config(&install_metadata.identity_path, &install_metadata)
-            .expect("bootstrap config");
-        let mut systemd = RecordingSystemdRunner {
-            failure_step: Some("remove-account"),
-            ..RecordingSystemdRunner::default()
-        };
-
-        let response = observe_legacy_uninstall_for_test(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: install_metadata.identity_path.clone(),
-            },
-            &install_metadata,
-            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-            &mut systemd,
-        );
-
-        assert_eq!(
-            response,
-            LifecycleResponse::failed("probe_uninstall_service_account_remove_failed")
-        );
-    }
-
-    #[test]
-    fn probe_uninstaller_removes_install_metadata_and_local_installation_assets() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
-        let install_metadata_path = temp.path().join("etc/enoki/probe-install.toml");
-        let install_path = temp.path().join("usr/local/bin/enoki-probe");
-        let state_dir = temp.path().join("var/lib/enoki-probe");
-        let status_path = state_dir.join("probe-operation-status.toml");
-        let operation_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-operations");
-        let collector_helper_sudoers_path = temp
-            .path()
-            .join("etc/sudoers.d/enoki-probe-collector-helpers");
-        let old_sudoers_path = temp.path().join("etc/sudoers.d/enoki-probe-upgrader");
-        for path in [
-            &bootstrap_config_path,
-            &install_metadata_path,
-            &install_path,
-            &operation_sudoers_path,
-            &collector_helper_sudoers_path,
-            &old_sudoers_path,
-        ] {
-            fs::create_dir_all(path.parent().expect("parent")).expect("parent");
-            fs::write(path, "owned file").expect("owned file");
-        }
-        fs::create_dir_all(&state_dir).expect("state dir");
-        fs::write(state_dir.join("state"), "state").expect("state");
-        let mut install_metadata =
-            trusted_install_metadata(&install_path, &status_path, assets_public_key_sha256());
-        install_metadata.operation_sudoers_path = Some(operation_sudoers_path.clone());
-        install_metadata.collector_helper_sudoers_path =
-            Some(collector_helper_sudoers_path.clone());
-        install_metadata.old_sudoers_paths = vec![old_sudoers_path.clone()];
-        let mut systemd = RecordingSystemdRunner::default();
-
-        assert_eq!(
-            observe_legacy_uninstall_for_test(
-                &ProbeUninstallerRunInput {
-                    bootstrap_config_path: bootstrap_config_path.clone(),
-                },
-                &install_metadata,
-                &install_metadata_path,
-                &mut systemd,
-            ),
-            LifecycleResponse::succeeded()
-        );
-
-        for path in [
-            &bootstrap_config_path,
-            &install_metadata_path,
-            &install_path,
-            &operation_sudoers_path,
-            &collector_helper_sudoers_path,
-            &old_sudoers_path,
-        ] {
-            assert!(!path.exists(), "{} should be removed", path.display());
-        }
-        assert!(!state_dir.exists());
-        assert_eq!(
-            systemd.calls,
-            vec![
-                "stop enoki-probe",
-                "disable enoki-probe",
-                "daemon-reload",
-                "reset-failed enoki-probe",
-                "verify-service-absent enoki-probe",
-                "remove-service-identity enoki-probe:enoki-probe",
-                "verify-service-absent enoki-probe",
-            ],
-        );
-    }
-
-    #[test]
-    fn legacy_uninstall_rejects_unsafe_inventory_before_host_effects() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let status_path = temp.path().join("state/probe-operation-status.toml");
-        let mut install_metadata = trusted_install_metadata(
-            &temp.path().join("bin/enoki-probe"),
-            &status_path,
-            assets_public_key_sha256(),
-        );
-        install_metadata.install_path = PathBuf::from("relative-probe-binary");
-
-        let mut systemd = RecordingSystemdRunner::default();
-        let response = observe_legacy_uninstall_for_test(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: temp.path().join("state/probe-bootstrap.toml"),
-            },
-            &install_metadata,
-            &temp.path().join("etc/enoki/probe-install.toml"),
-            &mut systemd,
-        );
-
-        assert_eq!(
-            response,
-            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
-        );
-        assert!(systemd.calls.is_empty());
-    }
-
-    #[test]
     fn hub_uninstall_adapter_rejects_bootstrap_hub_url_mismatch_before_token_validation() {
         let temp = tempfile::tempdir().expect("temp dir");
         let install_path = temp.path().join("bin/enoki-probe");
@@ -8572,7 +7751,7 @@ mod tests {
         );
 
         assert_eq!(
-            response.response,
+            response,
             LifecycleResponse::failed("probe_uninstall_failed")
         );
         assert_eq!(transport.url, "");

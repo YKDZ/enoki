@@ -24,63 +24,195 @@ const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/in
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
 
+use syn::{Attribute, Item, Visibility};
+
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
 }
 
-fn visible_top_level_declarations(source: &str, direct_child: bool) -> Vec<(bool, String)> {
-    let lines = source.lines().collect::<Vec<_>>();
-    let mut declarations = Vec::new();
-    let mut cfg_test = false;
-    let mut index = 0;
-    while index < lines.len() {
-        let line = lines[index];
-        let trimmed = line.trim();
-        if trimmed.starts_with("#[") {
-            cfg_test |= trimmed.contains("cfg(test)");
-            index += 1;
-            continue;
-        }
-        if trimmed.is_empty() || trimmed.starts_with("//") {
-            index += 1;
-            continue;
-        }
-        let top_level = line == trimmed;
-        let visible =
-            trimmed == "pub" || trimmed.starts_with("pub ") || trimmed.starts_with("pub(");
-        let reaches_parent = direct_child
-            || trimmed == "pub"
-            || trimmed.starts_with("pub ")
-            || trimmed.starts_with("pub(crate)")
-            || trimmed.starts_with("pub(in ");
-        if top_level && visible && reaches_parent {
-            let mut declaration = trimmed.to_owned();
-            while !declaration.contains('{') && !declaration.ends_with(';') {
-                index += 1;
-                declaration.push(' ');
-                declaration.push_str(lines[index].trim());
-            }
-            declarations.push((cfg_test, declaration));
-        }
-        cfg_test = false;
-        index += 1;
-    }
-    declarations
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ItemVisibility {
+    Private,
+    SelfOnly,
+    Parent,
+    Wider,
 }
 
-fn declaration_name(declaration: &str) -> &str {
-    for keyword in ["fn ", "struct ", "enum ", "const ", "type ", "trait "] {
-        if let Some((_, tail)) = declaration.split_once(keyword) {
-            return tail
-                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-                .next()
-                .expect("declaration name");
-        }
+#[derive(Debug, Eq, PartialEq)]
+struct TopLevelDeclaration {
+    cfg_test: bool,
+    name: String,
+    visibility: ItemVisibility,
+}
+
+fn item_attributes(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
     }
-    declaration
-        .split_once("use ")
-        .map(|(_, tail)| tail.trim_end_matches(';'))
-        .expect("visible declaration kind")
+}
+
+fn item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Const(item) => Some(item.ident.to_string()),
+        Item::Enum(item) => Some(item.ident.to_string()),
+        Item::ExternCrate(item) => Some(item.ident.to_string()),
+        Item::Fn(item) => Some(item.sig.ident.to_string()),
+        Item::Mod(item) => Some(item.ident.to_string()),
+        Item::Static(item) => Some(item.ident.to_string()),
+        Item::Struct(item) => Some(item.ident.to_string()),
+        Item::Trait(item) => Some(item.ident.to_string()),
+        Item::TraitAlias(item) => Some(item.ident.to_string()),
+        Item::Type(item) => Some(item.ident.to_string()),
+        Item::Union(item) => Some(item.ident.to_string()),
+        Item::Use(item) => Some(use_tree_name(&item.tree)),
+        _ => None,
+    }
+}
+
+fn use_tree_name(tree: &syn::UseTree) -> String {
+    match tree {
+        syn::UseTree::Path(path) => format!("{}::{}", path.ident, use_tree_name(&path.tree)),
+        syn::UseTree::Name(name) => name.ident.to_string(),
+        syn::UseTree::Rename(rename) => rename.rename.to_string(),
+        syn::UseTree::Glob(_) => "*".to_owned(),
+        syn::UseTree::Group(_) => "{group}".to_owned(),
+    }
+}
+
+fn item_visibility(item: &Item) -> Option<&Visibility> {
+    match item {
+        Item::Const(item) => Some(&item.vis),
+        Item::Enum(item) => Some(&item.vis),
+        Item::ExternCrate(item) => Some(&item.vis),
+        Item::Fn(item) => Some(&item.vis),
+        Item::Mod(item) => Some(&item.vis),
+        Item::Static(item) => Some(&item.vis),
+        Item::Struct(item) => Some(&item.vis),
+        Item::Trait(item) => Some(&item.vis),
+        Item::TraitAlias(item) => Some(&item.vis),
+        Item::Type(item) => Some(&item.vis),
+        Item::Union(item) => Some(&item.vis),
+        Item::Use(item) => Some(&item.vis),
+        _ => None,
+    }
+}
+
+fn classify_visibility(visibility: &Visibility) -> ItemVisibility {
+    match visibility {
+        Visibility::Inherited => ItemVisibility::Private,
+        Visibility::Public(_) => ItemVisibility::Wider,
+        Visibility::Restricted(restricted) if restricted.path.is_ident("super") => {
+            ItemVisibility::Parent
+        }
+        Visibility::Restricted(restricted) if restricted.path.is_ident("self") => {
+            ItemVisibility::SelfOnly
+        }
+        Visibility::Restricted(_) => ItemVisibility::Wider,
+    }
+}
+
+fn is_cfg_test(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && attribute
+                .parse_args::<syn::Ident>()
+                .is_ok_and(|condition| condition == "test")
+    })
+}
+
+fn top_level_declarations(source: &str) -> Vec<TopLevelDeclaration> {
+    syn::parse_file(source)
+        .expect("valid Rust module")
+        .items
+        .iter()
+        .filter_map(|item| {
+            Some(TopLevelDeclaration {
+                cfg_test: is_cfg_test(item_attributes(item)),
+                name: item_name(item)?,
+                visibility: classify_visibility(item_visibility(item)?),
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn rust_ast_classifier_handles_visibility_and_cfg_syntax() {
+    let fixture = r#"
+        #[doc = "pub(crate) and #[cfg(test)] are only text"]
+        pub fn bare_public() {}
+        pub(crate) struct CratePublic;
+        pub(super) enum ParentPublic { Value }
+        pub(self) type SelfPublic = ();
+        pub(in
+            crate::upgrader
+        ) use crate::sample::renamed as MultiLineRestricted;
+        #[cfg(test)]
+        pub(super) fn single_line_test() {}
+        #[cfg(
+            test
+        )]
+        #[allow(dead_code)]
+        pub(super) fn multi_line_test() {}
+        #[allow(dead_code)]
+        fn private_item() {}
+    "#;
+    assert_eq!(
+        top_level_declarations(fixture),
+        [
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "bare_public".to_owned(),
+                visibility: ItemVisibility::Wider
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "CratePublic".to_owned(),
+                visibility: ItemVisibility::Wider
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "ParentPublic".to_owned(),
+                visibility: ItemVisibility::Parent
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "SelfPublic".to_owned(),
+                visibility: ItemVisibility::SelfOnly
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "crate::sample::MultiLineRestricted".to_owned(),
+                visibility: ItemVisibility::Wider
+            },
+            TopLevelDeclaration {
+                cfg_test: true,
+                name: "single_line_test".to_owned(),
+                visibility: ItemVisibility::Parent
+            },
+            TopLevelDeclaration {
+                cfg_test: true,
+                name: "multi_line_test".to_owned(),
+                visibility: ItemVisibility::Parent
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "private_item".to_owned(),
+                visibility: ItemVisibility::Private
+            },
+        ]
+    );
 }
 
 #[test]
@@ -341,25 +473,36 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
         !UPGRADER.contains("use super::uninstall::*"),
         "父级 tests 不得通过 wildcard 旁路 Uninstall interface",
     );
-    let declarations = visible_top_level_declarations(UNINSTALL, true);
+    let declarations = top_level_declarations(UNINSTALL);
     let production_surface = declarations
         .iter()
-        .filter(|(cfg_test, _)| !cfg_test)
-        .map(|(_, declaration)| declaration_name(declaration))
+        .filter(|declaration| {
+            !declaration.cfg_test
+                && !matches!(
+                    declaration.visibility,
+                    ItemVisibility::Private | ItemVisibility::SelfOnly
+                )
+        })
+        .map(|declaration| (declaration.name.as_str(), declaration.visibility))
         .collect::<Vec<_>>();
     assert_eq!(
         production_surface,
         [
-            "cleanup::commit_replacement_and_cleanup_install_with_systemd",
-            "run_uninstall_lifecycle_adapter",
-            "resume_lifecycle_companion_at",
+            (
+                "cleanup::commit_replacement_and_cleanup_install_with_systemd",
+                ItemVisibility::Parent,
+            ),
+            ("run_uninstall_lifecycle_adapter", ItemVisibility::Parent),
+            ("resume_lifecycle_companion_at", ItemVisibility::Parent),
         ],
         "focused Uninstall implementation layer 只向父级暴露两个 adapter hook 与一个 Replacement seam",
     );
-    let nested_parent_surface = visible_top_level_declarations(UNINSTALL_CLEANUP, false)
+    let nested_parent_surface = top_level_declarations(UNINSTALL_CLEANUP)
         .into_iter()
-        .filter(|(cfg_test, _)| !cfg_test)
-        .map(|(_, declaration)| declaration_name(&declaration).to_owned())
+        .filter(|declaration| {
+            !declaration.cfg_test && declaration.visibility == ItemVisibility::Wider
+        })
+        .map(|declaration| declaration.name)
         .collect::<Vec<_>>();
     assert_eq!(
         nested_parent_surface,
@@ -368,29 +511,29 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
     );
     let test_surface = declarations
         .iter()
-        .filter(|(cfg_test, _)| *cfg_test)
-        .map(|(_, declaration)| declaration_name(declaration))
+        .filter(|declaration| {
+            declaration.cfg_test
+                && !matches!(
+                    declaration.visibility,
+                    ItemVisibility::Private | ItemVisibility::SelfOnly
+                )
+        })
+        .map(|declaration| (declaration.name.as_str(), declaration.visibility))
         .collect::<Vec<_>>();
     assert_eq!(
         test_surface,
-        [
-            "UninstallWorkflowObservation",
-            "run_uninstall_workflow_for_test",
-            "HubAcknowledgementRecoveryObservation",
-            "observe_hub_acknowledgement_persistence_recovery_for_test",
-            "observe_legacy_uninstall_for_test",
-            "observe_schema_four_complete_uninstall_for_test",
-            "observe_uninstall_state_failure_preserves_recovery_for_test",
-            "observe_replacement_metadata_custody_for_test",
-            "observe_replacement_retirement_retry_for_test",
-        ],
+        [("run_uninstall_workflow_for_test", ItemVisibility::Parent)],
         "父级 test interface 必须是显式 cfg(test) 的完整 workflow 或稳定行为 observation",
     );
-    for (_, declaration) in declarations.iter().filter(|(cfg_test, _)| *cfg_test) {
+    for declaration in declarations
+        .iter()
+        .filter(|declaration| declaration.cfg_test)
+    {
         for forbidden in ["phase", "plan_", "read_", "cleanup_sequence", "mechanics"] {
             assert!(
-                !declaration.contains(forbidden),
-                "test-only parent seam 不得暴露 mechanics vocabulary：{declaration}",
+                !declaration.name.contains(forbidden),
+                "test-only parent seam 不得暴露 mechanics vocabulary：{}",
+                declaration.name,
             );
         }
     }

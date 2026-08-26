@@ -18,7 +18,7 @@ use enoki_probe_bootstrap::replacement::{
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
-pub(super) fn execute_probe_uninstall_with_install_metadata_path(
+fn execute_probe_uninstall_with_install_metadata_path(
     input: &ProbeUninstallerRunInput,
     install_metadata: &TrustedProbeInstallMetadata,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -570,7 +570,7 @@ pub(super) fn finalize_recoverable_uninstall_cleanup(
 }
 
 #[cfg(test)]
-pub(super) fn execute_complete_uninstall_cleanup_oracle(
+fn execute_complete_uninstall_cleanup_oracle(
     plan: &ProbeUninstallCleanupPlan<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<(), ProbeUpgraderRunError> {
@@ -948,13 +948,357 @@ pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgra
 
 #[cfg(test)]
 mod tests {
-    use super::validate_owned_bootstrap_state;
-    use crate::upgrader::ProbeUpgraderRunError;
+    use super::{
+        ProbeUpgraderSystemdRunner, TrustedProbeInstallMetadata,
+        commit_replacement_cleanup_with_metadata_retirement,
+        execute_probe_uninstall_with_install_metadata_path, finalize_recoverable_uninstall_cleanup,
+        finalize_replacement_local_state_with, plan_probe_uninstall_cleanup,
+        plan_probe_uninstall_recovery, prepare_probe_uninstall_cleanup,
+        remove_lifecycle_companion_binary, remove_uninstall_local_state_with,
+        validate_owned_bootstrap_state,
+    };
+    use crate::upgrader::{ProbeUninstallerRunInput, ProbeUpgraderRunError};
+    use enoki_probe_bootstrap::replacement::{
+        ReplacementCommitError, ReplacementCommitFact, ReplacementCommitStore, ReplacementIntent,
+    };
     use std::{
         fs,
         os::unix::fs::{PermissionsExt, symlink},
         path::{Path, PathBuf},
     };
+
+    #[derive(Default)]
+    struct TestSystemd {
+        calls: Vec<String>,
+    }
+
+    impl ProbeUpgraderSystemdRunner for TestSystemd {
+        fn restart_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("restart {service_name}"));
+            Ok(())
+        }
+
+        fn stop_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("stop {service_name}"));
+            Ok(())
+        }
+
+        fn disable_service(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("disable {service_name}"));
+            Ok(())
+        }
+
+        fn daemon_reload(&mut self) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push("daemon-reload".to_owned());
+            Ok(())
+        }
+
+        fn verify_service_absent(
+            &mut self,
+            service_name: &str,
+        ) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("verify-absent {service_name}"));
+            Ok(())
+        }
+
+        fn remove_service_identity(
+            &mut self,
+            service_user: &str,
+            service_group: &str,
+        ) -> Result<(), ProbeUpgraderRunError> {
+            self.calls
+                .push(format!("remove-identity {service_user}:{service_group}"));
+            Ok(())
+        }
+    }
+
+    fn metadata(root: &Path, schema_version: u32) -> TrustedProbeInstallMetadata {
+        TrustedProbeInstallMetadata {
+            schema_version,
+            hub_url: "https://hub.example".to_owned(),
+            identity_path: root.join("state/identity.toml"),
+            install_path: root.join("bin/enoki-probe"),
+            operation_status_path: root.join("state/status.toml"),
+            probe_asset_public_key_sha256: "a".repeat(64),
+            probe_distribution_root_sha256: None,
+            bootstrap_acquirer_path: None,
+            bootstrap_activator_path: None,
+            bootstrap_state_dir: None,
+            service_name: "enoki-probe".to_owned(),
+            service_group: "enoki-probe".to_owned(),
+            service_unit_path: root.join("systemd/enoki-probe.service"),
+            service_user: "enoki-probe".to_owned(),
+            state_dir: root.join("state"),
+            operation_sudoers_path: None,
+            collector_helper_sudoers_path: None,
+            old_sudoers_paths: Vec::new(),
+            observation_runtime_path: None,
+            cpu_provider_path: None,
+            disk_health_provider_path: None,
+            lifecycle_companion_path: None,
+            observation_unit_paths: Vec::new(),
+            probe_ipc_group: None,
+            probe_ipc_group_ownership: None,
+            observation_ipc_group: None,
+            install_state_sha256: None,
+            target_manifest_sha256: None,
+            bundle_version: None,
+            lifecycle_authority_install_key: None,
+        }
+    }
+
+    fn create_file(path: &Path, mode: u32) {
+        fs::create_dir_all(path.parent().expect("file parent")).expect("create parent");
+        fs::write(path, b"fixture").expect("write fixture");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("fixture mode");
+    }
+
+    #[test]
+    fn legacy_cleanup_oracle_removes_owned_inventory_in_exact_order() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = metadata(temporary.path(), 1);
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ] {
+            create_file(path, 0o600);
+        }
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let install_metadata_path = temporary.path().join("etc/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let mut systemd = TestSystemd::default();
+
+        execute_probe_uninstall_with_install_metadata_path(
+            &input,
+            &metadata,
+            &mut systemd,
+            &install_metadata_path,
+        )
+        .expect("legacy cleanup");
+
+        for path in [
+            metadata.install_path,
+            metadata.service_unit_path,
+            metadata.state_dir,
+            install_metadata_path,
+        ] {
+            assert!(!path.exists(), "{} remains", path.display());
+        }
+        assert_eq!(
+            &systemd.calls[..2],
+            ["stop enoki-probe", "disable enoki-probe"]
+        );
+    }
+
+    #[test]
+    fn planner_rejects_relative_inventory_with_exact_error_and_zero_effects() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let sentinel = temporary.path().join("sentinel");
+        create_file(&sentinel, 0o600);
+        let mut metadata = metadata(temporary.path(), 1);
+        metadata.install_path = PathBuf::from("relative-probe");
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+
+        assert!(matches!(
+            plan_probe_uninstall_cleanup(
+                &input,
+                &metadata,
+                &temporary.path().join("probe-install.toml")
+            ),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "paths must be absolute"
+            ))
+        ));
+        assert_eq!(fs::read(&sentinel).expect("sentinel remains"), b"fixture");
+    }
+
+    #[test]
+    fn schema_four_cleanup_keeps_reentry_assets_until_recoverable_finalize() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 4);
+        let acquirer = temporary.path().join("bin/enoki-bootstrap-acquire");
+        let activator = temporary.path().join("bin/enoki-bootstrap-activate");
+        let bootstrap_state = temporary.path().join("bootstrap-state");
+        let companion = temporary.path().join("bin/enoki-probe-lifecycle-companion");
+        let companion_service = temporary
+            .path()
+            .join("systemd/enoki-probe-lifecycle-companion@.service");
+        let companion_socket = temporary
+            .path()
+            .join("systemd/enoki-probe-lifecycle-companion.socket");
+        metadata.bootstrap_acquirer_path = Some(acquirer.clone());
+        metadata.bootstrap_activator_path = Some(activator.clone());
+        metadata.bootstrap_state_dir = Some(bootstrap_state.clone());
+        metadata.lifecycle_companion_path = Some(companion.clone());
+        metadata.observation_unit_paths = vec![companion_service.clone(), companion_socket.clone()];
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+            &companion,
+            &companion_service,
+            &companion_socket,
+        ] {
+            create_file(path, 0o755);
+        }
+        create_file(&acquirer, 0o755);
+        create_file(&activator, 0o755);
+        fs::create_dir(&bootstrap_state).expect("bootstrap state");
+        fs::set_permissions(&bootstrap_state, fs::Permissions::from_mode(0o700))
+            .expect("bootstrap state mode");
+        let install_metadata_path = temporary.path().join("etc/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let plan = plan_probe_uninstall_cleanup(&input, &metadata, &install_metadata_path)
+            .expect("schema four plan");
+        let mut systemd = TestSystemd::default();
+
+        prepare_probe_uninstall_cleanup(&plan, &mut systemd).expect("prepare cleanup");
+        for path in [
+            &metadata.identity_path,
+            &install_metadata_path,
+            &companion,
+            &companion_service,
+            &companion_socket,
+        ] {
+            assert!(path.exists(), "{} removed during prepare", path.display());
+        }
+        finalize_recoverable_uninstall_cleanup(&plan, &mut systemd).expect("recoverable finalize");
+        assert!(companion.exists(), "companion is the final reentry asset");
+        remove_lifecycle_companion_binary(&plan).expect("remove companion binary");
+        assert!(!companion.exists());
+        assert!(!install_metadata_path.exists());
+        assert!(!metadata.identity_path.exists());
+        assert!(!metadata.state_dir.exists());
+    }
+
+    #[test]
+    fn local_state_failure_preserves_the_exact_cleanup_transcript() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let metadata = metadata(temporary.path(), 1);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let install_metadata_path = temporary.path().join("probe-install.toml");
+        let plan = plan_probe_uninstall_recovery(&input, &metadata, &install_metadata_path)
+            .expect("recovery plan");
+        let mut calls = Vec::new();
+
+        let error = remove_uninstall_local_state_with(&plan, |path| {
+            calls.push(path.to_path_buf());
+            (path != metadata.state_dir)
+                .then_some(())
+                .ok_or_else(|| ProbeUpgraderRunError::Io(std::io::Error::other("injected")))
+        })
+        .expect_err("state removal failure");
+
+        assert!(matches!(error, ProbeUpgraderRunError::Io(_)));
+        assert_eq!(
+            calls,
+            [
+                install_metadata_path,
+                metadata.identity_path,
+                metadata.state_dir,
+            ]
+        );
+    }
+
+    #[test]
+    fn replacement_cleanup_excludes_metadata_from_both_local_state_paths() {
+        let config = Path::new("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
+        let state = Path::new("/var/lib/enoki-probe");
+        let metadata = Path::new("/etc/enoki/probe-install.toml");
+        for verification_fails in [true, false] {
+            let mut calls = Vec::new();
+            let result = finalize_replacement_local_state_with(
+                config,
+                state,
+                |path| {
+                    calls.push(path.to_path_buf());
+                    Ok(())
+                },
+                || {
+                    if verification_fails {
+                        Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                            "verification failed",
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(calls, [config, state]);
+            assert!(!calls.iter().any(|path| path == metadata));
+            assert_eq!(result.is_err(), verification_fails);
+        }
+    }
+
+    fn replacement_intent() -> ReplacementIntent {
+        ReplacementIntent {
+            enrollment_id: "enr_0123456789abcdef".to_owned(),
+            enrollment_token_sha256: "a".repeat(64),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_01".to_owned(),
+            source_probe_version: "1.2.3".to_owned(),
+            source_probe_sha256: "b".repeat(64),
+            target_bundle_target: "x86_64-unknown-linux-gnu".to_owned(),
+            target_probe_version: "1.2.4".to_owned(),
+            target_asset_set_digest: format!("sha256:{}", "c".repeat(64)),
+            target_manifest_sha256: "d".repeat(64),
+        }
+    }
+
+    #[test]
+    fn completed_replacement_retries_metadata_retirement_without_cleanup_effects() {
+        struct Store(ReplacementCommitFact);
+        impl ReplacementCommitStore for Store {
+            type Error = ();
+            fn load(&mut self) -> Result<Option<ReplacementCommitFact>, Self::Error> {
+                Ok(Some(self.0.clone()))
+            }
+            fn persist(&mut self, fact: &ReplacementCommitFact) -> Result<(), Self::Error> {
+                self.0 = fact.clone();
+                Ok(())
+            }
+        }
+        let intent = replacement_intent();
+        let mut store = Store(ReplacementCommitFact {
+            schema_version: 1,
+            canonical_intent_sha256: intent.canonical_sha256().expect("canonical intent"),
+            intent: intent.clone(),
+            cleanup_complete: true,
+            candidate_layout_complete: false,
+        });
+        let root = tempfile::tempdir().expect("test root");
+        let mut systemd = TestSystemd::default();
+
+        let result = commit_replacement_cleanup_with_metadata_retirement(
+            intent,
+            &mut store,
+            Path::new("/etc/enoki/probe-install.toml"),
+            Some(root.path()),
+            &mut systemd,
+            |_| {
+                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                    "retire failed",
+                )))
+            },
+        );
+
+        assert!(matches!(result, Err(ReplacementCommitError::Effect(_))));
+        assert!(store.0.cleanup_complete);
+        assert!(systemd.calls.is_empty());
+    }
 
     fn private_directory(path: &Path) {
         fs::create_dir(path).expect("private directory");
@@ -980,7 +1324,9 @@ mod tests {
         symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
         assert!(matches!(
             validate_owned_bootstrap_state(Some(&symlink_state)),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state is not a root-owned private directory"
+            ))
         ));
         assert!(outside.exists());
 
@@ -993,7 +1339,9 @@ mod tests {
             .expect("unsafe hardlink");
         assert!(matches!(
             validate_owned_bootstrap_state(Some(&hardlink_state)),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unsafe entry"
+            ))
         ));
         assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
 
@@ -1002,7 +1350,9 @@ mod tests {
         fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
         assert!(matches!(
             validate_owned_bootstrap_state(Some(&extra_state)),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+                "Probe Bootstrap state contains an unexpected entry"
+            ))
         ));
         assert!(extra_state.join("unrecognised").exists());
     }
