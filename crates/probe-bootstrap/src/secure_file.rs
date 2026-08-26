@@ -182,6 +182,22 @@ impl SystemdProbeStateProjection {
         sync_directory(directory.raw())
     }
 
+    pub(crate) fn write_probe_bootstrap_config(
+        &self,
+        path: &Path,
+        contents: &[u8],
+    ) -> io::Result<()> {
+        let target = CString::new("probe-bootstrap.toml").expect("固定文件名不含 NUL");
+        atomic_write_at(
+            &self.identity,
+            &target,
+            path,
+            contents,
+            0o600,
+            Some(self.owner),
+        )
+    }
+
     fn directory(&self, directory: SystemdProbeDirectory) -> &DirectoryFd {
         match directory {
             SystemdProbeDirectory::State => &self.state,

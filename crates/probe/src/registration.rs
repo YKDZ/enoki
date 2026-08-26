@@ -168,7 +168,10 @@ pub fn register_probe(
         ));
     }
 
-    let server_time_offset_ms = response.server_time_ms as i128 - current_unix_time_ms_i128();
+    let server_time_offset_ms = response.server_time_ms as i128
+        - prepared
+            .server_time_reference_ms
+            .unwrap_or_else(current_unix_time_ms_i128);
     store_bootstrap_config(
         &input.bootstrap_config_path,
         &BootstrapConfig {

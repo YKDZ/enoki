@@ -880,6 +880,10 @@ pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
     let registration_binding = commit
         .registration_binding(&bundle.target)
         .ok_or(InstallError::ExistingResidue)?;
+    replacement_registration::converge_registered_identity_to_canonical(
+        paths,
+        &registration_binding,
+    )?;
     replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
     systemd.restart_canonical()?;
     retire_replacement_registration_attempt_source(paths)?;

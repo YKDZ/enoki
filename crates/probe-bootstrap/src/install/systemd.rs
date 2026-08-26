@@ -157,7 +157,7 @@ impl SystemdPort for SystemSystemd {
         let deadline = canonical_restart_deadline(Instant::now(), self.command_deadline);
         require_success(
             "/usr/bin/systemctl",
-            &["restart", "--no-block", "enoki-probe.service"],
+            &["restart", "enoki-probe.service"],
             InstallError::Systemd,
             deadline,
         )?;

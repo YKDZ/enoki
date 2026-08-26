@@ -26,6 +26,7 @@ import { afterEach, expect, it } from "vitest";
 import * as probeAssetBundle from "../../../scripts/probe-asset-bundle.mjs";
 import { createHubApp } from "../src/app";
 import { initializeHubDatabase } from "../src/database/index";
+import { defaultEnabledCollectorIds } from "../src/probe-configuration/model";
 import { writeSignedProbeAssetSet } from "./probe-release-transition-fixture";
 import { createTestProbeIdentity } from "./probe-test-auth";
 
@@ -393,6 +394,8 @@ it.skipIf(!probeBinary || !lifecycleCompanionBinary || !systemdImage)(
 
     try {
       const ownerSession = await loginOwner(app);
+      const productionProbeConfigurationVersion =
+        await publishProductionFixtureConfiguration(app, ownerSession);
       for (const [caseIndex, crashPoint] of [
         "before-rename",
         "after-rename",
@@ -542,6 +545,41 @@ it.skipIf(!probeBinary || !lifecycleCompanionBinary || !systemdImage)(
           expect(retainedCapsuleSha256.code).toBe(0);
           const activated = await activation;
           expect(activated.code, activated.stderr).toBe(0);
+          const identityPath =
+            "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
+          const canonicalIdentity = await docker(container, [
+            "cat",
+            identityPath,
+          ]);
+          expect(canonicalIdentity.code, canonicalIdentity.stderr).toBe(0);
+          expect(
+            !canonicalIdentity.stdout.includes("registration_"),
+            "canonical identity must not retain one-shot registration metadata",
+          ).toBe(true);
+          const acceptedStartupReports = proxy.reportExchanges
+            .slice(reportStart)
+            .filter(
+              (exchange) =>
+                exchange.status === 200 &&
+                Number(exchange.sequenceStart) === 1 &&
+                Number(exchange.sequenceEnd) === 1 &&
+                Number(exchange.metricCount) === 0,
+            );
+          expect(
+            acceptedStartupReports.length > 0 &&
+              acceptedStartupReports.every(
+                (exchange) =>
+                  exchange.currentProbeConfigurationVersion ===
+                  productionProbeConfigurationVersion,
+              ),
+            "authenticated startup responses must select the published production fixture configuration",
+          ).toBe(true);
+          expect(
+            proxy.requestTargets
+              .slice(requestStart)
+              .includes("/api/probe/config"),
+            "Probe must fetch the newer effective configuration through its authenticated config channel",
+          ).toBe(true);
           const activeAfterActivation = await docker(container, [
             "systemctl",
             "is-active",
@@ -550,7 +588,9 @@ it.skipIf(!probeBinary || !lifecycleCompanionBinary || !systemdImage)(
           expect(
             activeAfterActivation,
             `report exchanges=${JSON.stringify(
-              proxy.reportExchanges.slice(reportStart),
+              redactedReportExchangeSummary(
+                proxy.reportExchanges.slice(reportStart),
+              ),
             )}`,
           ).toEqual(expect.objectContaining({ code: 0, stdout: "active\n" }));
           await waitFor(
@@ -559,6 +599,12 @@ it.skipIf(!probeBinary || !lifecycleCompanionBinary || !systemdImage)(
                 proxy.reportExchanges.slice(reportStart),
               ),
             45_000,
+            () =>
+              `report replay did not converge: ${JSON.stringify(
+                redactedReportExchangeSummary(
+                  proxy.reportExchanges.slice(reportStart),
+                ),
+              )}`,
           );
           expect(
             proxy.reportExchanges
@@ -705,6 +751,184 @@ it.skipIf(!probeBinary || !lifecycleCompanionBinary || !systemdImage)(
           expect(
             authorityQuery.get(hostId, enrollmentCommand.enrollmentId),
           ).toEqual(authorityFacts);
+
+          if (caseIndex === 0) {
+            const currentProbeId = (authorityFacts as { probeId: string })
+              .probeId;
+            const wrongProbeIdIdentity = canonicalIdentity.stdout.replace(
+              `probe_id = ${JSON.stringify(currentProbeId)}`,
+              'probe_id = "probe_tampered"',
+            );
+            expect(
+              wrongProbeIdIdentity !== canonicalIdentity.stdout,
+              "wrong-Probe-ID negative must alter the canonical Probe ID",
+            ).toBe(true);
+            await overwriteContainerFile(
+              container,
+              identityPath,
+              wrongProbeIdIdentity,
+            );
+            const wrongProbeIdRestart = await docker(container, [
+              "systemctl",
+              "restart",
+              "enoki-probe.service",
+            ]);
+            expect(
+              wrongProbeIdRestart.code,
+              "blocking restart must not accept the old active state for a wrong Probe ID",
+            ).not.toBe(0);
+
+            const wrongKeyIdentity = canonicalIdentity.stdout.replace(
+              /^probe_private_key_pem = .*$/m,
+              `probe_private_key_pem = ${JSON.stringify(
+                createTestProbeIdentity().privateKeyPem,
+              )}`,
+            );
+            expect(
+              wrongKeyIdentity !== canonicalIdentity.stdout,
+              "wrong-key negative must alter the canonical Probe private key",
+            ).toBe(true);
+            await overwriteContainerFile(
+              container,
+              identityPath,
+              wrongKeyIdentity,
+            );
+            await docker(container, [
+              "systemctl",
+              "reset-failed",
+              "enoki-probe.service",
+            ]);
+            const wrongKeyRestart = await docker(container, [
+              "systemctl",
+              "restart",
+              "enoki-probe.service",
+            ]);
+            expect(
+              wrongKeyRestart.code,
+              "blocking restart must wait for authenticated READY from the new key",
+            ).not.toBe(0);
+
+            await overwriteContainerFile(
+              container,
+              identityPath,
+              canonicalIdentity.stdout,
+            );
+            await docker(container, [
+              "systemctl",
+              "reset-failed",
+              "enoki-probe.service",
+            ]);
+            for (const unit of [
+              "enoki-observation-runtime.socket",
+              "enoki-observation-runtime.service",
+            ]) {
+              const stopped = await docker(container, [
+                "systemctl",
+                "stop",
+                unit,
+              ]);
+              expect(
+                stopped.code === 0,
+                "Runtime outage precondition must stop both units",
+              ).toBe(true);
+              const masked = await docker(container, [
+                "systemctl",
+                "mask",
+                "--runtime",
+                unit,
+              ]);
+              expect(
+                masked.code === 0,
+                "Runtime outage precondition must runtime-mask both units",
+              ).toBe(true);
+              const inactive = await docker(container, [
+                "systemctl",
+                "is-active",
+                unit,
+              ]);
+              expect(
+                inactive.code !== 0,
+                "Runtime outage precondition requires both units to be inactive",
+              ).toBe(true);
+              const runtimeMasked = await docker(container, [
+                "systemctl",
+                "is-enabled",
+                unit,
+              ]);
+              expect(
+                runtimeMasked.code !== 0 &&
+                  runtimeMasked.stdout.trim().startsWith("masked"),
+                "Runtime outage precondition requires both units to be runtime-masked",
+              ).toBe(true);
+            }
+            expect(
+              (
+                await docker(container, [
+                  "test",
+                  "!",
+                  "-e",
+                  "/run/enoki-observation-runtime.sock",
+                ])
+              ).code === 0,
+              "Runtime outage precondition requires the observation socket path to be absent",
+            ).toBe(true);
+            const outageRequestStart = proxy.requestTargets.length;
+            const outageReportStart = proxy.reportExchanges.length;
+            const runtimeOutageRestart = await docker(container, [
+              "systemctl",
+              "restart",
+              "enoki-probe.service",
+            ]);
+            expect(
+              runtimeOutageRestart.code,
+              `Runtime-outage restart did not reach authenticated READY; report exchanges=${JSON.stringify(
+                redactedReportExchangeSummary(
+                  proxy.reportExchanges.slice(outageReportStart),
+                ),
+              )}`,
+            ).toBe(0);
+            expect(
+              (
+                await docker(container, [
+                  "systemctl",
+                  "is-active",
+                  "enoki-probe.service",
+                ])
+              ).code === 0,
+              "Runtime-outage restart must leave the canonical Probe active",
+            ).toBe(true);
+            await waitFor(
+              () => {
+                const acceptedStartup = proxy.reportExchanges
+                  .slice(outageReportStart)
+                  .some(
+                    (exchange) =>
+                      exchange.status === 200 &&
+                      Number(exchange.sequenceStart) === 1 &&
+                      Number(exchange.sequenceEnd) === 1 &&
+                      Number(exchange.metricCount) === 0 &&
+                      exchange.probeReportResponseDecoded === true &&
+                      exchange.currentProbeConfigurationVersion ===
+                        productionProbeConfigurationVersion,
+                  );
+                return (
+                  acceptedStartup &&
+                  proxy.requestTargets
+                    .slice(outageRequestStart)
+                    .includes("/api/probe/config")
+                );
+              },
+              45_000,
+              () =>
+                `Runtime-outage startup/config channel did not converge: reports=${JSON.stringify(
+                  redactedReportExchangeSummary(
+                    proxy.reportExchanges.slice(outageReportStart),
+                  ),
+                )} configRequested=${proxy.requestTargets
+                  .slice(outageRequestStart)
+                  .includes("/api/probe/config")}`,
+            );
+          }
           const installedUnit = await docker(container, [
             "cat",
             "/etc/systemd/system/enoki-probe.service",
@@ -1149,6 +1373,19 @@ function docker(container: string, command: string[]) {
   return runCommand("docker", ["exec", container, ...command]);
 }
 
+async function overwriteContainerFile(
+  container: string,
+  filePath: string,
+  contents: string,
+) {
+  const overwritten = await runCommand(
+    "docker",
+    ["exec", "--interactive", container, "tee", filePath],
+    contents,
+  );
+  expect(overwritten.code, overwritten.stderr).toBe(0);
+}
+
 async function requireCommand(
   program: string,
   args: string[],
@@ -1407,6 +1644,33 @@ async function loginOwner(app: ReturnType<typeof createHubApp>) {
   return response.headers.get("set-cookie") ?? "";
 }
 
+async function publishProductionFixtureConfiguration(
+  app: ReturnType<typeof createHubApp>,
+  ownerSession: string,
+) {
+  const response = await app.request("/api/web/probe-configuration", {
+    body: JSON.stringify({
+      enabledCollectorIds: [...defaultEnabledCollectorIds],
+      metricsCollectionIntervalSeconds: 1,
+    }),
+    headers: {
+      "content-type": "application/json",
+      cookie: ownerSession,
+    },
+    method: "PUT",
+  });
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as {
+    configuration: {
+      metricsCollectionIntervalSeconds: number;
+      version: string;
+    };
+  };
+  expect(body.configuration.metricsCollectionIntervalSeconds).toBe(1);
+  expect(body.configuration.version).not.toBe("default-v1");
+  return body.configuration.version;
+}
+
 async function startResponseLossProxy(hostname = "127.0.0.1") {
   let upstreamPort = 0;
   let responseLossMatcher: ((target: string, body: Buffer) => boolean) | null =
@@ -1450,11 +1714,18 @@ async function startResponseLossProxy(hostname = "127.0.0.1") {
         );
         if (reportExchange.status === 200) {
           try {
+            const decodedResponse =
+              root.enoki.v1.ProbeReportResponse.decode(responseBody);
+            reportExchange.probeReportResponseDecoded = true;
+            reportExchange.currentProbeConfigurationVersion =
+              decodedResponse.currentProbeConfigurationVersion;
             reportExchange.requestedSnapshotCollectorIds = [
-              ...root.enoki.v1.ProbeReportResponse.decode(responseBody)
-                .requestedSnapshotCollectorIds,
+              ...decodedResponse.requestedSnapshotCollectorIds,
             ];
           } catch {
+            reportExchange.probeReportResponseDecoded = false;
+            reportExchange.currentProbeConfigurationVersion =
+              "unparseable_response";
             reportExchange.requestedSnapshotCollectorIds = [
               "unparseable_response",
             ];
@@ -1510,6 +1781,7 @@ function summarizeReport(body: Buffer): Record<string, unknown> | null {
       bootId: report.bootId,
       metricCount: report.metrics.length,
       metricSequences: report.metrics.map((metric) => Number(metric.sequence)),
+      observationWindowFailure: report.observationWindowFailure != null,
       probeId: report.probeId,
       sequenceEnd: Number(report.sequenceEnd),
       sequenceStart: Number(report.sequenceStart),
@@ -1679,6 +1951,73 @@ function reportSnapshot(exchange: Record<string, unknown>) {
   return snapshots?.length === 1 ? snapshots[0] : null;
 }
 
+function redactedReportExchangeSummary(
+  exchanges: Array<Record<string, unknown>>,
+) {
+  const bootReferences = new Map<string, string>();
+  const configurationReferences = new Map<string, string>();
+  const snapshotReferences = new Map<string, string>();
+  const reference = (
+    references: Map<string, string>,
+    value: unknown,
+    prefix: string,
+  ) => {
+    const key = String(value ?? "");
+    if (!references.has(key)) {
+      references.set(key, `${prefix}-${references.size + 1}`);
+    }
+    return references.get(key);
+  };
+
+  return exchanges.map((exchange) => {
+    const snapshot = reportSnapshot(exchange);
+    const sequenceStart = Number(exchange.sequenceStart);
+    const sequenceEnd = Number(exchange.sequenceEnd);
+    const metricCount = Number(exchange.metricCount);
+    const snapshotKind = snapshot
+      ? snapshot.hasPayload === true
+        ? "full"
+        : "compact"
+      : "none";
+    return {
+      boot: reference(bootReferences, exchange.bootId, "boot"),
+      configuration:
+        typeof exchange.currentProbeConfigurationVersion === "string"
+          ? reference(
+              configurationReferences,
+              exchange.currentProbeConfigurationVersion,
+              "configuration",
+            )
+          : null,
+      error: exchange.errorCode ?? null,
+      metricCount,
+      observationWindowFailure: exchange.observationWindowFailure === true,
+      requestedHostProfile:
+        (
+          exchange.requestedSnapshotCollectorIds as string[] | undefined
+        )?.includes("official.host-profile") ?? false,
+      responseDecoded: exchange.probeReportResponseDecoded === true,
+      sameSequenceReplay:
+        sequenceStart === sequenceEnd &&
+        metricCount === 0 &&
+        snapshotKind === "full",
+      sequenceEnd,
+      sequenceStart,
+      snapshot: snapshot
+        ? {
+            kind: snapshotKind,
+            ref: reference(
+              snapshotReferences,
+              snapshot.snapshotHash,
+              "snapshot",
+            ),
+          }
+        : null,
+      status: exchange.status ?? null,
+    };
+  });
+}
+
 function completeHttpBody(message: Buffer) {
   const headerEnd = message.indexOf("\r\n\r\n");
   if (headerEnd < 0) return null;
@@ -1699,13 +2038,17 @@ function listening(server: net.Server) {
   return new Promise<void>((resolve) => server.once("listening", resolve));
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs: number) {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+  failureMessage?: () => string,
+) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  expect(predicate()).toBe(true);
+  expect(predicate(), failureMessage?.()).toBe(true);
 }
 
 function closeServer(server: net.Server) {

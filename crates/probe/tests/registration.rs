@@ -140,43 +140,40 @@ fn probe_registration_restart_reuses_the_candidate_key_and_exact_request_after_r
         },
     )
     .expect("root companion publishes attempt before activation");
-    fs::write(
-        &bootstrap_config_path,
-        [
-            "hub_url = \"https://hub.example\"",
-            "enrollment_token = \"enk_enroll_response_loss\"",
-            &format!(
-                "registration_attempt_credential_path = {:?}",
-                capsule_path.display().to_string()
-            ),
-            "registration_enrollment_id = \"enr_0123456789abcdef\"",
-            "registration_host_id = \"7\"",
-            "registration_hub_origin = \"https://hub.example\"",
-            "registration_old_probe_id = \"probe_old_01\"",
-            "registration_source_probe_version = \"0.1.0\"",
-            &format!(
-                "registration_committed_source_probe_sha256 = \"{}\"",
-                "a".repeat(64)
-            ),
-            "registration_target_probe_version = \"0.2.0\"",
-            "registration_target_bundle_target = \"x86_64-unknown-linux-gnu\"",
-            &format!(
-                "registration_target_asset_set_digest = \"sha256:{}\"",
-                "b".repeat(64)
-            ),
-            &format!(
-                "registration_target_manifest_sha256 = \"{}\"",
-                "c".repeat(64)
-            ),
-            &format!(
-                "registration_replacement_commit_sha256 = \"{}\"",
-                "d".repeat(64)
-            ),
-            "",
-        ]
-        .join("\n"),
-    )
-    .expect("replacement bootstrap config");
+    let one_shot_config = [
+        "hub_url = \"https://hub.example\"",
+        "enrollment_token = \"enk_enroll_response_loss\"",
+        &format!(
+            "registration_attempt_credential_path = {:?}",
+            capsule_path.display().to_string()
+        ),
+        "registration_enrollment_id = \"enr_0123456789abcdef\"",
+        "registration_host_id = \"7\"",
+        "registration_hub_origin = \"https://hub.example\"",
+        "registration_old_probe_id = \"probe_old_01\"",
+        "registration_source_probe_version = \"0.1.0\"",
+        &format!(
+            "registration_committed_source_probe_sha256 = \"{}\"",
+            "a".repeat(64)
+        ),
+        "registration_target_probe_version = \"0.2.0\"",
+        "registration_target_bundle_target = \"x86_64-unknown-linux-gnu\"",
+        &format!(
+            "registration_target_asset_set_digest = \"sha256:{}\"",
+            "b".repeat(64)
+        ),
+        &format!(
+            "registration_target_manifest_sha256 = \"{}\"",
+            "c".repeat(64)
+        ),
+        &format!(
+            "registration_replacement_commit_sha256 = \"{}\"",
+            "d".repeat(64)
+        ),
+        "",
+    ]
+    .join("\n");
+    fs::write(&bootstrap_config_path, &one_shot_config).expect("replacement bootstrap config");
     let mut transport = ResponseLossThenSuccessTransport {
         attempts: 0,
         bodies: Vec::new(),
@@ -195,7 +192,7 @@ fn probe_registration_restart_reuses_the_candidate_key_and_exact_request_after_r
 
     register_probe(
         ProbeRegistrationInput {
-            bootstrap_config_path,
+            bootstrap_config_path: bootstrap_config_path.clone(),
             enrollment_token: "enk_enroll_response_loss".to_string(),
             hub_url: "https://hub.example".to_string(),
         },
@@ -203,8 +200,26 @@ fn probe_registration_restart_reuses_the_candidate_key_and_exact_request_after_r
     )
     .expect("fresh process replays the committed registration attempt");
 
-    assert_eq!(transport.bodies.len(), 2);
+    let first_success_config = fs::read(&bootstrap_config_path).expect("first identity config");
+    fs::write(&bootstrap_config_path, one_shot_config).expect("restore one-shot config");
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    register_probe(
+        ProbeRegistrationInput {
+            bootstrap_config_path: bootstrap_config_path.clone(),
+            enrollment_token: "enk_enroll_response_loss".to_string(),
+            hub_url: "https://hub.example".to_string(),
+        },
+        &mut transport,
+    )
+    .expect("delayed exact-outcome replay converges");
+    assert!(
+        fs::read(&bootstrap_config_path).expect("replayed identity config") == first_success_config,
+        "exact outcome replay must persist byte-identical identity config"
+    );
+
+    assert_eq!(transport.bodies.len(), 3);
     assert_eq!(transport.bodies[1], transport.bodies[0]);
+    assert_eq!(transport.bodies[2], transport.bodies[0]);
     let first_request = ProbeRegistrationRequest::decode(transport.bodies[0].as_slice())
         .expect("first request decodes");
     let replay_request = ProbeRegistrationRequest::decode(transport.bodies[1].as_slice())

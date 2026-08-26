@@ -31,6 +31,7 @@ const ROOT_CAPSULE_OWNER: (u32, u32) = (0, 0);
 pub(super) struct PreparedProbeRegistration {
     pub(super) private_key_pem: String,
     pub(super) request_body: Vec<u8>,
+    pub(super) server_time_reference_ms: Option<i128>,
     pub(super) signed_attempt_sha256: Option<String>,
 }
 
@@ -64,6 +65,7 @@ struct ProbeRegistrationAttemptCapsule {
     enrollment_token_sha256: String,
     hub_origin: String,
     candidate_private_key_pem: String,
+    local_clock_reference_ms: u64,
     request_hex: String,
     signed_attempt_sha256: String,
 }
@@ -126,6 +128,7 @@ impl InstalledRegistrationAttempt {
                     signing_key.public_key_pem,
                 )
                 .encode_to_vec(),
+                server_time_reference_ms: None,
                 signed_attempt_sha256: None,
             });
         };
@@ -150,6 +153,7 @@ impl InstalledRegistrationAttempt {
                     request_body: decode_lower_hex(&capsule.request_hex).ok_or(
                         RegistrationError::InvalidResponse("invalid registration attempt capsule"),
                     )?,
+                    server_time_reference_ms: Some(i128::from(capsule.local_clock_reference_ms)),
                     signed_attempt_sha256: Some(capsule.signed_attempt_sha256),
                 })
             }
@@ -402,11 +406,16 @@ fn create_registration_attempt(
         snapshots: Vec::new(),
     }
     .encode_to_vec();
+    let local_clock_reference_ms =
+        u64::try_from(super::current_unix_time_ms_i128()).map_err(|_| {
+            RegistrationError::InvalidResponse("invalid replacement registration clock reference")
+        })?;
     Ok(ProbeRegistrationAttemptCapsule {
         schema_version: 1,
         enrollment_token_sha256: sha256_hex(input.enrollment_token.as_bytes()),
         hub_origin: input.hub_url.clone(),
         candidate_private_key_pem: signing_key.private_key_pem,
+        local_clock_reference_ms,
         request_hex: encode_lower_hex(&request_body),
         signed_attempt_sha256: signed_attempt_sha256(&canonical_attempt, &signature),
     })
@@ -473,6 +482,7 @@ fn validate_registration_attempt_capsule(
     binding: &ReplacementRegistrationBinding,
 ) -> Result<(), RegistrationError> {
     if capsule.schema_version != 1
+        || capsule.local_clock_reference_ms == 0
         || capsule.enrollment_token_sha256 != sha256_hex(input.enrollment_token.as_bytes())
         || capsule.hub_origin != input.hub_url
     {

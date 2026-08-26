@@ -2201,7 +2201,7 @@ mod tests {
         cell::{Cell, RefCell},
         collections::VecDeque,
         rc::Rc,
-        sync::Mutex,
+        sync::{Arc, Mutex},
     };
 
     struct FakeObservationWindowClient {
@@ -2790,6 +2790,201 @@ mod tests {
         assert!(matches!(error, ProbeRunError::Notify(_)));
         assert!(!error.is_permanent_report_failure());
         assert_eq!(transport.report_attempts.len(), 1);
+    }
+
+    #[test]
+    fn canonical_startup_ack_notifies_before_config_operation_and_unavailable_window() {
+        struct CausalTransport {
+            events: Arc<Mutex<Vec<&'static str>>>,
+            requests: Vec<(String, Vec<u8>)>,
+            responses: VecDeque<Vec<u8>>,
+        }
+
+        impl RegistrationTransport for CausalTransport {
+            fn post_protobuf(
+                &mut self,
+                _url: &str,
+                _body: Vec<u8>,
+            ) -> Result<Vec<u8>, RegistrationError> {
+                panic!("canonical identity must not register")
+            }
+        }
+
+        impl ReportTransport for CausalTransport {
+            fn post_protobuf_with_auth(
+                &mut self,
+                url: &str,
+                _auth: &ProbeRequestAuth<'_>,
+                body: Vec<u8>,
+            ) -> Result<Vec<u8>, ReportError> {
+                self.events
+                    .lock()
+                    .expect("events")
+                    .push(if url.ends_with("/api/probe/config") {
+                        "config"
+                    } else {
+                        "report"
+                    });
+                self.requests.push((url.to_string(), body));
+                Ok(self.responses.pop_front().expect("response is configured"))
+            }
+        }
+
+        impl ProbeTransport for CausalTransport {}
+
+        struct CausalOperationRunner {
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl ProbeOperationRunner for CausalOperationRunner {
+            fn run_probe_upgrade(
+                &mut self,
+                _input: ProbeUpgradeRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                self.events.lock().expect("events").push("operation");
+                ProbeUpgradeRunnerOutcome::Running
+            }
+
+            fn run_probe_uninstall(
+                &mut self,
+                _input: ProbeUninstallRunnerInput<'_>,
+            ) -> ProbeUpgradeRunnerOutcome {
+                panic!("upgrade response must not run uninstall")
+            }
+        }
+
+        struct UnavailableRuntime {
+            events: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl ObservationWindowClient for UnavailableRuntime {
+            fn request_finalized_window(
+                &self,
+                _cadence: Duration,
+                _sequence_start: u64,
+            ) -> Result<ObservationWindowResult, ObservationClientError> {
+                self.events.lock().expect("events").push("runtime");
+                Err(ObservationClientError::Unavailable)
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 5",
+                "enabled_collector_ids = []",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+
+        let operation = crate::protocol::enoki::v1::ProbeOperation {
+            id: "operation-01".to_string(),
+            operation: Some(Operation::ProbeUpgrade(ProbeUpgradeOperation::default())),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut transport = CausalTransport {
+            events: Arc::clone(&events),
+            requests: Vec::new(),
+            responses: VecDeque::from([
+                ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "global-2".to_string(),
+                    pending_operation: Some(operation),
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec(),
+                ProbeConfigurationResponse {
+                    enabled_collector_ids: Vec::new(),
+                    metrics_collection_interval_seconds: 1,
+                    version: "global-2".to_string(),
+                }
+                .encode_to_vec(),
+                ProbeReportResponse {
+                    accepted_sequence_end: 2,
+                    current_probe_configuration_version: "global-2".to_string(),
+                    pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 2,
+                }
+                .encode_to_vec(),
+            ]),
+        };
+        let notifier_events = Arc::clone(&events);
+        let runner_events = Arc::clone(&events);
+        let runtime = UnavailableRuntime {
+            events: Arc::clone(&events),
+        };
+
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+            move |_config, _path| CausalOperationRunner {
+                events: Arc::clone(&runner_events),
+            },
+            move || {
+                notifier_events.lock().expect("events").push("notify");
+                Ok(())
+            },
+            &runtime,
+        )
+        .expect("canonical startup remains ready while the Runtime is unavailable");
+
+        assert_eq!(
+            events.lock().expect("events").as_slice(),
+            [
+                "report",
+                "notify",
+                "operation",
+                "config",
+                "runtime",
+                "report"
+            ]
+        );
+        let reports = transport
+            .requests
+            .iter()
+            .filter(|(url, _)| url.ends_with("/api/probe/report"))
+            .map(|(_, body)| ProbeReportRequest::decode(body.as_slice()).expect("report decodes"))
+            .collect::<Vec<_>>();
+        assert_eq!(reports.len(), 2);
+        assert_eq!((reports[0].sequence_start, reports[0].sequence_end), (1, 1));
+        assert_eq!(reports[0].probe_configuration_version, "default-v1");
+        assert!(reports[0].metrics.is_empty());
+        assert!(reports[0].observation_window_failure.is_none());
+        assert_eq!((reports[1].sequence_start, reports[1].sequence_end), (2, 2));
+        assert_eq!(reports[1].probe_configuration_version, "global-2");
+        assert_eq!(
+            reports[1].operation_acknowledgements[0].operation_id,
+            "operation-01"
+        );
+        assert!(reports[1].metrics.is_empty());
+        assert_eq!(
+            reports[1]
+                .observation_window_failure
+                .as_ref()
+                .map(|failure| failure.reason),
+            Some(
+                crate::protocol::enoki::v1::ObservationWindowFailureReason::ObservationRuntimeUnavailable
+                    as i32
+            )
+        );
     }
 
     #[test]

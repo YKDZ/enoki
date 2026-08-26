@@ -1179,7 +1179,7 @@ mod tests {
         .unwrap();
         let mut registered_identity = fs::read_to_string(paths.identity()).unwrap();
         registered_identity.push_str("probe_id = \"probe_01\"\n");
-        fs::write(paths.identity(), registered_identity).unwrap();
+        fs::write(paths.identity(), &registered_identity).unwrap();
         fs::set_permissions(paths.identity(), fs::Permissions::from_mode(0o600)).unwrap();
         let identity_before = fs::read_to_string(paths.identity()).unwrap();
         let source = inspect_installed_probe_for_upgrade(&paths).unwrap();
@@ -3376,7 +3376,10 @@ mod tests {
         fs::write(paths.identity(), &registered_identity).unwrap();
         fs::write(
             paths.identity(),
-            registered_identity.replace(&"f".repeat(64), &"e".repeat(64)),
+            registered_identity.replace(
+                capsule["signedAttemptSha256"].as_str().unwrap(),
+                &"e".repeat(64),
+            ),
         )
         .unwrap();
         assert!(run_replacement_lifecycle_child(
@@ -3384,7 +3387,7 @@ mod tests {
             "reject-identity",
             None,
         ));
-        fs::write(paths.identity(), registered_identity).unwrap();
+        fs::write(paths.identity(), &registered_identity).unwrap();
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
             "activate",
@@ -3401,6 +3404,74 @@ mod tests {
         assert!(commit_path.exists(), "未完成 Readiness 必须保留 commit custody");
         assert!(runtime_credential.exists());
         assert!(!fs::read_to_string(paths.unit()).unwrap().contains("LoadCredential="));
+
+        for tampered in [
+            registered_identity
+                .lines()
+                .filter(|line| !line.starts_with("registration_signed_attempt_sha256"))
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+            format!("{registered_identity}registration_unknown = \"tamper\"\n"),
+            format!(
+                "{registered_identity}registration_host_id = \"host-registered\"\n"
+            ),
+        ] {
+            fs::write(paths.identity(), tampered).unwrap();
+            assert!(run_replacement_lifecycle_child(
+                temporary.path(),
+                "reject-retirement",
+                None,
+            ));
+            assert!(source.exists());
+            assert!(commit_path.exists());
+        }
+        fs::write(paths.identity(), &registered_identity).unwrap();
+
+        fs::write(
+            paths.identity(),
+            registered_identity.replace(
+                &format!("probe_private_key_pem = {capsule_key:?}"),
+                &format!("probe_private_key_pem = {other_key:?}"),
+            ),
+        )
+        .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "reject-retirement",
+            None,
+        ));
+        assert!(source.exists(), "wrong candidate key retains capsule");
+        assert!(commit_path.exists(), "wrong candidate key retains commit");
+        fs::write(
+            paths.identity(),
+            registered_identity.replace("probe-registered", "probe-tampered"),
+        )
+        .unwrap();
+        assert!(run_replacement_lifecycle_child(
+            temporary.path(),
+            "reject-canonical-restart",
+            None,
+        ));
+        assert!(source.exists(), "wrong Probe ID retains capsule");
+        assert!(commit_path.exists(), "wrong Probe ID retains commit");
+        fs::write(paths.identity(), &registered_identity).unwrap();
+
+        for point in ["before-rename", "after-rename"] {
+            assert!(!run_replacement_lifecycle_child(
+                temporary.path(),
+                "retire-source",
+                Some((&paths.identity(), point)),
+            ));
+            assert!(source.exists(), "config rewrite crash retains capsule");
+            assert!(commit_path.exists(), "config rewrite crash retains commit");
+        }
+        assert!(
+            !fs::read_to_string(paths.identity())
+                .unwrap()
+                .lines()
+                .any(|line| line.starts_with("registration_")),
+            "after-rename retry starts from the closed canonical identity shape"
+        );
 
         fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(!run_replacement_lifecycle_child(
@@ -3464,6 +3535,40 @@ mod tests {
         ));
         assert!(!source.exists());
         assert!(commit_path.exists(), "registration retirement 中断必须保留 commit");
+        for point in ["fail-restart", "before-restart"] {
+            assert!(!run_replacement_lifecycle_child(
+                temporary.path(),
+                "retire-source",
+                Some((&runtime_credential, point)),
+            ));
+            assert!(!source.exists(), "source-absent retry 不得重建 capsule");
+            assert!(
+                commit_path.exists(),
+                "source-absent retry 仍必须 fresh restart 后才可退休 commit"
+            );
+        }
+        let canonical_identity = fs::read_to_string(paths.identity()).unwrap();
+        for tampered in [
+            canonical_identity.replace("probe-registered", "probe-tampered"),
+            canonical_identity.replace(
+                &format!("probe_private_key_pem = {capsule_key:?}"),
+                &format!("probe_private_key_pem = {other_key:?}"),
+            ),
+        ] {
+            assert_ne!(tampered, canonical_identity);
+            fs::write(paths.identity(), tampered).unwrap();
+            assert!(run_replacement_lifecycle_child(
+                temporary.path(),
+                "reject-canonical-restart",
+                None,
+            ));
+            assert!(!source.exists());
+            assert!(
+                commit_path.exists(),
+                "Hub-authenticated canonical restart 失败必须保留 commit"
+            );
+        }
+        fs::write(paths.identity(), canonical_identity).unwrap();
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
             "retire-source",
@@ -3483,6 +3588,13 @@ mod tests {
         ));
         assert!(!source.parent().unwrap().exists());
         assert!(!commit_path.exists());
+        assert!(
+            !fs::read_to_string(paths.identity())
+                .unwrap()
+                .lines()
+                .any(|line| line.starts_with("registration_")),
+            "Replacement retirement 必须原子收敛为不含 one-shot metadata 的 canonical identity config"
+        );
         assert!(
             !runtime_credential.exists(),
             "Replacement finalizer 成功返回前必须收敛为无注册 credential 的 canonical invocation"
@@ -3534,6 +3646,7 @@ mod tests {
                     "candidatePrivateKeyPem": valid_probe_private_key_pem(),
                     "enrollmentTokenSha256": "e".repeat(64),
                     "hubOrigin": "https://hub.example",
+                    "localClockReferenceMs": 1_725_000_000_000_u64,
                     "requestHex": "00",
                     "schemaVersion": 1,
                     "signedAttemptSha256": "f".repeat(64),
@@ -3598,7 +3711,7 @@ mod tests {
                     result.unwrap();
                 }
             }
-            "retire-source" => {
+            "retire-source" | "reject-retirement" | "reject-canonical-restart" => {
                 let bundle = bundle().with_test_complete_receipts(5);
                 let commit = replacement_commit(&bundle);
                 let mut store = FileReplacementCommitStore::at(
@@ -3611,15 +3724,23 @@ mod tests {
                     paths: &paths,
                     timeout: false,
                 };
-                finalize_and_retire_complete_replacement_current_probe(
+                let result = finalize_and_retire_complete_replacement_current_probe(
                     &paths,
                     &commit.resume_binding(),
                     &bundle,
                     &commit,
                     &mut store,
                     &mut systemd,
-                )
-                .unwrap();
+                );
+                match std::env::var("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION").as_deref() {
+                    Ok("reject-retirement") => {
+                        assert_eq!(result, Err(InstallError::ExistingResidue));
+                    }
+                    Ok("reject-canonical-restart") => {
+                        assert_eq!(result, Err(InstallError::Systemd));
+                    }
+                    _ => result.unwrap(),
+                }
             }
             "canonical-start" => {
                 ProductionRecoverySystemd {
@@ -3676,6 +3797,11 @@ mod tests {
         }
 
         fn restart_canonical(&mut self) -> Result<(), InstallError> {
+            if std::env::var("ENOKI_TEST_REPLACEMENT_LIFECYCLE_ACTION").as_deref()
+                == Ok("reject-canonical-restart")
+            {
+                return Err(InstallError::Systemd);
+            }
             let credential = self
                 .paths
                 .root
