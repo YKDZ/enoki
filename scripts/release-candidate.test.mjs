@@ -25,8 +25,10 @@ import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 
 import {
+  createProbeTrustDelegation,
   createReleaseTransitionContract,
   releaseTransitionContractSigningInput,
+  verifyProbeTrustDelegation,
 } from "@enoki/probe-release";
 import { createTrustEpochMigrationAuthorization } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
@@ -36,13 +38,11 @@ import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import { createReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
 import {
   createProbeBootstrapPublication,
-  createProbeTrustDelegation,
   inspectProbeAssetSet,
   releaseTransitionForValidatedCandidate,
   validateReleaseCandidate,
   validateDelegatedProbeSigningIdentity,
   validateProbeSigningIdentity,
-  verifyProbeTrustDelegation,
 } from "./release-candidate-lib.mjs";
 import {
   loadValidatedCandidate,

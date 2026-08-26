@@ -2,6 +2,7 @@ import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import {
   createReleaseTransitionContract,
+  createProbeTrustDelegation,
   preflightReleaseMigrationConfiguration,
   releaseTransitionContractSigningInput,
   verifyReleaseTransitionContract,
@@ -11,7 +12,6 @@ import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/tes
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { assertMigrationCandidateJoin } from "./release-baseline-migration-lib.mjs";
-import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
 
 describe("Trust Epoch release transition", () => {
   let fixture;

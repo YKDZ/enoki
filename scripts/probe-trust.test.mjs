@@ -19,9 +19,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { createProbeTrustDelegation } from "@enoki/probe-release";
 import { describe, expect, it } from "vitest";
-
-import { createProbeTrustDelegation } from "./release-candidate-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const cli = "scripts/probe-trust.mjs";

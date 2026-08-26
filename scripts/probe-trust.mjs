@@ -20,11 +20,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import {
-  assertAllowedOptions,
   createProbeTrustDelegation,
+  verifyProbeTrustDelegation,
+} from "@enoki/probe-release";
+
+import {
+  assertAllowedOptions,
   parseCommandLine,
   requiredOption,
-  verifyProbeTrustDelegation,
 } from "./release-candidate-lib.mjs";
 
 const generateKeyPairAsync = promisify(generateKeyPair);

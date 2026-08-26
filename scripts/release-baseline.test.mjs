@@ -20,8 +20,10 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import {
+  createProbeTrustDelegation,
   createReleaseTransitionContract,
   createTrustEpochMigrationAuthorization,
+  probeTargets,
 } from "@enoki/probe-release";
 import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { describe, expect, it } from "vitest";
@@ -36,11 +38,7 @@ import {
   validateReleaseBaselineBundle,
   validateResolvedReleaseBaseline,
 } from "./release-baseline-lib.mjs";
-import {
-  createProbeTrustDelegation,
-  prepareProbeAssetSet,
-  probeTargets,
-} from "./release-candidate-lib.mjs";
+import { prepareProbeAssetSet } from "./release-candidate-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";

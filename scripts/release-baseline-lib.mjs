@@ -14,17 +14,17 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { trustEpochLegacyReleaseSha256 } from "@enoki/probe-release";
+import {
+  probeTargets,
+  trustEpochLegacyReleaseSha256,
+} from "@enoki/probe-release";
 
 import {
   resolveMigrationAuthorization,
   validateMigrationBaselineContents,
   verifyLegacyProbeAssetSet,
 } from "./release-baseline-migration-lib.mjs";
-import {
-  inspectProbeAssetSet,
-  probeTargets,
-} from "./release-candidate-lib.mjs";
+import { inspectProbeAssetSet } from "./release-candidate-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 
 const execFileAsync = promisify(execFile);

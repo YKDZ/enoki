@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { probeTargets } from "@enoki/probe-release";
+
 import { validateReleaseCatalogSnapshot } from "./release-baseline-lib.mjs";
-import { probeTargets } from "./release-candidate-lib.mjs";
 import {
   createInstalledBundleFailureRepairHostDriver,
   proveInstalledBundleFailureRepair,

@@ -35,12 +35,7 @@ import {
   verifyReleaseTransitionContract,
   verifyProbeTrustDelegation,
 } from "@enoki/probe-release";
-export {
-  createProbeTrustDelegation,
-  inspectLegacyProbeAssetSet,
-  probeTargets,
-  verifyProbeTrustDelegation,
-} from "@enoki/probe-release";
+
 import {
   inspectProbeBootstrapBinary,
   probeBootstrapTargets,
