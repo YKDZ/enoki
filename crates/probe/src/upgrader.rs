@@ -5121,13 +5121,12 @@ fn input_token(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::uninstall::{
-        execute_probe_uninstall, execute_probe_uninstall_with_install_metadata_path,
-        execute_uninstall_preserving_recovery_entries_for_test,
-        observe_uninstall_local_state_failure_for_test,
-        replacement_cleanup_metadata_exclusion_for_test,
-        replacement_metadata_retirement_failure_for_test, run_uninstall_workflow_for_test,
-        uninstall_recovery_path_for_test, uninstall_rejects_unsafe_inventory_for_test,
-        validate_owned_bootstrap_state_for_test,
+        observe_hub_acknowledgement_persistence_recovery_for_test,
+        observe_legacy_uninstall_for_test, observe_replacement_metadata_custody_for_test,
+        observe_replacement_retirement_retry_for_test,
+        observe_schema_four_complete_uninstall_for_test,
+        observe_uninstall_state_failure_preserves_recovery_for_test,
+        run_uninstall_workflow_for_test,
     };
     use super::*;
     use flate2::{Compression, write::GzEncoder};
@@ -5268,14 +5267,12 @@ mod tests {
     #[derive(Default)]
     struct RecordingValidationTransport {
         assets: HashMap<String, Vec<u8>>,
-        block_capsule_after_status: Option<PathBuf>,
         body: String,
         downloads: Vec<String>,
         probe_id: String,
         status_body: String,
         status_failure: bool,
         status_url: String,
-        saved_capsule: Option<Vec<u8>>,
         url: String,
         validated_identity_url: String,
         identity_failure: Option<String>,
@@ -5441,11 +5438,10 @@ mod tests {
         let config = PathBuf::from("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
         let state = PathBuf::from("/var/lib/enoki-probe");
         let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
-        let (failed_calls, completed_calls) =
-            replacement_cleanup_metadata_exclusion_for_test(&config, &state, &metadata)
-                .expect("observe both complete workflows");
-        assert_eq!(failed_calls, [config.clone(), state.clone()]);
-        assert_eq!(completed_calls, [config, state]);
+        assert!(
+            observe_replacement_metadata_custody_for_test(&config, &state, &metadata)
+                .expect("observe both complete workflows")
+        );
     }
 
     impl RecordingSystemdRunner {
@@ -5491,12 +5487,6 @@ mod tests {
             self.status_url = url.to_string();
             self.probe_id = auth.probe_id.to_string();
             self.status_body = body.to_string();
-
-            if let Some(path) = self.block_capsule_after_status.take() {
-                self.saved_capsule = Some(fs::read(&path).map_err(ProbeUpgraderRunError::Io)?);
-                fs::remove_file(&path).map_err(ProbeUpgraderRunError::Io)?;
-                fs::create_dir(&path).map_err(ProbeUpgraderRunError::Io)?;
-            }
 
             if self.status_failure {
                 return Err(ProbeUpgraderRunError::UninstallStatusReportFailure(
@@ -6279,7 +6269,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uninstall_mechanics_remove_owned_files_without_business_orchestration() {
+    fn legacy_uninstall_removes_owned_files_without_contacting_hub() {
         let temp = tempfile::tempdir().expect("temp dir");
         let bootstrap_config_path = temp.path().join("etc/enoki/probe-bootstrap.toml");
         let install_path = temp.path().join("usr/local/bin/enoki-probe");
@@ -6336,14 +6326,17 @@ mod tests {
         install_metadata.old_sudoers_paths = vec![legacy_sudoers_path.clone()];
         let mut systemd = RecordingSystemdRunner::default();
 
-        execute_probe_uninstall(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: bootstrap_config_path.clone(),
-            },
-            &install_metadata,
-            &mut systemd,
-        )
-        .expect("uninstall succeeds");
+        assert_eq!(
+            observe_legacy_uninstall_for_test(
+                &ProbeUninstallerRunInput {
+                    bootstrap_config_path: bootstrap_config_path.clone(),
+                },
+                &install_metadata,
+                Path::new(PRODUCTION_INSTALL_METADATA_PATH),
+                &mut systemd,
+            ),
+            LifecycleResponse::succeeded()
+        );
 
         assert_eq!(
             systemd.calls,
@@ -6463,13 +6456,15 @@ mod tests {
         };
         let mut systemd = RecordingSystemdRunner::default();
 
-        execute_probe_uninstall_with_install_metadata_path(
-            &input,
-            &install_metadata,
-            &mut systemd,
-            &install_metadata_path,
-        )
-        .expect("schema two uninstall succeeds");
+        assert_eq!(
+            observe_legacy_uninstall_for_test(
+                &input,
+                &install_metadata,
+                &install_metadata_path,
+                &mut systemd,
+            ),
+            LifecycleResponse::succeeded()
+        );
 
         let after_metadata = fs::metadata(&legacy_sudoers_path).expect("legacy remains");
         assert_eq!(
@@ -6588,13 +6583,10 @@ mod tests {
         };
         let mut systemd = RecordingSystemdRunner::default();
 
-        execute_probe_uninstall_with_install_metadata_path(
-            &input,
-            &metadata,
-            &mut systemd,
-            &metadata_path,
-        )
-        .unwrap();
+        assert_eq!(
+            observe_legacy_uninstall_for_test(&input, &metadata, &metadata_path, &mut systemd,),
+            LifecycleResponse::succeeded()
+        );
 
         for path in [install_path, runtime_path, provider_path, service_unit_path]
             .into_iter()
@@ -6723,18 +6715,11 @@ mod tests {
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: identity_path.clone(),
         };
-        let entries_survived = execute_uninstall_preserving_recovery_entries_for_test(
+        let entries_survived = observe_schema_four_complete_uninstall_for_test(
             &input,
             &metadata,
             &metadata_path,
             &mut systemd,
-            &[
-                identity_path.as_path(),
-                metadata_path.as_path(),
-                binaries[4].as_path(),
-                units[7].as_path(),
-                units[8].as_path(),
-            ],
         )
         .expect("schema four uninstall succeeds");
         assert!(
@@ -7147,7 +7132,7 @@ mod tests {
         );
 
         let mut cleanup_systemd = RecordingSystemdRunner::default();
-        let retirement_failure = replacement_metadata_retirement_failure_for_test(
+        let retirement_failure = observe_replacement_retirement_retry_for_test(
             intent.clone(),
             &mut store,
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
@@ -7519,17 +7504,12 @@ mod tests {
         );
 
         assert_eq!(
-            result,
+            result.response,
             LifecycleResponse::failed("probe_uninstall_service_account_remove_failed")
         );
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
-        assert!(
-            uninstall_recovery_path_for_test(&fixture.metadata_path)
-                .expect("capsule path")
-                .exists(),
-            "a failed local finalize remains recoverable"
-        );
+        assert!(result.recovery_available);
         assert!(fixture.companion_path.exists());
     }
 
@@ -7574,11 +7554,6 @@ mod tests {
             assert!(fixture.metadata_path.exists());
             assert!(fixture.identity_path.exists());
             assert!(fixture.companion_path.exists());
-            assert!(
-                !uninstall_recovery_path_for_test(&fixture.metadata_path)
-                    .expect("capsule path")
-                    .exists()
-            );
         }
     }
 
@@ -7685,14 +7660,60 @@ mod tests {
             &mut systemd,
         );
 
-        assert_eq!(result, LifecycleResponse::failed("probe_uninstall_failed"));
+        assert_eq!(
+            result.response,
+            LifecycleResponse::failed("probe_uninstall_failed")
+        );
         assert!(transport.url.contains("operation_mechanics"));
         assert!(transport.status_url.contains("operation_mechanics"));
+        assert!(result.recovery_available);
+
+        let conflicting_request = LifecycleRequest::hub_uninstall(
+            "probe_01",
+            "operation_takeover",
+            "takeover-token",
+            &"b".repeat(64),
+            &"d".repeat(64),
+            "1.2.3",
+        );
+        let conflicting_request = conflicting_request.expect("conflicting bound request");
+        let mut conflicting_transport = RecordingValidationTransport::default();
+        let mut conflicting_systemd = RecordingSystemdRunner::default();
+        let conflicting = run_uninstall_workflow_for_test(
+            &conflicting_request,
+            &input,
+            &fixture.metadata,
+            &fixture.metadata_path,
+            &mut conflicting_transport,
+            &mut conflicting_systemd,
+        );
+        assert_eq!(
+            conflicting.response,
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+        );
+        assert!(conflicting.recovery_available);
+        assert!(conflicting_transport.url.is_empty());
+        assert!(conflicting_transport.status_url.is_empty());
+        assert!(conflicting_transport.downloads.is_empty());
+        assert!(conflicting_systemd.calls.is_empty());
+
+        let mut retry_transport = RecordingValidationTransport::default();
+        let mut retry_systemd = RecordingSystemdRunner::default();
+        let retry = run_uninstall_workflow_for_test(
+            &request,
+            &input,
+            &fixture.metadata,
+            &fixture.metadata_path,
+            &mut retry_transport,
+            &mut retry_systemd,
+        );
+        assert_eq!(retry.response, LifecycleResponse::succeeded());
+        assert!(!retry.recovery_available);
+        assert!(retry_transport.url.is_empty());
         assert!(
-            uninstall_recovery_path_for_test(&fixture.metadata_path)
-                .expect("capsule path")
-                .exists(),
-            "the classified workflow persists its exact recovery binding"
+            retry_transport
+                .status_body
+                .contains("\"status\":\"succeeded\"")
         );
     }
 
@@ -7727,12 +7748,10 @@ mod tests {
             &mut failed_systemd,
         );
         assert_eq!(
-            first,
+            first.response,
             LifecycleResponse::failed("probe_uninstall_service_stop_failed")
         );
-        let capsule_path =
-            uninstall_recovery_path_for_test(&fixture.metadata_path).expect("capsule path");
-        assert!(capsule_path.exists());
+        assert!(first.recovery_available);
         assert!(!first_transport.url.is_empty());
         assert!(first_transport.status_url.is_empty());
 
@@ -7746,14 +7765,14 @@ mod tests {
             &mut retry_transport,
             &mut retry_systemd,
         );
-        assert_eq!(retry, LifecycleResponse::succeeded());
+        assert_eq!(retry.response, LifecycleResponse::succeeded());
         assert!(retry_transport.url.is_empty());
         assert!(
             retry_transport
                 .status_body
                 .contains("\"status\":\"succeeded\"")
         );
-        assert!(!capsule_path.exists());
+        assert!(!retry.recovery_available);
     }
 
     #[test]
@@ -7772,53 +7791,34 @@ mod tests {
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: fixture.identity_path.clone(),
         };
-        let capsule_path =
-            uninstall_recovery_path_for_test(&fixture.metadata_path).expect("capsule path");
-        let mut transport = RecordingValidationTransport {
-            block_capsule_after_status: Some(capsule_path.clone()),
-            ..RecordingValidationTransport::default()
-        };
+        let mut transport = RecordingValidationTransport::default();
+        let mut retry_transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
 
-        let first = run_uninstall_workflow_for_test(
+        let observation = observe_hub_acknowledgement_persistence_recovery_for_test(
             &request,
             &input,
             &fixture.metadata,
             &fixture.metadata_path,
             &mut transport,
-            &mut systemd,
-        );
-        assert_eq!(first, LifecycleResponse::recovery_pending());
-        assert!(transport.status_body.contains("\"status\":\"succeeded\""));
-        let prepared = transport
-            .saved_capsule
-            .take()
-            .expect("prepared capsule bytes");
-        assert!(capsule_path.is_dir());
-
-        fs::remove_dir(&capsule_path).expect("remove injected capsule directory");
-        fs::write(&capsule_path, prepared).expect("restore prepared capsule");
-        fs::set_permissions(&capsule_path, fs::Permissions::from_mode(0o600))
-            .expect("restore capsule mode");
-        assert!(capsule_path.exists());
-
-        let mut retry_transport = RecordingValidationTransport::default();
-        let retry = run_uninstall_workflow_for_test(
-            &request,
-            &input,
-            &fixture.metadata,
-            &fixture.metadata_path,
             &mut retry_transport,
             &mut systemd,
+        )
+        .expect("observe acknowledgement persistence recovery");
+        assert_eq!(
+            observation.interrupted.response,
+            LifecycleResponse::recovery_pending()
         );
-        assert_eq!(retry, LifecycleResponse::succeeded());
+        assert!(observation.interrupted.recovery_available);
+        assert!(transport.status_body.contains("\"status\":\"succeeded\""));
+        assert_eq!(observation.resumed.response, LifecycleResponse::succeeded());
         assert!(retry_transport.url.is_empty());
         assert!(
             retry_transport
                 .status_body
                 .contains("\"status\":\"succeeded\"")
         );
-        assert!(!capsule_path.exists());
+        assert!(!observation.resumed.recovery_available);
     }
 
     #[test]
@@ -7868,9 +7868,11 @@ mod tests {
             &mut failed_transport,
             &mut systemd,
         );
-        assert_eq!(first, LifecycleResponse::failed("probe_uninstall_failed"));
-        let capsule_path = uninstall_recovery_path_for_test(&metadata_path).expect("capsule path");
-        assert!(capsule_path.exists());
+        assert_eq!(
+            first.response,
+            LifecycleResponse::failed("probe_uninstall_failed")
+        );
+        assert!(first.recovery_available);
         for path in [
             identity_path.as_path(),
             metadata_path.as_path(),
@@ -7891,7 +7893,7 @@ mod tests {
             &mut retry_transport,
             &mut systemd,
         );
-        assert_eq!(completed, LifecycleResponse::recovery_pending());
+        assert_eq!(completed.response, LifecycleResponse::recovery_pending());
         assert!(
             retry_transport.url.is_empty(),
             "trusted capsule skips revalidation"
@@ -7901,23 +7903,19 @@ mod tests {
                 .status_body
                 .contains("\"status\":\"succeeded\"")
         );
-        assert!(capsule_path.exists());
+        assert!(completed.recovery_available);
         assert!(metadata_path.exists());
         assert!(identity_path.exists());
         assert!(companion_path.exists());
 
-        let final_state_calls =
-            observe_uninstall_local_state_failure_for_test(&input, &metadata, &metadata_path)
-                .expect("observe complete local-state workflow failure");
-        assert_eq!(
-            final_state_calls,
-            [
-                metadata_path.clone(),
-                identity_path.clone(),
-                metadata.state_dir.clone(),
-            ]
+        assert!(
+            observe_uninstall_state_failure_preserves_recovery_for_test(
+                &input,
+                &metadata,
+                &metadata_path
+            )
+            .expect("observe stable recovery behavior after local-state failure")
         );
-        assert!(capsule_path.exists(), "commit capsule remains recoverable");
         assert!(
             companion_path.exists(),
             "fixed resume entry remains recoverable"
@@ -7940,7 +7938,6 @@ mod tests {
             .status()
             .expect("start a fresh Companion recovery process");
         assert!(child.success(), "fresh recovery process failed");
-        assert!(!capsule_path.exists());
         assert!(!metadata_path.exists());
         assert!(!identity_path.exists());
         assert!(!companion_path.exists());
@@ -8056,78 +8053,22 @@ mod tests {
             bootstrap_config_path: metadata.identity_path.clone(),
         };
         let mut systemd = RecordingSystemdRunner::default();
-        let error = execute_probe_uninstall_with_install_metadata_path(
+        let response = observe_legacy_uninstall_for_test(
             &input,
             &metadata,
-            &mut systemd,
             &temp.path().join("metadata"),
-        )
-        .expect_err("symlinked Bootstrap role fails closed");
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata(
-                "Probe Bootstrap role is not a root-owned regular 0755 file"
-            )
-        ));
+            &mut systemd,
+        );
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+        );
         assert_eq!(fs::read(&target).expect("outside target"), b"outside");
         assert!(systemd.calls.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn bootstrap_state_validation_rejects_symlinks_hardlinks_and_extra_entries() {
-        use std::os::unix::fs::symlink;
-
-        fn private_directory(path: &Path) {
-            fs::create_dir(path).expect("private directory");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-                .expect("private directory mode");
-        }
-        fn owned_state(root: &Path) -> PathBuf {
-            let state = root.join("bootstrap-state");
-            private_directory(&state);
-            private_directory(&state.join("trust"));
-            private_directory(&state.join("inbox"));
-            state
-        }
-
-        let symlink_temp = tempfile::tempdir().expect("symlink temp");
-        let symlink_state = owned_state(symlink_temp.path());
-        fs::remove_dir(symlink_state.join("inbox")).expect("remove inbox");
-        let outside = symlink_temp.path().join("outside");
-        private_directory(&outside);
-        symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
-        assert!(matches!(
-            validate_owned_bootstrap_state_for_test(Some(&symlink_state)),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert!(outside.exists());
-
-        let hardlink_temp = tempfile::tempdir().expect("hardlink temp");
-        let hardlink_state = owned_state(hardlink_temp.path());
-        let outside = hardlink_temp.path().join("outside-generation");
-        fs::write(&outside, "outside").expect("outside state");
-        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).expect("outside mode");
-        fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
-            .expect("unsafe hardlink");
-        assert!(matches!(
-            validate_owned_bootstrap_state_for_test(Some(&hardlink_state)),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
-
-        let extra_temp = tempfile::tempdir().expect("extra entry temp");
-        let extra_state = owned_state(extra_temp.path());
-        fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
-        assert!(matches!(
-            validate_owned_bootstrap_state_for_test(Some(&extra_state)),
-            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
-        ));
-        assert!(extra_state.join("unrecognised").exists());
-    }
-
-    #[test]
-    fn legacy_uninstall_mechanics_propagate_required_service_cleanup_failure() {
+    fn legacy_uninstall_reports_required_service_disable_failure() {
         let temp = tempfile::tempdir().expect("temp dir");
         let status_path = temp.path().join("state/probe-operation-status.toml");
         let install_path = temp.path().join("bin/enoki-probe");
@@ -8141,16 +8082,19 @@ mod tests {
             ..RecordingSystemdRunner::default()
         };
 
-        let error = execute_probe_uninstall(
+        let response = observe_legacy_uninstall_for_test(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: install_metadata.identity_path.clone(),
             },
             &install_metadata,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             &mut systemd,
-        )
-        .expect_err("cleanup mechanics reject required systemd failure");
+        );
 
-        assert_eq!(error.code(), "probe_uninstall_service_disable_failed");
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_service_disable_failed")
+        );
         assert_eq!(systemd.calls, ["stop enoki-probe", "disable enoki-probe"]);
     }
 
@@ -8426,7 +8370,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uninstall_mechanics_propagate_loaded_service_residue() {
+    fn legacy_uninstall_reports_loaded_service_residue() {
         let temp = tempfile::tempdir().expect("temp dir");
         let status_path = temp.path().join("state/probe-operation-status.toml");
         let install_path = temp.path().join("bin/enoki-probe");
@@ -8440,20 +8384,23 @@ mod tests {
             ..RecordingSystemdRunner::default()
         };
 
-        let error = execute_probe_uninstall(
+        let response = observe_legacy_uninstall_for_test(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: install_metadata.identity_path.clone(),
             },
             &install_metadata,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             &mut systemd,
-        )
-        .expect_err("cleanup mechanics reject service residue");
+        );
 
-        assert_eq!(error.code(), "probe_uninstall_service_residue");
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_service_residue")
+        );
     }
 
     #[test]
-    fn legacy_uninstall_mechanics_propagate_service_account_cleanup_failure() {
+    fn legacy_uninstall_reports_service_account_removal_failure() {
         let temp = tempfile::tempdir().expect("temp dir");
         let status_path = temp.path().join("state/probe-operation-status.toml");
         let install_path = temp.path().join("bin/enoki-probe");
@@ -8467,18 +8414,18 @@ mod tests {
             ..RecordingSystemdRunner::default()
         };
 
-        let error = execute_probe_uninstall(
+        let response = observe_legacy_uninstall_for_test(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: install_metadata.identity_path.clone(),
             },
             &install_metadata,
+            Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             &mut systemd,
-        )
-        .expect_err("cleanup mechanics propagate account failure");
+        );
 
         assert_eq!(
-            error.code(),
-            "probe_uninstall_service_account_remove_failed"
+            response,
+            LifecycleResponse::failed("probe_uninstall_service_account_remove_failed")
         );
     }
 
@@ -8516,15 +8463,17 @@ mod tests {
         install_metadata.old_sudoers_paths = vec![old_sudoers_path.clone()];
         let mut systemd = RecordingSystemdRunner::default();
 
-        execute_probe_uninstall_with_install_metadata_path(
-            &ProbeUninstallerRunInput {
-                bootstrap_config_path: bootstrap_config_path.clone(),
-            },
-            &install_metadata,
-            &mut systemd,
-            &install_metadata_path,
-        )
-        .expect("uninstall cleanup succeeds");
+        assert_eq!(
+            observe_legacy_uninstall_for_test(
+                &ProbeUninstallerRunInput {
+                    bootstrap_config_path: bootstrap_config_path.clone(),
+                },
+                &install_metadata,
+                &install_metadata_path,
+                &mut systemd,
+            ),
+            LifecycleResponse::succeeded()
+        );
 
         for path in [
             &bootstrap_config_path,
@@ -8552,7 +8501,7 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_cleanup_planner_rejects_unsafe_targets_before_any_systemd_or_file_mutation() {
+    fn legacy_uninstall_rejects_unsafe_inventory_before_host_effects() {
         let temp = tempfile::tempdir().expect("temp dir");
         let status_path = temp.path().join("state/probe-operation-status.toml");
         let mut install_metadata = trusted_install_metadata(
@@ -8562,19 +8511,21 @@ mod tests {
         );
         install_metadata.install_path = PathBuf::from("relative-probe-binary");
 
-        let error = uninstall_rejects_unsafe_inventory_for_test(
+        let mut systemd = RecordingSystemdRunner::default();
+        let response = observe_legacy_uninstall_for_test(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: temp.path().join("state/probe-bootstrap.toml"),
             },
             &install_metadata,
             &temp.path().join("etc/enoki/probe-install.toml"),
-        )
-        .expect_err("unsafe cleanup targets are rejected before execution");
+            &mut systemd,
+        );
 
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidInstallMetadata("paths must be absolute")
-        ));
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+        );
+        assert!(systemd.calls.is_empty());
     }
 
     #[test]
@@ -8621,7 +8572,7 @@ mod tests {
         );
 
         assert_eq!(
-            response,
+            response.response,
             LifecycleResponse::failed("probe_uninstall_failed")
         );
         assert_eq!(transport.url, "");

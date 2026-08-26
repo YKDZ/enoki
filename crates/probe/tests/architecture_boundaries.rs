@@ -28,6 +28,61 @@ fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
 }
 
+fn visible_top_level_declarations(source: &str, direct_child: bool) -> Vec<(bool, String)> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut declarations = Vec::new();
+    let mut cfg_test = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if trimmed.starts_with("#[") {
+            cfg_test |= trimmed.contains("cfg(test)");
+            index += 1;
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            index += 1;
+            continue;
+        }
+        let top_level = line == trimmed;
+        let visible =
+            trimmed == "pub" || trimmed.starts_with("pub ") || trimmed.starts_with("pub(");
+        let reaches_parent = direct_child
+            || trimmed == "pub"
+            || trimmed.starts_with("pub ")
+            || trimmed.starts_with("pub(crate)")
+            || trimmed.starts_with("pub(in ");
+        if top_level && visible && reaches_parent {
+            let mut declaration = trimmed.to_owned();
+            while !declaration.contains('{') && !declaration.ends_with(';') {
+                index += 1;
+                declaration.push(' ');
+                declaration.push_str(lines[index].trim());
+            }
+            declarations.push((cfg_test, declaration));
+        }
+        cfg_test = false;
+        index += 1;
+    }
+    declarations
+}
+
+fn declaration_name(declaration: &str) -> &str {
+    for keyword in ["fn ", "struct ", "enum ", "const ", "type ", "trait "] {
+        if let Some((_, tail)) = declaration.split_once(keyword) {
+            return tail
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .next()
+                .expect("declaration name");
+        }
+    }
+    declaration
+        .split_once("use ")
+        .map(|(_, tail)| tail.trim_end_matches(';'))
+        .expect("visible declaration kind")
+}
+
 #[test]
 fn probe_entry_and_runtime_only_coordinate_runtime_finalized_windows() {
     let probe_entry = production_source(PROBE_MAIN);
@@ -281,46 +336,64 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
     assert!(UPGRADER.contains("mod uninstall;"));
     assert!(!UNINSTALL.contains("use super::*"));
     assert!(!UNINSTALL_CLEANUP.contains("use super::*"));
-    let cleanup_without_test_oracles = UNINSTALL_CLEANUP.replace(
-        "#[cfg(test)]\npub(in crate::upgrader)",
-        "#[cfg(test)]\nTEST_ONLY_PARENT_VISIBILITY",
-    );
-    assert_eq!(
-        cleanup_without_test_oracles
-            .matches("pub(in crate::upgrader)")
-            .count(),
-        1,
-        "cleanup implementation may expose only one production seam to upgrader",
-    );
-    assert!(cleanup_without_test_oracles.contains(
-        "pub(in crate::upgrader) fn commit_replacement_and_cleanup_install_with_systemd"
-    ));
     assert!(!UPGRADER.contains("use super::uninstall::cleanup"));
     assert!(
         !UPGRADER.contains("use super::uninstall::*"),
         "父级 tests 不得通过 wildcard 旁路 Uninstall interface",
     );
-    let parent_surface = UNINSTALL
-        .lines()
-        .filter(|line| line.starts_with("pub(super)"))
+    let declarations = visible_top_level_declarations(UNINSTALL, true);
+    let production_surface = declarations
+        .iter()
+        .filter(|(cfg_test, _)| !cfg_test)
+        .map(|(_, declaration)| declaration_name(declaration))
         .collect::<Vec<_>>();
     assert_eq!(
-        parent_surface,
+        production_surface,
         [
-            "pub(super) use cleanup::commit_replacement_and_cleanup_install_with_systemd;",
-            "pub(super) fn run_uninstall_lifecycle_adapter(",
-            "pub(super) fn resume_lifecycle_companion_at(",
+            "cleanup::commit_replacement_and_cleanup_install_with_systemd",
+            "run_uninstall_lifecycle_adapter",
+            "resume_lifecycle_companion_at",
         ],
         "focused Uninstall implementation layer 只向父级暴露两个 adapter hook 与一个 Replacement seam",
     );
-    let uninstall_without_test_wrappers = UNINSTALL.replace(
-        "#[cfg(test)]\npub(in crate::upgrader)",
-        "#[cfg(test)]\nTEST_ONLY_PARENT_VISIBILITY",
+    let nested_parent_surface = visible_top_level_declarations(UNINSTALL_CLEANUP, false)
+        .into_iter()
+        .filter(|(cfg_test, _)| !cfg_test)
+        .map(|(_, declaration)| declaration_name(&declaration).to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nested_parent_surface,
+        ["commit_replacement_and_cleanup_install_with_systemd"],
+        "cleanup 子模块不得提供第二条父级可达 seam",
     );
-    assert!(
-        !uninstall_without_test_wrappers.contains("pub(in crate::upgrader)"),
-        "新增的父级 test interface 必须显式标注 cfg(test)",
+    let test_surface = declarations
+        .iter()
+        .filter(|(cfg_test, _)| *cfg_test)
+        .map(|(_, declaration)| declaration_name(declaration))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        test_surface,
+        [
+            "UninstallWorkflowObservation",
+            "run_uninstall_workflow_for_test",
+            "HubAcknowledgementRecoveryObservation",
+            "observe_hub_acknowledgement_persistence_recovery_for_test",
+            "observe_legacy_uninstall_for_test",
+            "observe_schema_four_complete_uninstall_for_test",
+            "observe_uninstall_state_failure_preserves_recovery_for_test",
+            "observe_replacement_metadata_custody_for_test",
+            "observe_replacement_retirement_retry_for_test",
+        ],
+        "父级 test interface 必须是显式 cfg(test) 的完整 workflow 或稳定行为 observation",
     );
+    for (_, declaration) in declarations.iter().filter(|(cfg_test, _)| *cfg_test) {
+        for forbidden in ["phase", "plan_", "read_", "cleanup_sequence", "mechanics"] {
+            assert!(
+                !declaration.contains(forbidden),
+                "test-only parent seam 不得暴露 mechanics vocabulary：{declaration}",
+            );
+        }
+    }
     let production_adapter = UPGRADER
         .split("#[cfg(test)]\nmod tests")
         .next()
@@ -365,10 +438,10 @@ fn uninstall_has_no_parallel_stdin_business_or_failed_status_path() {
         );
     }
     let mechanics_oracle = UNINSTALL_CLEANUP
-        .split("fn execute_probe_uninstall(")
+        .split("fn execute_probe_uninstall_with_install_metadata_path(")
         .nth(1)
         .expect("legacy schema oracle must stay narrow")
-        .split("fn execute_probe_uninstall_with_install_metadata_path(")
+        .split("fn commit_replacement_and_cleanup_install_with_systemd")
         .next()
         .expect("legacy schema oracle body");
     for business_concern in [

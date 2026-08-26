@@ -4,8 +4,6 @@ use super::{
     ProbeUninstallerRunInput, ProbeUpgraderRunError, ProbeUpgraderSystemdRunner,
     TrustedProbeInstallMetadata,
 };
-#[cfg(test)]
-use crate::upgrader::PRODUCTION_INSTALL_METADATA_PATH;
 use crate::upgrader::{
     ensure_absolute_path, fixed_installed_probe_sha256, is_lifecycle_companion_path,
     is_lifecycle_companion_service, observation_services, preflight_rooted_path,
@@ -20,21 +18,7 @@ use enoki_probe_bootstrap::replacement::{
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
 
 #[cfg(test)]
-pub(in crate::upgrader) fn execute_probe_uninstall(
-    input: &ProbeUninstallerRunInput,
-    install_metadata: &TrustedProbeInstallMetadata,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> Result<(), ProbeUpgraderRunError> {
-    execute_probe_uninstall_with_install_metadata_path(
-        input,
-        install_metadata,
-        systemd,
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-    )
-}
-
-#[cfg(test)]
-pub(in crate::upgrader) fn execute_probe_uninstall_with_install_metadata_path(
+pub(super) fn execute_probe_uninstall_with_install_metadata_path(
     input: &ProbeUninstallerRunInput,
     install_metadata: &TrustedProbeInstallMetadata,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -960,4 +944,66 @@ pub(super) fn remove_owned_bootstrap_state(path: &Path) -> Result<(), ProbeUpgra
     }
     validate_owned_bootstrap_state(Some(path))?;
     fs::remove_dir_all(path).map_err(ProbeUpgraderRunError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_owned_bootstrap_state;
+    use crate::upgrader::ProbeUpgraderRunError;
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+        path::{Path, PathBuf},
+    };
+
+    fn private_directory(path: &Path) {
+        fs::create_dir(path).expect("private directory");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .expect("private directory mode");
+    }
+
+    fn owned_state(root: &Path) -> PathBuf {
+        let state = root.join("bootstrap-state");
+        private_directory(&state);
+        private_directory(&state.join("trust"));
+        private_directory(&state.join("inbox"));
+        state
+    }
+
+    #[test]
+    fn bootstrap_state_validation_rejects_symlinks_hardlinks_and_extra_entries() {
+        let symlink_temp = tempfile::tempdir().expect("symlink temp");
+        let symlink_state = owned_state(symlink_temp.path());
+        fs::remove_dir(symlink_state.join("inbox")).expect("remove inbox");
+        let outside = symlink_temp.path().join("outside");
+        private_directory(&outside);
+        symlink(&outside, symlink_state.join("inbox")).expect("unsafe inbox symlink");
+        assert!(matches!(
+            validate_owned_bootstrap_state(Some(&symlink_state)),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert!(outside.exists());
+
+        let hardlink_temp = tempfile::tempdir().expect("hardlink temp");
+        let hardlink_state = owned_state(hardlink_temp.path());
+        let outside = hardlink_temp.path().join("outside-generation");
+        fs::write(&outside, "outside").expect("outside state");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).expect("outside mode");
+        fs::hard_link(&outside, hardlink_state.join("trust/delegation-generation"))
+            .expect("unsafe hardlink");
+        assert!(matches!(
+            validate_owned_bootstrap_state(Some(&hardlink_state)),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert_eq!(fs::read(&outside).expect("outside remains"), b"outside");
+
+        let extra_temp = tempfile::tempdir().expect("extra entry temp");
+        let extra_state = owned_state(extra_temp.path());
+        fs::write(extra_state.join("unrecognised"), "extra").expect("extra entry");
+        assert!(matches!(
+            validate_owned_bootstrap_state(Some(&extra_state)),
+            Err(ProbeUpgraderRunError::InvalidInstallMetadata(_))
+        ));
+        assert!(extra_state.join("unrecognised").exists());
+    }
 }
