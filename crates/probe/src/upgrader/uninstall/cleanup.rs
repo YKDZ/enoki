@@ -993,6 +993,11 @@ mod tests {
             Ok(())
         }
 
+        fn reset_failed(&mut self, service_name: &str) -> Result<(), ProbeUpgraderRunError> {
+            self.calls.push(format!("reset-failed {service_name}"));
+            Ok(())
+        }
+
         fn verify_service_absent(
             &mut self,
             service_name: &str,
@@ -1008,6 +1013,16 @@ mod tests {
         ) -> Result<(), ProbeUpgraderRunError> {
             self.calls
                 .push(format!("remove-identity {service_user}:{service_group}"));
+            Ok(())
+        }
+
+        fn remove_owned_ipc_group(
+            &mut self,
+            group: &str,
+            ownership_marker: &str,
+        ) -> Result<(), ProbeUpgraderRunError> {
+            self.calls
+                .push(format!("remove-ipc-group {group}:{ownership_marker}"));
             Ok(())
         }
     }
@@ -1056,7 +1071,14 @@ mod tests {
     #[test]
     fn legacy_cleanup_oracle_removes_owned_inventory_in_exact_order() {
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let metadata = metadata(temporary.path(), 1);
+        let mut metadata = metadata(temporary.path(), 1);
+        metadata.operation_sudoers_path = Some(temporary.path().join("sudoers/operations"));
+        metadata.collector_helper_sudoers_path =
+            Some(temporary.path().join("sudoers/collector-helpers"));
+        metadata.old_sudoers_paths = vec![
+            temporary.path().join("sudoers/upgrader"),
+            temporary.path().join("sudoers/legacy-operation"),
+        ];
         for path in [
             &metadata.identity_path,
             &metadata.install_path,
@@ -1064,6 +1086,14 @@ mod tests {
             &metadata.service_unit_path,
         ] {
             create_file(path, 0o600);
+        }
+        for path in metadata
+            .operation_sudoers_path
+            .iter()
+            .chain(metadata.collector_helper_sudoers_path.iter())
+            .chain(metadata.old_sudoers_paths.iter())
+        {
+            create_file(path, 0o440);
         }
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: metadata.identity_path.clone(),
@@ -1081,16 +1111,29 @@ mod tests {
         .expect("legacy cleanup");
 
         for path in [
-            metadata.install_path,
-            metadata.service_unit_path,
-            metadata.state_dir,
-            install_metadata_path,
-        ] {
+            &metadata.install_path,
+            &metadata.service_unit_path,
+            &metadata.state_dir,
+            &install_metadata_path,
+        ]
+        .into_iter()
+        .chain(metadata.operation_sudoers_path.iter())
+        .chain(metadata.collector_helper_sudoers_path.iter())
+        .chain(metadata.old_sudoers_paths.iter())
+        {
             assert!(!path.exists(), "{} remains", path.display());
         }
         assert_eq!(
-            &systemd.calls[..2],
-            ["stop enoki-probe", "disable enoki-probe"]
+            systemd.calls,
+            [
+                "stop enoki-probe",
+                "disable enoki-probe",
+                "daemon-reload",
+                "reset-failed enoki-probe",
+                "verify-absent enoki-probe",
+                "remove-identity enoki-probe:enoki-probe",
+                "verify-absent enoki-probe",
+            ]
         );
     }
 
@@ -1119,6 +1162,165 @@ mod tests {
     }
 
     #[test]
+    fn schema_two_cleanup_removes_owned_bootstrap_custody_without_touching_external_targets() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 2);
+        let acquirer = temporary.path().join("bin/enoki-bootstrap-acquire");
+        let activator = temporary.path().join("bin/enoki-bootstrap-activate");
+        let bootstrap_state = owned_state(temporary.path());
+        metadata.bootstrap_acquirer_path = Some(acquirer.clone());
+        metadata.bootstrap_activator_path = Some(activator.clone());
+        metadata.bootstrap_state_dir = Some(bootstrap_state.clone());
+        let external_legacy = temporary.path().join("external-legacy-sudoers");
+        let external_target = temporary.path().join("external-symlink-target");
+        let owned_legacy_link = temporary.path().join("sudoers/owned-legacy-link");
+        create_file(&external_legacy, 0o440);
+        create_file(&external_target, 0o440);
+        fs::create_dir_all(owned_legacy_link.parent().expect("symlink parent"))
+            .expect("symlink parent");
+        symlink(&external_target, &owned_legacy_link).expect("owned symlink");
+        metadata.old_sudoers_paths = vec![owned_legacy_link.clone()];
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+            &acquirer,
+            &activator,
+        ] {
+            create_file(
+                path,
+                if path == &acquirer || path == &activator {
+                    0o755
+                } else {
+                    0o600
+                },
+            );
+        }
+        let install_metadata_path = temporary.path().join("etc/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let mut systemd = TestSystemd::default();
+
+        execute_probe_uninstall_with_install_metadata_path(
+            &input,
+            &metadata,
+            &mut systemd,
+            &install_metadata_path,
+        )
+        .expect("schema two cleanup");
+
+        for path in [
+            &acquirer,
+            &activator,
+            &bootstrap_state,
+            &owned_legacy_link,
+            &metadata.state_dir,
+            &install_metadata_path,
+        ] {
+            assert!(!path.exists(), "owned path remains: {}", path.display());
+        }
+        assert_eq!(
+            fs::read(&external_legacy).expect("external legacy"),
+            b"fixture"
+        );
+        assert_eq!(
+            fs::read(&external_target).expect("symlink target"),
+            b"fixture"
+        );
+    }
+
+    #[test]
+    fn schema_three_cleanup_removes_complete_observation_role_inventory_in_systemd_order() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let mut metadata = metadata(temporary.path(), 3);
+        metadata.bootstrap_acquirer_path = Some(temporary.path().join("bin/bootstrap-acquire"));
+        metadata.bootstrap_activator_path = Some(temporary.path().join("bin/bootstrap-activate"));
+        metadata.bootstrap_state_dir = Some(owned_state(temporary.path()));
+        metadata.observation_runtime_path = Some(temporary.path().join("bin/observation-runtime"));
+        metadata.cpu_provider_path = Some(temporary.path().join("bin/cpu-provider"));
+        metadata.disk_health_provider_path = Some(temporary.path().join("bin/disk-provider"));
+        metadata.observation_unit_paths = [
+            "enoki-observation-runtime.service",
+            "enoki-observation-runtime.socket",
+            "enoki-cpu-resource-provider@.service",
+            "enoki-cpu-resource-provider.socket",
+            "enoki-disk-health-resource-provider@.service",
+            "enoki-disk-health-resource-provider.socket",
+        ]
+        .map(|name| temporary.path().join("systemd").join(name))
+        .to_vec();
+        for path in [
+            &metadata.identity_path,
+            &metadata.install_path,
+            &metadata.operation_status_path,
+            &metadata.service_unit_path,
+        ]
+        .into_iter()
+        .chain(metadata.bootstrap_acquirer_path.iter())
+        .chain(metadata.bootstrap_activator_path.iter())
+        .chain(metadata.observation_runtime_path.iter())
+        .chain(metadata.cpu_provider_path.iter())
+        .chain(metadata.disk_health_provider_path.iter())
+        .chain(metadata.observation_unit_paths.iter())
+        {
+            create_file(
+                path,
+                if metadata.bootstrap_acquirer_path.as_ref() == Some(path)
+                    || metadata.bootstrap_activator_path.as_ref() == Some(path)
+                {
+                    0o755
+                } else {
+                    0o600
+                },
+            );
+        }
+        let install_metadata_path = temporary.path().join("etc/probe-install.toml");
+        create_file(&install_metadata_path, 0o600);
+        let input = ProbeUninstallerRunInput {
+            bootstrap_config_path: metadata.identity_path.clone(),
+        };
+        let mut systemd = TestSystemd::default();
+
+        execute_probe_uninstall_with_install_metadata_path(
+            &input,
+            &metadata,
+            &mut systemd,
+            &install_metadata_path,
+        )
+        .expect("schema three cleanup");
+
+        for path in metadata
+            .observation_unit_paths
+            .iter()
+            .chain(metadata.observation_runtime_path.iter())
+            .chain(metadata.cpu_provider_path.iter())
+            .chain(metadata.disk_health_provider_path.iter())
+        {
+            assert!(
+                !path.exists(),
+                "observation role remains: {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            &systemd.calls[..8],
+            [
+                "stop enoki-disk-health-resource-provider.socket",
+                "disable enoki-disk-health-resource-provider.socket",
+                "stop enoki-cpu-resource-provider.socket",
+                "disable enoki-cpu-resource-provider.socket",
+                "stop enoki-observation-runtime.socket",
+                "disable enoki-observation-runtime.socket",
+                "stop enoki-observation-runtime.service",
+                "disable enoki-observation-runtime.service",
+            ]
+        );
+    }
+
+    #[test]
     fn schema_four_cleanup_keeps_reentry_assets_until_recoverable_finalize() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let mut metadata = metadata(temporary.path(), 4);
@@ -1132,11 +1334,33 @@ mod tests {
         let companion_socket = temporary
             .path()
             .join("systemd/enoki-probe-lifecycle-companion.socket");
+        let observation_runtime = temporary.path().join("bin/observation-runtime");
+        let cpu_provider = temporary.path().join("bin/cpu-provider");
+        let disk_provider = temporary.path().join("bin/disk-provider");
+        let observation_units = [
+            "enoki-observation-runtime.service",
+            "enoki-observation-runtime.socket",
+            "enoki-cpu-resource-provider@.service",
+            "enoki-cpu-resource-provider.socket",
+            "enoki-disk-health-resource-provider@.service",
+            "enoki-disk-health-resource-provider.socket",
+        ]
+        .map(|name| temporary.path().join("systemd").join(name));
         metadata.bootstrap_acquirer_path = Some(acquirer.clone());
         metadata.bootstrap_activator_path = Some(activator.clone());
         metadata.bootstrap_state_dir = Some(bootstrap_state.clone());
         metadata.lifecycle_companion_path = Some(companion.clone());
-        metadata.observation_unit_paths = vec![companion_service.clone(), companion_socket.clone()];
+        metadata.observation_runtime_path = Some(observation_runtime.clone());
+        metadata.cpu_provider_path = Some(cpu_provider.clone());
+        metadata.disk_health_provider_path = Some(disk_provider.clone());
+        metadata.observation_unit_paths = observation_units
+            .iter()
+            .cloned()
+            .chain([companion_service.clone(), companion_socket.clone()])
+            .collect();
+        metadata.probe_ipc_group = Some("enoki-probe-ipc".to_owned());
+        metadata.probe_ipc_group_ownership = Some("!enoki-bootstrap-owned".to_owned());
+        metadata.observation_ipc_group = Some("enoki-observation-ipc".to_owned());
         for path in [
             &metadata.identity_path,
             &metadata.install_path,
@@ -1145,8 +1369,14 @@ mod tests {
             &companion,
             &companion_service,
             &companion_socket,
+            &observation_runtime,
+            &cpu_provider,
+            &disk_provider,
         ] {
             create_file(path, 0o755);
+        }
+        for path in &observation_units {
+            create_file(path, 0o600);
         }
         create_file(&acquirer, 0o755);
         create_file(&activator, 0o755);
@@ -1179,6 +1409,67 @@ mod tests {
         assert!(!install_metadata_path.exists());
         assert!(!metadata.identity_path.exists());
         assert!(!metadata.state_dir.exists());
+        for path in [
+            &metadata.install_path,
+            &metadata.service_unit_path,
+            &acquirer,
+            &activator,
+            &bootstrap_state,
+            &observation_runtime,
+            &cpu_provider,
+            &disk_provider,
+            &companion_service,
+            &companion_socket,
+            &install_metadata_path,
+        ]
+        .into_iter()
+        .chain(observation_units.iter())
+        {
+            assert!(!path.exists(), "schema four residue: {}", path.display());
+        }
+        assert_eq!(
+            systemd.calls,
+            [
+                "stop enoki-disk-health-resource-provider@*.service",
+                "disable enoki-disk-health-resource-provider@*.service",
+                "stop enoki-cpu-resource-provider@*.service",
+                "disable enoki-cpu-resource-provider@*.service",
+                "stop enoki-disk-health-resource-provider.socket",
+                "disable enoki-disk-health-resource-provider.socket",
+                "stop enoki-cpu-resource-provider.socket",
+                "disable enoki-cpu-resource-provider.socket",
+                "stop enoki-observation-runtime.socket",
+                "disable enoki-observation-runtime.socket",
+                "stop enoki-observation-runtime.service",
+                "disable enoki-observation-runtime.service",
+                "stop enoki-probe",
+                "disable enoki-probe",
+                "daemon-reload",
+                "reset-failed enoki-probe",
+                "verify-absent enoki-probe",
+                "reset-failed enoki-observation-runtime.service",
+                "verify-absent enoki-observation-runtime.service",
+                "reset-failed enoki-observation-runtime.socket",
+                "verify-absent enoki-observation-runtime.socket",
+                "reset-failed enoki-cpu-resource-provider.socket",
+                "verify-absent enoki-cpu-resource-provider.socket",
+                "reset-failed enoki-disk-health-resource-provider.socket",
+                "verify-absent enoki-disk-health-resource-provider.socket",
+                "reset-failed enoki-cpu-resource-provider@*.service",
+                "verify-absent enoki-cpu-resource-provider@*.service",
+                "reset-failed enoki-disk-health-resource-provider@*.service",
+                "verify-absent enoki-disk-health-resource-provider@*.service",
+                "remove-identity enoki-probe:enoki-probe",
+                "remove-identity enoki-observation-ipc:enoki-observation-ipc",
+                "remove-ipc-group enoki-probe-ipc:!enoki-bootstrap-owned",
+                "stop enoki-probe-lifecycle-companion.socket",
+                "disable enoki-probe-lifecycle-companion.socket",
+                "daemon-reload",
+                "reset-failed enoki-probe-lifecycle-companion.socket",
+                "verify-absent enoki-probe-lifecycle-companion.socket",
+                "verify-absent enoki-probe",
+            ]
+        );
     }
 
     #[test]

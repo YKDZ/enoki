@@ -24,7 +24,7 @@ const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/in
 const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
 const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
 
-use syn::{Attribute, Item, Visibility};
+use syn::{Attribute, ForeignItem, Item, Visibility};
 
 fn production_source(source: &str) -> &str {
     source.split("#[cfg(test)]").next().unwrap_or(source)
@@ -45,42 +45,6 @@ struct TopLevelDeclaration {
     visibility: ItemVisibility,
 }
 
-fn item_attributes(item: &Item) -> &[Attribute] {
-    match item {
-        Item::Const(item) => &item.attrs,
-        Item::Enum(item) => &item.attrs,
-        Item::ExternCrate(item) => &item.attrs,
-        Item::Fn(item) => &item.attrs,
-        Item::Mod(item) => &item.attrs,
-        Item::Static(item) => &item.attrs,
-        Item::Struct(item) => &item.attrs,
-        Item::Trait(item) => &item.attrs,
-        Item::TraitAlias(item) => &item.attrs,
-        Item::Type(item) => &item.attrs,
-        Item::Union(item) => &item.attrs,
-        Item::Use(item) => &item.attrs,
-        _ => &[],
-    }
-}
-
-fn item_name(item: &Item) -> Option<String> {
-    match item {
-        Item::Const(item) => Some(item.ident.to_string()),
-        Item::Enum(item) => Some(item.ident.to_string()),
-        Item::ExternCrate(item) => Some(item.ident.to_string()),
-        Item::Fn(item) => Some(item.sig.ident.to_string()),
-        Item::Mod(item) => Some(item.ident.to_string()),
-        Item::Static(item) => Some(item.ident.to_string()),
-        Item::Struct(item) => Some(item.ident.to_string()),
-        Item::Trait(item) => Some(item.ident.to_string()),
-        Item::TraitAlias(item) => Some(item.ident.to_string()),
-        Item::Type(item) => Some(item.ident.to_string()),
-        Item::Union(item) => Some(item.ident.to_string()),
-        Item::Use(item) => Some(use_tree_name(&item.tree)),
-        _ => None,
-    }
-}
-
 fn use_tree_name(tree: &syn::UseTree) -> String {
     match tree {
         syn::UseTree::Path(path) => format!("{}::{}", path.ident, use_tree_name(&path.tree)),
@@ -88,24 +52,6 @@ fn use_tree_name(tree: &syn::UseTree) -> String {
         syn::UseTree::Rename(rename) => rename.rename.to_string(),
         syn::UseTree::Glob(_) => "*".to_owned(),
         syn::UseTree::Group(_) => "{group}".to_owned(),
-    }
-}
-
-fn item_visibility(item: &Item) -> Option<&Visibility> {
-    match item {
-        Item::Const(item) => Some(&item.vis),
-        Item::Enum(item) => Some(&item.vis),
-        Item::ExternCrate(item) => Some(&item.vis),
-        Item::Fn(item) => Some(&item.vis),
-        Item::Mod(item) => Some(&item.vis),
-        Item::Static(item) => Some(&item.vis),
-        Item::Struct(item) => Some(&item.vis),
-        Item::Trait(item) => Some(&item.vis),
-        Item::TraitAlias(item) => Some(&item.vis),
-        Item::Type(item) => Some(&item.vis),
-        Item::Union(item) => Some(&item.vis),
-        Item::Use(item) => Some(&item.vis),
-        _ => None,
     }
 }
 
@@ -132,19 +78,83 @@ fn is_cfg_test(attributes: &[Attribute]) -> bool {
     })
 }
 
-fn top_level_declarations(source: &str) -> Vec<TopLevelDeclaration> {
-    syn::parse_file(source)
-        .expect("valid Rust module")
-        .items
-        .iter()
-        .filter_map(|item| {
-            Some(TopLevelDeclaration {
-                cfg_test: is_cfg_test(item_attributes(item)),
-                name: item_name(item)?,
-                visibility: classify_visibility(item_visibility(item)?),
-            })
-        })
-        .collect()
+fn declaration(
+    attributes: &[Attribute],
+    name: String,
+    visibility: &Visibility,
+) -> TopLevelDeclaration {
+    TopLevelDeclaration {
+        cfg_test: is_cfg_test(attributes),
+        name,
+        visibility: classify_visibility(visibility),
+    }
+}
+
+fn validate_foreign_items(items: &[ForeignItem]) -> Result<(), String> {
+    for item in items {
+        let visibility = match item {
+            ForeignItem::Fn(item) => &item.vis,
+            ForeignItem::Static(item) => &item.vis,
+            ForeignItem::Type(item) => &item.vis,
+            ForeignItem::Macro(_) | ForeignItem::Verbatim(_) => {
+                return Err("unsupported foreign item".to_owned());
+            }
+            _ => return Err("unsupported foreign item".to_owned()),
+        };
+        if !matches!(
+            classify_visibility(visibility),
+            ItemVisibility::Private | ItemVisibility::SelfOnly
+        ) {
+            return Err("parent-reaching foreign item".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn classify_top_level_item(item: &Item) -> Result<Option<TopLevelDeclaration>, String> {
+    let declared = match item {
+        Item::Const(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Enum(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::ExternCrate(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Fn(item) => declaration(&item.attrs, item.sig.ident.to_string(), &item.vis),
+        Item::Mod(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Static(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Struct(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Trait(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::TraitAlias(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Type(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Union(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Use(item) => declaration(&item.attrs, use_tree_name(&item.tree), &item.vis),
+        Item::ForeignMod(item) => {
+            validate_foreign_items(&item.items)?;
+            return Ok(None);
+        }
+        Item::Impl(_) => return Ok(None),
+        Item::Macro(item) => {
+            if item
+                .attrs
+                .iter()
+                .any(|attribute| attribute.path().is_ident("macro_export"))
+            {
+                return Err("macro_export reaches outside the module".to_owned());
+            }
+            return Ok(None);
+        }
+        Item::Verbatim(_) => return Err("unsupported top-level item".to_owned()),
+        _ => return Err("unsupported top-level item".to_owned()),
+    };
+    Ok(Some(declared))
+}
+
+fn top_level_declarations(source: &str) -> Result<Vec<TopLevelDeclaration>, String> {
+    let file = syn::parse_file(source).map_err(|error| error.to_string())?;
+    let mut declarations = Vec::new();
+    for item in &file.items {
+        if let Some(declaration) = classify_top_level_item(item)? {
+            declarations.push(declaration);
+        }
+    }
+    Ok(declarations)
 }
 
 #[test]
@@ -169,7 +179,7 @@ fn rust_ast_classifier_handles_visibility_and_cfg_syntax() {
         fn private_item() {}
     "#;
     assert_eq!(
-        top_level_declarations(fixture),
+        top_level_declarations(fixture).expect("supported fixture"),
         [
             TopLevelDeclaration {
                 cfg_test: false,
@@ -213,6 +223,21 @@ fn rust_ast_classifier_handles_visibility_and_cfg_syntax() {
             },
         ]
     );
+}
+
+#[test]
+fn rust_ast_classifier_rejects_public_foreign_item() {
+    assert!(top_level_declarations(r#"extern "C" { pub fn leaked(); }"#).is_err());
+}
+
+#[test]
+fn rust_ast_classifier_rejects_macro_export() {
+    assert!(top_level_declarations(r#"#[macro_export] macro_rules! leaked { () => {} }"#).is_err());
+}
+
+#[test]
+fn rust_ast_classifier_rejects_unsupported_item() {
+    assert!(classify_top_level_item(&Item::Verbatim(Default::default())).is_err());
 }
 
 #[test]
@@ -473,7 +498,7 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
         !UPGRADER.contains("use super::uninstall::*"),
         "父级 tests 不得通过 wildcard 旁路 Uninstall interface",
     );
-    let declarations = top_level_declarations(UNINSTALL);
+    let declarations = top_level_declarations(UNINSTALL).expect("supported uninstall module");
     let production_surface = declarations
         .iter()
         .filter(|declaration| {
@@ -498,6 +523,7 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
         "focused Uninstall implementation layer 只向父级暴露两个 adapter hook 与一个 Replacement seam",
     );
     let nested_parent_surface = top_level_declarations(UNINSTALL_CLEANUP)
+        .expect("supported cleanup module")
         .into_iter()
         .filter(|declaration| {
             !declaration.cfg_test && declaration.visibility == ItemVisibility::Wider
@@ -520,10 +546,9 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
         })
         .map(|declaration| (declaration.name.as_str(), declaration.visibility))
         .collect::<Vec<_>>();
-    assert_eq!(
-        test_surface,
-        [("run_uninstall_workflow_for_test", ItemVisibility::Parent)],
-        "父级 test interface 必须是显式 cfg(test) 的完整 workflow 或稳定行为 observation",
+    assert!(
+        test_surface.is_empty(),
+        "父级不得暴露任何 cfg(test) Uninstall interface：{test_surface:?}",
     );
     for declaration in declarations
         .iter()

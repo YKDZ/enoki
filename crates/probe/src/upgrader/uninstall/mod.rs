@@ -32,25 +32,6 @@ use cleanup::{
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(super) fn run_uninstall_workflow_for_test(
-    request: &LifecycleRequest,
-    input: &ProbeUninstallerRunInput,
-    metadata: &TrustedProbeInstallMetadata,
-    install_metadata_path: &Path,
-    transport: &mut impl ProbeUpgraderValidationTransport,
-    systemd: &mut impl ProbeUpgraderSystemdRunner,
-) -> LifecycleResponse {
-    lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
-        request,
-        input,
-        metadata,
-        install_metadata_path,
-        transport,
-        systemd,
-    ))
-}
-
 const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
 const MAX_UNINSTALL_CAPSULE_BYTES: u64 = 64 * 1024;
 
