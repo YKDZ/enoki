@@ -98,11 +98,7 @@ describe("Probe Upgrade current problem", () => {
 
   it.each([
     ["probe_repair", "探针修复失败：需要重新修复探针", true],
-    [
-      "manual_reinstall_required",
-      "探针修复失败：需要手动重新安装探针",
-      false,
-    ],
+    ["manual_reinstall_required", "探针修复失败：需要手动重新安装探针", false],
     [null, "探针修复失败：未知问题", false],
   ] as const)(
     "renders the fixed failed Repair presentation for %s",

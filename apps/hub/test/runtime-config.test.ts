@@ -1,8 +1,4 @@
-import {
-  mkdtempSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 

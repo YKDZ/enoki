@@ -2,9 +2,7 @@
   "version": "7",
   "dialect": "sqlite",
   "id": "7b6cbd2c-2b42-409f-ad5d-760aa75516e9",
-  "prevIds": [
-    "a4964c3c-9821-4b75-9f19-f0216def4813"
-  ],
+  "prevIds": ["a4964c3c-9821-4b75-9f19-f0216def4813"],
   "ddl": [
     {
       "name": "audit_log",
@@ -1715,13 +1713,9 @@
       "table": "snapshot_replay_requests"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1730,13 +1724,9 @@
       "table": "metric_samples"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1745,13 +1735,9 @@
       "table": "official_host_profiles"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1760,13 +1746,9 @@
       "table": "probe_configuration_host_overrides"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1775,13 +1757,9 @@
       "table": "probe_operations"
     },
     {
-      "columns": [
-        "probe_id"
-      ],
+      "columns": ["probe_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "probe_id"
-      ],
+      "columnsTo": ["probe_id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1790,13 +1768,9 @@
       "table": "probe_request_nonces"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1805,13 +1779,9 @@
       "table": "report_observations"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "tableTo": "managed_hosts",
-      "columnsTo": [
-        "id"
-      ],
+      "columnsTo": ["id"],
       "onUpdate": "NO ACTION",
       "onDelete": "CASCADE",
       "nameExplicit": false,
@@ -1820,108 +1790,84 @@
       "table": "snapshot_replay_requests"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "audit_log_pk",
       "table": "audit_log",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "enrollment_tokens_pk",
       "table": "enrollment_tokens",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "managed_hosts_pk",
       "table": "managed_hosts",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "metric_samples_pk",
       "table": "metric_samples",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "metrics_archive_runs_pk",
       "table": "metrics_archive_runs",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "official_host_profiles_pk",
       "table": "official_host_profiles",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "probe_configuration_global_defaults_pk",
       "table": "probe_configuration_global_defaults",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "managed_host_id"
-      ],
+      "columns": ["managed_host_id"],
       "nameExplicit": false,
       "name": "probe_configuration_host_overrides_pk",
       "table": "probe_configuration_host_overrides",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "probe_operations_pk",
       "table": "probe_operations",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "probe_request_nonces_pk",
       "table": "probe_request_nonces",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "report_observations_pk",
       "table": "report_observations",
       "entityType": "pks"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "snapshot_replay_requests_pk",
       "table": "snapshot_replay_requests",

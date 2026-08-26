@@ -121,7 +121,7 @@ export function renderInstallCommand(
 ): InstallCommandResult {
   const hubUrl = config.probeApiOrigin ?? "http://localhost";
   const enrollmentInput = input.replacementMigration
-      ? JSON.stringify({
+    ? JSON.stringify({
         hubOrigin: hubUrl,
         enrollmentToken: input.enrollmentToken,
         replacementMigration: input.replacementMigration,
