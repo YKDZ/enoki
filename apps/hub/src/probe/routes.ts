@@ -1,18 +1,12 @@
 import { Buffer } from "node:buffer";
-import {
-  createHash,
-  createPublicKey,
-  createVerify,
-  randomBytes,
-} from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import type { HostProfileSnapshot } from "@enoki/api-client/protocol";
 import type { HostDetailSample } from "@enoki/api-client/websocket";
 import { enoki } from "@enoki/proto/generated/ts/enoki_pb.js";
-import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
-import type { Context } from "hono";
 
+import type { ProbeOperationConfig } from "../config.js";
 import type { AuditRepository } from "../database/audit.js";
 import type { EnrollmentRepository } from "../database/enrollments.js";
 import {
@@ -34,15 +28,27 @@ import {
   maxEnrollmentRejectionMessageLength,
 } from "../enrollment/lifecycle.js";
 import { hashSecret } from "../enrollment/routes.js";
+import { broadcastHostSummaryHint } from "../hosts/live-summary.js";
+import { defaultProbeOperationTimeouts } from "../hosts/probe-upgrade-timeout.js";
 import {
   broadcastHostReadyHint,
   broadcastHostRemovedHint,
-  liveSummaryFromHost,
   type LiveUpdateBroadcaster,
 } from "../live-updates.js";
-import { deriveObservedIp, type TrustedProxyCidr } from "../network.js";
+import type { TrustedProxyCidr } from "../network.js";
 import { defaultProbeConfiguration } from "./configuration.js";
+import {
+  createForwardTransitions,
+  type AuthenticatedForwardEvidence,
+  type ForwardTransitions,
+} from "./forward-transitions.js";
 import { permitsLegacyFullHostProfileObservation } from "./legacy-report-compatibility.js";
+import {
+  canonicalLifecycleUpgradeAuthority,
+  deriveLifecycleAuthorityKey,
+  signLifecycleUpgradeAuthority,
+  type LifecycleUpgradeAuthority,
+} from "./lifecycle-authority.js";
 import {
   defaultProbeOperationTokenTtlMs,
   issueProbeOperationToken,
@@ -51,11 +57,27 @@ import {
 import {
   acknowledgeProbeUpgradeRequest,
   failReportedProbeUpgradeRequest,
+  hasUnavailableProbeUpgradeTarget,
+  isClosedProbeOperation,
   succeedReportedProbeOperation,
   startProbeUpgradeRequest,
-  succeedProbeUpgradeRequestFromHostProfile,
   type ProbeUpgradeRequest,
 } from "./operation.js";
+import {
+  validProbePublicKeyPem,
+  verifyProbeRequestSignature,
+} from "./probe-identity.js";
+import { resolveRegistrationAttempt } from "./registration-attempt.js";
+import { readProbeReleaseContextFromDirectory } from "./release-context.js";
+import { verifyProbeRepairEligibility } from "./repair-authority.js";
+import { type RepairAuthorizationBudget } from "./repair-authorization-budget.js";
+import { createProbeRepairAuthorizationRoutes } from "./repair-routes.js";
+import {
+  observedIpFromContext,
+  parseProbeOperationId,
+  probeJsonError,
+  readCappedRequestBody,
+} from "./route-http.js";
 
 const RegistrationRequest = enoki.v1.ProbeRegistrationRequest as any;
 const RegistrationResponse = enoki.v1.ProbeRegistrationResponse as any;
@@ -91,6 +113,8 @@ export type ProbeRouteServices = {
   metrics: MetricsRepository;
   probeConfigurations: ProbeConfigurationRepository;
   probeOperations?: ProbeOperationRepository;
+  forwardTransitions?: ForwardTransitions;
+  probeOperationTimeouts?: ProbeOperationConfig;
   reportTransaction: ProbeReportTransaction;
   snapshotCollectors?: SnapshotCollectorStorageRegistry;
   clockSkewThresholdMs?: number;
@@ -98,14 +122,22 @@ export type ProbeRouteServices = {
   liveUpdates?: LiveUpdateBroadcaster | null;
   now?: () => number;
   probeOperationTokenSecret?: string;
+  probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: Buffer | string;
   probeApiOrigin?: string;
+  repairAuthorizationBudget?: RepairAuthorizationBudget;
   trustedProxyCidrs?: TrustedProxyCidr[];
 };
 
 export function createProbeRoutes(services: ProbeRouteServices) {
   const routes = new Hono();
   const now = services.now ?? Date.now;
-
+  const forwardTransitions =
+    services.forwardTransitions ??
+    createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations!,
+    });
   routes.use("*", async (context, next) => {
     if (!isIdentityContentEncoding(context.req.raw.headers)) {
       return probeJsonError("payload_compression_not_supported", 415);
@@ -113,6 +145,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     return next();
   });
+  routes.route("/", createProbeRepairAuthorizationRoutes(services));
 
   routes.post("/register", async (context) => {
     if (
@@ -161,7 +194,41 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             targetKind:
               enrollment.targetKind === "new_host"
                 ? enoki.v1.ProbeEnrollmentTargetKind.NEW_HOST
-                : enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST,
+                : enrollment.targetKind === "existing_host"
+                  ? enoki.v1.ProbeEnrollmentTargetKind.EXISTING_HOST
+                  : enoki.v1.ProbeEnrollmentTargetKind.MANUAL_REINSTALL,
+            expectedHubOrigin:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.expectedHubOrigin
+                : "",
+            enrollmentId:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.enrollmentId
+                : "",
+            targetHostId:
+              enrollment.targetKind === "manual_reinstall"
+                ? String(enrollment.targetHostId)
+                : "",
+            expectedProbeId:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.expectedProbeId
+                : "",
+            sourceProbeVersion:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.sourceProbeVersion
+                : "",
+            sourceProbeSha256:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.sourceProbeSha256
+                : [],
+            targetAssetSetDigest:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.targetAssetSetDigest
+                : "",
+            targetProbeVersion:
+              enrollment.targetKind === "manual_reinstall"
+                ? enrollment.targetProbeVersion
+                : "",
           },
         }),
       ).finish();
@@ -198,6 +265,33 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return context.body(null, 204, { "cache-control": "no-store" });
     }
 
+    const tokenHash = hashSecret(request.enrollmentToken);
+    const registrationAttemptResolution = await resolveRegistrationAttempt({
+      enrollments: services.enrollments,
+      probeAssetDir: services.probeAssetDir,
+      probeDistributionRootPublicKeyPem:
+        services.probeDistributionRootPublicKeyPem,
+      request,
+      tokenHash,
+    });
+    if (registrationAttemptResolution.kind === "invalid") {
+      return probeJsonError("invalid_enrollment_token", 401);
+    }
+    if (registrationAttemptResolution.kind === "replay") {
+      return context.body(
+        toArrayBuffer(registrationAttemptResolution.outcome),
+        200,
+        {
+          "cache-control": "no-store",
+          "content-type": "application/x-protobuf",
+        },
+      );
+    }
+    const registrationAttempt =
+      registrationAttemptResolution.kind === "accepted"
+        ? registrationAttemptResolution.attempt
+        : null;
+
     if (!validProbePublicKeyPem(request.probePublicKeyPem)) {
       return probeJsonError("probe_public_key_required", 400);
     }
@@ -219,53 +313,73 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const hostProfile = hostProfileSnapshot?.hostProfile ?? null;
-    if (!hostProfileSnapshot || !hostProfile) {
-      return probeJsonError("malformed_probe_registration", 400);
-    }
 
     const registeredAtMs = now();
-    const probeId = createProbeId();
-    const probeSecretPlaceholder = createProbeSecret();
-    const hostProfileHash = hostProfileSnapshot.canonicalHash;
+    const hostProfileHash = hostProfileSnapshot?.canonicalHash ?? null;
     const observedIp = observedIpFromContext(
       context,
       services.trustedProxyCidrs,
     );
-    const displayName =
-      hostProfile.hostname?.trim() || fallbackDisplayName(probeId);
     const registration = services.enrollments.registerNewHost({
-      host: {
-        architecture: hostProfile.architecture || null,
-        clockSkewDetected: false,
-        connectAddress:
-          firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
-        createdAtMs: registeredAtMs,
-        cpuCount: hostProfile.cpuCount || null,
-        cpuModel: hostProfile.cpuModel?.trim() || null,
-        displayName,
-        displayNameEdited: false,
-        hostname: hostProfile.hostname || null,
-        kernel: hostProfile.kernel || null,
-        lastClockSkewMs: null,
-        lastReportAtMs: null,
-        memoryTotalBytes: hostProfile.memoryTotalBytes
-          ? Number(hostProfile.memoryTotalBytes)
-          : null,
-        observedIp,
-        probePublicKeyPem: request.probePublicKeyPem,
-        os: hostProfile.os || null,
-        probeConfigurationVersion: defaultProbeConfiguration.version,
-        probeId,
-        probeSecretHash: hashSecret(probeSecretPlaceholder),
-        probeVersion: hostProfile.probeVersion || null,
+      host: () => {
+        const probeId = createProbeId();
+        const probeSecretPlaceholder = createProbeSecret();
+        return {
+          architecture: hostProfile?.architecture || null,
+          clockSkewDetected: false,
+          connectAddress:
+            firstHostProfileAddress(hostProfile) ?? observedIp ?? "",
+          createdAtMs: registeredAtMs,
+          cpuCount: hostProfile?.cpuCount || null,
+          cpuModel: hostProfile?.cpuModel?.trim() || null,
+          displayName:
+            hostProfile?.hostname?.trim() || fallbackDisplayName(probeId),
+          displayNameEdited: false,
+          hostname: hostProfile?.hostname || null,
+          kernel: hostProfile?.kernel || null,
+          lastClockSkewMs: null,
+          lastReportAtMs: null,
+          memoryTotalBytes: hostProfile?.memoryTotalBytes
+            ? Number(hostProfile.memoryTotalBytes)
+            : null,
+          observedIp,
+          probePublicKeyPem: request.probePublicKeyPem,
+          os: hostProfile?.os || null,
+          probeConfigurationVersion: defaultProbeConfiguration.version,
+          probeId,
+          probeSecretHash: hashSecret(probeSecretPlaceholder),
+          probeVersion: hostProfile?.probeVersion || null,
+        };
       },
-      hostProfile: hostProfilePersistenceValues({
-        payload: hostProfile,
-        snapshotHash: hostProfileHash,
-        updatedAtMs: registeredAtMs,
-      }),
+      hostProfile:
+        hostProfile && hostProfileHash
+          ? hostProfilePersistenceValues({
+              payload: hostProfile,
+              snapshotHash: hostProfileHash,
+              updatedAtMs: registeredAtMs,
+            })
+          : null,
       registeredAtMs,
-      tokenHash: hashSecret(request.enrollmentToken),
+      ...(registrationAttempt
+        ? {
+            registrationAttempt: {
+              ...registrationAttempt,
+              outcome: (host: { id: number; probeId: string }) =>
+                Buffer.from(
+                  RegistrationResponse.encode(
+                    RegistrationResponse.create({
+                      initialConfiguration: defaultProbeConfiguration,
+                      enrollmentId: registrationAttempt.enrollmentId,
+                      hostId: String(host.id),
+                      probeId: host.probeId,
+                      serverTimeMs: registeredAtMs,
+                    }),
+                  ).finish(),
+                ),
+            },
+          }
+        : {}),
+      tokenHash,
       verificationDeadlineAtMs: registeredAtMs + enrollmentVerificationTtlMs,
     });
 
@@ -273,14 +387,17 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("invalid_enrollment_token", 401);
     }
 
-    const body = RegistrationResponse.encode(
-      RegistrationResponse.create({
-        initialConfiguration: defaultProbeConfiguration,
-        enrollmentId: registration.enrollment.enrollmentId,
-        probeId,
-        serverTimeMs: registeredAtMs,
-      }),
-    ).finish();
+    const body =
+      registration.registrationOutcome ??
+      RegistrationResponse.encode(
+        RegistrationResponse.create({
+          initialConfiguration: defaultProbeConfiguration,
+          enrollmentId: registration.enrollment.enrollmentId,
+          hostId: String(registration.enrollment.hostId),
+          probeId: registration.host.probeId,
+          serverTimeMs: registeredAtMs,
+        }),
+      ).finish();
 
     return context.body(toArrayBuffer(body), 200, {
       "cache-control": "no-store",
@@ -334,6 +451,9 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     if (!snapshotPayloadBranchesMatchCollectorIds(request)) {
       return probeJsonError("malformed_probe_report", 400);
     }
+    if (!hostProfileOutcomeWindowIsCoherent(request)) {
+      return probeJsonError("malformed_probe_report", 400);
+    }
 
     const hostProfileSnapshot = hostProfileSnapshotFromReport(request);
 
@@ -355,19 +475,31 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     }
 
     const reportReceivedAtMs = now();
-    const prevalidatedOperations = planProbeOperationReportApplication({
-      acknowledgements: request.operationAcknowledgements ?? [],
-      hostId: host.id,
-      nowMs: reportReceivedAtMs,
-      services,
-      statuses: request.operationStatuses ?? [],
-    });
-    if (prevalidatedOperations.error) {
-      return probeJsonError(prevalidatedOperations.error, 400);
-    }
-
     const ingestReport = (reportServices: ProbeRouteServices) => {
       const services = reportServices;
+      const transactionalHost = services.hosts.findActiveById(host.id);
+      if (!transactionalHost) {
+        throw new ReportBusinessRejection("probe_identity_required", 400);
+      }
+      const bootBundleVersion =
+        reportResponsibility === "startup"
+          ? nonemptyString(request.probeAssetBundleVersion)
+          : null;
+      const reportedBundleVersion = nonemptyString(
+        hostProfileSnapshot?.hostProfile?.probeAssetBundleVersion,
+      );
+      const storedBootBundleVersion = nonemptyString(
+        transactionalHost.probeAssetBundleVersion,
+      );
+      const currentBootBundleVersion =
+        bootBundleVersion ?? storedBootBundleVersion;
+      if (
+        hostProfileSnapshot?.hostProfile &&
+        currentBootBundleVersion &&
+        reportedBundleVersion !== currentBootBundleVersion
+      ) {
+        throw new ReportBusinessRejection("probe_asset_bundle_incoherent", 409);
+      }
       let snapshotReplayToFulfill: SnapshotReplayRequestKey | null = null;
       let snapshotReplayWireShape: SnapshotReplayReceiptWireShape | null = null;
       const replaySequenceAlreadyAccepted = services.metrics.hasObservation({
@@ -412,11 +544,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             collectorId: hostProfileCollectorId,
             hostId: host.id,
           }) ?? false;
-        // v0.1.72 advances to the next sequence when following a compact
-        // Host Profile request. Only a still-pending request can authorize
-        // that initial +1 full snapshot; after fulfillment its exact retry is
-        // matched against the durable receipt below, never inferred from a
-        // predecessor request and a successor Observation.
         const pendingLegacyReplayRequest =
           services.snapshotCollectors?.pendingLegacySnapshotReplayRequest(
             replayRequest,
@@ -439,75 +566,106 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           if (!permitsLegacyFullObservation) {
             throw new ReportBusinessRejection("malformed_probe_report", 400);
           }
+        } else if (
+          replaySequenceAlreadyAccepted &&
+          hasCurrentReplayOnlyContents &&
+          replayRequestStatus === "pending"
+        ) {
+          snapshotReplayToFulfill = replayRequest;
+          snapshotReplayWireShape = "current_sequence";
+          isSnapshotReplay = true;
+        } else if (
+          replaySequenceAlreadyAccepted &&
+          hasCurrentReplayOnlyContents &&
+          replayReceipt?.wireShape === "current_sequence" &&
+          replayReceipt.acceptedSnapshotHash === snapshotHash &&
+          replayReceipt.key.sequence === replayRequest.sequence
+        ) {
+          isSnapshotReplay = true;
+        } else if (
+          replaySequenceAlreadyAccepted &&
+          hasNoMetrics &&
+          replayReceipt?.wireShape === "legacy_successor" &&
+          replayReceipt.acceptedSnapshotHash === snapshotHash &&
+          replayReceipt.key.sequence + 1 === replayRequest.sequence &&
+          permitsLegacyFullObservation
+        ) {
+          isSnapshotReplay = true;
+        } else if (
+          !replaySequenceAlreadyAccepted &&
+          hasNoMetrics &&
+          pendingLegacyReplayRequest &&
+          permitsLegacyFullObservation
+        ) {
+          snapshotReplayToFulfill = pendingLegacyReplayRequest;
+          snapshotReplayWireShape = "legacy_successor";
+          isSnapshotReplay = true;
+        } else if (
+          permitsLegacyFullObservation &&
+          bootStartAlreadyAccepted &&
+          replayRequestStatus === null &&
+          !hasPendingSnapshotReplayRequest &&
+          !pendingLegacyReplayRequest &&
+          !replayReceipt
+        ) {
+          // v0.1.72 emitted ordinary full Host Profile Observations after its
+          // boot began. The exact allowlist admits them only when no replay
+          // receipt or pending request can classify the payload as a replay.
         } else {
-          if (
-            replaySequenceAlreadyAccepted &&
-            hasCurrentReplayOnlyContents &&
-            replayRequestStatus === "pending"
-          ) {
-            // The current-Probe replay uses the already accepted sequence;
-            // this pending request is fulfilled by its full snapshot.
-            snapshotReplayToFulfill = replayRequest;
-            snapshotReplayWireShape = "current_sequence";
-            isSnapshotReplay = true;
-          } else if (
-            replaySequenceAlreadyAccepted &&
-            hasCurrentReplayOnlyContents &&
-            replayReceipt?.wireShape === "current_sequence" &&
-            replayReceipt.acceptedSnapshotHash === snapshotHash &&
-            replayReceipt.key.sequence === replayRequest.sequence
-          ) {
-            // Exact current-Probe replay retry. Its receipt already exists.
-            isSnapshotReplay = true;
-          } else if (
-            replaySequenceAlreadyAccepted &&
-            hasNoMetrics &&
-            replayReceipt?.wireShape === "legacy_successor" &&
-            replayReceipt.acceptedSnapshotHash === snapshotHash &&
-            replayReceipt.key.sequence + 1 === replayRequest.sequence &&
-            permitsLegacyFullObservation
-          ) {
-            // Idempotent retry of the v0.1.72 successor-sequence follow-up.
-            isSnapshotReplay = true;
-          } else if (
-            !replaySequenceAlreadyAccepted &&
-            hasNoMetrics &&
-            pendingLegacyReplayRequest &&
-            permitsLegacyFullObservation
-          ) {
-            snapshotReplayToFulfill = pendingLegacyReplayRequest;
-            snapshotReplayWireShape = "legacy_successor";
-            isSnapshotReplay = true;
-          } else if (
-            permitsLegacyFullObservation &&
-            bootStartAlreadyAccepted &&
-            replayRequestStatus === null &&
-            !hasPendingSnapshotReplayRequest &&
-            !pendingLegacyReplayRequest &&
-            !replayReceipt
-          ) {
-            // v0.1.72 also emitted ordinary full Host Profile Observations
-            // after its boot had started. No pending or matching replay state
-            // means this is a new time slice, not a replay inferred from its
-            // payload shape.
-          } else {
-            throw new ReportBusinessRejection("malformed_probe_report", 400);
-          }
+          throw new ReportBusinessRejection("malformed_probe_report", 400);
         }
+      }
+      const reportedEnrollmentId = nonemptyString(request.enrollmentId);
+      const reportedEnrollment = reportedEnrollmentId
+        ? services.enrollments.readStatus(
+            reportedEnrollmentId,
+            reportReceivedAtMs,
+          )
+        : null;
+      if (
+        reportedEnrollmentId &&
+        (!reportedEnrollment || reportedEnrollment.hostId !== host.id)
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
+      }
+      if (
+        hasProducedHostProfile(request) &&
+        !hostProfileSnapshot?.hostProfile &&
+        reportedEnrollment?.targetKind === "manual_reinstall" &&
+        reportedEnrollment.status === "verifying"
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
       }
       const startupEnrollment =
         !isSnapshotReplay &&
-        isProbeStartupReport({
+        (isProbeStartupReport({
           report: validatedReport,
           reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
           request,
-        })
+        }) ||
+          (hasProducedHostProfile(request) &&
+            Boolean(hostProfileSnapshot?.hostProfile)))
           ? services.enrollments.resolveStartupReport({
-              enrollmentId: nonemptyString(request.enrollmentId),
+              enrollmentId: null,
               hostId: host.id,
+              probeAssetBundleVersion: reportedBundleVersion,
+              probeVersion: nonemptyString(
+                hostProfileSnapshot?.hostProfile?.probeVersion,
+              ),
+              producedCurrentHostProfile:
+                hasProducedHostProfile(request) &&
+                Boolean(hostProfileSnapshot?.hostProfile),
               reportedAtMs: reportReceivedAtMs,
             })
           : null;
+
+      if (
+        reportedEnrollmentId &&
+        startupEnrollment &&
+        startupEnrollment.enrollment.enrollmentId !== reportedEnrollmentId
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
+      }
 
       if (startupEnrollment?.status === "rejected") {
         // Commit the Enrollment's terminal timeout by itself, then reject the
@@ -527,10 +685,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
         };
       }
 
+      if (
+        hasProducedHostProfile(request) &&
+        !hostProfileSnapshot?.hostProfile &&
+        startupEnrollment?.status === "verifying"
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
+      }
+
       const operationPlan = planProbeOperationReportApplication({
         acknowledgements: request.operationAcknowledgements ?? [],
         hostId: host.id,
         nowMs: reportReceivedAtMs,
+        probeId: host.probeId,
         services,
         statuses: request.operationStatuses ?? [],
       });
@@ -552,6 +719,18 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       const reportedHostProfileHash =
         hostProfileSnapshot?.canonicalHash ?? null;
       const reportedSnapshotHash = hostProfileSnapshot?.snapshotHash ?? null;
+      const latestForwardOperation =
+        services.probeOperations?.findLatestForHost(host.id) ?? null;
+      const hostProfileForwardEvidence =
+        latestForwardOperation?.kind === "probe_upgrade" &&
+        latestForwardOperation.state === "failed" &&
+        latestForwardOperation.id !== null
+          ? {
+              operationId: latestForwardOperation.id,
+              reportBootId: request.bootId,
+              reportProbeId: request.probeId,
+            }
+          : null;
       const knownHostProfileSnapshot =
         services.snapshotCollectors
           ?.get(hostProfileCollectorId)
@@ -623,21 +802,12 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             }
           : null,
         probeVersion: reportedHostProfile?.probeVersion || undefined,
+        probeAssetBundleVersion: bootBundleVersion ?? undefined,
+        probeAssetBundleBootId: bootBundleVersion ? request.bootId : undefined,
+        probeAssetBundleProbeId: bootBundleVersion
+          ? request.probeId
+          : undefined,
       });
-      let hostProfileUpdate: HostProfileSnapshot | null = null;
-      if (reportedHostProfile && reportedHostProfileHash) {
-        const result = services.snapshotCollectors?.write({
-          collectorId: hostProfileCollectorId,
-          hostId: host.id,
-          observedIp,
-          payload: reportedHostProfile,
-          snapshotHash: reportedHostProfileHash,
-          updatedAtMs: reportReceivedAtMs,
-        });
-        if (result?.changed) {
-          hostProfileUpdate = result.view;
-        }
-      }
       if (
         snapshotReplayToFulfill &&
         (!snapshotReplayWireShape ||
@@ -652,28 +822,16 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       ) {
         throw new ReportBusinessRejection("malformed_probe_report", 400);
       }
-      const storedReportedHostProfile =
-        !reportedHostProfile &&
-        hostProfileSnapshot &&
-        services.snapshotCollectors?.hostProfile.hasSnapshot(
-          host.id,
-          reportedSnapshotHash,
-        )
-          ? services.snapshotCollectors.hostProfile.read(host.id)
-          : null;
-      markProbeUpgradeSucceededFromHostProfile({
-        hostId: host.id,
-        hostProfile: reportedHostProfile ?? storedReportedHostProfile,
-        nowMs: reportReceivedAtMs,
-        services,
-      });
-
       const samplesBySequence = new Map<number, ProtoMessage>(
         ((request.metrics ?? []) as ProtoMessage[]).map((sample) => [
           unsignedNumber(sample.sequence),
           sample,
         ]),
       );
+      const observationWindowFailureReason =
+        validatedReport.observationWindowFailureReason;
+      const cpuResourceCollectionOutcomeReasons =
+        validatedReport.cpuResourceCollectionOutcomeReasons;
       const detailSamples: HostDetailSample[] = [];
 
       for (
@@ -687,7 +845,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           const inserted = services.metrics.recordObservationSample({
             observation: {
               bootId: request.bootId,
+              cpuResourceCollectionOutcomeReason:
+                cpuResourceCollectionOutcomeReasons.get(sequence) ?? null,
               hostId: host.id,
+              observationWindowFailureReason,
               probeId: host.probeId,
               receivedAtMs: reportReceivedAtMs,
               sequence,
@@ -695,6 +856,7 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             sample: {
               bootId: request.bootId,
               collectedAtMs: signedNumber(sample.collectedAtMs),
+              collectorOutcomes: validatedCollectorOutcomes(sample),
               cpuCores: ((sample.cpuCores ?? []) as ProtoMessage[]).map(
                 (core) => ({
                   idle: unsignedNumber(core.idle),
@@ -811,7 +973,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           services.metrics.recordObservationSample({
             observation: {
               bootId: request.bootId,
+              cpuResourceCollectionOutcomeReason:
+                cpuResourceCollectionOutcomeReasons.get(sequence) ?? null,
               hostId: host.id,
+              observationWindowFailureReason,
               probeId: host.probeId,
               receivedAtMs: reportReceivedAtMs,
               sequence,
@@ -819,6 +984,60 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           });
         }
       }
+
+      const hostProfileObservedAtMs = services.metrics.observationReceivedAtMs({
+        bootId: request.bootId,
+        probeId: host.probeId,
+        sequence: validatedReport.sequenceEnd,
+      });
+      let hostProfileUpdate: HostProfileSnapshot | null = null;
+      if (
+        hostProfileObservedAtMs !== null &&
+        reportedHostProfile &&
+        reportedHostProfileHash
+      ) {
+        const result = services.snapshotCollectors?.write({
+          collectorId: hostProfileCollectorId,
+          forwardEvidence: hostProfileForwardEvidence,
+          hostId: host.id,
+          observedIp,
+          payload: reportedHostProfile,
+          profileProbeAssetBundleVersion: reportedBundleVersion,
+          snapshotHash: reportedHostProfileHash,
+          updatedAtMs: hostProfileObservedAtMs,
+        });
+        if (result?.changed) {
+          hostProfileUpdate = result.view;
+        }
+      } else if (
+        hostProfileObservedAtMs !== null &&
+        knownHostProfileSnapshot &&
+        reportedSnapshotHash
+      ) {
+        services.snapshotCollectors?.hostProfile.observe({
+          forwardEvidence: hostProfileForwardEvidence,
+          hostId: host.id,
+          observedAtMs: hostProfileObservedAtMs,
+          snapshotHash: reportedSnapshotHash,
+        });
+      }
+      markProbeUpgradeSucceededFromHostProfile({
+        authenticatedProbeId: request.probeId,
+        bootEvidenceBootId:
+          bootBundleVersion !== null
+            ? request.bootId
+            : transactionalHost.probeAssetBundleBootId,
+        bootEvidenceProbeId:
+          bootBundleVersion !== null
+            ? request.probeId
+            : transactionalHost.probeAssetBundleProbeId,
+        bootProbeAssetBundleVersion: currentBootBundleVersion,
+        hostId: host.id,
+        hostProfile: reportedHostProfile,
+        nowMs: reportReceivedAtMs,
+        profileReportBootId: request.bootId,
+        services,
+      });
 
       const readyEnrollment =
         startupEnrollment?.status === "ready"
@@ -872,7 +1091,13 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       );
     }
 
-    broadcastHostSummary(services, host.id, ingested.reportReceivedAtMs);
+    broadcastHostSummaryHint(services, {
+      hostId: host.id,
+      nowMs: ingested.reportReceivedAtMs,
+      timeouts:
+        services.probeOperationTimeouts ?? defaultProbeOperationTimeouts,
+      userAgent: context.req.raw.headers.get("user-agent") ?? undefined,
+    });
     if (ingested.hostProfileUpdate) {
       services.liveUpdates?.broadcastHostProfile(
         host.id,
@@ -944,12 +1169,19 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest ?? "",
       targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
 
     if (result.error) {
       return probeJsonError(result.error, 403);
+    }
+
+    if (operation.kind === "probe_upgrade") {
+      return context.json({ valid: true }, 200, {
+        "cache-control": "no-store",
+      });
     }
 
     const acknowledged = acknowledgeProbeUpgradeRequest({
@@ -970,6 +1202,117 @@ export function createProbeRoutes(services: ProbeRouteServices) {
     });
   });
 
+  routes.post(
+    "/operations/:operationId/upgrade-stage/admit",
+    async (context) => {
+      const requestBody = await readCappedRequestBody(
+        context.req.raw,
+        maxProbeOperationPayloadBytes,
+      );
+      if (!requestBody) return probeJsonError("probe_report_too_large", 413);
+      const host = authenticateProbe(
+        services.hosts,
+        context.req.raw,
+        requestBody,
+        services.probeApiOrigin,
+      );
+      if (!host) return probeJsonError("probe_identity_required", 401);
+      const operationId = parseProbeOperationId(
+        context.req.param("operationId"),
+      );
+      const body = readUpgradeStageAdmissionBody(requestBody);
+      const operation =
+        operationId === null
+          ? null
+          : (services.probeOperations?.findById(operationId) ?? null);
+      if (!operation || operation.hostId !== host.id) {
+        return probeJsonError("probe_operation_not_found", 404);
+      }
+      if (!body || operation.kind !== "probe_upgrade") {
+        return probeJsonError("malformed_probe_upgrade_stage_admission", 400);
+      }
+      const operationNowMs = now();
+      const token = validateProbeOperationToken({
+        nowMs: operationNowMs,
+        operation,
+        probeId: host.probeId,
+        secret: probeOperationTokenSecret(services),
+        targetAssetSetDigest: body.targetAssetSetDigest,
+        targetProbeVersion: body.targetBundleVersion,
+        token: body.token,
+      });
+      if (token.error) return probeJsonError(token.error, 403);
+      if (
+        !services.probeAssetDir ||
+        !services.probeDistributionRootPublicKeyPem
+      ) {
+        return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      }
+      const release = await readProbeReleaseContextFromDirectory({
+        assetDir: services.probeAssetDir,
+        trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+      });
+      const transition = release.releaseTransition;
+      if (
+        transition?.classification !== "compatible" ||
+        transition.sourceProbeVersion !== body.sourceBundleVersion ||
+        transition.targetProbeVersion !== body.targetBundleVersion ||
+        transition.targetAssetSetDigest !== body.targetAssetSetDigest ||
+        !transition.targetBundles?.some(
+          (bundle) => bundle.bundleManifestSha256 === body.targetManifestSha256,
+        )
+      ) {
+        return probeJsonError("probe_upgrade_authority_rejected", 409);
+      }
+      const authority: LifecycleUpgradeAuthority = {
+        schemaVersion: 1,
+        hubOrigin: services.probeApiOrigin ?? "",
+        hostId: String(host.id),
+        probeId: host.probeId,
+        operationId: String(operation.id),
+        sourceBundleVersion: body.sourceBundleVersion,
+        sourceInstallStateSha256: body.sourceInstallStateSha256,
+        sourceManifestSha256: body.sourceManifestSha256,
+        targetBundleVersion: body.targetBundleVersion,
+        targetAssetSetDigest: body.targetAssetSetDigest,
+        targetManifestSha256: body.targetManifestSha256,
+        verifiedStageSha256: body.verifiedStageSha256,
+        expiresAtMs: operationNowMs + defaultProbeOperationTokenTtlMs,
+      };
+      const tokenHash = services.enrollments.lifecycleAuthorityTokenHashForHost(
+        host.id,
+      );
+      const hubOrigin = services.probeApiOrigin ?? "";
+      if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+        return probeJsonError("probe_upgrade_authority_unavailable", 503);
+      }
+      const key = deriveLifecycleAuthorityKey(
+        Buffer.from(tokenHash, "hex"),
+        hubOrigin,
+      );
+      const canonicalAuthority = canonicalLifecycleUpgradeAuthority(authority);
+      const admitted =
+        services.probeOperations?.admitPendingProbeUpgradeRequest(
+          operationId!,
+          operationNowMs,
+          body.targetManifestSha256,
+          createHash("sha256").update(canonicalAuthority).digest("hex"),
+          body.verifiedStageSha256,
+        );
+      if (!admitted) {
+        return probeJsonError("probe_operation_status_invalid", 409);
+      }
+      return context.json(
+        {
+          authority,
+          signature: signLifecycleUpgradeAuthority(canonicalAuthority, key),
+        },
+        200,
+        { "cache-control": "no-store" },
+      );
+    },
+  );
+
   routes.post("/operations/:operationId/status", async (context) => {
     const requestBody = await readCappedRequestBody(
       context.req.raw,
@@ -978,17 +1321,6 @@ export function createProbeRoutes(services: ProbeRouteServices) {
 
     if (!requestBody) {
       return probeJsonError("probe_report_too_large", 413);
-    }
-
-    const host = authenticateProbe(
-      services.hosts,
-      context.req.raw,
-      requestBody,
-      services.probeApiOrigin,
-    );
-
-    if (!host) {
-      return probeJsonError("probe_identity_required", 401);
     }
 
     const operationId = parseProbeOperationId(context.req.param("operationId"));
@@ -1001,20 +1333,38 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError("probe_operation_not_found", 404);
     }
 
-    if (operation.hostId !== host.id) {
-      return probeJsonError("probe_operation_token_probe_mismatch", 403);
-    }
-
     const body = readOperationStatusBody(requestBody);
     if (!body) {
       return probeJsonError("malformed_probe_operation_status", 400);
     }
 
+    const allowDeletedTerminalUninstall =
+      operation.kind === "probe_uninstall" &&
+      operation.state === "succeeded" &&
+      body.status === "succeeded";
+    const host = authenticateProbeOperationStatus(
+      services.hosts,
+      context.req.raw,
+      requestBody,
+      services.probeApiOrigin,
+      allowDeletedTerminalUninstall,
+    );
+
+    if (!host) {
+      return probeJsonError("probe_identity_required", 401);
+    }
+
+    if (operation.hostId !== host.id) {
+      return probeJsonError("probe_operation_token_probe_mismatch", 403);
+    }
+
     const tokenResult = validateProbeOperationToken({
+      allowSucceededUninstallReplay: allowDeletedTerminalUninstall,
       nowMs: now(),
       operation,
       probeId: host.probeId,
       secret: probeOperationTokenSecret(services),
+      targetAssetSetDigest: body.targetAssetSetDigest ?? "",
       targetProbeVersion: body.targetProbeVersion ?? "",
       token: body.token,
     });
@@ -1023,12 +1373,30 @@ export function createProbeRoutes(services: ProbeRouteServices) {
       return probeJsonError(tokenResult.error, 403);
     }
 
+    if (operation.kind !== "probe_uninstall" && body.status === "failed") {
+      const reconciled = forwardTransitions.reconcileAuthenticatedEvidence({
+        evidence: [
+          {
+            code: body.errorCode ?? "probe_operation_failed",
+            hostId: host.id,
+            kind: "operation_failed",
+            message: body.message ?? "",
+            observedAtMs: now(),
+            operationId,
+          },
+        ],
+      });
+      if (reconciled.kind === "refused") {
+        return probeJsonError("malformed_probe_operation_status", 400);
+      }
+      return context.json({ accepted: true }, 200, {
+        "cache-control": "no-store",
+      });
+    }
+
     const statusResult =
       body.status === "succeeded"
-        ? succeedReportedProbeOperation({
-            nowMs: now(),
-            operation,
-          })
+        ? succeedReportedProbeOperation({ nowMs: now(), operation })
         : failReportedProbeUpgradeRequest({
             code: body.errorCode ?? "probe_operation_failed",
             message: body.message ?? "",
@@ -1175,6 +1543,29 @@ function isProbeStartupReport(input: {
   );
 }
 
+function isStartupReportShape(
+  report: { sequenceEnd: number; sequenceStart: number },
+  request: ProtoMessage,
+) {
+  return (
+    report.sequenceStart === 1 &&
+    report.sequenceEnd === 1 &&
+    (request.metrics ?? []).length === 0 &&
+    !request.observationWindowFailure
+  );
+}
+
+function hasProducedHostProfile(request: ProtoMessage) {
+  return ((request.metrics ?? []) as ProtoMessage[]).some((sample) =>
+    ((sample.collectorOutcomes ?? []) as ProtoMessage[]).some(
+      (outcome) =>
+        outcome.collectorId === hostProfileCollectorId &&
+        Number(outcome.state) === 1 &&
+        !outcome.failure,
+    ),
+  );
+}
+
 function nonemptyString(value: unknown) {
   return typeof value === "string" && value.trim() ? value : null;
 }
@@ -1188,6 +1579,9 @@ function pendingProbeOperationForHost(
   const operation = services.probeOperations?.findActiveForHost(hostId);
 
   if (!operation || operation.state !== "pending") {
+    return null;
+  }
+  if (operation.kind === "probe_upgrade" && !operation.targetAssetSetDigest) {
     return null;
   }
 
@@ -1224,12 +1618,15 @@ function probeUpgradeOperationMessage(
     id: String(operation.id),
     probeUpgrade: {
       currentProbeVersion: operation.currentProbeVersion ?? "",
+      hostId: String(operation.hostId),
       operationToken: issueProbeOperationToken({
         expiresAtMs: tokenInput.expiresAtMs,
         operation,
         probeId: tokenInput.probeId,
         secret: tokenInput.secret,
       }),
+      targetAssetSetDigest: operation.targetAssetSetDigest ?? "",
+      targetManifestSha256: "",
       targetProbeVersion: operation.targetProbeVersion,
     },
   };
@@ -1242,6 +1639,7 @@ function probeOperationTokenSecret(services: ProbeRouteServices) {
 function readTokenValidationBody(requestBody: Uint8Array) {
   try {
     const body = JSON.parse(new TextDecoder().decode(requestBody)) as {
+      targetAssetSetDigest?: unknown;
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -1249,6 +1647,8 @@ function readTokenValidationBody(requestBody: Uint8Array) {
     if (
       typeof body.token !== "string" ||
       body.token.length === 0 ||
+      (Object.hasOwn(body, "targetAssetSetDigest") &&
+        typeof body.targetAssetSetDigest !== "string") ||
       (Object.hasOwn(body, "targetProbeVersion") &&
         typeof body.targetProbeVersion !== "string")
     ) {
@@ -1256,11 +1656,64 @@ function readTokenValidationBody(requestBody: Uint8Array) {
     }
 
     return {
+      targetAssetSetDigest:
+        typeof body.targetAssetSetDigest === "string"
+          ? body.targetAssetSetDigest
+          : undefined,
       targetProbeVersion:
         typeof body.targetProbeVersion === "string"
           ? body.targetProbeVersion
           : undefined,
       token: body.token,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readUpgradeStageAdmissionBody(requestBody: Uint8Array) {
+  try {
+    const body = JSON.parse(new TextDecoder().decode(requestBody)) as Record<
+      string,
+      unknown
+    >;
+    const keys = [
+      "sourceBundleVersion",
+      "sourceInstallStateSha256",
+      "sourceManifestSha256",
+      "targetAssetSetDigest",
+      "targetBundleVersion",
+      "targetManifestSha256",
+      "token",
+      "verifiedStageSha256",
+    ];
+    if (
+      Object.keys(body).sort().join("\0") !== keys.sort().join("\0") ||
+      keys.some((key) => typeof body[key] !== "string") ||
+      !/^[0-9a-f]{64}$/.test(String(body.sourceInstallStateSha256)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.sourceManifestSha256)) ||
+      !/^sha256:[0-9a-f]{64}$/.test(String(body.targetAssetSetDigest)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.targetManifestSha256)) ||
+      !/^[0-9a-f]{64}$/.test(String(body.verifiedStageSha256)) ||
+      !/^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/.test(
+        String(body.sourceBundleVersion),
+      ) ||
+      !/^(?:0|[1-9]\d*)[.](?:0|[1-9]\d*)[.](?:0|[1-9]\d*)$/.test(
+        String(body.targetBundleVersion),
+      ) ||
+      !(body.token as string).length
+    ) {
+      return null;
+    }
+    return body as {
+      sourceBundleVersion: string;
+      sourceInstallStateSha256: string;
+      sourceManifestSha256: string;
+      targetAssetSetDigest: string;
+      targetBundleVersion: string;
+      targetManifestSha256: string;
+      token: string;
+      verifiedStageSha256: string;
     };
   } catch {
     return null;
@@ -1273,6 +1726,7 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       errorCode?: unknown;
       message?: unknown;
       status?: unknown;
+      targetAssetSetDigest?: unknown;
       targetProbeVersion?: unknown;
       token?: unknown;
     };
@@ -1281,6 +1735,8 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       typeof body.token !== "string" ||
       body.token.length === 0 ||
       (body.status !== "succeeded" && body.status !== "failed") ||
+      (Object.hasOwn(body, "targetAssetSetDigest") &&
+        typeof body.targetAssetSetDigest !== "string") ||
       (Object.hasOwn(body, "targetProbeVersion") &&
         typeof body.targetProbeVersion !== "string") ||
       (Object.hasOwn(body, "errorCode") &&
@@ -1294,6 +1750,10 @@ function readOperationStatusBody(requestBody: Uint8Array) {
       errorCode: typeof body.errorCode === "string" ? body.errorCode : null,
       message: typeof body.message === "string" ? body.message : null,
       status: body.status,
+      targetAssetSetDigest:
+        typeof body.targetAssetSetDigest === "string"
+          ? body.targetAssetSetDigest
+          : undefined,
       targetProbeVersion:
         typeof body.targetProbeVersion === "string"
           ? body.targetProbeVersion
@@ -1333,6 +1793,7 @@ function planProbeOperationReportApplication(input: {
   acknowledgements: ProtoMessage[];
   hostId: number;
   nowMs: number;
+  probeId: string;
   services: ProbeRouteServices;
   statuses: ProtoMessage[];
 }):
@@ -1353,6 +1814,7 @@ function planProbeOperationReportApplication(input: {
 
   const stagedOperations = new Map<number, ProbeUpgradeRequest>();
   const operationsToUpdate = new Map<number, ProbeUpgradeRequest>();
+  const forwardEvidence: AuthenticatedForwardEvidence[] = [];
 
   for (const acknowledgement of input.acknowledgements) {
     const operation = findReportableProbeOperation(
@@ -1370,6 +1832,16 @@ function planProbeOperationReportApplication(input: {
     }
 
     if (isClosedProbeOperation(operation)) {
+      continue;
+    }
+
+    if (operation.kind !== "probe_uninstall") {
+      forwardEvidence.push({
+        hostId: input.hostId,
+        kind: "operation_accepted",
+        observedAtMs: input.nowMs,
+        operationId: operation.id!,
+      });
       continue;
     }
 
@@ -1409,11 +1881,41 @@ function planProbeOperationReportApplication(input: {
       };
     }
 
-    if (isClosedProbeOperation(operation)) {
+    const repairEligibility = verifiedRepairEligibilityForStatus({
+      operation,
+      probeId: input.probeId,
+      services: input.services,
+      status,
+    });
+
+    if (operation.kind !== "probe_uninstall") {
+      const evidence = forwardEvidenceFromStatus({
+        hostId: input.hostId,
+        nowMs: input.nowMs,
+        operation,
+        repairEligibility,
+        status,
+      });
+      if (!evidence) {
+        return {
+          error: "malformed_probe_operation_status",
+          operations: [],
+        };
+      }
+      forwardEvidence.push(evidence);
       continue;
     }
 
-    const result = applyProbeOperationStatus(status, operation, input.nowMs);
+    if (isClosedProbeOperation(operation) && !repairEligibility) {
+      continue;
+    }
+
+    const result = applyProbeOperationStatus(
+      status,
+      operation,
+      input.nowMs,
+      repairEligibility,
+    );
 
     if (result.error) {
       return {
@@ -1431,10 +1933,55 @@ function planProbeOperationReportApplication(input: {
     }
   }
 
+  if (forwardEvidence.length > 0) {
+    const reconciled = forwardTransitionsFor(
+      input.services,
+    ).reconcileAuthenticatedEvidence({ evidence: forwardEvidence });
+    if (reconciled.kind === "refused") {
+      return {
+        error: "malformed_probe_operation_status",
+        operations: [],
+      };
+    }
+  }
+
   return {
     error: null,
     operations: [...operationsToUpdate.values()],
   };
+}
+
+function forwardEvidenceFromStatus(input: {
+  hostId: number;
+  nowMs: number;
+  operation: ProbeUpgradeRequest;
+  repairEligibility?: {
+    evidenceJson: string;
+    evidenceSha256: string;
+  } | null;
+  status: ProtoMessage;
+}): AuthenticatedForwardEvidence | null {
+  const status = decodeProbeOperationStatus(input.status);
+  if (status?.kind === "running") {
+    return {
+      hostId: input.hostId,
+      kind: "operation_running",
+      observedAtMs: input.nowMs,
+      operationId: input.operation.id!,
+    };
+  }
+  if (status?.kind === "failed") {
+    return {
+      code: status.code,
+      hostId: input.hostId,
+      kind: "operation_failed",
+      message: status.message,
+      observedAtMs: input.nowMs,
+      operationId: input.operation.id!,
+      repairEligibility: input.repairEligibility,
+    };
+  }
+  return null;
 }
 
 function stageProbeOperationUpdate(
@@ -1450,12 +1997,6 @@ function stageProbeOperationUpdate(
   operationsToUpdate.set(operation.id, operation);
 }
 
-function isClosedProbeOperation(operation: ProbeUpgradeRequest) {
-  return ["canceled", "failed", "succeeded", "superseded"].includes(
-    operation.state,
-  );
-}
-
 function findReportableProbeOperation(
   services: ProbeRouteServices,
   hostId: number,
@@ -1469,18 +2010,19 @@ function findReportableProbeOperation(
   }
 
   const stagedOperation = stagedOperations?.get(id);
-  if (stagedOperation) {
+  if (stagedOperation && !hasUnavailableProbeUpgradeTarget(stagedOperation)) {
     return stagedOperation;
   }
 
   const active = services.probeOperations?.findActiveForHost(hostId);
-  if (active?.id === id) {
+  if (active?.id === id && !hasUnavailableProbeUpgradeTarget(active)) {
     return active;
   }
 
   const operation = services.probeOperations?.findById(id);
   if (
     operation?.hostId === hostId &&
+    !hasUnavailableProbeUpgradeTarget(operation) &&
     ["failed", "superseded", "canceled", "succeeded"].includes(operation.state)
   ) {
     return operation;
@@ -1493,24 +2035,30 @@ function applyProbeOperationStatus(
   status: ProtoMessage,
   operation: ProbeUpgradeRequest,
   nowMs: number,
+  repairEligibility?: {
+    evidenceJson: string;
+    evidenceSha256: string;
+  } | null,
 ) {
-  if (status.running && !status.failed) {
+  const decoded = decodeProbeOperationStatus(status);
+  if (decoded?.kind === "running") {
     return startProbeUpgradeRequest({
       nowMs,
       operation,
     });
   }
 
-  if (status.failed && !status.running && status.failed.errorCode) {
+  if (decoded?.kind === "failed") {
     return failReportedProbeUpgradeRequest({
-      code: status.failed.errorCode,
-      message: status.failed.message ?? "",
+      code: decoded.code,
+      message: decoded.message,
       nowMs,
       operation,
+      repairEligibility,
     });
   }
 
-  if (status.succeeded && !status.running && !status.failed) {
+  if (decoded?.kind === "succeeded") {
     return succeedReportedProbeOperation({
       nowMs,
       operation,
@@ -1521,6 +2069,67 @@ function applyProbeOperationStatus(
     error: "probe_operation_status_invalid" as const,
     operation,
   };
+}
+
+function decodeProbeOperationStatus(
+  status: ProtoMessage,
+):
+  | { kind: "running" }
+  | { code: string; kind: "failed"; message: string }
+  | { kind: "succeeded" }
+  | null {
+  const branches = [
+    Boolean(status.running),
+    Boolean(status.failed),
+    Boolean(status.succeeded),
+  ];
+  if (branches.filter(Boolean).length !== 1) return null;
+
+  if (status.running) return { kind: "running" };
+  if (status.failed?.errorCode) {
+    return {
+      code: status.failed.errorCode,
+      kind: "failed",
+      message: status.failed.message ?? "",
+    };
+  }
+  return status.succeeded ? { kind: "succeeded" } : null;
+}
+
+function verifiedRepairEligibilityForStatus(input: {
+  operation: ProbeUpgradeRequest;
+  probeId: string;
+  services: ProbeRouteServices;
+  status: ProtoMessage;
+}) {
+  if (
+    input.status.failed?.errorCode !== "lifecycle.upgrade_repair_required" ||
+    typeof input.status.failed.repairEligibilityEvidence !== "string" ||
+    !input.status.failed.repairEligibilityEvidence ||
+    typeof input.status.failed.repairEligibilitySignature !== "string" ||
+    !input.status.failed.repairEligibilitySignature
+  ) {
+    return null;
+  }
+  const tokenHash =
+    input.services.enrollments.lifecycleAuthorityTokenHashForHost(
+      input.operation.hostId,
+    );
+  const hubOrigin = input.services.probeApiOrigin ?? "";
+  if (!tokenHash || !/^[0-9a-f]{64}$/.test(tokenHash) || !hubOrigin) {
+    return null;
+  }
+  return verifyProbeRepairEligibility({
+    canonicalEvidence: input.status.failed.repairEligibilityEvidence,
+    evidenceSignature: input.status.failed.repairEligibilitySignature,
+    expectedHubOrigin: hubOrigin,
+    expectedProbeId: input.probeId,
+    failedUpgrade: input.operation,
+    installKey: deriveLifecycleAuthorityKey(
+      Buffer.from(tokenHash, "hex"),
+      hubOrigin,
+    ),
+  });
 }
 
 function completeProbeUninstallIfSucceeded(input: {
@@ -1546,11 +2155,17 @@ function completeProbeUninstallIfSucceeded(input: {
 }
 
 function markProbeUpgradeSucceededFromHostProfile(input: {
+  authenticatedProbeId: string;
+  bootEvidenceBootId: string | null;
+  bootEvidenceProbeId: string | null;
+  bootProbeAssetBundleVersion: string | null;
   hostId: number;
   hostProfile: {
+    probeAssetBundleVersion?: string | null;
     probeVersion?: string | null;
   } | null;
   nowMs: number;
+  profileReportBootId: string;
   services: ProbeRouteServices;
 }) {
   if (!input.hostProfile?.probeVersion) {
@@ -1564,65 +2179,33 @@ function markProbeUpgradeSucceededFromHostProfile(input: {
     return;
   }
 
-  const succeeded = succeedProbeUpgradeRequestFromHostProfile({
-    hostProfile: input.hostProfile,
-    nowMs: input.nowMs,
-    operation: active,
-  });
-
-  if (succeeded) {
-    input.services.probeOperations?.updateProbeUpgradeRequest(succeeded);
-  }
-}
-
-function parseProbeOperationId(operationId: string | null | undefined) {
-  if (!operationId || !/^[1-9]\d*$/.test(operationId)) {
-    return null;
-  }
-
-  return Number(operationId);
-}
-
-function broadcastHostSummary(
-  services: ProbeRouteServices,
-  hostId: number,
-  nowMs: number,
-) {
-  if (!services.liveUpdates) {
-    return;
-  }
-
-  const hostSummary = services.hosts
-    .listSummaries({
-      hostProfileForHost: (hostId) =>
-        services.snapshotCollectors?.hostProfile.read(hostId) ?? null,
-      latestMetricForHost: (hostId) =>
-        services.metrics.findLatestSample(hostId),
-      nowMs,
-      probeConfigurationForHost: (hostId) => {
-        const effective =
-          services.probeConfigurations.getEffectiveForHost(hostId);
-
-        return {
-          mode: effective.mode,
-          version: effective.configuration.version,
-        };
+  if (active.id === null) return;
+  forwardTransitionsFor(input.services).reconcileAuthenticatedEvidence({
+    evidence: [
+      {
+        authenticatedProbeId: input.authenticatedProbeId,
+        bootEvidenceBootId: input.bootEvidenceBootId,
+        bootEvidenceProbeId: input.bootEvidenceProbeId,
+        bootProbeAssetBundleVersion: input.bootProbeAssetBundleVersion,
+        hostId: input.hostId,
+        hostProfile: input.hostProfile,
+        kind: "host_profile_terminal",
+        observedAtMs: input.nowMs,
+        operationId: active.id,
+        profileReportBootId: input.profileReportBootId,
       },
-      thresholds: services.hostStatus,
+    ],
+  });
+}
+
+function forwardTransitionsFor(services: ProbeRouteServices) {
+  return (
+    services.forwardTransitions ??
+    createForwardTransitions({
+      audit: services.audit,
+      probeOperations: services.probeOperations!,
     })
-    .find((summary) => summary.id === hostId);
-
-  if (hostSummary) {
-    const effectiveConfiguration =
-      services.probeConfigurations.getEffectiveForHost(hostId);
-
-    services.liveUpdates.broadcastHostSummary(
-      liveSummaryFromHost(hostSummary, {
-        metricsCollectionIntervalSeconds:
-          effectiveConfiguration.configuration.metricsCollectionIntervalSeconds,
-      }),
-    );
-  }
+  );
 }
 
 function liveDetailSampleFromMetricSample(
@@ -1747,9 +2330,10 @@ function validRegistrationResponsibilities(request: ProtoMessage) {
   const snapshots = (request.snapshots ?? []) as ProtoMessage[];
 
   return (
-    snapshots.length === 1 &&
-    snapshots[0]?.collectorId === hostProfileCollectorId &&
-    Boolean(snapshots[0]?.hostProfile)
+    snapshots.length === 0 ||
+    (snapshots.length === 1 &&
+      snapshots[0]?.collectorId === hostProfileCollectorId &&
+      Boolean(snapshots[0]?.hostProfile))
   );
 }
 
@@ -1814,11 +2398,29 @@ function authenticateProbe(
   return null;
 }
 
+function authenticateProbeOperationStatus(
+  hosts: HostRepository,
+  request: Request,
+  body: Uint8Array,
+  probeApiOrigin: string | undefined,
+  allowDeletedTerminalUninstall: boolean,
+) {
+  const authentication = authenticateSignedProbeRequest(
+    hosts,
+    request,
+    body,
+    probeApiOrigin,
+    allowDeletedTerminalUninstall,
+  );
+  return authentication.kind === "authenticated" ? authentication.host : null;
+}
+
 function authenticateSignedProbeRequest(
   hosts: HostRepository,
   request: Request,
   body: Uint8Array,
   probeApiOrigin = "http://localhost",
+  includeDeleted = false,
 ): SignedProbeAuthentication {
   const headers = request.headers;
   const probeId = headers.get("x-enoki-probe-id")?.trim() ?? "";
@@ -1841,7 +2443,9 @@ function authenticateSignedProbeRequest(
     return { kind: "invalid" };
   }
 
-  const host = hosts.findByProbeId(probeId);
+  const host = includeDeleted
+    ? hosts.findByProbeIdIncludingDeleted(probeId)
+    : hosts.findByProbeId(probeId);
   if (!host?.probePublicKeyPem) {
     return { kind: "invalid" };
   }
@@ -1911,37 +2515,6 @@ function canonicalOriginPathAndQuery(request: Request, probeApiOrigin: string) {
   return `${probeApiOrigin}${url.pathname}${url.search}`;
 }
 
-function verifyProbeRequestSignature(
-  publicKeyPem: string,
-  payload: string,
-  signature: string,
-) {
-  try {
-    const verifier = createVerify("RSA-SHA256");
-    verifier.update(payload);
-    verifier.end();
-    return verifier.verify(publicKeyPem, Buffer.from(signature, "hex"));
-  } catch {
-    return false;
-  }
-}
-
-function validProbePublicKeyPem(publicKeyPem: string | null | undefined) {
-  if (!publicKeyPem) {
-    return false;
-  }
-
-  try {
-    const publicKey = createPublicKey(publicKeyPem);
-    return (
-      publicKey.asymmetricKeyType === "rsa" &&
-      (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) >= 2048
-    );
-  } catch {
-    return false;
-  }
-}
-
 function isIdentityContentEncoding(headers: Headers) {
   const contentEncoding = headers.get("content-encoding");
 
@@ -1962,60 +2535,6 @@ function contentLengthExceeds(headers: Headers, maxBytes: number) {
   return Number(contentLength) > maxBytes;
 }
 
-async function readCappedRequestBody(request: Request, maxBytes: number) {
-  if (!request.body) {
-    return new Uint8Array();
-  }
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        break;
-      }
-
-      totalBytes += value.byteLength;
-
-      if (totalBytes > maxBytes) {
-        await reader.cancel();
-        return null;
-      }
-
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new Uint8Array(totalBytes);
-  let offset = 0;
-
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return body;
-}
-
-function probeJsonError(
-  error: string,
-  status: 400 | 401 | 403 | 404 | 409 | 413 | 415,
-) {
-  return new Response(JSON.stringify({ error }), {
-    headers: {
-      "cache-control": "no-store",
-      "content-type": "application/json",
-    },
-    status,
-  });
-}
-
 function createProbeId() {
   return `probe_${randomBytes(16).toString("base64url")}`;
 }
@@ -2033,8 +2552,9 @@ function hashHostProfile(hostProfile: ProtoMessage) {
 }
 
 function stableHostProfile(hostProfile: ProtoMessage): ProtoMessage {
+  const { probeAssetBundleVersion: _bundleVersion, ...stable } = hostProfile;
   return {
-    ...hostProfile,
+    ...stable,
     filesystems: [...(hostProfile.filesystems ?? [])].sort(
       (left, right) =>
         compareProtoStrings(left.mountPoint, right.mountPoint) ||
@@ -2072,9 +2592,37 @@ function validateReportEnvelope(request: ProtoMessage) {
   }
 
   const samples = request.metrics ?? [];
+  const observationWindowFailureReason = observationWindowFailureReasonFor(
+    request.observationWindowFailure,
+  );
+  const cpuResourceCollectionOutcomeReasons = new Map<number, number>();
+  const cpuResourceCollectionOutcomes =
+    (request.cpuResourceCollectionOutcomes as ProtoMessage[] | undefined) ?? [];
   const sequenceCount = sequenceEnd - sequenceStart + 1;
 
-  if (samples.length === 0 && sequenceCount !== 1) {
+  if (
+    request.observationWindowFailure != null &&
+    observationWindowFailureReason === null
+  ) {
+    return null;
+  }
+  if (
+    observationWindowFailureReason !== null &&
+    cpuResourceCollectionOutcomes.length > 0
+  ) {
+    return null;
+  }
+
+  if (observationWindowFailureReason !== null && samples.length !== 0) {
+    return null;
+  }
+
+  if (
+    samples.length === 0 &&
+    sequenceCount !== 1 &&
+    observationWindowFailureReason === null &&
+    cpuResourceCollectionOutcomes.length === 0
+  ) {
     return null;
   }
 
@@ -2083,6 +2631,28 @@ function validateReportEnvelope(request: ProtoMessage) {
   }
 
   const sampleSequences = new Set<number>();
+
+  for (const outcome of cpuResourceCollectionOutcomes) {
+    const sequence = unsignedNumber(outcome.sequence);
+    const reason = cpuResourceCollectionOutcomeReasonFor(outcome);
+    if (
+      sequence < sequenceStart ||
+      sequence > sequenceEnd ||
+      reason === null ||
+      cpuResourceCollectionOutcomeReasons.has(sequence)
+    ) {
+      return null;
+    }
+    cpuResourceCollectionOutcomeReasons.set(sequence, reason);
+  }
+  if (
+    samples.length === 0 &&
+    observationWindowFailureReason === null &&
+    cpuResourceCollectionOutcomes.length > 0 &&
+    cpuResourceCollectionOutcomeReasons.size !== sequenceCount
+  ) {
+    return null;
+  }
 
   for (const sample of samples) {
     const sequence = unsignedNumber(sample.sequence);
@@ -2115,7 +2685,31 @@ function validateReportEnvelope(request: ProtoMessage) {
     }
   }
 
-  return { sequenceEnd, sequenceStart };
+  return {
+    cpuResourceCollectionOutcomeReasons,
+    observationWindowFailureReason,
+    sequenceEnd,
+    sequenceStart,
+  };
+}
+
+function cpuResourceCollectionOutcomeReasonFor(
+  outcome: unknown,
+): number | null {
+  if (!outcome || typeof outcome !== "object") {
+    return null;
+  }
+  const reason = unsignedNumber((outcome as ProtoMessage).reason);
+  return reason >= 1 && reason <= 3 ? reason : null;
+}
+
+function observationWindowFailureReasonFor(failure: unknown): number | null {
+  if (!failure || typeof failure !== "object") {
+    return null;
+  }
+
+  const reason = unsignedNumber((failure as ProtoMessage).reason);
+  return reason >= 1 && reason <= 3 ? reason : null;
 }
 
 function reportResponsibilityFor(input: {
@@ -2136,7 +2730,10 @@ function reportResponsibilityFor(input: {
   // batch that was never a Probe Startup Report, while requiring current
   // Probes to use the typed constructor shape below.
   if (snapshots.length === 0) {
-    return "legacy_observation";
+    return isStartupReportShape(input.report, input.request) &&
+      nonemptyString(input.request.probeAssetBundleVersion)
+      ? "startup"
+      : "legacy_observation";
   }
 
   if (
@@ -2158,13 +2755,19 @@ function reportResponsibilityFor(input: {
       (input.request.metrics ?? []).length === 0 &&
       typeof input.request.probeConfigurationVersion === "string" &&
       input.request.probeConfigurationVersion.length > 0 &&
-      !input.request.probeConfigurationError
+      !input.request.probeConfigurationError &&
+      !input.request.observationWindowFailure
       ? "startup"
       : null;
   }
 
   if (snapshot.hostProfile !== null) {
-    return "full_host_profile";
+    if (hasProducedHostProfile(input.request)) {
+      return "observation";
+    }
+    return hasSnapshotReplayOnlyContents(input.request)
+      ? "full_host_profile"
+      : null;
   }
 
   return "observation";
@@ -2173,6 +2776,7 @@ function reportResponsibilityFor(input: {
 function hasSnapshotReplayOnlyContents(request: ProtoMessage) {
   return (
     (request.metrics ?? []).length === 0 &&
+    !request.observationWindowFailure &&
     !request.probeConfigurationError &&
     (request.operationAcknowledgements ?? []).length === 0 &&
     (request.operationStatuses ?? []).length === 0
@@ -2208,6 +2812,126 @@ function firstHostProfileAddress(hostProfile: ProtoMessage | null | undefined) {
   }
 
   return null;
+}
+
+const officialOutcomeCollectors = new Set([
+  "official.cpu",
+  "official.load",
+  "official.memory",
+  "official.uptime",
+  "official.network",
+  "official.disk",
+  "official.temperature",
+  "official.battery",
+  "official.disk-health",
+  "official.host-profile",
+]);
+
+function validatedCollectorOutcomes(sample: ProtoMessage) {
+  const seen = new Set<string>();
+  return ((sample.collectorOutcomes ?? []) as ProtoMessage[]).map((outcome) => {
+    const collectorId = outcome.collectorId ?? "";
+    const state = Number(outcome.state ?? 0);
+    const failure = outcome.failure as ProtoMessage | null | undefined;
+    const failurePhase = failure ? Number(failure.phase ?? 0) : null;
+    const encodedFailureCode = failure ? String(failure.code ?? "") : null;
+    const legacyFailureCode = failure ? Number(failure.legacyCode ?? 0) : 0;
+    const normalizedLegacyFailureCode = legacyCollectorFailureCode(
+      collectorId,
+      failurePhase,
+      legacyFailureCode,
+    );
+    const failureCode = encodedFailureCode
+      ? encodedFailureCode
+      : normalizedLegacyFailureCode;
+    if (
+      !officialOutcomeCollectors.has(collectorId) ||
+      seen.has(collectorId) ||
+      ![1, 2, 3].includes(state) ||
+      (state === 3
+        ? ![1, 2].includes(failurePhase ?? 0) ||
+          !validCollectorFailureCode(failureCode) ||
+          !failureCode?.startsWith(`${collectorId}.`) ||
+          (legacyFailureCode !== 0 &&
+            normalizedLegacyFailureCode !== failureCode)
+        : failure !== null && failure !== undefined)
+    ) {
+      throw new ReportBusinessRejection("malformed_probe_report", 400);
+    }
+    seen.add(collectorId);
+    return {
+      collectorId,
+      failureCode,
+      failurePhase: failurePhase as 1 | 2 | null,
+      state: state as 1 | 2 | 3,
+    };
+  });
+}
+
+function legacyCollectorFailureCode(
+  collectorId: string,
+  phase: number | null,
+  code: number,
+): string | null {
+  if (![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(code)) return null;
+  if (code === 1) return `${collectorId}.resource-unavailable`;
+  if (code === 2) return `${collectorId}.resource-malformed`;
+  if (code === 3) return `${collectorId}.activation-budget-exhausted`;
+  if (code === 4 && collectorId === "official.cpu")
+    return "official.cpu.counters-malformed";
+  if (code === 5 && collectorId === "official.load")
+    return "official.load.facts-malformed";
+  if (code === 6 && collectorId === "official.memory")
+    return "official.memory.facts-malformed";
+  if (code === 7 && collectorId === "official.uptime")
+    return "official.uptime.facts-malformed";
+  if (code === 8 && collectorId === "official.host-profile") {
+    return phase === 1
+      ? "official.host-profile.resource-malformed"
+      : "official.host-profile.facts-malformed";
+  }
+  if (code === 9 && collectorId === "official.host-profile")
+    return "official.host-profile.resource-unavailable";
+  if (code === 10 && collectorId === "official.host-profile")
+    return "official.host-profile.activation-budget-exhausted";
+  return null;
+}
+
+function validCollectorFailureCode(code: string | null): code is string {
+  return (
+    code !== null &&
+    code.length >= 3 &&
+    code.length <= 96 &&
+    /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(code)
+  );
+}
+
+function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
+  const samples = (request.metrics ?? []) as ProtoMessage[];
+  const snapshots = ((request.snapshots ?? []) as ProtoMessage[]).filter(
+    (snapshot) => snapshot.collectorId === hostProfileCollectorId,
+  );
+  let outcome: ProtoMessage | undefined;
+  for (const [index, sample] of samples.entries()) {
+    const matches = ((sample.collectorOutcomes ?? []) as ProtoMessage[]).filter(
+      (candidate) => candidate.collectorId === hostProfileCollectorId,
+    );
+    if (matches.length > 1 || (matches.length === 1 && index !== 0))
+      return false;
+    outcome ??= matches[0];
+  }
+  if (!outcome) return true;
+  if (Number(outcome.state) === 1 && !outcome.failure) {
+    return (
+      snapshots.length === 1 &&
+      Boolean(snapshots[0]?.snapshotHash) &&
+      (!snapshots[0]?.hostProfile ||
+        Boolean(
+          nonemptyString(snapshots[0]?.hostProfile?.probeAssetBundleVersion),
+        ))
+    );
+  }
+  return snapshots.length === 0 && [2, 3].includes(Number(outcome.state));
 }
 
 function reportConnectAddress(
@@ -2318,34 +3042,6 @@ function sumUnsigned<T>(
 
 function fallbackDisplayName(probeId: string) {
   return probeId.slice(0, 14);
-}
-
-function observedIpFromContext(
-  context: Context,
-  trustedProxyCidrs: TrustedProxyCidr[] | undefined,
-) {
-  const request = context.req.raw;
-  return deriveObservedIp({
-    directPeer: directRemoteAddress(context),
-    trustedProxyCidrs: trustedProxyCidrs ?? [],
-    xForwardedFor: request.headers.get("x-forwarded-for"),
-  });
-}
-
-function directRemoteAddress(context: Context) {
-  try {
-    return normalizeRemoteAddress(getConnInfo(context).remote.address);
-  } catch {
-    return null;
-  }
-}
-
-function normalizeRemoteAddress(address: string | undefined) {
-  if (!address) {
-    return null;
-  }
-
-  return address.startsWith("::ffff:") ? address.slice(7) : address;
 }
 
 function toArrayBuffer(bytes: Uint8Array) {

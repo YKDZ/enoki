@@ -30,3 +30,18 @@ message DiskHealthMetric {
   string usage_mount_point = 9;
   string role = 10;
 }
+
+// Disk Health Provider 对一个内部发现设备返回的有界原始结果。
+message DiskHealthDeviceResourceFact {
+  string device_name = 1;
+  bytes smartctl_json = 2;
+  int32 exit_code = 3;
+}
+
+// 一次固定 pull 的 typed Disk Health Resource Result。
+message DiskHealthResourceResult {
+  repeated DiskHealthDeviceResourceFact devices = 1;
+  DiskHealthCollectorCapabilityStatus capability_status = 2;
+  string failure_code = 3;
+  string unraid_disks_ini = 4;
+}

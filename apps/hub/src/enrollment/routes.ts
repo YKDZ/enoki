@@ -9,6 +9,14 @@ import type {
   EnrollmentTarget,
 } from "../database/enrollments.js";
 import type { HostStatusThresholds } from "../database/hosts.js";
+import type { HostRepository } from "../database/hosts.js";
+import type { ProbeOperationRepository } from "../database/probe-operations.js";
+import { evaluateProbeUpgradeEligibility } from "../probe/asset-set.js";
+import { manualProbeReinstallPolicy } from "../probe/manual-reinstall-policy.js";
+import {
+  readProbeReleaseContextFromDirectory,
+  unavailableProbeReleaseContext,
+} from "../probe/release-context.js";
 import {
   createDefaultInstallationCommandConfig,
   type InstallationCommandConfig,
@@ -22,8 +30,12 @@ export type EnrollmentRouteServices = {
   audit?: AuditRepository;
   enrollments: EnrollmentRepository;
   hostStatus?: HostStatusThresholds;
+  hosts?: HostRepository;
   installation?: InstallationCommandConfig;
   now?: () => number;
+  probeAssetDir?: string;
+  probeDistributionRootPublicKeyPem?: Buffer | string;
+  probeOperations?: ProbeOperationRepository;
 };
 
 export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
@@ -38,6 +50,73 @@ export function createEnrollmentRoutes(services: EnrollmentRouteServices) {
       return context.json({ error: "invalid_enrollment_target" }, 400);
     }
     return createOwnerEnrollment(context, services, installation, now, target);
+  });
+
+  routes.post("/existing-host/:hostId", (context) => {
+    const hostId = Number(context.req.param("hostId"));
+    if (!Number.isInteger(hostId) || hostId <= 0) {
+      return context.json(
+        { error: "existing_host_reenrollment_unavailable" },
+        409,
+      );
+    }
+    return createOwnerEnrollment(context, services, installation, now, {
+      hostId,
+      kind: "existing_host",
+    });
+  });
+
+  routes.post("/manual-reinstall/:hostId", async (context) => {
+    const hostId = positiveInteger(context.req.param("hostId"));
+    if (!hostId || !services.hosts) {
+      return context.json({ error: "manual_reinstall_unavailable" }, 409);
+    }
+    const host = services.hosts.findActiveById(hostId);
+    if (!host) {
+      return context.json({ error: "host_not_found" }, 404);
+    }
+    const releaseContext = services.probeAssetDir
+      ? await readProbeReleaseContextFromDirectory({
+          assetDir: services.probeAssetDir,
+          trustedRootPublicKeyPem: services.probeDistributionRootPublicKeyPem,
+        })
+      : unavailableProbeReleaseContext();
+    const policy = manualProbeReinstallPolicy({
+      eligibility: evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: releaseContext.assetSet.version,
+        probeAssetSetVersionNonUpgradeableReason:
+          releaseContext.assetSet.nonUpgradeableReason,
+        probeVersion: host.probeVersion,
+        releaseTransition: releaseContext.releaseTransition,
+      }),
+      hostLastReportAtMs: host.lastReportAtMs,
+      hostProbeVersion: host.probeVersion,
+      latestOperation:
+        services.probeOperations?.findLatestForHost(hostId) ?? null,
+      nowMs: now(),
+      offlineAfterMs: services.hostStatus?.offlineAfterMs ?? 90_000,
+      sourceProbeSha256:
+        releaseContext.releaseTransition?.sourceProbeSha256 ?? [],
+      targetAssetSetDigest: releaseContext.assetSet.targetAssetSetDigest,
+      targetProbeVersion: releaseContext.assetSet.version,
+    });
+    if (!policy) {
+      return context.json({ error: "manual_reinstall_not_required" }, 409);
+    }
+    const expectedHubOrigin = installation.probeApiOrigin;
+    if (!expectedHubOrigin) {
+      return context.json({ error: "manual_reinstall_unavailable" }, 409);
+    }
+    return createOwnerEnrollment(context, services, installation, now, {
+      expectedHubOrigin,
+      expectedProbeId: host.probeId,
+      expectedProbeVersion: policy.sourceProbeVersion,
+      hostId,
+      kind: "manual_reinstall",
+      sourceProbeSha256: policy.sourceProbeSha256,
+      targetAssetSetDigest: policy.targetAssetSetDigest,
+      targetProbeVersion: policy.targetProbeVersion,
+    });
   });
 
   routes.get("/:enrollmentId", (context) => {
@@ -117,6 +196,19 @@ function createOwnerEnrollment(
     enrollmentToken,
     ...renderInstallCommand(installation, {
       enrollmentToken,
+      ...(target.kind === "manual_reinstall"
+        ? {
+            replacementMigration: {
+              enrollmentId,
+              expectedProbeId: target.expectedProbeId,
+              sourceProbeSha256: target.sourceProbeSha256,
+              sourceProbeVersion: target.expectedProbeVersion,
+              targetAssetSetDigest: target.targetAssetSetDigest,
+              targetHostId: String(target.hostId),
+              targetProbeVersion: target.targetProbeVersion,
+            },
+          }
+        : {}),
     }),
   } satisfies EnrollmentResponse;
 
@@ -171,4 +263,9 @@ function createEnrollmentToken() {
 
 function createEnrollmentId() {
   return `enr_${randomBytes(16).toString("base64url")}`;
+}
+
+function positiveInteger(value: string) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }

@@ -1,15 +1,25 @@
 use std::{
     ffi::{CString, OsStr},
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read},
     os::{
         fd::{AsRawFd, FromRawFd, RawFd},
         unix::ffi::OsStrExt,
     },
     path::{Component, Path},
+};
+
+const SYSTEMD_PROBE_CREDENTIAL_DIRECTORY: &str = "/run/credentials/enoki-probe.service";
+const SYSTEMD_REGISTRATION_CREDENTIAL_NAME: &str = "registration-attempt";
+const TMPFS_MAGIC: libc::c_long = 0x0102_1994;
+
+#[cfg(test)]
+use std::{
+    io::Write,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(test)]
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Creates a no-follow temporary sibling through held directory file descriptors,
@@ -22,9 +32,11 @@ pub fn atomic_write(
     mode: u32,
     owner: Option<(u32, u32)>,
 ) -> io::Result<()> {
-    atomic_write_with_before_rename(path, contents, mode, owner, || Ok(()))
+    let _ = open_parent(path, true)?;
+    enoki_probe_bootstrap::secure_file::atomic_write(path, contents, mode, owner)
 }
 
+#[cfg(test)]
 fn atomic_write_with_before_rename(
     path: &Path,
     contents: &[u8],
@@ -98,6 +110,14 @@ pub fn managed_path_exists(path: &Path) -> io::Result<bool> {
     }
 }
 
+pub fn remove_regular_file(path: &Path, mode: u32, owner: Option<(u32, u32)>) -> io::Result<()> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    verify_file_at(parent.raw(), &target, mode, owner)?;
+    unlink_at(parent.raw(), &target)?;
+    sync_directory(parent.raw())
+}
+
 /// Reads an existing managed regular file through held no-follow directory FDs.
 /// This is for the registration handoff, which preserves installer-owned fields
 /// before atomically replacing the bootstrap identity.
@@ -124,6 +144,183 @@ pub fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
     Ok(contents)
+}
+
+/// 读取私有持久化注册尝试材料，并通过持有的目录文件描述符校验其所有者、模式、大小、
+/// 普通文件类型与单硬链接保管约束。
+pub fn read_private_regular_file(
+    path: &Path,
+    mode: u32,
+    owner: (u32, u32),
+    maximum_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    let fd = unsafe {
+        libc::openat(
+            parent.raw(),
+            target.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let stat = stat_fd(file.as_raw_fd())?;
+    if file_type(stat.st_mode) != libc::S_IFREG
+        || stat.st_mode & 0o777 != mode
+        || stat.st_uid != owner.0
+        || stat.st_gid != owner.1
+        || stat.st_nlink != 1
+        || stat.st_size < 0
+        || stat.st_size as usize > maximum_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "managed private file attributes do not match",
+        ));
+    }
+    let mut contents = Vec::with_capacity(stat.st_size as usize);
+    Read::by_ref(&mut file)
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut contents)?;
+    if contents.len() > maximum_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "managed private file is too large",
+        ));
+    }
+    Ok(contents)
+}
+
+/// 读取大小受限的一次性 systemd 凭据。该凭据可归 root 或 DynamicUser
+/// 服务身份所有，但必须是组用户与其他用户均无权限的单硬链接普通文件。
+pub fn read_bounded_private_credential(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+    let (parent, target) = open_parent(path, false)?;
+    verify_private_directory(parent.raw())?;
+    let fd = unsafe {
+        libc::openat(
+            parent.raw(),
+            target.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let stat = stat_fd(file.as_raw_fd())?;
+    let service_owner = (unsafe { libc::geteuid() }, unsafe { libc::getegid() });
+    if file_type(stat.st_mode) != libc::S_IFREG
+        || stat.st_mode & 0o077 != 0
+        || !matches!(stat.st_mode & 0o700, 0o400 | 0o600)
+        || ((stat.st_uid, stat.st_gid) != (0, 0) && (stat.st_uid, stat.st_gid) != service_owner)
+        || stat.st_nlink != 1
+        || stat.st_size < 0
+        || stat.st_size as usize > maximum_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "registration credential attributes do not match",
+        ));
+    }
+    let mut contents = Vec::with_capacity(stat.st_size as usize);
+    Read::by_ref(&mut file)
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut contents)?;
+    (contents.len() <= maximum_bytes)
+        .then_some(contents)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "registration credential is too large",
+            )
+        })
+}
+
+/// 读取 Replacement registration 的一次性交付材料。有 systemd credential 环境时，
+/// 只接受 canonical Probe service 的固定凭据；其他调用继续使用持久 root-private capsule
+/// 的原有校验规则。
+pub fn read_registration_attempt_credential_bytes(
+    path: &Path,
+    maximum_bytes: usize,
+) -> io::Result<Vec<u8>> {
+    let Some(directory) = std::env::var_os("CREDENTIALS_DIRECTORY") else {
+        return read_bounded_private_credential(path, maximum_bytes);
+    };
+    let directory = Path::new(&directory);
+    let expected_directory = Path::new(SYSTEMD_PROBE_CREDENTIAL_DIRECTORY);
+    let expected_path = expected_directory.join(SYSTEMD_REGISTRATION_CREDENTIAL_NAME);
+    if directory != expected_directory || path != expected_path {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "registration credential path does not match systemd delivery",
+        ));
+    }
+    read_systemd_registration_credential(path, maximum_bytes)
+}
+
+fn read_systemd_registration_credential(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+    let (parent, target) = open_parent(path, false)?;
+    let directory = stat_fd(parent.raw())?;
+    if file_type(directory.st_mode) != libc::S_IFDIR
+        || directory.st_mode & 0o777 != 0o550
+        || directory.st_uid != 0
+        || directory.st_gid != 0
+        || directory.st_nlink != 2
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "systemd registration credential directory attributes do not match",
+        ));
+    }
+    let filesystem = statfs_fd(parent.raw())?;
+    let mount = statvfs_fd(parent.raw())?;
+    let required_flags = libc::ST_RDONLY | libc::ST_NOSUID | libc::ST_NODEV | libc::ST_NOEXEC;
+    if filesystem.f_type != TMPFS_MAGIC || mount.f_flag & required_flags != required_flags {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "systemd registration credential mount attributes do not match",
+        ));
+    }
+    let fd = unsafe {
+        libc::openat(
+            parent.raw(),
+            target.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let stat = stat_fd(file.as_raw_fd())?;
+    if file_type(stat.st_mode) != libc::S_IFREG
+        || stat.st_mode & 0o777 != 0o440
+        || stat.st_uid != 0
+        || stat.st_gid != 0
+        || stat.st_nlink != 1
+        || stat.st_size < 0
+        || stat.st_size as usize > maximum_bytes
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "systemd registration credential attributes do not match",
+        ));
+    }
+    let mut contents = Vec::with_capacity(stat.st_size as usize);
+    Read::by_ref(&mut file)
+        .take(maximum_bytes as u64 + 1)
+        .read_to_end(&mut contents)?;
+    (contents.len() <= maximum_bytes)
+        .then_some(contents)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "registration credential is too large",
+            )
+        })
 }
 
 fn open_parent(path: &Path, create: bool) -> io::Result<(DirectoryFd, CString)> {
@@ -257,6 +454,7 @@ fn open_directory_at(parent: RawFd, name: &CString) -> RawFd {
     }
 }
 
+#[cfg(test)]
 fn reject_target_symlink(parent: RawFd, name: &CString) -> io::Result<()> {
     match stat_at(parent, name) {
         Ok(stat) if file_type(stat.st_mode) == libc::S_IFLNK => Err(io::Error::new(
@@ -269,6 +467,7 @@ fn reject_target_symlink(parent: RawFd, name: &CString) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn open_new_file(parent: RawFd, name: &CString, mode: u32) -> io::Result<RawFd> {
     let fd = unsafe {
         libc::openat(
@@ -285,6 +484,7 @@ fn open_new_file(parent: RawFd, name: &CString, mode: u32) -> io::Result<RawFd> 
     }
 }
 
+#[cfg(test)]
 fn temporary_name(target: &CString) -> io::Result<CString> {
     let sequence = TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     CString::new(format!(
@@ -392,6 +592,24 @@ fn stat_fd(fd: RawFd) -> io::Result<libc::stat> {
     }
 }
 
+fn statfs_fd(fd: RawFd) -> io::Result<libc::statfs> {
+    let mut stat = unsafe { std::mem::zeroed::<libc::statfs>() };
+    if unsafe { libc::fstatfs(fd, &mut stat) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(stat)
+    }
+}
+
+fn statvfs_fd(fd: RawFd) -> io::Result<libc::statvfs> {
+    let mut stat = unsafe { std::mem::zeroed::<libc::statvfs>() };
+    if unsafe { libc::fstatvfs(fd, &mut stat) } != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(stat)
+    }
+}
+
 fn stat_at(parent: RawFd, name: &CString) -> io::Result<libc::stat> {
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstatat(parent, name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
@@ -411,7 +629,13 @@ mod tests {
     use std::{
         fs,
         os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        process::Command,
     };
+
+    const SYSTEMD_CREDENTIAL_CHILD: &str = "ENOKI_TEST_SYSTEMD_CREDENTIAL_CHILD";
+    const SYSTEMD_CREDENTIAL_DIRECTORY: &str = "/run/credentials/enoki-probe.service";
+    const SYSTEMD_CREDENTIAL_PATH: &str =
+        "/run/credentials/enoki-probe.service/registration-attempt";
 
     #[test]
     fn atomic_write_rejects_a_dangling_target_symlink_without_following_it() {
@@ -498,5 +722,143 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
         assert_eq!(metadata.uid(), uid);
         assert_eq!(metadata.gid(), gid);
+    }
+
+    #[test]
+    fn systemd_delivered_registration_credential_is_exact_and_fail_closed() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let status = Command::new("unshare")
+            .args([
+                "--mount",
+                std::env::current_exe()
+                    .expect("current test executable")
+                    .to_str()
+                    .expect("UTF-8 test executable"),
+                "--exact",
+                "secure_file::tests::systemd_delivered_registration_credential_child",
+                "--nocapture",
+            ])
+            .env(SYSTEMD_CREDENTIAL_CHILD, "1")
+            .status()
+            .expect("run credential contract in an isolated mount namespace");
+        assert!(status.success(), "credential contract child succeeds");
+    }
+
+    #[test]
+    fn systemd_delivered_registration_credential_child() {
+        if std::env::var_os(SYSTEMD_CREDENTIAL_CHILD).is_none() {
+            return;
+        }
+
+        for tamper in [
+            "none",
+            "directory-owner",
+            "directory-mode",
+            "file-owner",
+            "file-mode",
+            "hardlink",
+            "symlink",
+            "path",
+            "writable-mount",
+        ] {
+            mount_systemd_credential(tamper);
+            unsafe {
+                std::env::set_var("CREDENTIALS_DIRECTORY", SYSTEMD_CREDENTIAL_DIRECTORY);
+            }
+            let path = if tamper == "path" {
+                Path::new(SYSTEMD_CREDENTIAL_DIRECTORY).join("other-attempt")
+            } else {
+                Path::new(SYSTEMD_CREDENTIAL_PATH).to_path_buf()
+            };
+            let result = read_registration_attempt_credential_bytes(&path, 1024);
+            if tamper == "none" {
+                assert_eq!(result.expect("canonical systemd credential"), b"canonical");
+            } else {
+                assert!(result.is_err(), "tamper {tamper} must fail closed");
+            }
+            unsafe {
+                std::env::remove_var("CREDENTIALS_DIRECTORY");
+            }
+            assert_eq!(
+                unsafe {
+                    libc::umount2(
+                        CString::new(SYSTEMD_CREDENTIAL_DIRECTORY).unwrap().as_ptr(),
+                        libc::MNT_DETACH,
+                    )
+                },
+                0,
+                "credential tmpfs unmounts",
+            );
+        }
+        fs::remove_dir(SYSTEMD_CREDENTIAL_DIRECTORY).expect("remove credential mountpoint");
+    }
+
+    fn mount_systemd_credential(tamper: &str) {
+        fs::create_dir_all(SYSTEMD_CREDENTIAL_DIRECTORY).expect("credential mountpoint");
+        let source = CString::new("tmpfs").unwrap();
+        let target = CString::new(SYSTEMD_CREDENTIAL_DIRECTORY).unwrap();
+        let kind = CString::new("tmpfs").unwrap();
+        let data = CString::new("size=1m,mode=0550").unwrap();
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    kind.as_ptr(),
+                    libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSYMFOLLOW,
+                    data.as_ptr().cast(),
+                )
+            },
+            0,
+            "credential tmpfs mounts",
+        );
+        let path = Path::new(SYSTEMD_CREDENTIAL_PATH);
+        fs::write(path, b"canonical").expect("credential contents");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o440)).expect("credential mode");
+        match tamper {
+            "directory-owner" => assert_eq!(unsafe { libc::chown(target.as_ptr(), 1, 1) }, 0),
+            "directory-mode" => fs::set_permissions(
+                SYSTEMD_CREDENTIAL_DIRECTORY,
+                fs::Permissions::from_mode(0o750),
+            )
+            .expect("tampered directory mode"),
+            "file-owner" => {
+                let path = CString::new(SYSTEMD_CREDENTIAL_PATH).unwrap();
+                assert_eq!(unsafe { libc::chown(path.as_ptr(), 1, 1) }, 0);
+            }
+            "file-mode" => fs::set_permissions(path, fs::Permissions::from_mode(0o400))
+                .expect("tampered credential mode"),
+            "hardlink" => fs::hard_link(path, path.with_file_name("registration-copy"))
+                .expect("tampered hard link"),
+            "symlink" => {
+                fs::rename(path, path.with_file_name("registration-referent"))
+                    .expect("move credential referent");
+                symlink("registration-referent", path).expect("tampered credential symlink");
+            }
+            "none" | "path" | "writable-mount" => {}
+            _ => unreachable!(),
+        }
+        if tamper != "writable-mount" {
+            assert_eq!(
+                unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_REMOUNT
+                            | libc::MS_RDONLY
+                            | libc::MS_NOSUID
+                            | libc::MS_NODEV
+                            | libc::MS_NOEXEC
+                            | libc::MS_NOSYMFOLLOW,
+                        std::ptr::null(),
+                    )
+                },
+                0,
+                "credential tmpfs becomes read-only",
+            );
+        }
     }
 }

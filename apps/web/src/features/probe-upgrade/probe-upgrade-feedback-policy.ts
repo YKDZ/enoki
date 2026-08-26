@@ -12,7 +12,22 @@ export type ProbeUpgradeRequestFailedFact = {
   kind: "probe-upgrade-request-failed";
 };
 
+export type ProbeUpgradeAllSubmittedFact = {
+  attemptId: number;
+  failed: number;
+  kind: "probe-upgrade-all-submitted";
+  skipped: number;
+  submitted: number;
+};
+
+export type ProbeUpgradeAllRequestFailedFact = {
+  attemptId: number;
+  kind: "probe-upgrade-all-request-failed";
+};
+
 export type ProbeUpgradeFeedbackFact =
+  | ProbeUpgradeAllRequestFailedFact
+  | ProbeUpgradeAllSubmittedFact
   | ProbeUpgradeRequestFailedFact
   | {
       hostId: number;
@@ -41,6 +56,27 @@ const probeUpgradePresentations = {
 export function decideProbeUpgradeFeedback(
   input: ProbeUpgradeFeedbackFact,
 ): ProbeUpgradeFeedbackDecision {
+  if (input.kind === "probe-upgrade-all-request-failed") {
+    const aggregateKey = `probe-upgrade-all-request-failed:${input.attemptId}`;
+    return display(aggregateKey, "error", "无法提交全部探针升级", {
+      description: "请稍后重试。",
+    });
+  }
+
+  if (input.kind === "probe-upgrade-all-submitted") {
+    const aggregateKey = `probe-upgrade-all-submitted:${input.attemptId}`;
+    const level = input.failed > 0 ? "warning" : "success";
+    const title =
+      input.failed > 0
+        ? "已提交部分探针升级"
+        : input.submitted > 0
+          ? "已提交探针升级"
+          : "没有可升级的探针";
+    return display(aggregateKey, level, title, {
+      description: `已提交 ${input.submitted} 台，跳过 ${input.skipped} 台，失败 ${input.failed} 台。`,
+    });
+  }
+
   if (input.kind === "probe-upgrade-request-failed") {
     const presentation = probeUpgradePresentations.requestFailed;
     return display(

@@ -8,7 +8,7 @@
     "build": "turbo run build --output-logs=errors-only --log-order=grouped",
     "check": "pnpm run check:node && pnpm run rust:check",
     "check:terminology": "node scripts/check-terminology.mjs",
-    "check:node": "turbo run boundaries format:check lint typecheck build test:ci test:e2e check:generated --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
+    "check:node": "turbo run boundaries format:check lint typecheck build test test:e2e check:generated --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
     "db:reset-migrations": "pnpm --filter @enoki/hub run db:reset-migrations",
     "dev": "pnpm --filter @enoki/web dev",
     "dev:hub": "pnpm --filter @enoki/hub build && NODE_ENV=development pnpm --filter @enoki/hub start",
@@ -22,12 +22,14 @@
     "check:generated": "pnpm --filter @enoki/proto check",
     "rust:check": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
     "test": "vitest run scripts/*.test.mjs --reporter=agent --silent=passed-only",
-    "test:ci": "vitest run scripts/*.test.mjs --reporter=agent --silent=passed-only",
+    "test:hub-container-logging": "node apps/hub/scripts/hub-container-logging-evidence.mjs",
     "test:e2e": "playwright test",
     "test:e2e:candidate": "node scripts/release-ui-contract.mjs",
-    "test:hub-container-logging": "node apps/hub/scripts/hub-container-logging-evidence.mjs",
     "e2e": "pnpm run test:e2e",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@enoki/probe-release": "workspace:*"
   },
   "devDependencies": {
     "@playwright/test": "catalog:",

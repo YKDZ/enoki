@@ -7,6 +7,7 @@ import type { MetricsArchivePeriodPlan } from "./planner.js";
 export type MetricsArchivePlannedSample = {
   bootId: string;
   collectedAtMs: number;
+  hasMetricSample?: boolean;
   probeId: string;
   receivedAtMs: number;
   sequence: number;
@@ -27,12 +28,13 @@ export type WriteMetricsArchiveFileResult = {
   rowCounts: MetricsArchiveFileRowCounts;
 };
 
-const archiveSchemaVersion = 1;
+const archiveSchemaVersion = 3;
 
 const archiveTables = [
   "archive_metadata",
   "archive_host_snapshots",
   "metric_samples",
+  "metric_collector_outcomes",
   "official_metric_cpu",
   "official_metric_memory",
   "official_metric_load",
@@ -48,6 +50,7 @@ const archiveTables = [
 ] as const;
 
 const metricsChildTables = [
+  "metric_collector_outcomes",
   "official_metric_cpu",
   "official_metric_memory",
   "official_metric_load",
@@ -278,13 +281,24 @@ function createArchiveSchema(database: DatabaseSync) {
       role text
     );
 
+    create table metric_collector_outcomes (
+      id integer primary key,
+      metric_sample_id integer not null references metric_samples(id) on delete cascade,
+      collector_id text not null,
+      state integer not null,
+      failure_phase integer,
+      failure_code text
+    );
+
     create table report_observations (
       id integer primary key,
       managed_host_id integer not null,
       probe_id text not null,
       boot_id text not null,
       sequence integer not null,
-      received_at_ms integer not null
+      received_at_ms integer not null,
+      observation_window_failure_reason integer,
+      cpu_resource_collection_outcome_reason integer
     );
 
     create index archive_host_snapshots_host_lookup_idx
@@ -313,6 +327,8 @@ function createArchiveSchema(database: DatabaseSync) {
       on metric_network_interfaces (metric_sample_id);
     create index official_metric_disk_health_sample_idx
       on official_metric_disk_health (metric_sample_id);
+    create unique index metric_collector_outcomes_sample_collector_idx
+      on metric_collector_outcomes (metric_sample_id, collector_id);
     create unique index report_observations_probe_boot_sequence_idx
       on report_observations (probe_id, boot_id, sequence);
   `);
@@ -327,14 +343,17 @@ function copyMetricsClosure(
     return;
   }
 
-  const plannedSampleFilter = sampleIdentityFilter(plan.samples);
+  const metricSamplePlans = plan.samples.filter(
+    (sample) => sample.hasMetricSample !== false,
+  );
+  const plannedSampleFilter = sampleIdentityFilter(metricSamplePlans);
   const samples = hot
     .prepare(
       `
         select *
         from metric_samples
         where collected_at_ms >= ? and collected_at_ms < ?
-          and (${plannedSampleFilter.sql})
+          and (${plannedSampleFilter.sql || "0"})
         order by collected_at_ms, id
       `,
     )
@@ -345,13 +364,25 @@ function copyMetricsClosure(
     ) as SqlRow[];
 
   insertRows(archive, "metric_samples", samples);
-  if (samples.length === 0) {
-    return;
-  }
-
   const sampleIds = samples.map((sample) => Number(sample.id));
+  const archivedSampleFilter = sampleIdentityFilter(plan.samples);
+  const observations = hot
+    .prepare(
+      `
+        select ro.*
+        from report_observations ro
+        where ${archivedSampleFilter.sql
+          .replaceAll("probe_id", "ro.probe_id")
+          .replaceAll("boot_id", "ro.boot_id")
+          .replaceAll("sequence", "ro.sequence")}
+        order by ro.received_at_ms, ro.id
+      `,
+    )
+    .all(...archivedSampleFilter.parameters) as SqlRow[];
   const hostIds = [
-    ...new Set(samples.map((sample) => Number(sample.managed_host_id))),
+    ...new Set(
+      [...samples, ...observations].map((row) => Number(row.managed_host_id)),
+    ),
   ];
   const hostSnapshots = selectRowsByIds(
     hot,
@@ -387,17 +418,6 @@ function copyMetricsClosure(
     );
   }
 
-  const archivedSampleFilter = sampleRowsIdentityFilter("ro", samples);
-  const observations = hot
-    .prepare(
-      `
-        select ro.*
-        from report_observations ro
-        where ${archivedSampleFilter.sql}
-        order by ro.received_at_ms, ro.id
-      `,
-    )
-    .all(...archivedSampleFilter.parameters) as SqlRow[];
   insertRows(archive, "report_observations", observations);
 }
 
@@ -410,22 +430,6 @@ function sampleIdentityFilter(samples: MetricsArchivePlannedSample[]) {
     ]),
     sql: samples
       .map(() => "(probe_id = ? and boot_id = ? and sequence = ?)")
-      .join(" or "),
-  };
-}
-
-function sampleRowsIdentityFilter(tableAlias: string, samples: SqlRow[]) {
-  return {
-    parameters: samples.flatMap((sample) => [
-      sample.probe_id ?? null,
-      sample.boot_id ?? null,
-      sample.sequence ?? null,
-    ]),
-    sql: samples
-      .map(
-        () =>
-          `(${tableAlias}.probe_id = ? and ${tableAlias}.boot_id = ? and ${tableAlias}.sequence = ?)`,
-      )
       .join(" or "),
   };
 }

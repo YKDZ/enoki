@@ -54,6 +54,28 @@ pub struct DiskHealthMetric {
     #[prost(string, tag = "10")]
     pub role: ::prost::alloc::string::String,
 }
+/// Disk Health Provider 对一个内部发现设备返回的有界原始结果。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DiskHealthDeviceResourceFact {
+    #[prost(string, tag = "1")]
+    pub device_name: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub smartctl_json: ::prost::alloc::vec::Vec<u8>,
+    #[prost(int32, tag = "3")]
+    pub exit_code: i32,
+}
+/// 一次固定 pull 的 typed Disk Health Resource Result。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DiskHealthResourceResult {
+    #[prost(message, repeated, tag = "1")]
+    pub devices: ::prost::alloc::vec::Vec<DiskHealthDeviceResourceFact>,
+    #[prost(enumeration = "DiskHealthCollectorCapabilityStatus", tag = "2")]
+    pub capability_status: i32,
+    #[prost(string, tag = "3")]
+    pub failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub unraid_disks_ini: ::prost::alloc::string::String,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum DiskHealthCollectorCapabilityStatus {
@@ -166,6 +188,44 @@ pub struct HostProfileSnapshot {
     pub cpu_physical_count: u32,
     #[prost(message, optional, tag = "17")]
     pub collector_capabilities: ::core::option::Option<CollectorCapabilities>,
+    /// Runtime 生成的 Bundle 证据；Resource Provider 无权设置。
+    #[prost(string, tag = "18")]
+    pub probe_asset_bundle_version: ::prost::alloc::string::String,
+}
+/// 固定 Host Profile Resource pull 返回的内部不可变事实。
+/// 此消息不会越过已认证的 Probe--Hub 报告边界。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HostProfileResourceFacts {
+    #[prost(string, tag = "1")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub os: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub kernel: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub architecture: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "5")]
+    pub cpu_count: u32,
+    #[prost(uint64, tag = "6")]
+    pub memory_total_bytes: u64,
+    #[prost(message, repeated, tag = "7")]
+    pub filesystems: ::prost::alloc::vec::Vec<FilesystemProfile>,
+    #[prost(message, repeated, tag = "8")]
+    pub network_interfaces: ::prost::alloc::vec::Vec<NetworkInterfaceProfile>,
+    #[prost(string, tag = "9")]
+    pub cpu_model: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "10")]
+    pub process_count: u32,
+    #[prost(uint32, tag = "11")]
+    pub thread_count: u32,
+    #[prost(uint64, tag = "12")]
+    pub cpu_cache_l3_bytes: u64,
+    #[prost(uint32, tag = "13")]
+    pub cpu_base_frequency_mhz: u32,
+    #[prost(uint32, tag = "14")]
+    pub cpu_socket_count: u32,
+    #[prost(uint32, tag = "15")]
+    pub cpu_physical_count: u32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Snapshot {
@@ -201,6 +261,101 @@ pub struct NetworkInterfaceProfile {
     pub name: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "2")]
     pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Provider 读取的一组不可变 CPU counter 事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CpuCounterResourceFact {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub user: u64,
+    #[prost(uint64, tag = "3")]
+    pub nice: u64,
+    #[prost(uint64, tag = "4")]
+    pub system: u64,
+    #[prost(uint64, tag = "5")]
+    pub idle: u64,
+    #[prost(uint64, tag = "6")]
+    pub iowait: u64,
+    #[prost(uint64, tag = "7")]
+    pub irq: u64,
+    #[prost(uint64, tag = "8")]
+    pub softirq: u64,
+    #[prost(uint64, tag = "9")]
+    pub steal: u64,
+}
+/// Provider 对一个固定挂载点执行 statvfs 后返回的不可变容量事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FilesystemCapacityResourceFact {
+    #[prost(string, tag = "1")]
+    pub mount_point: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub total_bytes: u64,
+    #[prost(uint64, tag = "3")]
+    pub free_bytes: u64,
+    #[prost(uint64, tag = "4")]
+    pub available_bytes: u64,
+}
+/// Provider 从一个固定电源设备目录读取的原始事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BatterySupplyResourceFact {
+    #[prost(string, tag = "1")]
+    pub supply_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub capacity: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub status: ::prost::alloc::string::String,
+}
+/// Provider 从固定 mount table 与 block sysfs 派生的设备拓扑事实。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BlockDeviceTopologyResourceFact {
+    #[prost(string, tag = "1")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub physical_device: ::prost::alloc::string::String,
+}
+/// 一次固定 pull 的完整 typed Resource Result。
+/// procfs 文本仍是内部 Resource 事实；Collector 计算只在 Runtime 中进行。
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SystemStateResourceResult {
+    #[prost(message, repeated, tag = "1")]
+    pub cpu_counters: ::prost::alloc::vec::Vec<CpuCounterResourceFact>,
+    #[prost(string, tag = "2")]
+    pub proc_loadavg: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub proc_meminfo: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub proc_uptime: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub host_profile: ::core::option::Option<HostProfileResourceFacts>,
+    #[prost(string, tag = "6")]
+    pub proc_net_dev: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub proc_net_route: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub proc_net_ipv6_route: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub proc_mounts: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub proc_diskstats: ::prost::alloc::string::String,
+    #[prost(int64, tag = "11")]
+    pub disk_counters_collected_at_ms: i64,
+    #[prost(message, repeated, tag = "12")]
+    pub filesystem_capacities: ::prost::alloc::vec::Vec<FilesystemCapacityResourceFact>,
+    #[prost(string, repeated, tag = "13")]
+    pub temperature_inputs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(message, repeated, tag = "14")]
+    pub battery_supplies: ::prost::alloc::vec::Vec<BatterySupplyResourceFact>,
+    #[prost(string, tag = "15")]
+    pub network_failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "16")]
+    pub disk_failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "17")]
+    pub temperature_failure_code: ::prost::alloc::string::String,
+    #[prost(string, tag = "18")]
+    pub battery_failure_code: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "19")]
+    pub block_device_topology: ::prost::alloc::vec::Vec<BlockDeviceTopologyResourceFact>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CpuCoreMetric {
@@ -313,6 +468,89 @@ pub struct MetricSample {
     pub battery_state: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(message, repeated, tag = "24")]
     pub disk_health: ::prost::alloc::vec::Vec<DiskHealthMetric>,
+    #[prost(message, repeated, tag = "25")]
+    pub collector_outcomes: ::prost::alloc::vec::Vec<CollectorOutcome>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorOutcome {
+    #[prost(string, tag = "1")]
+    pub collector_id: ::prost::alloc::string::String,
+    #[prost(enumeration = "CollectorOutcomeState", tag = "2")]
+    pub state: i32,
+    #[prost(message, optional, tag = "3")]
+    pub failure: ::core::option::Option<CollectorFailure>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CollectorFailure {
+    #[prost(enumeration = "CollectorFailurePhase", tag = "1")]
+    pub phase: i32,
+    /// 冻结的旧 wire 兼容槽；不得新增数值或用于新 Collector。
+    #[prost(uint32, tag = "2")]
+    pub legacy_code: u32,
+    /// Collector 自有、namespaced 的稳定失败码。
+    #[prost(string, tag = "3")]
+    pub code: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CollectorOutcomeState {
+    Unspecified = 0,
+    Produced = 1,
+    NoData = 2,
+    Failed = 3,
+}
+impl CollectorOutcomeState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "COLLECTOR_OUTCOME_STATE_UNSPECIFIED",
+            Self::Produced => "COLLECTOR_OUTCOME_STATE_PRODUCED",
+            Self::NoData => "COLLECTOR_OUTCOME_STATE_NO_DATA",
+            Self::Failed => "COLLECTOR_OUTCOME_STATE_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "COLLECTOR_OUTCOME_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "COLLECTOR_OUTCOME_STATE_PRODUCED" => Some(Self::Produced),
+            "COLLECTOR_OUTCOME_STATE_NO_DATA" => Some(Self::NoData),
+            "COLLECTOR_OUTCOME_STATE_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CollectorFailurePhase {
+    Unspecified = 0,
+    Resource = 1,
+    Calculation = 2,
+}
+impl CollectorFailurePhase {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "COLLECTOR_FAILURE_PHASE_UNSPECIFIED",
+            Self::Resource => "COLLECTOR_FAILURE_PHASE_RESOURCE",
+            Self::Calculation => "COLLECTOR_FAILURE_PHASE_CALCULATION",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "COLLECTOR_FAILURE_PHASE_UNSPECIFIED" => Some(Self::Unspecified),
+            "COLLECTOR_FAILURE_PHASE_RESOURCE" => Some(Self::Resource),
+            "COLLECTOR_FAILURE_PHASE_CALCULATION" => Some(Self::Calculation),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeOperation {
@@ -339,6 +577,12 @@ pub struct ProbeUpgradeOperation {
     pub target_probe_version: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub operation_token: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub target_asset_set_digest: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub host_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub target_manifest_sha256: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeUninstallOperation {
@@ -379,6 +623,12 @@ pub struct ProbeOperationFailed {
     pub error_code: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub message: ::prost::alloc::string::String,
+    /// Root-owned, domain-separated post-activation evidence. The Probe only
+    /// forwards these opaque values; the Hub verifies them before persistence.
+    #[prost(string, tag = "3")]
+    pub repair_eligibility_evidence: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub repair_eligibility_signature: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProbeRegistrationRequest {
@@ -397,13 +647,69 @@ pub struct ProbeRegistrationRequest {
     /// before generating an identity or mutating local installation resources.
     #[prost(message, optional, tag = "6")]
     pub installation_inspection: ::core::option::Option<ProbeInstallationInspection>,
+    /// Replacement 注册携带由候选密钥签名的精确版本化注册尝试字节。
+    /// 旧式 Enrollment 仍使用外层字段。
+    #[prost(bytes = "vec", tag = "7")]
+    pub canonical_attempt: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "8")]
+    pub candidate_signature: ::prost::alloc::vec::Vec<u8>,
+}
+/// 规范字节是这个封闭消息的 protobuf 编码。Hub 只有在解码后重新编码
+/// 仍与原字节逐字节一致时才接受。
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProbeRegistrationAttempt {
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    #[prost(string, tag = "2")]
+    pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub hub_origin: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub host_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub old_probe_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub source_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub target_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub target_asset_set_digest: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub target_manifest_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "10")]
+    pub replacement_commit_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "11")]
+    pub nonce: ::prost::alloc::string::String,
+    #[prost(string, tag = "12")]
+    pub candidate_public_key_pem: ::prost::alloc::string::String,
+    #[prost(string, tag = "13")]
+    pub committed_source_probe_sha256: ::prost::alloc::string::String,
+    #[prost(string, tag = "14")]
+    pub target_bundle_target: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationInspection {}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationInspectionResponse {
     #[prost(enumeration = "ProbeEnrollmentTargetKind", tag = "1")]
     pub target_kind: i32,
+    #[prost(string, tag = "2")]
+    pub expected_hub_origin: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub expected_probe_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub source_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub target_probe_version: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub target_asset_set_digest: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "7")]
+    pub source_probe_sha256: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 与等待中的 manual-reinstall Enrollment 绑定的公开 correlation facts。
+    #[prost(string, tag = "8")]
+    pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub target_host_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeInstallationRejection {
@@ -435,6 +741,10 @@ pub struct ProbeRegistrationResponse {
     pub installation_inspection: ::core::option::Option<
         ProbeInstallationInspectionResponse,
     >,
+    /// Hub 在 registration transaction 中持久绑定的 Host；本机身份 receipt
+    /// 必须保存它，不能从后续 Probe route 反向推断。
+    #[prost(string, tag = "7")]
+    pub host_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProbeReportRequest {
@@ -462,6 +772,29 @@ pub struct ProbeReportRequest {
     pub snapshots: ::prost::alloc::vec::Vec<Snapshot>,
     #[prost(string, tag = "13")]
     pub enrollment_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "14")]
+    pub observation_window_failure: ::core::option::Option<ObservationWindowFailure>,
+    #[prost(message, repeated, tag = "15")]
+    pub cpu_resource_collection_outcomes: ::prost::alloc::vec::Vec<
+        CpuResourceCollectionOutcome,
+    >,
+    /// 出现在不含 Observation 的 sequence-one Boot Report。
+    #[prost(string, tag = "16")]
+    pub probe_asset_bundle_version: ::prost::alloc::string::String,
+}
+/// CPU Resource acquisition 的闭合结果；不携带实现名、路径或诊断文本。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CpuResourceCollectionOutcome {
+    #[prost(uint64, tag = "1")]
+    pub sequence: u64,
+    #[prost(enumeration = "CpuResourceCollectionOutcomeReason", tag = "2")]
+    pub reason: i32,
+}
+/// 闭合的 Runtime 报告级失败，不携带 Provider、Resource、路径或本机诊断。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ObservationWindowFailure {
+    #[prost(enumeration = "ObservationWindowFailureReason", tag = "1")]
+    pub reason: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProbeReportResponse {
@@ -484,6 +817,7 @@ pub enum ProbeEnrollmentTargetKind {
     Unspecified = 0,
     NewHost = 1,
     ExistingHost = 2,
+    ManualReinstall = 3,
 }
 impl ProbeEnrollmentTargetKind {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -495,6 +829,7 @@ impl ProbeEnrollmentTargetKind {
             Self::Unspecified => "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED",
             Self::NewHost => "NEW_HOST",
             Self::ExistingHost => "EXISTING_HOST",
+            Self::ManualReinstall => "MANUAL_REINSTALL",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -503,6 +838,83 @@ impl ProbeEnrollmentTargetKind {
             "PROBE_ENROLLMENT_TARGET_KIND_UNSPECIFIED" => Some(Self::Unspecified),
             "NEW_HOST" => Some(Self::NewHost),
             "EXISTING_HOST" => Some(Self::ExistingHost),
+            "MANUAL_REINSTALL" => Some(Self::ManualReinstall),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CpuResourceCollectionOutcomeReason {
+    Unspecified = 0,
+    CpuResourceUnavailable = 1,
+    CpuResourceMalformed = 2,
+    CpuProviderActivationBudgetExhausted = 3,
+}
+impl CpuResourceCollectionOutcomeReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED",
+            Self::CpuResourceUnavailable => "CPU_RESOURCE_UNAVAILABLE",
+            Self::CpuResourceMalformed => "CPU_RESOURCE_MALFORMED",
+            Self::CpuProviderActivationBudgetExhausted => {
+                "CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED"
+            }
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CPU_RESOURCE_COLLECTION_OUTCOME_REASON_UNSPECIFIED" => {
+                Some(Self::Unspecified)
+            }
+            "CPU_RESOURCE_UNAVAILABLE" => Some(Self::CpuResourceUnavailable),
+            "CPU_RESOURCE_MALFORMED" => Some(Self::CpuResourceMalformed),
+            "CPU_PROVIDER_ACTIVATION_BUDGET_EXHAUSTED" => {
+                Some(Self::CpuProviderActivationBudgetExhausted)
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ObservationWindowFailureReason {
+    Unspecified = 0,
+    ObservationRuntimeUnavailable = 1,
+    ObservationRuntimeInvalidResponse = 2,
+    ProbeAssetBundleIncoherent = 3,
+}
+impl ObservationWindowFailureReason {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED",
+            Self::ObservationRuntimeUnavailable => "OBSERVATION_RUNTIME_UNAVAILABLE",
+            Self::ObservationRuntimeInvalidResponse => {
+                "OBSERVATION_RUNTIME_INVALID_RESPONSE"
+            }
+            Self::ProbeAssetBundleIncoherent => "PROBE_ASSET_BUNDLE_INCOHERENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "OBSERVATION_WINDOW_FAILURE_REASON_UNSPECIFIED" => Some(Self::Unspecified),
+            "OBSERVATION_RUNTIME_UNAVAILABLE" => {
+                Some(Self::ObservationRuntimeUnavailable)
+            }
+            "OBSERVATION_RUNTIME_INVALID_RESPONSE" => {
+                Some(Self::ObservationRuntimeInvalidResponse)
+            }
+            "PROBE_ASSET_BUNDLE_INCOHERENT" => Some(Self::ProbeAssetBundleIncoherent),
             _ => None,
         }
     }

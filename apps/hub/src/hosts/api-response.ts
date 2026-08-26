@@ -1,10 +1,16 @@
-import type { HostSummary as ApiHostSummary } from "@enoki/api-client";
+import type {
+  HostSummary as ApiHostSummary,
+  ProbeUpgradeOverviewProblem,
+} from "@enoki/api-client";
 
 import type { HostSummary as DatabaseHostSummary } from "../database/hosts.js";
 
 export function hostSummaryResponse(
   host: DatabaseHostSummary,
-  options: { metricsCollectionIntervalSeconds?: number } = {},
+  options: {
+    metricsCollectionIntervalSeconds?: number;
+    probeUpgradeProblem?: ProbeUpgradeOverviewProblem;
+  } = {},
 ): ApiHostSummary {
   return {
     clockSkew: {
@@ -64,6 +70,7 @@ export function hostSummaryResponse(
       mode: host.probeConfiguration.mode,
       version: host.probeConfiguration.version,
     },
+    probeUpgradeProblem: options.probeUpgradeProblem ?? null,
     probeVersion: host.probeVersion,
     status: host.status,
     system: host.system,

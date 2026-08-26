@@ -2,11 +2,9 @@ import { createHash } from "node:crypto";
 
 import {
   hasAdvancingPortableMetrics,
-  hasSupportedProbeIdentityBoundary,
   isSupportedReleaseTestHostVirtualization,
   isCandidateHostReady,
 } from "./release-e2e-lib.mjs";
-import { createGitHubActionsMatrix } from "./release-e2e-matrix.mjs";
 
 const requiredComponentNames = Object.freeze([
   "inputValidation",
@@ -24,17 +22,19 @@ const requiredComponentNames = Object.freeze([
 
 export function createMatrixGateResult({
   artifactName,
-  candidate,
+  candidateManifest,
   cellId,
   evidence,
   scenarioOutcome,
   verifyCleanOutcome,
 }) {
+  const candidate = candidateManifest?.candidate ?? null;
   const evidenceOutcome = normalizeEvidenceOutcome(evidence?.result?.status);
   const scenarioId = evidence?.scenario ?? null;
   const successfulSteps =
     scenarioOutcome === "success" && verifyCleanOutcome === "success";
   const consistentEvidence =
+    isCandidateManifest(candidateManifest) &&
     typeof scenarioId === "string" &&
     cellId === `${cellIdEnvironment(cellId)}--${scenarioId}` &&
     sameCandidate(evidence?.candidate, candidate);
@@ -43,6 +43,7 @@ export function createMatrixGateResult({
     evidence,
     evidenceOutcome,
     cellId,
+    candidateManifest,
   );
 
   return {
@@ -59,6 +60,7 @@ export function createMatrixGateResult({
       evidenceValidationErrors.length === 0
         ? evidenceOutcome
         : "failed",
+    releaseBaselineKind: evidence?.releaseBaseline?.kind ?? null,
     scenarioId,
     scenarioStepOutcome: scenarioOutcome,
     schemaVersion: 1,
@@ -66,7 +68,12 @@ export function createMatrixGateResult({
   };
 }
 
-function validateHostScenarioEvidence(evidence, outcome, cellId) {
+function validateHostScenarioEvidence(
+  evidence,
+  outcome,
+  cellId,
+  candidateManifest,
+) {
   if (outcome !== "succeeded") return [];
 
   const errors = [];
@@ -74,13 +81,37 @@ function validateHostScenarioEvidence(evidence, outcome, cellId) {
   if (evidence?.phase !== "succeeded") errors.push("phase was not succeeded");
   validateReleaseTestHostEvidence(evidence, cellId, errors);
   validateCleanupEvidence(evidence?.cleanup, errors);
+  validateReleaseBaselineEvidence(
+    evidence?.releaseBaseline,
+    candidateManifest?.releaseBaseline,
+    errors,
+  );
+  const baselineKind = evidence?.releaseBaseline?.kind;
+  if (
+    baselineKind !== "enoki-release-baseline" &&
+    baselineKind !== "enoki-trust-epoch-migration-baseline"
+  ) {
+    errors.push("Release Baseline evidence kind is invalid");
+  }
   if (evidence?.scenario !== "fresh-install-uninstall") {
     validateUninstallEvidence(evidence?.uninstall, errors);
   }
 
   const requiredByScenario = {
-    "baseline-upgrade-uninstall": [
+    "compatible-upgrade-uninstall": [
       "auditLog",
+      "baselineInstall",
+      "candidateHost",
+      "compatibility",
+      "hostBoundary",
+      "identityContinuity",
+      "metrics",
+      "probeConfiguration",
+      "upgradeOperationTimeline",
+    ],
+    "replacement-migration-uninstall": [
+      "auditLog",
+      "baselineInstall",
       "candidateHost",
       "compatibility",
       "hostBoundary",
@@ -91,12 +122,14 @@ function validateHostScenarioEvidence(evidence, outcome, cellId) {
     ],
     "fresh-install-uninstall": [
       "auditLog",
+      "canonicalRuntimeUnavailableReporting",
       "host",
       "hostBoundary",
       "diagnostics",
       "finalLocalUninstall",
       "hubOnlyDeletion",
       "initialInstall",
+      "installedBundleFailureRepair",
       "localUninstall",
       "metrics",
       "metricsHistory",
@@ -105,6 +138,7 @@ function validateHostScenarioEvidence(evidence, outcome, cellId) {
       "repeatedAdd",
     ],
     "hub-restore-compatibility-window": [
+      "baselineInstall",
       "hostProfileContinuity",
       "identity",
       "image",
@@ -115,6 +149,7 @@ function validateHostScenarioEvidence(evidence, outcome, cellId) {
     ],
     "post-replacement-repair-uninstall": [
       "auditLog",
+      "baselineInstall",
       "boundaryEvidenceValidation",
       "failureBoundary",
       "identityContinuity",
@@ -131,13 +166,16 @@ function validateHostScenarioEvidence(evidence, outcome, cellId) {
   }
 
   if (evidence?.scenario === "fresh-install-uninstall") {
-    validateFreshEvidence(evidence, errors);
-  } else if (evidence?.scenario === "baseline-upgrade-uninstall") {
-    validateBaselineEvidence(evidence, errors);
+    validateFreshEvidence(evidence, errors, candidateManifest);
+  } else if (
+    evidence?.scenario === "compatible-upgrade-uninstall" ||
+    evidence?.scenario === "replacement-migration-uninstall"
+  ) {
+    validateBaselineEvidence(evidence, errors, candidateManifest);
   } else if (evidence?.scenario === "post-replacement-repair-uninstall") {
-    validateRepairEvidence(evidence, errors);
+    validateRepairEvidence(evidence, errors, candidateManifest);
   } else if (evidence?.scenario === "hub-restore-compatibility-window") {
-    validateRestoreEvidence(evidence, errors);
+    validateRestoreEvidence(evidence, errors, candidateManifest);
   } else {
     errors.push("unknown Host scenario");
   }
@@ -241,7 +279,7 @@ function sameKeySet(actual, expected) {
   );
 }
 
-function validateFreshEvidence(evidence, errors) {
+function validateFreshEvidence(evidence, errors, candidateManifest) {
   const version = candidateProbeVersion(evidence);
   if (!isCandidateHostReady(evidence?.host, version)) {
     errors.push("fresh Host Profile is invalid");
@@ -249,23 +287,24 @@ function validateFreshEvidence(evidence, errors) {
   validateMetrics(evidence?.metrics, "fresh reporting", errors);
   validateMetricsHistoryPreservation(evidence, errors);
   validateProbeConfiguration(evidence?.probeConfiguration, errors);
-  validateFreshLifecycleAuditLog(evidence, errors);
-  validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
-  validateInstallerEvidence(
-    evidence?.initialInstall?.installer,
-    "initial Probe installer",
+  validateInstalledBundleFailureRepair(
+    evidence?.installedBundleFailureRepair,
+    version,
+    evidence?.host?.id,
     errors,
   );
-  validateCommandCompletionReadiness({
-    commandCompletion: evidence?.initialInstall?.commandCompletion,
-    expectedHostId: evidence?.host?.id,
-    expectedProbeVersion: version,
-    expectedTarget: { kind: "new_host" },
-    label: "initial install",
-    readiness: evidence?.initialInstall?.readiness,
-    sourceEnrollment: evidence?.initialInstall?.enrollment,
+  validateFreshLifecycleAuditLog(evidence, errors);
+  validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
+  validateHostInstallResult(
+    evidence?.initialInstall,
+    "initial Probe installer",
     errors,
-  });
+    {
+      activeHub: "candidate",
+      candidateManifest,
+      expectedRunId: evidence?.runId,
+    },
+  );
   validateRepeatedAddEvidence(evidence?.repeatedAdd, errors);
   validateLocalUninstallEvidence(
     evidence?.localUninstall,
@@ -273,7 +312,8 @@ function validateFreshEvidence(evidence, errors) {
     "first Local Probe Uninstall",
     errors,
   );
-  validateReEnrollmentEvidence(evidence, errors);
+  validateReEnrollmentEvidence(evidence, errors, candidateManifest);
+  validateCanonicalRuntimeUnavailableReporting(evidence, errors);
   validateHubOnlyDeletionEvidence(evidence, errors);
   validateLocalUninstallEvidence(
     evidence?.finalLocalUninstall,
@@ -282,6 +322,290 @@ function validateFreshEvidence(evidence, errors) {
     errors,
   );
   validateDiagnosticsEvidence(evidence?.diagnostics, errors);
+}
+
+function validateCanonicalRuntimeUnavailableReporting(evidence, errors) {
+  const value = evidence?.canonicalRuntimeUnavailableReporting;
+  const host = value?.host;
+  const identity = host?.identity;
+  const probe = host?.probe;
+  const runtime = host?.runtime;
+  const owner = value?.ownerProjection;
+  const reporting = value?.reporting;
+  const boot = reporting?.bootReport;
+  const failure = reporting?.failureReport;
+  const receiptConvergence = reporting?.receiptConvergence;
+  const expectedProbeId = evidence?.reEnrollment?.identity?.after?.probeId;
+  const validSha256 = (candidate) => /^[0-9a-f]{64}$/.test(candidate ?? "");
+  const validIdentity =
+    sameKeySet(identity ?? {}, {
+      probeId: null,
+      registrationAttemptCredential: null,
+      registrationAttemptSource: null,
+      registrationDropIn: null,
+      transitionalRegistrationKeys: null,
+    }) &&
+    identity.probeId === expectedProbeId &&
+    identity.registrationAttemptCredential === false &&
+    identity.registrationAttemptSource === false &&
+    identity.registrationDropIn === false &&
+    identity.transitionalRegistrationKeys === false;
+  const validHost =
+    validIdentity &&
+    sameKeySet(probe ?? {}, {
+      ActiveState: null,
+      LoadState: null,
+      Result: null,
+      SubState: null,
+      Type: null,
+    }) &&
+    probe.ActiveState === "active" &&
+    probe.LoadState === "loaded" &&
+    probe.Result === "success" &&
+    probe.SubState === "running" &&
+    probe.Type === "notify" &&
+    sameKeySet(runtime ?? {}, {
+      serviceLoadState: null,
+      socketLoadState: null,
+    }) &&
+    runtime.serviceLoadState === "masked" &&
+    runtime.socketLoadState === "masked";
+  const validBoot =
+    sameKeySet(boot ?? {}, {
+      acceptedSequenceEnd: null,
+      bytes: null,
+      payloadSha256: null,
+      reconciliation: null,
+      responseDelivered: null,
+      responseSha256: null,
+      sequence: null,
+      upstreamStatus: null,
+    }) &&
+    boot.sequence === 1 &&
+    boot.acceptedSequenceEnd === 1 &&
+    boot.upstreamStatus === 200 &&
+    boot.responseDelivered === true &&
+    Number.isSafeInteger(boot.bytes) &&
+    boot.bytes > 0 &&
+    sameKeySet(boot.reconciliation ?? {}, {
+      currentProbeConfigurationVersion: null,
+      pendingOperation: null,
+      requestedSnapshotCollectorIdsCount: null,
+    }) &&
+    typeof boot.reconciliation.currentProbeConfigurationVersion === "string" &&
+    boot.reconciliation.currentProbeConfigurationVersion.length > 0 &&
+    ["absent", "present"].includes(boot.reconciliation.pendingOperation) &&
+    Number.isSafeInteger(
+      boot.reconciliation.requestedSnapshotCollectorIdsCount,
+    ) &&
+    boot.reconciliation.requestedSnapshotCollectorIdsCount >= 0 &&
+    validSha256(boot.payloadSha256) &&
+    validSha256(boot.responseSha256);
+  const validFailureAttempts =
+    Array.isArray(failure?.attempts) &&
+    failure.attempts.length === 2 &&
+    failure.attempts.every(
+      (attempt, index) =>
+        sameKeySet(attempt ?? {}, {
+          acceptedSequenceEnd: null,
+          response: null,
+          responseSha256: null,
+          upstreamStatus: null,
+        }) &&
+        attempt.acceptedSequenceEnd === 2 &&
+        attempt.response === (index === 0 ? "dropped" : "delivered") &&
+        validSha256(attempt.responseSha256) &&
+        attempt.upstreamStatus === 200,
+    );
+  const validFailure =
+    sameKeySet(failure ?? {}, {
+      attempts: null,
+      bytes: null,
+      collectionOutcomeCount: null,
+      metricsCount: null,
+      payloadSha256: null,
+      probeConfigurationVersion: null,
+      reason: null,
+      retryPayloadSha256: null,
+      sequence: null,
+    }) &&
+    failure.sequence === 2 &&
+    failure.reason === "observation_runtime_unavailable" &&
+    failure.metricsCount === 0 &&
+    failure.collectionOutcomeCount === 0 &&
+    failure.probeConfigurationVersion ===
+      boot?.reconciliation?.currentProbeConfigurationVersion &&
+    Number.isSafeInteger(failure.bytes) &&
+    failure.bytes > 0 &&
+    validSha256(failure.payloadSha256) &&
+    failure.retryPayloadSha256 === failure.payloadSha256 &&
+    validFailureAttempts;
+  const validReporting =
+    sameKeySet(reporting ?? {}, {
+      bootId: null,
+      bootReport: null,
+      failureReport: null,
+      kind: null,
+      probeId: null,
+      receiptConvergence: null,
+      schemaVersion: null,
+    }) &&
+    reporting.kind === "canonical-runtime-unavailable-report-evidence" &&
+    reporting.schemaVersion === 1 &&
+    reporting.probeId === expectedProbeId &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(reporting.bootId ?? "") &&
+    validBoot &&
+    validFailure &&
+    sameKeySet(receiptConvergence ?? {}, {
+      contract: null,
+      key: null,
+      requestAttemptCount: null,
+      uniquePayloadCount: null,
+    }) &&
+    receiptConvergence.contract === "report-sequence-ack-idempotency" &&
+    sameKeySet(receiptConvergence.key ?? {}, {
+      bootId: null,
+      probeId: null,
+      sequence: null,
+    }) &&
+    receiptConvergence.key.probeId === reporting.probeId &&
+    receiptConvergence.key.bootId === reporting.bootId &&
+    receiptConvergence.key.sequence === 2 &&
+    receiptConvergence.requestAttemptCount === 2 &&
+    receiptConvergence.uniquePayloadCount === 1;
+  const validOwnerProjection =
+    owner?.metricsUnchanged === true &&
+    owner?.reportedProbeConfigurationVersion ===
+      boot?.reconciliation?.currentProbeConfigurationVersion &&
+    owner?.host?.id === evidence?.host?.id &&
+    owner?.host?.status === "online" &&
+    isCandidateHostReady(owner?.host, candidateProbeVersion(evidence));
+  const transport = evidence?.diagnostics?.transport;
+  const validTransportDiagnostics =
+    transport?.completed === true &&
+    transport?.failure === null &&
+    transport?.failureReportObserved === true &&
+    transport?.lastUpstreamStatus === 200;
+  if (
+    !validHost ||
+    !validReporting ||
+    !validOwnerProjection ||
+    !validTransportDiagnostics
+  ) {
+    errors.push("canonical Runtime-unavailable reporting evidence is invalid");
+  }
+}
+
+function validateInstalledBundleFailureRepair(
+  value,
+  version,
+  expectedHostId,
+  errors,
+) {
+  const failure = value?.failure;
+  const bundle = failure?.bundle;
+  const epoch = failure?.failureEpoch;
+  const latch = failure?.latch;
+  const budget = failure?.recoveryBudget;
+  const repair = value?.repair;
+  const sha256 = (candidate) => /^[0-9a-f]{64}$/.test(candidate ?? "");
+  if (
+    !sameKeySet(failure ?? {}, {
+      activeState: null,
+      bundle: null,
+      failureEpoch: null,
+      latch: null,
+      recoveryBudget: null,
+      result: null,
+      role: null,
+      status: null,
+      unit: null,
+      unitSha256: null,
+    }) ||
+    !sameKeySet(bundle ?? {}, {
+      installStateSha256: null,
+      manifestSha256: null,
+      runtimeFaultSha256: null,
+      runtimeSha256: null,
+      version: null,
+    }) ||
+    !sameKeySet(epoch ?? {}, {
+      bootId: null,
+      generation: null,
+      hostId: null,
+      identityReceiptSha256: null,
+      links: null,
+      mode: null,
+      ownerUid: null,
+      probeId: null,
+    }) ||
+    !sameKeySet(latch ?? {}, {
+      generation: null,
+      links: null,
+      mode: null,
+      ownerUid: null,
+    }) ||
+    !sameKeySet(budget ?? {}, {
+      observedStarts: null,
+      startLimitBurst: null,
+      startLimitIntervalSeconds: null,
+    }) ||
+    !sameKeySet(repair ?? {}, {
+      failureEpochRemoved: null,
+      faultRemoved: null,
+      latchRemoved: null,
+      output: null,
+      probeId: null,
+      repairedVersion: null,
+      runtimeSha256: null,
+      sameBundle: null,
+      unit: null,
+    }) ||
+    failure.activeState !== "failed" ||
+    failure.result !== "start-limit-hit" ||
+    failure.role !== "observation_runtime" ||
+    failure.status !== "latched" ||
+    failure.unit !== "enoki-observation-runtime.service" ||
+    !sha256(failure.unitSha256) ||
+    bundle.version !== version ||
+    !sha256(bundle.installStateSha256) ||
+    !sha256(bundle.manifestSha256) ||
+    !sha256(bundle.runtimeFaultSha256) ||
+    !sha256(bundle.runtimeSha256) ||
+    bundle.runtimeFaultSha256 === bundle.runtimeSha256 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(epoch.bootId ?? "") ||
+    !sha256(epoch.generation) ||
+    epoch.hostId !== String(expectedHostId) ||
+    !sha256(epoch.identityReceiptSha256) ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(epoch.probeId ?? "") ||
+    epoch.ownerUid !== 0 ||
+    epoch.mode !== "0600" ||
+    epoch.links !== 1 ||
+    latch.generation !== epoch.generation ||
+    latch.ownerUid !== 0 ||
+    latch.mode !== "0600" ||
+    latch.links !== 1 ||
+    budget.startLimitBurst !== 3 ||
+    budget.startLimitIntervalSeconds !== 60 ||
+    budget.observedStarts !== 3 ||
+    repair.failureEpochRemoved !== true ||
+    repair.faultRemoved !== true ||
+    repair.latchRemoved !== true ||
+    repair.output !== "Probe repair completed." ||
+    repair.repairedVersion !== version ||
+    repair.runtimeSha256 !== bundle.runtimeSha256 ||
+    repair.sameBundle !== true ||
+    repair.unit !== failure.unit ||
+    repair.probeId !== epoch.probeId ||
+    repair.probeId !== value?.identity?.after?.probeId ||
+    JSON.stringify(value?.identity?.after) !==
+      JSON.stringify(value?.identity?.before) ||
+    value?.host?.id !== expectedHostId ||
+    !isCandidateHostReady(value?.host, version)
+  ) {
+    errors.push("Installed Bundle Failure Repair evidence is invalid");
+  }
+  validateInstalledHostBoundary(value?.hostBoundary, version, errors);
 }
 
 function validateInstallerEvidence(value, label, errors) {
@@ -295,6 +619,128 @@ function validateInstallerEvidence(value, label, errors) {
     containsUnredactedSecret(output)
   ) {
     errors.push(`${label} output is invalid`);
+  }
+}
+
+function validateHostInstallResult(
+  value,
+  label,
+  errors,
+  { activeHub, allowLegacyMigration = false, candidateManifest, expectedRunId },
+) {
+  validateInstallerEvidence(value, label, errors);
+  if (
+    !sameKeySet(value ?? {}, {
+      bootstrapRecipeProvenance: null,
+      output: null,
+      runId: null,
+    }) ||
+    value?.runId !== expectedRunId
+  ) {
+    errors.push(`${label} production result is invalid`);
+  }
+  if (
+    allowLegacyMigration &&
+    candidateManifest?.releaseBaseline?.kind ===
+      "enoki-trust-epoch-migration-baseline" &&
+    value?.bootstrapRecipeProvenance === null
+  ) {
+    return;
+  }
+  validateBootstrapRecipeProvenance(
+    value?.bootstrapRecipeProvenance,
+    candidateManifest,
+    activeHub,
+    errors,
+  );
+}
+
+function validateBootstrapRecipeProvenance(
+  provenance,
+  candidateManifest,
+  activeHub,
+  errors,
+) {
+  const record = provenance?.record;
+  const recipe = record?.recipe;
+  const baseline = candidateManifest?.releaseBaseline;
+  const expectedDigest =
+    activeHub === "candidate"
+      ? candidateManifest?.hub?.digest
+      : baseline?.hub?.imageDigest;
+  const expectedVersion =
+    activeHub === "candidate"
+      ? candidateManifest?.probeAssetSet?.version
+      : baseline?.kind === "enoki-release-baseline"
+        ? baseline.probeAssetSet?.version
+        : null;
+  const recordBytes = Buffer.from(`${JSON.stringify(record ?? {}, null, 2)}\n`);
+  const candidateRecipe = candidateManifest?.bootstrapRecipe;
+  if (
+    !sameKeySet(provenance ?? {}, {
+      activeHub: null,
+      hubDigest: null,
+      kind: null,
+      record: null,
+      recordFile: null,
+      recordSha256: null,
+      recordSize: null,
+      schemaVersion: null,
+    }) ||
+    !sameKeySet(record ?? {}, {
+      bundleVersion: null,
+      distribution: null,
+      kind: null,
+      recipe: null,
+      rootFingerprint: null,
+      schemaVersion: null,
+      targets: null,
+    }) ||
+    !sameKeySet(recipe ?? {}, {
+      file: null,
+      sha256: null,
+      size: null,
+      version: null,
+    }) ||
+    provenance.activeHub !== activeHub ||
+    provenance.hubDigest !== expectedDigest ||
+    provenance.kind !== "enoki-release-e2e-bootstrap-recipe-provenance" ||
+    provenance.recordFile !== "enoki-probe-bootstrap-recipe.json" ||
+    provenance.recordSha256 !==
+      createHash("sha256").update(recordBytes).digest("hex") ||
+    provenance.recordSize !== recordBytes.byteLength ||
+    provenance.schemaVersion !== 1 ||
+    record?.bundleVersion !== expectedVersion ||
+    record?.distribution !== "enoki" ||
+    record?.kind !== "enoki-probe-bootstrap-recipe-record" ||
+    record?.schemaVersion !== 1 ||
+    !/^[0-9a-f]{64}$/.test(record?.rootFingerprint ?? "") ||
+    !Array.isArray(record?.targets) ||
+    record.targets.length !== 4 ||
+    recipe?.file !== "enoki-probe-bootstrap.py" ||
+    recipe?.version !== "v1" ||
+    !/^[0-9a-f]{64}$/.test(recipe?.sha256 ?? "") ||
+    !Number.isSafeInteger(recipe?.size) ||
+    recipe.size < 1 ||
+    (activeHub === "candidate" &&
+      (candidateRecipe?.recordFile !== provenance.recordFile ||
+        candidateRecipe?.recordSha256 !== provenance.recordSha256 ||
+        candidateRecipe?.recordSize !== provenance.recordSize ||
+        candidateRecipe?.bundleVersion !== record.bundleVersion ||
+        candidateRecipe?.distribution !== record.distribution ||
+        candidateRecipe?.kind !== record.kind ||
+        candidateRecipe?.rootFingerprint !== record.rootFingerprint ||
+        candidateRecipe?.schemaVersion !== record.schemaVersion ||
+        JSON.stringify(candidateRecipe?.targets) !==
+          JSON.stringify(record.targets) ||
+        candidateRecipe?.file !== recipe.file ||
+        candidateRecipe?.sha256 !== recipe.sha256 ||
+        candidateRecipe?.size !== recipe.size ||
+        candidateRecipe?.version !== recipe.version))
+  ) {
+    errors.push(
+      `Active ${activeHub} Hub Bootstrap recipe provenance is invalid`,
+    );
   }
 }
 
@@ -339,7 +785,7 @@ function validateLocalUninstallEvidence(value, expectedHostId, label, errors) {
   }
 }
 
-function validateReEnrollmentEvidence(evidence, errors) {
+function validateReEnrollmentEvidence(evidence, errors, candidateManifest) {
   const reEnrollment = evidence?.reEnrollment;
   const before = reEnrollment?.identity?.before;
   const after = reEnrollment?.identity?.after;
@@ -368,67 +814,15 @@ function validateReEnrollmentEvidence(evidence, errors) {
   ) {
     errors.push("Host Re-enrollment evidence is invalid");
   }
-  validateInstallerEvidence(
+  validateHostInstallResult(
     reEnrollment?.installer,
     "Host Re-enrollment installer",
     errors,
-  );
-  validateCommandCompletionReadiness({
-    commandCompletion: reEnrollment?.commandCompletion,
-    expectedHostId: evidence?.host?.id,
-    expectedProbeVersion: candidateProbeVersion(evidence),
-    expectedTarget: { hostId: evidence?.host?.id, kind: "existing_host" },
-    label: "Host Re-enrollment",
-    readiness: reEnrollment?.readiness,
-    sourceEnrollment: reEnrollment?.enrollment,
-    errors,
-  });
-}
-
-function validateCommandCompletionReadiness({
-  commandCompletion,
-  errors,
-  expectedHostId,
-  expectedProbeVersion,
-  expectedTarget,
-  label,
-  readiness,
-  sourceEnrollment,
-}) {
-  const hostId = commandCompletion?.hostId;
-  const sourceTarget = sourceEnrollment?.target;
-  if (
-    !validEnrollmentSource(sourceEnrollment) ||
-    !sameEnrollmentTarget(sourceTarget, expectedTarget) ||
-    commandCompletion?.status !== "ready" ||
-    commandCompletion?.enrollmentId !== sourceEnrollment.enrollmentId ||
-    !sameEnrollmentTarget(commandCompletion?.target, expectedTarget) ||
-    !Number.isSafeInteger(hostId) ||
-    hostId <= 0 ||
-    hostId !== expectedHostId ||
-    readiness?.id !== hostId ||
-    !isCandidateHostReady(readiness, expectedProbeVersion)
-  ) {
-    errors.push(`${label} command completion readiness is invalid`);
-  }
-}
-
-function validEnrollmentSource(enrollment) {
-  return (
-    typeof enrollment?.enrollmentId === "string" &&
-    enrollment.enrollmentId.length > 0 &&
-    enrollment?.status === "pending" &&
-    !containsUnredactedSecret(enrollment)
-  );
-}
-
-function sameEnrollmentTarget(actual, expected) {
-  if (actual?.kind !== expected?.kind) return false;
-  if (actual.kind === "new_host") return actual.hostId == null;
-  return (
-    actual.kind === "existing_host" &&
-    Number.isSafeInteger(actual.hostId) &&
-    actual.hostId === expected.hostId
+    {
+      activeHub: "candidate",
+      candidateManifest,
+      expectedRunId: evidence?.runId,
+    },
   );
 }
 
@@ -455,6 +849,7 @@ function validateMetricsHistoryPreservation(evidence, errors) {
 
 function validMetricsHistory(value) {
   return (
+    sameKeySet(value ?? {}, { anchors: null, sha256: null }) &&
     Array.isArray(value?.anchors) &&
     value.anchors.length >= 2 &&
     value.anchors.every(validMetricAnchor) &&
@@ -472,6 +867,14 @@ function validMetricsHistory(value) {
 
 function validMetricAnchor(value) {
   return (
+    sameKeySet(value ?? {}, {
+      collectedAtMs: null,
+      cpuPercent: null,
+      memoryTotalBytes: null,
+      memoryUsedBytes: null,
+      sequence: null,
+      uptimeSeconds: null,
+    }) &&
     Number.isSafeInteger(value?.sequence) &&
     value.sequence >= 0 &&
     Number.isSafeInteger(value?.collectedAtMs) &&
@@ -738,12 +1141,48 @@ function containsUnredactedSecret(value) {
   return false;
 }
 
-function validateBaselineEvidence(evidence, errors) {
+function validateBaselineEvidence(evidence, errors, candidateManifest) {
   const version = candidateProbeVersion(evidence);
-  if (
-    evidence?.manualRecovery === null ||
-    evidence?.manualRecovery === undefined
-  ) {
+  const migration =
+    evidence?.releaseBaseline?.kind === "enoki-trust-epoch-migration-baseline";
+  validateHostInstallResult(
+    evidence?.baselineInstall,
+    "Release Baseline Probe installer",
+    errors,
+    {
+      activeHub: "baseline",
+      allowLegacyMigration: true,
+      candidateManifest,
+      expectedRunId: evidence?.runId,
+    },
+  );
+  if (migration) {
+    if (
+      evidence?.upgradeOperationTimeline?.length !== 0 ||
+      evidence?.manualRecovery?.kind !== "trust_epoch_manual_reinstall" ||
+      evidence.manualRecovery.hostId !== evidence?.candidateHost?.id ||
+      typeof evidence.manualRecovery.enrollmentId !== "string" ||
+      !evidence.manualRecovery.enrollmentId
+    ) {
+      errors.push("Trust Epoch manual reinstall evidence is invalid");
+    }
+    validateHostInstallResult(
+      evidence?.manualRecovery?.result,
+      "Trust Epoch manual reinstall",
+      errors,
+      {
+        activeHub: "candidate",
+        candidateManifest,
+        expectedRunId: evidence?.runId,
+      },
+    );
+  } else {
+    if (
+      evidence?.manualRecovery !== null &&
+      evidence?.manualRecovery !== undefined
+    ) {
+      errors.push("Compatible Upgrade must not use manual recovery");
+    }
     validateTerminalOperation(
       evidence?.upgradeOperationTimeline,
       "probe_upgrade",
@@ -751,24 +1190,6 @@ function validateBaselineEvidence(evidence, errors) {
       "baseline Upgrade",
       errors,
     );
-  } else {
-    validateTerminalOperation(
-      evidence?.upgradeOperationTimeline,
-      "probe_upgrade",
-      "failed",
-      "baseline Upgrade permission failure",
-      errors,
-    );
-    const failed = evidence?.upgradeOperationTimeline?.at(-1);
-    if (
-      failed?.failure?.code !== "insufficient_privilege" ||
-      evidence.manualRecovery.mode !== "installer" ||
-      evidence.manualRecovery.status !== "succeeded" ||
-      evidence.manualRecovery.failedOperationId !== failed?.id ||
-      evidence.manualRecovery.targetProbeVersion !== version
-    ) {
-      errors.push("Installer Recovery evidence is invalid");
-    }
   }
   if (
     evidence?.compatibility?.status !== "succeeded" ||
@@ -782,11 +1203,25 @@ function validateBaselineEvidence(evidence, errors) {
   if (!isCandidateHostReady(evidence?.candidateHost, version)) {
     errors.push("Candidate Host Profile is invalid");
   }
-  validateIdentityContinuity(
-    evidence?.identityContinuity,
-    evidence?.candidateHost?.id,
-    errors,
-  );
+  if (migration) {
+    validateIdentityReplacement(
+      evidence?.identityContinuity,
+      evidence?.candidateHost?.id,
+      errors,
+    );
+    validateMigrationRetention(evidence?.migrationRetention, errors, {
+      afterMetrics: evidence?.metrics?.afterUpgrade,
+      expectedCandidateHost: evidence?.candidateHost,
+      expectedConfiguration: evidence?.probeConfiguration?.beforeUpgrade,
+      expectedIdentityHostId: evidence?.identityContinuity?.hostId,
+    });
+  } else {
+    validateIdentityContinuity(
+      evidence?.identityContinuity,
+      evidence?.candidateHost?.id,
+      errors,
+    );
+  }
   validateMetrics(evidence?.metrics?.beforeUpgrade, "pre-Upgrade", errors);
   validateMetrics(evidence?.metrics?.afterUpgrade, "post-Upgrade", errors);
   validateMetricsProgression(
@@ -803,12 +1238,31 @@ function validateBaselineEvidence(evidence, errors) {
     evidence?.probeConfiguration?.afterUpgrade,
     errors,
   );
-  validateLifecycleAuditLog(evidence, true, errors);
+  validateLifecycleAuditLog(evidence, !migration, errors);
+  if (migration) validateManualReinstallAuditLog(evidence, errors);
   validateInstalledHostBoundary(evidence?.hostBoundary, version, errors);
 }
 
-function validateRepairEvidence(evidence, errors) {
+function validateRepairEvidence(evidence, errors, candidateManifest) {
   const version = candidateProbeVersion(evidence);
+  validateHostInstallResult(
+    evidence?.baselineInstall,
+    "Repair Release Baseline Probe installer",
+    errors,
+    {
+      activeHub: "baseline",
+      candidateManifest,
+      expectedRunId: evidence?.runId,
+    },
+  );
+  if (
+    evidence?.releaseBaseline?.kind === "enoki-trust-epoch-migration-baseline"
+  ) {
+    errors.push(
+      "Trust Epoch migration Repair has no production-authorized eligibility sequence",
+    );
+    return;
+  }
   validateTerminalOperation(
     evidence?.operationTimeline,
     "probe_upgrade",
@@ -866,9 +1320,7 @@ function validateRepairEvidence(evidence, errors) {
     errors,
   );
   validateProbeConfiguration(evidence?.probeConfiguration?.afterRepair, errors);
-  validateInstalledHostBoundary(evidence?.repairHostBoundary, version, errors, {
-    requireSupportedIdentity: true,
-  });
+  validateInstalledHostBoundary(evidence?.repairHostBoundary, version, errors);
   validateLifecycleAuditLog(evidence, true, errors);
 }
 
@@ -893,6 +1345,16 @@ function validateMetricsProgression(before, after, label, errors) {
 
 function validateProbeConfiguration(configuration, errors) {
   if (
+    !sameKeySet(configuration ?? {}, {
+      configuration: null,
+      mode: null,
+      reportedVersion: null,
+      version: null,
+    }) ||
+    !validEffectiveProbeConfiguration({
+      configuration: configuration?.configuration,
+      mode: configuration?.mode,
+    }) ||
     configuration?.mode !== "override" ||
     !configuration?.configuration ||
     !Array.isArray(configuration.configuration.enabledCollectorIds) ||
@@ -966,32 +1428,50 @@ function validateLifecycleAuditLog(evidence, requiresUpgrade, errors) {
   }
 }
 
-function validateInstalledHostBoundary(
-  boundary,
-  version,
-  errors,
-  { requireSupportedIdentity = false } = {},
-) {
+function validateInstalledHostBoundary(boundary, version, errors) {
   const inventory = boundary?.inventory;
   const files = inventory?.files;
   if (
+    !sameKeySet(boundary ?? {}, {
+      delegationGeneration: null,
+      inventory: null,
+      probeVersion: null,
+      service: null,
+      sudoers: null,
+    }) ||
+    !sameKeySet(inventory ?? {}, {
+      accounts: null,
+      files: null,
+      units: null,
+    }) ||
+    !sameKeySet(inventory?.accounts ?? {}, { group: null, user: null }) ||
+    !sameKeySet(boundary?.service ?? {}, {
+      ActiveState: null,
+      FragmentPath: null,
+      Group: null,
+      LoadState: null,
+      SubState: null,
+      User: null,
+    }) ||
     boundary?.probeVersion !== version ||
     inventory?.accounts?.user !== true ||
     inventory?.accounts?.group !== true ||
     !Array.isArray(files) ||
-    (requireSupportedIdentity &&
-      !hasSupportedProbeIdentityBoundary(boundary)) ||
     !files.includes("/usr/local/bin/enoki-probe") ||
     !files.includes("/etc/systemd/system/enoki-probe.service") ||
-    !files.includes("/etc/sudoers.d/enoki-probe-operations") ||
+    files.some((file) => file.startsWith("/etc/sudoers.d/enoki-probe")) ||
     !Array.isArray(inventory?.units) ||
     !inventory.units.includes("enoki-probe.service") ||
     boundary?.service?.LoadState !== "loaded" ||
     boundary?.service?.ActiveState !== "active" ||
+    boundary?.service?.SubState !== "running" ||
     boundary?.service?.User !== "enoki-probe" ||
     boundary?.service?.Group !== "enoki-probe" ||
-    typeof boundary?.sudoers !== "string" ||
-    !boundary.sudoers.includes("enoki-probe-uninstaller")
+    boundary?.service?.FragmentPath !==
+      "/etc/systemd/system/enoki-probe.service" ||
+    boundary?.sudoers !== "" ||
+    !Number.isSafeInteger(boundary?.delegationGeneration) ||
+    boundary.delegationGeneration < 1
   ) {
     errors.push("Host installation boundary is invalid");
   }
@@ -1013,11 +1493,197 @@ function validateIdentityContinuity(identity, hostId, errors) {
   }
 }
 
+function validateIdentityReplacement(identity, hostId, errors) {
+  const before = identity?.before;
+  const after = identity?.after;
+  if (
+    !Number.isSafeInteger(identity?.hostId) ||
+    identity.hostId !== hostId ||
+    !validProbeIdentity(before) ||
+    !validProbeIdentity(after) ||
+    after.probeId === before.probeId ||
+    after.identitySha256 === before.identitySha256
+  ) {
+    errors.push("Probe Identity replacement is invalid");
+  }
+}
+
+function validateMigrationRetention(
+  retention,
+  errors,
+  {
+    afterMetrics,
+    expectedCandidateHost,
+    expectedConfiguration,
+    expectedIdentityHostId,
+  } = {},
+) {
+  const metricHistory = retention?.metricHistory;
+  const postMetricHistory = retention?.postMetricHistory;
+  const expectedEffectiveConfiguration = {
+    configuration: expectedConfiguration?.configuration,
+    mode: expectedConfiguration?.mode,
+  };
+  const latestBeforeAnchor = metricHistory?.anchors?.at(-1);
+  if (
+    !sameKeySet(retention ?? {}, {
+      configuration: null,
+      hostAfter: null,
+      hostBefore: null,
+      metricHistory: null,
+      postMetricHistory: null,
+    }) ||
+    !validRetainedHostProjection(retention?.hostBefore) ||
+    !validRetainedHostProjection(retention?.hostAfter) ||
+    !Number.isSafeInteger(retention?.hostBefore?.id) ||
+    retention.hostBefore.id !== retention?.hostAfter?.id ||
+    retention.hostBefore.id !== expectedCandidateHost?.id ||
+    retention.hostBefore.id !== expectedIdentityHostId ||
+    JSON.stringify(retention.hostAfter.hostProfile) !==
+      JSON.stringify(
+        canonicalSemanticValue(expectedCandidateHost?.hostProfile),
+      ) ||
+    !validHostMetadata(retention?.hostBefore?.hostMetadata) ||
+    JSON.stringify(retention.hostBefore.hostMetadata) !==
+      JSON.stringify(retention?.hostAfter?.hostMetadata) ||
+    retention.hostBefore.reportedProbeConfigurationVersion !==
+      expectedConfiguration?.reportedVersion ||
+    retention.hostAfter.reportedProbeConfigurationVersion !==
+      expectedConfiguration?.reportedVersion ||
+    retention.hostBefore.reportedProbeConfigurationVersion !==
+      expectedConfiguration?.version ||
+    retention.hostAfter.reportedProbeConfigurationVersion !==
+      expectedConfiguration?.version ||
+    !validEffectiveProbeConfiguration(retention?.configuration) ||
+    JSON.stringify(retention?.configuration) !==
+      JSON.stringify(expectedEffectiveConfiguration) ||
+    !validMetricsHistory(metricHistory) ||
+    metricHistory?.anchors?.length > 3 ||
+    !validMetricsHistory(postMetricHistory) ||
+    postMetricHistory?.anchors?.length > metricHistory?.anchors?.length + 3 ||
+    (afterMetrics ?? []).length !== 2 ||
+    !metricHistory?.anchors?.every((anchor) =>
+      postMetricHistory?.anchors?.some((sample) =>
+        sameMetricAnchor(anchor, sample),
+      ),
+    ) ||
+    !(afterMetrics ?? []).every((sample) =>
+      postMetricHistory?.anchors?.some((anchor) =>
+        sameMetricAnchor(anchor, sample),
+      ),
+    ) ||
+    !postMetricHistory?.anchors?.some(
+      (anchor) =>
+        anchor.sequence > latestBeforeAnchor?.sequence &&
+        anchor.collectedAtMs > latestBeforeAnchor?.collectedAtMs,
+    )
+  ) {
+    errors.push(
+      "Trust Epoch Host, metadata, configuration, or history retention is invalid",
+    );
+  }
+}
+
+function validEffectiveProbeConfiguration(value) {
+  const configuration = value?.configuration;
+  return (
+    sameKeySet(value ?? {}, { configuration: null, mode: null }) &&
+    value.mode === "override" &&
+    sameKeySet(configuration ?? {}, {
+      enabledCollectorIds: null,
+      metricsCollectionIntervalSeconds: null,
+      version: null,
+    }) &&
+    Array.isArray(configuration.enabledCollectorIds) &&
+    configuration.enabledCollectorIds.every(
+      (collectorId) => typeof collectorId === "string",
+    ) &&
+    Number.isSafeInteger(configuration.metricsCollectionIntervalSeconds) &&
+    typeof configuration.version === "string" &&
+    configuration.version.length > 0
+  );
+}
+
+function validRetainedHostProjection(value) {
+  return (
+    sameKeySet(value ?? {}, {
+      hostMetadata: null,
+      hostProfile: null,
+      id: null,
+      reportedProbeConfigurationVersion: null,
+    }) &&
+    value.hostProfile !== null &&
+    typeof value.hostProfile === "object" &&
+    !Array.isArray(value.hostProfile)
+  );
+}
+
+function validateManualReinstallAuditLog(evidence, errors) {
+  const identity = evidence?.identityContinuity;
+  const hostId = evidence?.candidateHost?.id;
+  const event = Array.isArray(evidence?.auditLog)
+    ? evidence.auditLog.find(
+        (entry) => entry?.action === "probe.manual_reinstall_identity_replaced",
+      )
+    : null;
+  if (
+    event?.actor !== "system" ||
+    event?.outcome !== "success" ||
+    event?.subjectId !== String(hostId) ||
+    event?.subjectType !== "host" ||
+    event?.details?.oldProbeId !== identity?.before?.probeId ||
+    event?.details?.newProbeId !== identity?.after?.probeId ||
+    !Array.isArray(event?.details?.sourceProbeSha256) ||
+    event.details.sourceProbeSha256.length < 1 ||
+    !/^sha256:[0-9a-f]{64}$/.test(event?.details?.targetAssetSetDigest ?? "") ||
+    event?.details?.targetProbeVersion !== candidateProbeVersion(evidence)
+  ) {
+    errors.push("manual reinstall identity replacement Audit Log is invalid");
+  }
+}
+
 function candidateProbeVersion(evidence) {
   const version = evidence?.candidate?.version;
   return typeof version === "string" && version.startsWith("v")
     ? version.slice(1)
     : null;
+}
+
+function validateReleaseBaselineEvidence(evidence, baseline, errors) {
+  if (!isReleaseBaselineDescriptor(baseline)) {
+    errors.push("Candidate Release Baseline identity is unavailable");
+    return;
+  }
+  const migration = baseline.kind === "enoki-trust-epoch-migration-baseline";
+  const expected = {
+    authority: migration
+      ? {
+          authorizationSha256: baseline.authorization?.sha256,
+          githubReleaseId: baseline.githubRelease.id,
+          legacyReleaseSha256: baseline.authorization?.legacyReleaseSha256,
+          peeledCommitSha: baseline.githubRelease.peeledCommitSha,
+        }
+      : {
+          githubReleaseId: baseline.githubRelease.id,
+          peeledCommitSha: baseline.githubRelease.peeledCommitSha,
+          signingPublicKeySha256:
+            baseline.probeAssetSet?.signingIdentity?.publicKeySha256,
+          trustRootPublicKeySha256:
+            baseline.probeAssetSet?.trustRoot?.publicKeySha256,
+        },
+    descriptorSha256: createHash("sha256")
+      .update(JSON.stringify(baseline))
+      .digest("hex"),
+    hubDigest: baseline.hub.imageDigest,
+    kind: baseline.kind,
+    probeVersion: migration
+      ? baseline.tag.slice(1)
+      : baseline.probeAssetSet?.version,
+    tag: baseline.tag,
+  };
+  if (JSON.stringify(evidence) !== JSON.stringify(expected)) {
+    errors.push("Release Baseline evidence is not bound to the Candidate");
+  }
 }
 
 function validateCleanupEvidence(cleanup, errors) {
@@ -1112,8 +1778,26 @@ function validateTerminalOperation(timeline, kind, state, label, errors) {
   }
 }
 
-function validateRestoreEvidence(evidence, errors) {
+function validateRestoreEvidence(evidence, errors, candidateManifest) {
   const version = candidateProbeVersion(evidence);
+  const migration =
+    evidence?.releaseBaseline?.kind === "enoki-trust-epoch-migration-baseline";
+  if (migration) {
+    errors.push(
+      "Trust Epoch migration Hub Restore has no production-compatible Candidate Probe identity sequence",
+    );
+    return;
+  }
+  validateHostInstallResult(
+    evidence?.baselineInstall,
+    "Restore Release Baseline Probe installer",
+    errors,
+    {
+      activeHub: "baseline",
+      candidateManifest,
+      expectedRunId: evidence?.runId,
+    },
+  );
   validateTerminalOperation(
     evidence?.migration?.operationTimeline,
     "probe_upgrade",
@@ -1169,9 +1853,10 @@ function validateRestoreEvidence(evidence, errors) {
   }
   const candidateReporting = evidence?.reporting?.candidateHub;
   const restoredReporting = evidence?.reporting?.restoredBaselineHub;
+  const reportingVersion = version;
   if (
-    !isCandidateHostReady(candidateReporting?.host, version) ||
-    !isCandidateHostReady(restoredReporting?.host, version)
+    !isCandidateHostReady(candidateReporting?.host, reportingVersion) ||
+    !isCandidateHostReady(restoredReporting?.host, reportingVersion)
   ) {
     errors.push("Candidate-to-Baseline Host reporting is invalid");
   }
@@ -1184,11 +1869,7 @@ function validateRestoreEvidence(evidence, errors) {
     errors,
   );
   const identity = evidence?.identity;
-  const identities = [
-    identity?.beforeUpgrade,
-    identity?.afterUpgrade,
-    identity?.afterRestore,
-  ];
+  const identities = [identity?.beforeUpgrade, identity?.afterRestore];
   if (
     !Number.isSafeInteger(identity?.hostId) ||
     identity.hostId !== candidateReporting?.host?.id ||
@@ -1203,7 +1884,9 @@ function validateRestoreEvidence(evidence, errors) {
       (value) =>
         value?.probeId !== identities[0]?.probeId ||
         value?.identitySha256 !== identities[0]?.identitySha256,
-    )
+    ) ||
+    identity?.afterUpgrade?.probeId !== identities[0]?.probeId ||
+    identity?.afterUpgrade?.identitySha256 !== identities[0]?.identitySha256
   ) {
     errors.push("Restore Probe Identity continuity is invalid");
   }
@@ -1244,7 +1927,7 @@ export function createReleaseVerificationSummary({
   gateResults,
   hostGates,
   identities = {},
-  matrix,
+  scenarioPlan,
   requested,
   run,
   standardCi,
@@ -1272,7 +1955,7 @@ export function createReleaseVerificationSummary({
     matrixJob: components.hostMatrix ?? gateResults?.matrixJob ?? "missing",
     uiJob: components.candidateUiContract ?? gateResults?.uiJob ?? "missing",
   };
-  const expectedCells = createGitHubActionsMatrix(matrix).include;
+  const expectedCells = validateScenarioPlan(scenarioPlan);
   const artifactUrl = (artifactName) =>
     resolveArtifactUrl(artifactIndex, artifactName, run);
   const providedHostGates = hostGates ?? [];
@@ -1284,12 +1967,14 @@ export function createReleaseVerificationSummary({
     const expectedOutcome = "succeeded";
     return {
       artifactName: gate?.artifactName ?? null,
+      capabilities: [...cell.capabilities],
       cellId: cell.cellId,
       environmentId: cell.environmentId,
       evidenceOutcome: gate?.evidenceOutcome ?? "missing",
       evidenceUrl: artifactUrl(gate?.artifactName),
       expectedOutcome,
       outcome: gate?.outcome ?? "missing",
+      releaseBaselineKind: gate?.releaseBaselineKind ?? null,
       runner: cell.runner,
       scenarioId: cell.scenarioId,
       scenarioStepOutcome: gate?.scenarioStepOutcome ?? "missing",
@@ -1324,6 +2009,7 @@ export function createReleaseVerificationSummary({
     isArtifactName(uiGate?.artifactName) &&
     (!artifactIndex || Boolean(artifactUrl(uiGate?.artifactName))) &&
     sameCandidate(uiGate?.candidate, candidateManifest?.candidate) &&
+    expectedCells.length > 0 &&
     providedHostGates.length === expectedCells.length &&
     gatesByCell.size === expectedCells.length &&
     hostScenarios.every(
@@ -1336,7 +2022,9 @@ export function createReleaseVerificationSummary({
           gatesByCell.get(gate.cellId)?.candidate,
           candidateManifest?.candidate,
         ) &&
-        gatesByCell.get(gate.cellId)?.scenarioId === gate.scenarioId,
+        gatesByCell.get(gate.cellId)?.scenarioId === gate.scenarioId &&
+        gatesByCell.get(gate.cellId)?.releaseBaselineKind ===
+          candidateManifest?.releaseBaseline?.kind,
     );
 
   const hub = candidateManifest?.hub ?? identities.hub ?? null;
@@ -1398,6 +2086,7 @@ export function createReleaseVerificationSummary({
     hub,
     kind: "enoki-release-verification-evidence",
     missingIdentities,
+    bootstrapRecipe: candidateManifest?.bootstrapRecipe ?? null,
     probeAssetSet,
     promotable: false,
     releaseBaseline,
@@ -1436,15 +2125,15 @@ export function renderReleaseVerificationEvidenceMarkdown(summary) {
     "",
     "## Required gates",
     "",
-    "| Gate | Outcome | Evidence |",
-    "| --- | --- | --- |",
-    `| Candidate build | ${summary.gates.candidateBuild.outcome} | Candidate Manifest |`,
-    `| Standard CI | ${summary.gates.standardCi.outcome} | ${summary.gates.standardCi.runUrl ?? "missing"} |`,
-    `| Matrix expansion | ${summary.gates.matrixExpansion.outcome} | central matrix |`,
-    `| Candidate-image UI Contract | ${summary.gates.candidateUiContract.outcome} | ${evidenceLink(summary.gates.candidateUiContract)} |`,
+    "| Gate | Capabilities | Outcome | Evidence |",
+    "| --- | --- | --- | --- |",
+    `| Candidate build | — | ${summary.gates.candidateBuild.outcome} | Candidate Manifest |`,
+    `| Standard CI | — | ${summary.gates.standardCi.outcome} | ${summary.gates.standardCi.runUrl ?? "missing"} |`,
+    `| Matrix expansion | — | ${summary.gates.matrixExpansion.outcome} | central matrix |`,
+    `| Candidate-image UI Contract | — | ${summary.gates.candidateUiContract.outcome} | ${evidenceLink(summary.gates.candidateUiContract)} |`,
     ...summary.gates.hostScenarios.map(
       (gate) =>
-        `| \`${gate.cellId}\` | ${gate.outcome} | ${evidenceLink(gate)} |`,
+        `| \`${gate.cellId}\` | ${gate.capabilities.map((capability) => `\`${capability}\``).join(", ") || "missing"} | ${gate.outcome} | ${evidenceLink(gate)} |`,
     ),
     "",
     "## Failure reasons",
@@ -1472,13 +2161,158 @@ function assertAttemptSummaryInputs({
 }
 
 function isCandidateManifest(candidateManifest) {
+  // 候选目录已由 validateReleaseCandidate 完成内容闭包验证；此处重验其
+  // schema 4 描述符，避免汇总器把残缺的已解析值当作可验证的候选。
   return (
+    isPlainObject(candidateManifest) &&
     candidateManifest?.kind === "enoki-release-candidate" &&
-    candidateManifest?.schemaVersion === 2 &&
-    Boolean(candidateManifest.candidate) &&
-    Boolean(candidateManifest.hub) &&
-    Boolean(candidateManifest.probeAssetSet) &&
-    Boolean(candidateManifest.releaseBaseline)
+    candidateManifest?.schemaVersion === 4 &&
+    sameKeySet(candidateManifest, {
+      bootstrapRecipe: null,
+      candidate: null,
+      hub: null,
+      kind: null,
+      probeAssetSet: null,
+      releaseBaseline: null,
+      schemaVersion: null,
+    }) &&
+    isCandidateIdentity(candidateManifest.candidate) &&
+    isCandidateBootstrapRecipe(
+      candidateManifest.bootstrapRecipe,
+      candidateManifest.candidate,
+    ) &&
+    isCandidateHub(candidateManifest.hub, candidateManifest.candidate) &&
+    isCandidateProbeAssetSet(
+      candidateManifest.probeAssetSet,
+      candidateManifest.candidate,
+    ) &&
+    isReleaseBaselineDescriptor(candidateManifest.releaseBaseline)
+  );
+}
+
+function isCandidateBootstrapRecipe(recipe, candidate) {
+  return (
+    isPlainObject(recipe) &&
+    sameKeySet(recipe, {
+      bundleVersion: null,
+      distribution: null,
+      file: null,
+      kind: null,
+      recordFile: null,
+      recordSha256: null,
+      recordSize: null,
+      rootFingerprint: null,
+      schemaVersion: null,
+      sha256: null,
+      size: null,
+      targets: null,
+      version: null,
+    }) &&
+    recipe.bundleVersion === candidate.version.slice(1) &&
+    recipe.distribution === "enoki" &&
+    recipe.file === "enoki-probe-bootstrap.py" &&
+    recipe.kind === "enoki-probe-bootstrap-recipe-record" &&
+    recipe.recordFile === "enoki-probe-bootstrap-recipe.json" &&
+    /^[0-9a-f]{64}$/.test(recipe.recordSha256 ?? "") &&
+    Number.isSafeInteger(recipe.recordSize) &&
+    recipe.recordSize > 0 &&
+    recipe.schemaVersion === 1 &&
+    Array.isArray(recipe.targets) &&
+    recipe.targets.length === 4 &&
+    recipe.version === "v1" &&
+    /^[0-9a-f]{64}$/.test(recipe.rootFingerprint ?? "") &&
+    /^[0-9a-f]{64}$/.test(recipe.sha256 ?? "") &&
+    Number.isSafeInteger(recipe.size) &&
+    recipe.size > 0
+  );
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCandidateIdentity(candidate) {
+  return (
+    isPlainObject(candidate) &&
+    sameKeySet(candidate, { commit: null, version: null }) &&
+    /^[0-9a-f]{40}$/.test(candidate.commit ?? "") &&
+    /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(
+      candidate.version ?? "",
+    )
+  );
+}
+
+function isCandidateHub(hub, candidate) {
+  return (
+    isPlainObject(hub) &&
+    sameKeySet(hub, {
+      archive: null,
+      archiveSha256: null,
+      digest: null,
+      embeddedProbeVersion: null,
+      size: null,
+    }) &&
+    hub.archive === `hub/enoki-hub-${candidate.version}.oci.tar` &&
+    /^[0-9a-f]{64}$/.test(hub.archiveSha256 ?? "") &&
+    /^sha256:[0-9a-f]{64}$/.test(hub.digest ?? "") &&
+    hub.embeddedProbeVersion === candidate.version.slice(1) &&
+    Number.isSafeInteger(hub.size) &&
+    hub.size > 0
+  );
+}
+
+function isCandidateProbeAssetSet(probeAssetSet, candidate) {
+  return (
+    isPlainObject(probeAssetSet) &&
+    sameKeySet(probeAssetSet, {
+      directory: null,
+      files: null,
+      signingIdentity: null,
+      version: null,
+    }) &&
+    probeAssetSet.directory === "probe-assets" &&
+    probeAssetSet.version === candidate.version.slice(1) &&
+    Array.isArray(probeAssetSet.files) &&
+    probeAssetSet.files.length > 0 &&
+    probeAssetSet.files.every(
+      (file) =>
+        isPlainObject(file) &&
+        typeof file.file === "string" &&
+        file.file.length > 0 &&
+        /^[0-9a-f]{64}$/.test(file.sha256 ?? "") &&
+        Number.isSafeInteger(file.size) &&
+        file.size > 0,
+    ) &&
+    isPlainObject(probeAssetSet.signingIdentity) &&
+    sameKeySet(probeAssetSet.signingIdentity, {
+      algorithm: null,
+      publicKeyFile: null,
+      publicKeySha256: null,
+    }) &&
+    probeAssetSet.signingIdentity.algorithm === "rsa-sha256" &&
+    probeAssetSet.signingIdentity.publicKeyFile === "signing-key.pem" &&
+    /^[0-9a-f]{64}$/.test(probeAssetSet.signingIdentity.publicKeySha256 ?? "")
+  );
+}
+
+function isReleaseBaselineDescriptor(releaseBaseline) {
+  const githubRelease = releaseBaseline?.githubRelease;
+  return (
+    isPlainObject(releaseBaseline) &&
+    ["enoki-release-baseline", "enoki-trust-epoch-migration-baseline"].includes(
+      releaseBaseline.kind,
+    ) &&
+    typeof releaseBaseline.tag === "string" &&
+    /^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/.test(
+      releaseBaseline.tag,
+    ) &&
+    isPlainObject(githubRelease) &&
+    Number.isSafeInteger(githubRelease.id) &&
+    githubRelease.id > 0 &&
+    /^[0-9a-f]{40}$/.test(githubRelease.peeledCommitSha ?? "") &&
+    /^[0-9a-f]{40}$/.test(githubRelease.tagRefSha ?? "") &&
+    isPlainObject(releaseBaseline.hub) &&
+    /^sha256:[0-9a-f]{64}$/.test(releaseBaseline.hub.imageDigest ?? "")
   );
 }
 
@@ -1502,6 +2336,33 @@ function normalizeComponentResults(componentResults) {
         : "missing",
     ]),
   );
+}
+
+function validateScenarioPlan(plan) {
+  if (plan === null || plan === undefined) return [];
+  if (
+    plan?.kind !== "enoki-release-scenario-plan" ||
+    plan.schemaVersion !== 1 ||
+    !Array.isArray(plan.cells) ||
+    plan.cells.length === 0 ||
+    plan.cells.some(
+      (cell) =>
+        typeof cell?.cellId !== "string" ||
+        typeof cell.environmentId !== "string" ||
+        typeof cell.runner !== "string" ||
+        typeof cell.scenarioId !== "string" ||
+        !Array.isArray(cell.capabilities) ||
+        cell.capabilities.some(
+          (capability) => typeof capability !== "string" || !capability,
+        ) ||
+        (cell.scenarioId === "fresh-install-uninstall" &&
+          !cell.capabilities.includes("canonical-report-response-loss")),
+    ) ||
+    new Set(plan.cells.map((cell) => cell.cellId)).size !== plan.cells.length
+  ) {
+    throw new Error("compiled Release Scenario Plan is invalid");
+  }
+  return plan.cells;
 }
 
 function sameCandidate(left, right) {

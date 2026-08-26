@@ -1,79 +1,128 @@
 <script setup lang="ts">
-import { CheckCircle2, CircleAlert, CircleX, LoaderCircle } from "@lucide/vue";
+import { CircleX, LoaderCircle } from "@lucide/vue";
 import { computed } from "vue";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
 import type { HostDetail } from "@/types";
 
 const props = defineProps<{
   status: NonNullable<HostDetail["probeUpgradeStatus"]>;
 }>();
 
-const requiresInstallerRecovery = computed(
-  () =>
-    props.status.state === "failed" &&
-    props.status.failure?.code === "insufficient_privilege",
-);
+const emit = defineEmits<{
+  retryProbeUpgrade: [];
+}>();
 
 const presentation = computed(() => {
+  const repair = props.status.kind === "probe_repair";
   switch (props.status.state) {
     case "pending":
       return {
+        action: null,
+        description: repair
+          ? "Hub 正在等待探针接收修复请求。"
+          : "Hub 正在等待探针接收升级请求。",
         icon: LoaderCircle,
         iconClass: "animate-spin",
-        title: "探针升级等待中",
+        title: repair ? "探针修复请求等待中" : "探针升级等待中",
         variant: "default" as const,
       };
     case "accepted":
       return {
+        action: null,
+        description: repair
+          ? "探针已接收请求，正在等待修复开始。"
+          : "探针已接收请求，正在等待升级开始。",
         icon: LoaderCircle,
         iconClass: "animate-spin",
-        title: "探针已接收升级请求",
+        title: repair ? "探针已接收修复请求" : "探针已接收升级请求",
         variant: "default" as const,
       };
     case "running":
       return {
+        action: null,
+        description: repair
+          ? "探针正在恢复目标版本。"
+          : "探针正在安装并切换到目标版本。",
         icon: LoaderCircle,
         iconClass: "animate-spin",
-        title: "探针升级进行中",
-        variant: "default" as const,
-      };
-    case "succeeded":
-      return {
-        icon: CheckCircle2,
-        iconClass: "text-emerald-600",
-        title: "探针升级完成",
+        title: repair ? "探针修复进行中" : "探针升级进行中",
         variant: "default" as const,
       };
     case "failed":
-      return {
-        icon: CircleX,
-        iconClass: "",
-        title: "探针升级失败",
-        variant: "destructive" as const,
-      };
+      return failedPresentation(
+        props.status.failure?.recoveryDisposition ?? null,
+        repair,
+      );
+    case "succeeded":
     case "canceled":
-      return {
-        icon: CircleAlert,
-        iconClass: "",
-        title: "探针升级已取消",
-        variant: "default" as const,
-      };
     case "superseded":
-      return {
-        icon: CircleAlert,
-        iconClass: "",
-        title: "探针升级请求已被替代",
-        variant: "default" as const,
-      };
+      return null;
     default:
-      throw new Error(`不支持的探针升级状态：${props.status.state}`);
+      return null;
   }
 });
+
+type RecoveryDisposition = NonNullable<
+  NonNullable<HostDetail["probeUpgradeStatus"]>["failure"]
+>["recoveryDisposition"];
+
+function failedPresentation(disposition: RecoveryDisposition, repair: boolean) {
+  const base = {
+    icon: CircleX,
+    iconClass: "",
+    variant: "destructive" as const,
+  };
+
+  switch (disposition) {
+    case "retry_probe_upgrade":
+      return {
+        ...base,
+        action: "retry" as const,
+        description:
+          "上次探针升级未完成。请再次确认升级后，由 Hub 创建新的升级请求。",
+        title: "探针升级失败：请再次确认升级",
+      };
+    case "probe_repair":
+      return {
+        ...base,
+        action: "repair" as const,
+        description: repair
+          ? "本次探针修复未完成，请在受影响主机上以 root 权限重新修复探针。"
+          : "升级已进入激活阶段，请在受影响主机上以 root 权限修复探针。",
+        title: repair
+          ? "探针修复失败：需要重新修复探针"
+          : "探针升级失败：需要修复探针",
+      };
+    case "manual_reinstall_required":
+      return {
+        ...base,
+        action: null,
+        description:
+          "当前安装无法安全原地恢复。主机离线且 Hub 验证迁移目标后，会提供一次手动重装操作。",
+        title: repair
+          ? "探针修复失败：需要手动重新安装探针"
+          : "探针升级失败：需要手动重新安装探针",
+      };
+    default:
+      return {
+        ...base,
+        action: null,
+        description:
+          "Hub 无法安全判断恢复方式。请检查 Hub 与探针状态后再决定下一步。",
+        title: repair ? "探针修复失败：未知问题" : "探针升级失败：未知问题",
+      };
+  }
+}
 </script>
 
 <template>
-  <Alert data-testid="probe-upgrade-status" :variant="presentation.variant">
+  <Alert
+    v-if="presentation"
+    data-testid="probe-upgrade-status"
+    :variant="presentation.variant"
+  >
     <component
       :is="presentation.icon"
       class="size-4"
@@ -81,19 +130,23 @@ const presentation = computed(() => {
       aria-hidden="true"
     />
     <AlertTitle>{{ presentation.title }}</AlertTitle>
-    <AlertDescription class="grid gap-2">
+    <AlertDescription class="grid gap-3">
+      <p>{{ presentation.description }}</p>
       <p>目标探针版本：{{ status.targetProbeVersion }}</p>
-      <p v-if="status.failure">
-        {{ status.failure.message || status.failure.code }}
-        <span v-if="status.failure.message">（{{ status.failure.code }}）</span>
+      <p v-if="presentation.action === 'repair'">
+        运行
+        <code>sudo enoki-probe repair</code>，然后返回此页确认探针恢复上报。
       </p>
-      <p v-if="requiresInstallerRecovery">
-        请在 Hub 生成新的一次性安装命令，并在受影响主机上以 root
-        权限运行；安装器会保留现有探针身份并完成恢复。
-      </p>
-      <p v-else-if="status.state === 'failed'">
-        请在受影响主机上以 root 权限运行探针修复，然后返回此页确认探针恢复上报。
-      </p>
+      <div v-if="presentation.action === 'retry'">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          @click="emit('retryProbeUpgrade')"
+        >
+          再次确认升级
+        </Button>
+      </div>
     </AlertDescription>
   </Alert>
 </template>

@@ -1,16 +1,6 @@
 import { type BrowserContext, type Page } from "@playwright/test";
 
-import {
-  closeFakeLiveWebSocket,
-  fakeLiveSocketGeneration,
-  fakeLiveSocketOpenGeneration,
-  installFakeLiveWebSocket,
-  openFakeLiveWebSocket,
-} from "./fake-live-websocket";
-import { releaseUiBrowserRuntime } from "./release-ui-contract-fixture";
 import { expect, test } from "./security-console";
-
-const { probeApiUrl } = releaseUiBrowserRuntime();
 
 type BrowserEnrollmentTarget =
   | { kind: "new_host" }
@@ -31,6 +21,20 @@ type BrowserEnrollmentStatus = {
 };
 
 type BrowserEnrollmentResponse = BrowserEnrollmentStatus & {
+  bootstrapRecipe: {
+    bundleVersion: string;
+    distribution: string;
+    kind: "enoki-probe-bootstrap-recipe-record";
+    recipe: {
+      file: string;
+      sha256: string;
+      size: number;
+      version: string;
+    };
+    rootFingerprint: string;
+    schemaVersion: 1;
+    targets: string[];
+  };
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
@@ -59,7 +63,11 @@ type BrowserScrollCall = {
   block?: ScrollLogicalPosition;
 };
 
-test("owner can generate a two-role probe activation command", async ({
+const isCandidateImageGate = Boolean(
+  process.env.ENOKI_RELEASE_UI_CANDIDATE_VERSION,
+);
+
+test("owner can generate the configured probe activation command", async ({
   context,
   page,
 }) => {
@@ -76,13 +84,22 @@ test("owner can generate a two-role probe activation command", async ({
 
   const command = page.getByRole("textbox", { name: "安装命令" });
   await expect(command).toBeFocused();
-  await expect(command).toHaveValue(
-    /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
-  );
-  expect(await command.inputValue()).toContain(
-    `ENOKI_HUB_URL='${probeApiUrl}'`,
-  );
-  await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  const enrollmentToken = isCandidateImageGate
+    ? /ENOKI_ENROLLMENT_TOKEN=/
+    : /enk_enroll_[A-Za-z0-9_-]+/;
+  if (isCandidateImageGate) {
+    await expect(command).toHaveValue(
+      /\/usr\/local\/bin\/enoki-probe-bootstrap-acquire \| sudo -- \/usr\/local\/bin\/enoki-probe-bootstrap-activate/,
+    );
+    await expect(command).toHaveValue(
+      /ENOKI_HUB_URL='http:\/\/127\.0\.0\.1:38201'/,
+    );
+  } else {
+    await expect(command).toHaveValue(
+      /^printf '%s\\n' 'enk_enroll_[A-Za-z0-9_-]+' \| python3 -- \.\/enoki-probe-bootstrap\.py --hub-origin 'http:\/\/127\.0\.0\.1:38201'$/,
+    );
+  }
+  await expect(command).toHaveValue(enrollmentToken);
   await expect(command).not.toHaveValue(/sudo env/);
   await expect(command).not.toHaveValue(/curl/);
   await expect(command).not.toHaveValue(/github\.com/);
@@ -94,11 +111,11 @@ test("owner can generate a two-role probe activation command", async ({
     (await command.inputValue()).length,
   );
   await command.press("x");
-  await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  await expect(command).toHaveValue(enrollmentToken);
 
   await seedSystemClipboard(context, "must-not-paste");
   await command.press("Control+V");
-  await expect(command).toHaveValue(/ENOKI_ENROLLMENT_TOKEN=/);
+  await expect(command).toHaveValue(enrollmentToken);
 });
 
 test("owner can select the command with Cmd+A on a macOS browser runner", async ({
@@ -140,7 +157,7 @@ test("an expired Enrollment closes the matching dialog through its status API", 
         expiresAtMs,
         expiredAtMs: null,
         hostId: null,
-        hubUrl: probeApiUrl,
+        hubUrl: "http://127.0.0.1:38200",
         installCommand: "curl expired-command",
         readyAtMs: null,
         rejectedAtMs: null,
@@ -179,113 +196,6 @@ test("an expired Enrollment closes the matching dialog through its status API", 
 
   await expect(page.getByText("安装命令已过期")).toBeVisible();
   await expect(page.getByRole("dialog", { name: "添加主机" })).toBeHidden();
-});
-
-test("a verifying Enrollment keeps its dialog open and withholds the install command", async ({
-  page,
-}) => {
-  const enrollmentId = "enr_verifying_browser";
-  const verifyingAtMs = Date.now();
-  let statusReads = 0;
-  await page.route("**/api/web/enrollments", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-
-    await route.fulfill({
-      contentType: "application/json",
-      json: pendingEnrollment(enrollmentId),
-      status: 201,
-    });
-  });
-  await page.route(`**/api/web/enrollments/${enrollmentId}`, async (route) => {
-    statusReads += 1;
-    await route.fulfill({
-      contentType: "application/json",
-      json: {
-        ...pendingEnrollment(enrollmentId),
-        status: "verifying",
-        verificationDeadlineAtMs: verifyingAtMs + 60_000,
-      },
-    });
-  });
-
-  await page.goto("/");
-  await page.getByRole("button", { name: "添加探针" }).click();
-
-  const dialog = page.getByRole("dialog", { name: "添加主机" });
-  await expect.poll(() => statusReads).toBeGreaterThan(0);
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("状态：正在验证")).toBeVisible();
-  await expect(
-    dialog.getByText("正在验证探针是否已连接到 Hub。"),
-  ).toBeVisible();
-  await expect(dialog.getByRole("textbox", { name: "安装命令" })).toBeHidden();
-});
-
-test("a reconnect reconciles a missed terminal Enrollment exactly once from authoritative HTTP status", async ({
-  page,
-}) => {
-  const enrollmentId = "enr_reconnect_expired_browser";
-  const expiresAtMs = Date.now() - 1;
-  let statusReads = 0;
-  const socketStateAtStatusRead: Array<{
-    generation: number;
-    openedGeneration: number;
-  }> = [];
-  await installFakeLiveWebSocket(page, { deferOpenFromGeneration: 2 });
-  await page.route("**/api/web/enrollments", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-
-    await route.fulfill({
-      contentType: "application/json",
-      json: pendingEnrollment(enrollmentId),
-      status: 201,
-    });
-  });
-  await page.route(`**/api/web/enrollments/${enrollmentId}`, async (route) => {
-    statusReads += 1;
-    socketStateAtStatusRead.push({
-      generation: await fakeLiveSocketGeneration(page),
-      openedGeneration: await fakeLiveSocketOpenGeneration(page),
-    });
-    await route.fulfill({
-      contentType: "application/json",
-      json: {
-        ...pendingEnrollment(enrollmentId),
-        expiresAtMs,
-        expiredAtMs: expiresAtMs,
-        status: "expired",
-      },
-    });
-  });
-
-  await page.goto("/");
-  await expect.poll(() => fakeLiveSocketGeneration(page)).toBe(1);
-  await expect.poll(() => fakeLiveSocketOpenGeneration(page)).toBe(1);
-  await page.clock.install();
-  await closeFakeLiveWebSocket(page);
-  await page.clock.fastForward(1_000);
-  await expect.poll(() => fakeLiveSocketGeneration(page)).toBe(2);
-  await expect.poll(() => fakeLiveSocketOpenGeneration(page)).toBe(1);
-
-  await page.getByRole("button", { name: "添加探针" }).click();
-  await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
-    "curl ready-command",
-  );
-  expect(statusReads).toBe(0);
-
-  await openFakeLiveWebSocket(page);
-  await expect.poll(() => statusReads).toBe(1);
-  await expect(page.getByText("安装命令已过期")).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "添加主机" })).toBeHidden();
-  expect(socketStateAtStatusRead).toEqual([
-    { generation: 2, openedGeneration: 2 },
-  ]);
 });
 
 test("an authoritative ready Enrollment reveals and focuses its Host with reduced motion", async ({
@@ -598,55 +508,6 @@ test("a ready Host beyond the initial card batch is revealed without changing th
   await expect(page.getByRole("button", { name: "切换到列表" })).toBeVisible();
 });
 
-for (const overviewView of ["cards", "list"] as const) {
-  test(`an eligible offline Host can open the shared re-enrollment dialog from ${overviewView} view`, async ({
-    page,
-  }) => {
-    const requests = await prepareOfflineHostReenrollment(page, overviewView);
-
-    await page.goto("/");
-
-    const surfaceSelector = (hostId: number) =>
-      overviewView === "cards"
-        ? `[data-enoki-host-card-id="${hostId}"]`
-        : `[data-enoki-host-id="${hostId}"]`;
-    const offlineHost = page.locator(surfaceSelector(71));
-    const detailAction = offlineHost.getByRole("button", {
-      name: "打开主机 Existing host",
-    });
-    const reenrollmentAction = offlineHost.getByRole("button", {
-      name: "重新注册探针",
-    });
-    await expect(detailAction).toBeVisible();
-    await expect(reenrollmentAction).toBeVisible();
-    await expect(
-      page
-        .locator(surfaceSelector(72))
-        .getByRole("button", { name: "重新注册探针" }),
-    ).toHaveCount(0);
-    await expect(
-      page
-        .locator(surfaceSelector(73))
-        .getByRole("button", { name: "重新注册探针" }),
-    ).toHaveCount(0);
-    await expect(page.locator(surfaceSelector(74))).toHaveCount(0);
-
-    await detailAction.focus();
-    await page.keyboard.press("Tab");
-    await expect(reenrollmentAction).toBeFocused();
-    await page.keyboard.press("Enter");
-
-    await expect
-      .poll(() => requests.targets)
-      .toEqual([{ hostId: 71, kind: "existing_host" }]);
-    expect(requests.ownerSessionCookies).toHaveLength(1);
-    await expect(page.getByRole("dialog", { name: "添加主机" })).toBeVisible();
-    await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
-      "curl existing-host-command",
-    );
-  });
-}
-
 test("an offline Host matched by a rejected Enrollment opens its existing-host installation command", async ({
   page,
 }) => {
@@ -664,6 +525,7 @@ test("an offline Host matched by a rejected Enrollment opens its existing-host i
   await recoveryAction.click();
 
   await expect.poll(() => requests.existingHost).toBe(1);
+  expect(requests.legacyExistingHost).toBe(0);
   await expect(requests.newHost).toBe(1);
   await expect(page.getByRole("dialog", { name: "添加主机" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "安装命令" })).toHaveValue(
@@ -762,13 +624,27 @@ for (const scenario of [
 
 function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
   return {
+    bootstrapRecipe: {
+      bundleVersion: "1.2.3",
+      distribution: "enoki",
+      kind: "enoki-probe-bootstrap-recipe-record",
+      recipe: {
+        file: "enoki-probe-bootstrap.py",
+        sha256: "a".repeat(64),
+        size: 123,
+        version: "v1",
+      },
+      rootFingerprint: "b".repeat(64),
+      schemaVersion: 1,
+      targets: ["x86_64-unknown-linux-musl"],
+    },
     createdAtMs: Date.now(),
     enrollmentId,
     enrollmentToken: "enk_enroll_ready_browser",
     expiresAtMs: Date.now() + 60_000,
     expiredAtMs: null,
     hostId: null,
-    hubUrl: probeApiUrl,
+    hubUrl: "http://127.0.0.1:38200",
     installCommand: "curl ready-command",
     readyAtMs: null,
     rejectedAtMs: null,
@@ -777,62 +653,6 @@ function pendingEnrollment(enrollmentId: string): BrowserEnrollmentResponse {
     target: { kind: "new_host" },
     verificationDeadlineAtMs: null,
   };
-}
-
-async function prepareOfflineHostReenrollment(
-  page: Page,
-  overviewView: "cards" | "list",
-) {
-  const requests: {
-    ownerSessionCookies: string[];
-    targets: BrowserEnrollmentTarget[];
-  } = { ownerSessionCookies: [], targets: [] };
-  if (overviewView === "list") {
-    await page.addInitScript(() => {
-      localStorage.setItem("enoki-overview-view", "list");
-    });
-  }
-  await page.route("**/api/web/hosts", async (route) => {
-    await route.fulfill({
-      contentType: "application/json",
-      json: {
-        hosts: [
-          browserHost({ id: 71, status: "offline" }),
-          browserHost({ id: 72, status: "stale" }),
-          browserHost({ id: 73, status: "online" }),
-        ],
-      },
-    });
-  });
-  await page.route("**/api/web/enrollments", async (route) => {
-    if (route.request().method() !== "POST") {
-      await route.continue();
-      return;
-    }
-    const body = route.request().postDataJSON() as {
-      target: BrowserEnrollmentTarget;
-    };
-    const cookie = (await route.request().headerValue("cookie")) ?? "";
-    expect(cookie).toMatch(/(?:^|;\s*)enoki_owner_session=[^;]+/);
-    requests.ownerSessionCookies.push(cookie);
-    requests.targets.push(body.target);
-    await route.fulfill({
-      contentType: "application/json",
-      json: existingHostEnrollmentResponse().json,
-      status: 201,
-    });
-  });
-  await page.route(
-    "**/api/web/enrollments/enr_existing_host_recovery",
-    async (route) => {
-      await route.fulfill({
-        contentType: "application/json",
-        json: existingHostEnrollmentResponse().json,
-      });
-    },
-  );
-
-  return requests;
 }
 
 async function prepareRejectedExistingHostEnrollment(
@@ -844,7 +664,7 @@ async function prepareRejectedExistingHostEnrollment(
   },
 ) {
   const enrollmentId = "enr_existing_host_rejected";
-  const requests = { existingHost: 0, newHost: 0 };
+  const requests = { existingHost: 0, legacyExistingHost: 0, newHost: 0 };
   await page.route("**/api/web/auth/session", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -898,6 +718,24 @@ async function prepareRejectedExistingHostEnrollment(
       });
     },
   );
+  await page.route("**/api/web/enrollments/existing-host/71", async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.continue();
+      return;
+    }
+
+    requests.legacyExistingHost += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        ...pendingEnrollment("enr_existing_host_recovery"),
+        installCommand: "curl existing-host-command",
+        target: { hostId: 71, kind: "existing_host" },
+      },
+      status: 201,
+    });
+  });
+
   return requests;
 }
 

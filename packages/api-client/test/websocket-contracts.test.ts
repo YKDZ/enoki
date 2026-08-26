@@ -119,6 +119,7 @@ describe("WebSocket contracts", () => {
           id: 1,
           lastSeenAtMs: 1_725_000_010_000,
           latestMetrics: null,
+          probeUpgradeProblem: { status: "in_progress" },
           status: "online",
           warningFlags: {
             clockSkew: false,
@@ -140,6 +141,7 @@ describe("WebSocket contracts", () => {
         id: 1,
         lastSeenAtMs: 1_725_000_010_000,
         latestMetrics: null,
+        probeUpgradeProblem: { status: "in_progress" },
         status: "online",
         warningFlags: {
           clockSkew: false,
@@ -189,6 +191,7 @@ describe("WebSocket contracts", () => {
             receivedAtMs: 1_725_000_010_000,
             uptimeSeconds: 86_400,
           },
+          probeUpgradeProblem: null,
           status: "online",
           warningFlags: {
             clockSkew: false,
@@ -215,6 +218,7 @@ describe("WebSocket contracts", () => {
           receivedAtMs: 1_725_000_010_000,
           uptimeSeconds: 86_400,
         },
+        probeUpgradeProblem: null,
         status: "online",
         warningFlags: {
           clockSkew: false,

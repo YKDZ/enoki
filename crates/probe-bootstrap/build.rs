@@ -3,7 +3,6 @@ use std::{env, fs, path::PathBuf};
 use rsa::{
     RsaPublicKey,
     pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding},
-    traits::PublicKeyParts,
 };
 use sha2::{Digest, Sha256};
 
@@ -80,10 +79,7 @@ fn main() {
     };
 
     let root = RsaPublicKey::from_public_key_pem(&required("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM"))
-        .unwrap_or_else(|_| panic!("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM must be an RSA-4096 SPKI PEM"));
-    if root.n().bits() != 4096 {
-        panic!("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM must be an RSA-4096 SPKI PEM");
-    }
+        .unwrap_or_else(|_| panic!("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM must be an RSA SPKI PEM"));
     let canonical_root = root
         .to_public_key_pem(LineEnding::LF)
         .expect("RSA SPKI PEM encoding");

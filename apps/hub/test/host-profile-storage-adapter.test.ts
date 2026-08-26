@@ -170,7 +170,7 @@ describe("Host Profile storage adapter", () => {
     database.close();
   });
 
-  it("does not update the stored Host Profile when the snapshot hash is unchanged", async () => {
+  it("advances observation freshness without replacing a same-hash Host Profile", async () => {
     const database = await createTemporaryDatabase();
     const host = database.hosts.create({
       clockSkewDetected: false,
@@ -211,8 +211,124 @@ describe("Host Profile storage adapter", () => {
         .get(host.id),
     ).toEqual({
       count: 1,
-      updated_at_ms: 1_725_000_000_100,
+      updated_at_ms: 1_725_000_000_200,
     });
+
+    database.close();
+  });
+
+  it("advances a compact observation only for the current matching snapshot hash", async () => {
+    const database = await createTemporaryDatabase();
+    const host = database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "10.0.0.20",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "adapter-host",
+      displayNameEdited: false,
+      lastClockSkewMs: null,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-adapter-observe",
+      probeSecretHash: "secret-hash-observe",
+    });
+    database.snapshotCollectors.hostProfile.write({
+      forwardEvidence: {
+        operationId: 41,
+        reportBootId: "boot-full",
+        reportProbeId: "probe-adapter-observe",
+      },
+      hostId: host.id,
+      payload: fakeHostProfile({ hostname: "adapter-host" }),
+      profileProbeAssetBundleVersion: "0.3.0",
+      snapshotHash: "hash-current",
+      updatedAtMs: 1_725_000_000_100,
+    });
+
+    expect(
+      database.snapshotCollectors.hostProfile.observe({
+        hostId: host.id,
+        observedAtMs: 1_725_000_000_200,
+        snapshotHash: "hash-stale",
+      }),
+    ).toBe(false);
+    expect(
+      database.snapshotCollectors.hostProfile.observe({
+        hostId: host.id,
+        observedAtMs: 1_725_000_000_050,
+        snapshotHash: "hash-current",
+      }),
+    ).toBe(false);
+    expect(
+      database.snapshotCollectors.hostProfile.observe({
+        forwardEvidence: {
+          operationId: 42,
+          reportBootId: "boot-compact",
+          reportProbeId: "probe-adapter-observe",
+        },
+        hostId: host.id,
+        observedAtMs: 1_725_000_000_300,
+        snapshotHash: "hash-current",
+      }),
+    ).toBe(true);
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id),
+    ).toEqual(
+      expect.objectContaining({
+        forwardEvidence: {
+          operationId: 42,
+          profileProbeAssetBundleVersion: "0.3.0",
+          reportBootId: "boot-compact",
+          reportProbeId: "probe-adapter-observe",
+        },
+        observedAtMs: 1_725_000_000_300,
+      }),
+    );
+
+    database.close();
+  });
+
+  it("persists forward Host Profile evidence only as one complete four-column value", async () => {
+    const database = await createTemporaryDatabase();
+    const host = database.hosts.create({
+      clockSkewDetected: false,
+      connectAddress: "10.0.0.21",
+      createdAtMs: 1_725_000_000_000,
+      displayName: "adapter-host-atomic-evidence",
+      displayNameEdited: false,
+      lastClockSkewMs: null,
+      probeConfigurationVersion: "default-v1",
+      probeId: "probe-adapter-atomic-evidence",
+      probeSecretHash: "secret-hash-atomic-evidence",
+    });
+
+    database.snapshotCollectors.hostProfile.write({
+      forwardEvidence: {
+        operationId: 43,
+        reportBootId: "boot-without-profile-version",
+        reportProbeId: host.probeId,
+      },
+      hostId: host.id,
+      payload: fakeHostProfile(),
+      snapshotHash: "hash-atomic-evidence",
+      updatedAtMs: 1_725_000_000_100,
+    });
+
+    expect(
+      database.sqlite
+        .prepare(
+          `select forward_operation_id, report_boot_id, report_probe_id,
+             report_profile_bundle_version
+           from official_host_profiles where managed_host_id = ?`,
+        )
+        .get(host.id),
+    ).toEqual({
+      forward_operation_id: null,
+      report_boot_id: null,
+      report_probe_id: null,
+      report_profile_bundle_version: null,
+    });
+    expect(
+      database.snapshotCollectors.hostProfile.readObservation(host.id),
+    ).toEqual(expect.objectContaining({ forwardEvidence: null }));
 
     database.close();
   });

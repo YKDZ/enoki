@@ -28,7 +28,7 @@ import { hostStatusText } from "@/lib/host-display";
 import { sortHostsForOverview } from "@/lib/ready-host-reveal";
 
 import type { HostSummary } from "../types";
-import HostReenrollmentAction from "./HostReenrollmentAction.vue";
+import HostCardProbeUpgradeProblemBadge from "./HostCardProbeUpgradeProblemBadge.vue";
 
 export type HostListSortKey =
   | "cpu"
@@ -48,7 +48,6 @@ const props = defineProps<{
 }>();
 
 defineEmits<{
-  createExistingHostEnrollment: [hostId: number];
   openHostDetail: [hostId: number];
 }>();
 
@@ -168,7 +167,7 @@ function SortIcon(key: HostListSortKey) {
   <div class="overflow-x-auto">
     <div class="grid min-w-[980px] gap-2">
       <div
-        class="text-muted-foreground grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)_minmax(120px,auto)] gap-3 px-3 text-xs font-medium"
+        class="text-muted-foreground grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] gap-3 px-3 text-xs font-medium"
       >
         <button
           v-for="column in columns"
@@ -180,88 +179,78 @@ function SortIcon(key: HostListSortKey) {
           {{ column.label }}
           <component :is="SortIcon(column.key)" class="size-3" />
         </button>
-        <span>操作</span>
       </div>
-      <div
+      <button
         v-for="host in visibleHosts"
         :key="host.id"
+        type="button"
         :data-enoki-host-id="host.id"
         :class="[
-          'bg-card text-card-foreground grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)_minmax(120px,auto)] items-center gap-3 rounded-md border px-3 py-3 text-left transition',
+          'bg-card text-card-foreground hover:bg-accent/40 grid grid-cols-[minmax(250px,1.25fr)_minmax(72px,.55fr)_minmax(180px,1.25fr)_minmax(72px,.55fr)_repeat(2,minmax(100px,.75fr))_minmax(92px,.7fr)] items-center gap-3 rounded-md border px-3 py-3 text-left transition',
           host.id === highlightedHostId && 'ring-primary ring-2 ring-offset-2',
         ]"
-        tabindex="-1"
+        @click="$emit('openHostDetail', host.id)"
       >
-        <button
-          type="button"
-          :aria-label="`打开主机 ${host.displayName}`"
-          class="hover:bg-accent/40 col-span-7 grid grid-cols-subgrid items-center gap-3 rounded-md text-left"
-          @click="$emit('openHostDetail', host.id)"
-        >
-          <div class="min-w-0">
-            <div class="flex items-center gap-2 font-medium">
-              <Server
-                class="text-muted-foreground size-4 shrink-0"
-                aria-hidden="true"
-              />
-              <span class="wrap-break-word whitespace-normal">{{
-                host.displayName
-              }}</span>
-              <Badge :class="statusClass(host.status)" variant="outline">
-                {{ hostStatusText(host.status) }}
-              </Badge>
-            </div>
-            <p
-              v-if="host.description"
-              class="text-muted-foreground mt-1 text-xs wrap-break-word whitespace-normal"
-            >
-              {{ host.description }}
-            </p>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 font-medium">
+            <Server
+              class="text-muted-foreground size-4 shrink-0"
+              aria-hidden="true"
+            />
+            <span class="wrap-break-word whitespace-normal">{{
+              host.displayName
+            }}</span>
+            <Badge :class="statusClass(host.status)" variant="outline">
+              {{ hostStatusText(host.status) }}
+            </Badge>
+            <HostCardProbeUpgradeProblemBadge
+              :problem="host.probeUpgradeProblem"
+            />
           </div>
-          <MetricInline
-            :icon="Cpu"
-            :text="percentText(host.latestMetrics?.cpuPercent)"
-          />
-          <MetricInline
-            :icon="MemoryStick"
-            :text="
-              formatByteUsage(
-                host.latestMetrics?.memoryUsedBytes ?? null,
-                host.latestMetrics?.memoryTotalBytes ?? null,
-              )
-            "
-          />
-          <MetricInline
-            :icon="HardDrive"
-            :text="percentText(diskPercent(host))"
-          />
-          <MetricInline
-            :icon="Download"
-            :text="
-              formatBitsPerSecond(
-                host.latestMetrics?.networkRxBitsPerSecond ?? null,
-              )
-            "
-          />
-          <MetricInline
-            :icon="Upload"
-            :text="
-              formatBitsPerSecond(
-                host.latestMetrics?.networkTxBitsPerSecond ?? null,
-              )
-            "
-          />
-          <span class="text-sm font-medium">{{
-            formatDuration(host.latestMetrics?.uptimeSeconds)
-          }}</span>
-        </button>
-        <HostReenrollmentAction
-          :host="host"
-          @create-existing-host-enrollment="
-            $emit('createExistingHostEnrollment', $event)
+          <p
+            v-if="host.description"
+            class="text-muted-foreground mt-1 text-xs wrap-break-word whitespace-normal"
+          >
+            {{ host.description }}
+          </p>
+        </div>
+        <MetricInline
+          :icon="Cpu"
+          :text="percentText(host.latestMetrics?.cpuPercent)"
+        />
+        <MetricInline
+          :icon="MemoryStick"
+          :text="
+            formatByteUsage(
+              host.latestMetrics?.memoryUsedBytes ?? null,
+              host.latestMetrics?.memoryTotalBytes ?? null,
+            )
           "
         />
-      </div>
+        <MetricInline
+          :icon="HardDrive"
+          :text="percentText(diskPercent(host))"
+        />
+        <MetricInline
+          :icon="Download"
+          :text="
+            formatBitsPerSecond(
+              host.latestMetrics?.networkRxBitsPerSecond ?? null,
+            )
+          "
+        />
+        <MetricInline
+          :icon="Upload"
+          :text="
+            formatBitsPerSecond(
+              host.latestMetrics?.networkTxBitsPerSecond ?? null,
+            )
+          "
+        />
+        <span class="text-sm font-medium">{{
+          formatDuration(host.latestMetrics?.uptimeSeconds)
+        }}</span>
+      </button>
     </div>
   </div>
 </template>

@@ -50,17 +50,72 @@ describe("Probe Asset Set upgrade eligibility", () => {
     });
   });
 
-  it("marks lower valid Probe versions upgradeable", () => {
+  it("marks a lower Probe version upgradeable only through a verified compatible transition", () => {
     expect(
       evaluateProbeUpgradeEligibility({
         probeAssetSetVersion: "v1.4.0",
         probeVersion: "1.3.9",
+        releaseTransition: {
+          classification: "compatible",
+          sourceProbeVersion: "1.3.9",
+          sourceProbeSha256: ["c".repeat(64)],
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion: "1.4.0",
+        },
       }),
     ).toEqual({
       currentProbeAssetSetVersion: "1.4.0",
       currentProbeVersion: "1.3.9",
       isUpgradeable: true,
       nonUpgradeableReason: null,
+    });
+  });
+
+  it("keeps missing, mismatched, and replacement-required transitions closed", () => {
+    expect(
+      evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: "1.4.0",
+        probeVersion: "1.3.9",
+      }).nonUpgradeableReason,
+    ).toBe("probe_release_transition_missing");
+
+    expect(
+      evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: "1.4.0",
+        probeVersion: "1.3.9",
+        releaseTransition: {
+          classification: "compatible",
+          sourceProbeVersion: "1.3.8",
+          sourceProbeSha256: ["c".repeat(64)],
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion: "1.4.0",
+        },
+      }).nonUpgradeableReason,
+    ).toBe("probe_release_transition_mismatch");
+
+    expect(
+      evaluateProbeUpgradeEligibility({
+        probeAssetSetVersion: "1.4.0",
+        probeVersion: "1.3.9",
+        releaseTransition: {
+          classification: "replacement-required",
+          sourceProbeVersion: "1.3.9",
+          sourceProbeSha256: ["c".repeat(64)],
+          targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+          targetProbeVersion: "1.4.0",
+        },
+      }),
+    ).toEqual({
+      currentProbeAssetSetVersion: "1.4.0",
+      currentProbeVersion: "1.3.9",
+      isUpgradeable: false,
+      manualReinstall: {
+        sourceProbeSha256: ["c".repeat(64)],
+        sourceProbeVersion: "1.3.9",
+        targetAssetSetDigest: `sha256:${"a".repeat(64)}`,
+        targetProbeVersion: "1.4.0",
+      },
+      nonUpgradeableReason: "probe_release_transition_replacement_required",
     });
   });
 

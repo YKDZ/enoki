@@ -19,6 +19,7 @@ import {
   validateDelegatedProbeSigningIdentity,
   validateProbeSigningIdentity,
   validateReleaseCandidate,
+  writeProbeBootstrapPublication,
 } from "./release-candidate-lib.mjs";
 
 try {
@@ -140,6 +141,7 @@ try {
   } else if (command === "prepare-probe-assets") {
     assertAllowedOptions(command, options, [
       "--archives-dir",
+      "--bootstrap-archives-dir",
       "--output",
       "--private-key-env",
       "--public-key-env",
@@ -153,6 +155,7 @@ try {
     const publicKeyEnvironment = requiredOption(options, "--public-key-env");
     const result = await prepareProbeAssetSet({
       archivesDir: requiredOption(options, "--archives-dir"),
+      bootstrapArchivesDir: requiredOption(options, "--bootstrap-archives-dir"),
       delegationBytes: await readFile(
         requiredOption(options, "--trust-delegation"),
       ),
@@ -173,6 +176,7 @@ try {
   } else if (command === "prepare-unsigned-probe-assets") {
     assertAllowedOptions(command, options, [
       "--archives-dir",
+      "--bootstrap-archives-dir",
       "--output",
       "--public-key-env",
       "--root-public-key-env",
@@ -184,6 +188,7 @@ try {
     const publicKeyEnvironment = requiredOption(options, "--public-key-env");
     const result = await prepareUnsignedProbeAssetSet({
       archivesDir: requiredOption(options, "--archives-dir"),
+      bootstrapArchivesDir: requiredOption(options, "--bootstrap-archives-dir"),
       delegationBytes: await readFile(
         requiredOption(options, "--trust-delegation"),
       ),
@@ -241,9 +246,26 @@ try {
         process.env[requiredOption(options, "--root-public-key-env")],
     });
     process.stdout.write(`Hub OCI builds are reproducible: ${result.digest}\n`);
+  } else if (command === "write-bootstrap-publication") {
+    assertAllowedOptions(command, options, [
+      "--output",
+      "--root-public-key-env",
+      "--source-dir",
+      "--version",
+    ]);
+    const version = requiredOption(options, "--version");
+    const record = await writeProbeBootstrapPublication({
+      bundleVersion: version.startsWith("v") ? version.slice(1) : version,
+      outputDir: requiredOption(options, "--output"),
+      sourceDir: requiredOption(options, "--source-dir"),
+      trustedRootPublicKeyPem:
+        process.env[requiredOption(options, "--root-public-key-env")],
+    });
+    process.stdout.write(
+      `wrote Probe Bootstrap publication ${record.bundleVersion}\n`,
+    );
   } else if (command === "assemble") {
     assertAllowedOptions(command, options, [
-      "--bootstrap-artifacts",
       "--commit",
       "--hub-oci",
       "--output",
@@ -254,7 +276,6 @@ try {
       "--version",
     ]);
     const manifest = await assembleReleaseCandidate({
-      bootstrapArtifactDir: requiredOption(options, "--bootstrap-artifacts"),
       commit: requiredOption(options, "--commit"),
       hubOciPath: requiredOption(options, "--hub-oci"),
       outputDir: requiredOption(options, "--output"),

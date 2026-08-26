@@ -1,6 +1,9 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import type { ProbeOperationState, ProbeUpgradeRequest } from "./operation.js";
+import {
+  isClosedProbeOperation,
+  type ProbeUpgradeRequest,
+} from "./operation.js";
 
 export type ProbeOperationTokenValidationError =
   | "probe_operation_token_invalid"
@@ -12,18 +15,14 @@ export type ProbeOperationTokenValidationError =
 
 type ProbeOperationTokenPayload = {
   expiresAtMs: number;
+  hostId: number;
   kind: string;
   operationId: number;
   probeId: string;
+  sourceProbeVersion?: string;
+  targetAssetSetDigest?: string;
   targetProbeVersion?: string;
 };
-
-const closedStates: ProbeOperationState[] = [
-  "canceled",
-  "failed",
-  "superseded",
-  "succeeded",
-];
 
 export const defaultProbeOperationTokenTtlMs = 5 * 60 * 1000;
 
@@ -38,12 +37,29 @@ export function issueProbeOperationToken(input: {
       "Cannot issue Probe Operation Token for unsaved operation.",
     );
   }
+  if (
+    input.operation.kind === "probe_upgrade" &&
+    !input.operation.targetAssetSetDigest
+  ) {
+    throw new Error(
+      "Cannot issue Probe Operation Token without a Probe Asset Set digest.",
+    );
+  }
 
   const payload: ProbeOperationTokenPayload = {
     expiresAtMs: input.expiresAtMs,
+    hostId: input.operation.hostId,
     kind: input.operation.kind,
     operationId: input.operation.id,
     probeId: input.probeId,
+    sourceProbeVersion:
+      input.operation.kind === "probe_upgrade"
+        ? (input.operation.currentProbeVersion ?? undefined)
+        : undefined,
+    targetAssetSetDigest:
+      input.operation.kind === "probe_upgrade"
+        ? (input.operation.targetAssetSetDigest ?? undefined)
+        : undefined,
     targetProbeVersion:
       input.operation.kind === "probe_upgrade"
         ? input.operation.targetProbeVersion
@@ -56,10 +72,12 @@ export function issueProbeOperationToken(input: {
 }
 
 export function validateProbeOperationToken(input: {
+  allowSucceededUninstallReplay?: boolean;
   nowMs: number;
   operation: ProbeUpgradeRequest;
   probeId: string;
   secret: string;
+  targetAssetSetDigest: string;
   targetProbeVersion: string;
   token: string;
 }): { error: ProbeOperationTokenValidationError | null } {
@@ -73,6 +91,10 @@ export function validateProbeOperationToken(input: {
     return { error: "probe_operation_token_operation_mismatch" };
   }
 
+  if (payload.hostId !== input.operation.hostId) {
+    return { error: "probe_operation_token_operation_mismatch" };
+  }
+
   if (payload.probeId !== input.probeId) {
     return { error: "probe_operation_token_probe_mismatch" };
   }
@@ -83,17 +105,25 @@ export function validateProbeOperationToken(input: {
 
   if (
     input.operation.kind === "probe_upgrade" &&
-    (payload.targetProbeVersion !== input.targetProbeVersion ||
+    (payload.sourceProbeVersion !== input.operation.currentProbeVersion ||
+      payload.targetAssetSetDigest !== input.targetAssetSetDigest ||
+      input.operation.targetAssetSetDigest !== input.targetAssetSetDigest ||
+      payload.targetProbeVersion !== input.targetProbeVersion ||
       input.operation.targetProbeVersion !== input.targetProbeVersion)
   ) {
     return { error: "probe_operation_token_target_mismatch" };
   }
 
-  if (input.nowMs > payload.expiresAtMs) {
+  const succeededUninstallReplay =
+    input.allowSucceededUninstallReplay === true &&
+    input.operation.kind === "probe_uninstall" &&
+    input.operation.state === "succeeded";
+
+  if (input.nowMs > payload.expiresAtMs && !succeededUninstallReplay) {
     return { error: "probe_operation_token_expired" };
   }
 
-  if (closedStates.includes(input.operation.state)) {
+  if (isClosedProbeOperation(input.operation) && !succeededUninstallReplay) {
     return { error: "probe_operation_token_operation_closed" };
   }
 
@@ -132,9 +162,18 @@ function isProbeOperationTokenPayload(
     typeof payload === "object" &&
     payload !== null &&
     typeof (payload as ProbeOperationTokenPayload).expiresAtMs === "number" &&
+    typeof (payload as ProbeOperationTokenPayload).hostId === "number" &&
     typeof (payload as ProbeOperationTokenPayload).kind === "string" &&
     typeof (payload as ProbeOperationTokenPayload).operationId === "number" &&
     typeof (payload as ProbeOperationTokenPayload).probeId === "string" &&
+    (typeof (payload as ProbeOperationTokenPayload).sourceProbeVersion ===
+      "string" ||
+      typeof (payload as ProbeOperationTokenPayload).sourceProbeVersion ===
+        "undefined") &&
+    (typeof (payload as ProbeOperationTokenPayload).targetAssetSetDigest ===
+      "string" ||
+      typeof (payload as ProbeOperationTokenPayload).targetAssetSetDigest ===
+        "undefined") &&
     (typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===
       "string" ||
       typeof (payload as ProbeOperationTokenPayload).targetProbeVersion ===

@@ -22,6 +22,28 @@ message HostProfileSnapshot {
   uint32 cpu_socket_count = 15;
   uint32 cpu_physical_count = 16;
   CollectorCapabilities collector_capabilities = 17;
+  // Runtime 生成的 Bundle 证据；Resource Provider 无权设置。
+  string probe_asset_bundle_version = 18;
+}
+
+// 固定 Host Profile Resource pull 返回的内部不可变事实。
+// 此消息不会越过已认证的 Probe--Hub 报告边界。
+message HostProfileResourceFacts {
+  string hostname = 1;
+  string os = 2;
+  string kernel = 3;
+  string architecture = 4;
+  uint32 cpu_count = 5;
+  uint64 memory_total_bytes = 6;
+  repeated FilesystemProfile filesystems = 7;
+  repeated NetworkInterfaceProfile network_interfaces = 8;
+  string cpu_model = 9;
+  uint32 process_count = 10;
+  uint32 thread_count = 11;
+  uint64 cpu_cache_l3_bytes = 12;
+  uint32 cpu_base_frequency_mhz = 13;
+  uint32 cpu_socket_count = 14;
+  uint32 cpu_physical_count = 15;
 }
 
 message Snapshot {

@@ -1,6 +1,7 @@
 //! Offline trust verification.  Archive parsing is exposed only to the
 //! unprivileged acquisition module; root activation verifies metadata and the
 //! component bytes, never a compressed archive.
+use crate::bundle_role::BUNDLE_COMPONENTS;
 use crate::handoff::Handoff;
 #[cfg(feature = "acquirer")]
 use flate2::bufread::GzDecoder;
@@ -9,7 +10,6 @@ use rsa::{
     pkcs1v15::{Signature as RsaSignature, VerifyingKey},
     pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding},
     signature::Verifier,
-    traits::PublicKeyParts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,13 +23,24 @@ use tar::Archive;
 
 const DELEGATION_DOMAIN: &[u8] = b"enoki/probe-trust-delegation/v1\0";
 const MAX_BUNDLE_MANIFEST_BYTES: usize = 256 * 1024;
-const COMPONENT_PATH: &str = "enoki-probe";
 pub const MAX_COMPONENT_BYTES: u64 = 512 * 1024 * 1024;
+const BUNDLED_BOOTSTRAP_ASSETS: [(&str, &str, &str); 2] = [
+    (
+        "bootstrap/enoki-probe-bootstrap-acquire",
+        "bootstrap-acquirer-v1",
+        "bootstrap-acquirer",
+    ),
+    (
+        "bootstrap/enoki-probe-bootstrap-activate",
+        "bootstrap-activator-v1",
+        "bootstrap-activator",
+    ),
+];
 #[cfg(feature = "acquirer")]
 const MAX_TAR_OVERHEAD_BYTES: u64 = 16 * 1024;
 #[cfg(feature = "acquirer")]
 const MAX_UNCOMPRESSED_ARCHIVE_BYTES: u64 =
-    MAX_COMPONENT_BYTES + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
+    MAX_COMPONENT_BYTES * 6 + MAX_BUNDLE_MANIFEST_BYTES as u64 + MAX_TAR_OVERHEAD_BYTES;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct VerificationPolicy<'a> {
@@ -43,8 +54,170 @@ pub struct VerificationPolicy<'a> {
 pub struct VerifiedBundle {
     pub version: String,
     pub target: String,
+    pub asset_set_manifest_sha256: String,
+    pub manifest_sha256: String,
     pub delegation_generation: u64,
     pub component_len: u64,
+    pub(crate) bootstrap_assets: Vec<BundleComponent>,
+}
+impl VerifiedBundle {
+    pub fn delegation_generation(&self) -> u64 {
+        self.delegation_generation
+    }
+
+    pub fn install_state_sha256(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"enoki.install-state.v1\0");
+        hash.update(self.version.as_bytes());
+        hash.update(b"\0");
+        hash.update(self.target.as_bytes());
+        hash.update(b"\0");
+        hash.update(self.manifest_sha256.as_bytes());
+        for component in &self.bootstrap_assets {
+            hash.update(b"\0");
+            hash.update(component.role.as_bytes());
+            hash.update(b"\0");
+            hash.update(component.sha256.as_bytes());
+            hash.update(b"\0");
+            hash.update(component.size.to_be_bytes());
+        }
+        format!("{:x}", hash.finalize())
+    }
+
+    /// 封闭的确定性测试入口：构造已跨过 verifier 边界、且七个固定角色
+    /// 都绑定到同一组测试字节的完整 Bundle 收据。
+    #[cfg(feature = "deterministic-test-seams")]
+    #[doc(hidden)]
+    pub fn deterministic_complete_for_test(
+        version: &str,
+        target: &str,
+        manifest_sha256: &str,
+        asset_set_manifest_sha256: &str,
+        component_bytes: &[u8],
+    ) -> Self {
+        let sha256 = format!("{:x}", Sha256::digest(component_bytes));
+        let mut bootstrap_assets = Vec::new();
+        bootstrap_assets.push(BundleComponent {
+            path: "bin/enoki-probe".to_owned(),
+            permission_profile: "probe".to_owned(),
+            resource_contract: None,
+            role: "probe".to_owned(),
+            sha256: sha256.clone(),
+            size: component_bytes.len() as u64,
+            version: version.to_owned(),
+        });
+        for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
+            if matches!(
+                role,
+                "observation-runtime"
+                    | "system-state-provider"
+                    | "disk-health-provider"
+                    | "lifecycle-companion"
+            ) {
+                bootstrap_assets.push(BundleComponent {
+                    path: path.to_owned(),
+                    permission_profile: permission_profile.to_owned(),
+                    resource_contract: Some(resource_contract.to_owned()),
+                    role: role.to_owned(),
+                    sha256: sha256.clone(),
+                    size: component_bytes.len() as u64,
+                    version: version.to_owned(),
+                });
+            }
+        }
+        for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
+            bootstrap_assets.push(BundleComponent {
+                path: path.to_owned(),
+                permission_profile: permission_profile.to_owned(),
+                resource_contract: None,
+                role: role.to_owned(),
+                sha256: sha256.clone(),
+                size: component_bytes.len() as u64,
+                version: version.to_owned(),
+            });
+        }
+        Self {
+            version: version.to_owned(),
+            target: target.to_owned(),
+            asset_set_manifest_sha256: asset_set_manifest_sha256.to_owned(),
+            manifest_sha256: manifest_sha256.to_owned(),
+            delegation_generation: 1,
+            component_len: component_bytes.len() as u64,
+            bootstrap_assets,
+        }
+    }
+    #[cfg(all(test, feature = "activator"))]
+    pub(crate) fn with_test_observation_receipts(mut self, size: u64) -> Self {
+        let test_sha256 = format!("{:x}", Sha256::digest(b"probe"));
+        if self.component_receipt("probe").is_none() {
+            self.bootstrap_assets.push(BundleComponent {
+                path: "bin/enoki-probe".to_owned(),
+                permission_profile: "probe".to_owned(),
+                resource_contract: None,
+                role: "probe".to_owned(),
+                sha256: test_sha256.clone(),
+                size,
+                version: self.version.clone(),
+            });
+        }
+        for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
+            if matches!(
+                role,
+                "observation-runtime"
+                    | "system-state-provider"
+                    | "disk-health-provider"
+                    | "lifecycle-companion"
+            ) {
+                self.bootstrap_assets.push(BundleComponent {
+                    path: path.to_string(),
+                    permission_profile: permission_profile.to_string(),
+                    resource_contract: Some(resource_contract.to_string()),
+                    role: role.to_string(),
+                    sha256: test_sha256.clone(),
+                    size,
+                    version: self.version.clone(),
+                });
+            }
+        }
+        self
+    }
+
+    #[cfg(all(test, feature = "activator"))]
+    pub(crate) fn with_test_complete_receipts(mut self, size: u64) -> Self {
+        self = self.with_test_observation_receipts(size);
+        let test_sha256 = format!("{:x}", Sha256::digest(b"probe"));
+        for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
+            self.bootstrap_assets.push(BundleComponent {
+                path: path.to_owned(),
+                permission_profile: permission_profile.to_owned(),
+                resource_contract: None,
+                role: role.to_owned(),
+                sha256: test_sha256.clone(),
+                size,
+                version: self.version.clone(),
+            });
+        }
+        self
+    }
+
+    pub(crate) fn component_receipt(&self, role: &str) -> Option<(&str, u64)> {
+        self.bootstrap_assets
+            .iter()
+            .find(|component| component.role == role)
+            .map(|component| (component.sha256.as_str(), component.size))
+    }
+    pub(crate) fn acquirer_receipt(&self) -> Option<(&str, u64)> {
+        self.bootstrap_assets
+            .iter()
+            .find(|asset| asset.role == "bootstrap-acquirer")
+            .map(|asset| (asset.sha256.as_str(), asset.size))
+    }
+    pub(crate) fn activator_receipt(&self) -> Option<(&str, u64)> {
+        self.bootstrap_assets
+            .iter()
+            .find(|asset| asset.role == "bootstrap-activator")
+            .map(|asset| (asset.sha256.as_str(), asset.size))
+    }
 }
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedMetadata {
@@ -101,12 +274,13 @@ pub fn verify_metadata(
     if sha256_hex(&handoff.bundle_manifest) != outer.asset.bundle_manifest_sha256 {
         return Err(VerificationError::BundleManifest);
     }
-    let bundle = verify_bundle_manifest(
+    let mut bundle = verify_bundle_manifest(
         &handoff.bundle_manifest,
         &outer.version,
         &outer.asset,
         outer.delegation_generation,
     )?;
+    bundle.asset_set_manifest_sha256 = sha256_hex(&handoff.manifest);
     Ok(VerifiedMetadata {
         asset: outer.asset,
         bundle,
@@ -169,13 +343,119 @@ pub fn verify_archive_and_extract(
     metadata: &VerifiedMetadata,
     sink: &mut impl Write,
 ) -> Result<VerifiedBundle, VerificationError> {
+    verify_archive_and_extract_roles(
+        archive,
+        handoff,
+        metadata,
+        sink,
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+    )
+}
+
+/// 可信转换路径使用与首次安装相同的固定角色 archive verifier；调用者不能提供角色表。
+#[cfg(feature = "acquirer")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_archive_and_extract_upgrade_roles(
+    archive: &mut File,
+    handoff: &Handoff,
+    metadata: &VerifiedMetadata,
+    probe_sink: &mut impl Write,
+    runtime_sink: &mut impl Write,
+    cpu_provider_sink: &mut impl Write,
+    disk_health_provider_sink: &mut impl Write,
+    lifecycle_companion_sink: &mut impl Write,
+) -> Result<VerifiedBundle, VerificationError> {
+    verify_archive_and_extract_lifecycle_roles(
+        archive,
+        handoff,
+        metadata,
+        probe_sink,
+        runtime_sink,
+        cpu_provider_sink,
+        disk_health_provider_sink,
+        lifecycle_companion_sink,
+        &mut std::io::sink(),
+        &mut std::io::sink(),
+    )
+}
+
+/// 生命周期转换一次提取并校验全部运行时角色与两个 Bootstrap 角色。
+#[cfg(feature = "acquirer")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_archive_and_extract_lifecycle_roles(
+    archive: &mut File,
+    handoff: &Handoff,
+    metadata: &VerifiedMetadata,
+    probe_sink: &mut impl Write,
+    runtime_sink: &mut impl Write,
+    cpu_provider_sink: &mut impl Write,
+    disk_health_provider_sink: &mut impl Write,
+    lifecycle_companion_sink: &mut impl Write,
+    bootstrap_acquirer_sink: &mut impl Write,
+    bootstrap_activator_sink: &mut impl Write,
+) -> Result<VerifiedBundle, VerificationError> {
+    verify_archive_and_extract_roles(
+        archive,
+        handoff,
+        metadata,
+        probe_sink,
+        runtime_sink,
+        cpu_provider_sink,
+        disk_health_provider_sink,
+        lifecycle_companion_sink,
+        bootstrap_acquirer_sink,
+        bootstrap_activator_sink,
+    )
+}
+
+#[cfg(feature = "acquirer")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_archive_and_extract_roles(
+    archive: &mut File,
+    handoff: &Handoff,
+    metadata: &VerifiedMetadata,
+    component_sink: &mut impl Write,
+    runtime_sink: &mut impl Write,
+    cpu_provider_sink: &mut impl Write,
+    disk_health_provider_sink: &mut impl Write,
+    lifecycle_companion_sink: &mut impl Write,
+    acquirer_sink: &mut impl Write,
+    activator_sink: &mut impl Write,
+) -> Result<VerifiedBundle, VerificationError> {
     verify_archive_digest(archive, &metadata.asset)?;
     archive
         .seek(SeekFrom::Start(0))
         .map_err(|_| VerificationError::Io)?;
     let mut tar = Archive::new(BoundedRead::new(GzDecoder::new(BufReader::new(archive))));
     let mut saw_manifest = false;
-    let mut saw_component = false;
+    let components = metadata
+        .bundle
+        .bootstrap_assets
+        .iter()
+        .filter(|component| {
+            matches!(
+                component.role.as_str(),
+                "probe"
+                    | "observation-runtime"
+                    | "system-state-provider"
+                    | "disk-health-provider"
+                    | "lifecycle-companion"
+            )
+        })
+        .collect::<Vec<_>>();
+    let bootstrap_assets = metadata
+        .bundle
+        .bootstrap_assets
+        .iter()
+        .filter(|component| component.role.starts_with("bootstrap-"))
+        .collect::<Vec<_>>();
+    let mut saw_components = vec![false; components.len()];
+    let mut saw_bootstrap_assets = vec![false; bootstrap_assets.len()];
     for item in tar
         .entries()
         .map_err(|_| VerificationError::ArchiveStructure)?
@@ -198,22 +478,80 @@ pub fn verify_archive_and_extract(
                 return Err(VerificationError::BundleManifest);
             }
             saw_manifest = true;
-        } else if path.as_ref() == COMPONENT_PATH.as_bytes() {
-            if saw_component || entry.size() != metadata.bundle.component_len {
+        } else if let Some((index, component)) = components
+            .iter()
+            .enumerate()
+            .find(|(_, component)| path.as_ref() == component.path.as_bytes())
+        {
+            if saw_components[index] || entry.size() != component.size {
                 return Err(VerificationError::ArchiveStructure);
             }
-            stream_component(
-                &mut entry,
-                sink,
-                metadata.bundle.component_len,
-                component_digest(&handoff.bundle_manifest)?,
-            )?;
-            saw_component = true;
+            match component.role.as_str() {
+                "probe" => stream_component(
+                    &mut entry,
+                    component_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "observation-runtime" => stream_component(
+                    &mut entry,
+                    runtime_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "system-state-provider" => stream_component(
+                    &mut entry,
+                    cpu_provider_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "disk-health-provider" => stream_component(
+                    &mut entry,
+                    disk_health_provider_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                "lifecycle-companion" => stream_component(
+                    &mut entry,
+                    lifecycle_companion_sink,
+                    component.size,
+                    component.sha256.clone(),
+                )?,
+                _ => return Err(VerificationError::ArchiveStructure),
+            }
+            saw_components[index] = true;
+        } else if let Some((index, asset)) = bootstrap_assets
+            .iter()
+            .enumerate()
+            .find(|(_, asset)| path.as_ref() == asset.path.as_bytes())
+        {
+            if saw_bootstrap_assets[index] || entry.size() != asset.size {
+                return Err(VerificationError::ArchiveStructure);
+            }
+            match asset.role.as_str() {
+                "bootstrap-acquirer" => stream_component(
+                    &mut entry,
+                    &mut *acquirer_sink,
+                    asset.size,
+                    asset.sha256.clone(),
+                )?,
+                "bootstrap-activator" => stream_component(
+                    &mut entry,
+                    &mut *activator_sink,
+                    asset.size,
+                    asset.sha256.clone(),
+                )?,
+                _ => return Err(VerificationError::ArchiveStructure),
+            }
+            saw_bootstrap_assets[index] = true;
         } else {
             return Err(VerificationError::ArchiveStructure);
         }
     }
-    if !saw_manifest || !saw_component {
+    if !saw_manifest
+        || saw_components.iter().any(|seen| !seen)
+        || saw_bootstrap_assets.iter().any(|seen| !seen)
+    {
         return Err(VerificationError::ArchiveStructure);
     }
     require_exact_gzip_and_tar_eof(tar.into_inner())?;
@@ -224,12 +562,22 @@ pub fn verify_archive_and_extract(
 /// signed component length and digest, with no caller-supplied profile/mode.
 pub fn verify_component(
     component: &mut File,
-    handoff: &Handoff,
+    _handoff: &Handoff,
     bundle: &VerifiedBundle,
 ) -> Result<(), VerificationError> {
-    let expected = component_digest(&handoff.bundle_manifest)?;
+    verify_role_component(component, bundle, "probe")
+}
+
+pub(crate) fn verify_role_component(
+    component: &mut File,
+    bundle: &VerifiedBundle,
+    role: &str,
+) -> Result<(), VerificationError> {
+    let (expected, expected_len) = bundle
+        .component_receipt(role)
+        .ok_or(VerificationError::Component)?;
     let details = component.metadata().map_err(|_| VerificationError::Io)?;
-    if details.len() != bundle.component_len || bundle.component_len == 0 {
+    if details.len() != expected_len || expected_len == 0 {
         return Err(VerificationError::Component);
     }
     component
@@ -250,12 +598,81 @@ pub fn verify_component(
             .ok_or(VerificationError::Component)?;
         hash.update(&buf[..count]);
     }
-    if total != bundle.component_len || format!("{:x}", hash.finalize()) != expected {
+    if total != expected_len || format!("{:x}", hash.finalize()) != expected {
         return Err(VerificationError::Component);
     }
     component
         .seek(SeekFrom::Start(0))
         .map_err(|_| VerificationError::Io)?;
+    Ok(())
+}
+
+/// root Upgrade边界对固定5运行角色做独立收据复验；调用者不能提供角色名或数量。
+#[allow(clippy::too_many_arguments)]
+pub fn verify_upgrade_role_receipts(
+    probe: &mut File,
+    runtime: &mut File,
+    system_state_provider: &mut File,
+    disk_health_provider: &mut File,
+    lifecycle_companion: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), VerificationError> {
+    for (file, role) in [
+        (probe, "probe"),
+        (runtime, "observation-runtime"),
+        (system_state_provider, "system-state-provider"),
+        (disk_health_provider, "disk-health-provider"),
+        (lifecycle_companion, "lifecycle-companion"),
+    ] {
+        verify_role_component(file, bundle, role)?;
+    }
+    Ok(())
+}
+
+/// Root 对正在执行的 sealed activator FD 进行独立 receipt 复验。
+pub fn verify_activator_receipt(
+    activator: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), VerificationError> {
+    let expected = bundle.activator_receipt();
+    verify_bootstrap_receipt(activator, expected)
+}
+
+pub fn verify_acquirer_receipt(
+    acquirer: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), VerificationError> {
+    verify_bootstrap_receipt(acquirer, bundle.acquirer_receipt())
+}
+
+fn verify_bootstrap_receipt(
+    receipt: &mut File,
+    expected: Option<(&str, u64)>,
+) -> Result<(), VerificationError> {
+    let (expected_sha256, expected_size) = expected.ok_or(VerificationError::Component)?;
+    let details = receipt.metadata().map_err(|_| VerificationError::Io)?;
+    if !details.is_file() || details.len() != expected_size {
+        return Err(VerificationError::Component);
+    }
+    receipt
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| VerificationError::Io)?;
+    let mut hash = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = receipt
+            .read(&mut buffer)
+            .map_err(|_| VerificationError::Io)?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        hash.update(&buffer[..read]);
+    }
+    if total != expected_size || format!("{:x}", hash.finalize()) != expected_sha256 {
+        return Err(VerificationError::Component);
+    }
     Ok(())
 }
 
@@ -276,9 +693,6 @@ fn trusted_root(
         std::str::from_utf8(&canonical).map_err(|_| VerificationError::RootFingerprint)?,
     )
     .map_err(|_| VerificationError::RootFingerprint)?;
-    if key.n().bits() != 4096 {
-        return Err(VerificationError::RootFingerprint);
-    }
     Ok((key, canonical))
 }
 fn verify_delegation(
@@ -313,13 +727,6 @@ fn verify_delegation(
         serde_json::from_value(parsed).map_err(|_| VerificationError::Delegation)?;
     let signing = canonical_public_key(parsed.signing_identity.public_key_pem.as_bytes())
         .ok_or(VerificationError::Delegation)?;
-    let signing_key = RsaPublicKey::from_public_key_pem(
-        std::str::from_utf8(&signing).map_err(|_| VerificationError::Delegation)?,
-    )
-    .map_err(|_| VerificationError::Delegation)?;
-    if signing_key.n().bits() != 4096 {
-        return Err(VerificationError::Delegation);
-    }
     let canonical = Delegation {
         signing_identity: SigningIdentity {
             public_key_pem: String::from_utf8(signing)
@@ -431,86 +838,6 @@ fn select_asset<'a>(m: &'a AssetManifest, target: &str) -> Result<&'a Asset, Ver
     }
     found.ok_or(VerificationError::TargetAsset)
 }
-
-#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SignedHandoffVectors {
-    root_public_key_pem: String,
-    signing_public_key_pem: String,
-    bundle_manifest_base64: String,
-    #[cfg(feature = "acquirer")]
-    archive_base64: String,
-    generations: std::collections::BTreeMap<String, SignedHandoffGeneration>,
-}
-
-#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SignedHandoffGeneration {
-    delegation_base64: String,
-    delegation_signature_base64: String,
-    manifest_base64: String,
-    manifest_signature_base64: String,
-}
-
-#[cfg(all(test, feature = "acquirer"))]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WeakDelegationVector {
-    delegation_base64: String,
-    delegation_signature_base64: String,
-}
-
-#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
-pub(crate) struct SignedTestHandoff {
-    #[cfg(feature = "acquirer")]
-    pub(crate) archive: Vec<u8>,
-    pub(crate) handoff: Handoff,
-    pub(crate) root: Vec<u8>,
-    #[cfg(feature = "activator")]
-    pub(crate) root_fingerprint: String,
-}
-
-#[cfg(all(test, any(feature = "acquirer", feature = "activator")))]
-pub(crate) fn signed_test_handoff(generation: u64) -> SignedTestHandoff {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    use std::sync::LazyLock;
-
-    static VECTORS: LazyLock<SignedHandoffVectors> = LazyLock::new(|| {
-        serde_json::from_str(include_str!("../test-data/signed-handoff-vectors.json")).unwrap()
-    });
-    let vector = VECTORS.generations.get(&generation.to_string()).unwrap();
-    let decode = |value: &str| STANDARD.decode(value).unwrap();
-    let root = VECTORS.root_public_key_pem.as_bytes().to_vec();
-    SignedTestHandoff {
-        #[cfg(feature = "acquirer")]
-        archive: decode(&VECTORS.archive_base64),
-        handoff: Handoff {
-            delegation: decode(&vector.delegation_base64),
-            delegation_signature: decode(&vector.delegation_signature_base64),
-            manifest: decode(&vector.manifest_base64),
-            manifest_signature: decode(&vector.manifest_signature_base64),
-            signing_key: VECTORS.signing_public_key_pem.as_bytes().to_vec(),
-            bundle_manifest: decode(&VECTORS.bundle_manifest_base64),
-        },
-        #[cfg(feature = "activator")]
-        root_fingerprint: sha256_hex(&root),
-        root,
-    }
-}
-
-#[cfg(all(test, feature = "acquirer"))]
-fn weak_delegation_test_vector() -> (Vec<u8>, Vec<u8>) {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-    let vector: WeakDelegationVector =
-        serde_json::from_str(include_str!("../test-data/weak-delegation-vector.json")).unwrap();
-    (
-        STANDARD.decode(vector.delegation_base64).unwrap(),
-        STANDARD.decode(vector.delegation_signature_base64).unwrap(),
-    )
-}
 #[cfg(feature = "acquirer")]
 fn verify_archive_digest(archive: &mut File, a: &Asset) -> Result<(), VerificationError> {
     if archive.metadata().map_err(|_| VerificationError::Io)?.len() != a.size {
@@ -572,13 +899,37 @@ fn verify_bundle_manifest(
         return Err(VerificationError::BundleManifest);
     }
     let v: Value = serde_json::from_slice(bytes).map_err(|_| VerificationError::BundleManifest)?;
-    exact(&v, &["components", "kind", "target", "version"])
-        .ok_or(VerificationError::BundleManifest)?;
+    exact(
+        &v,
+        &["bootstrapAssets", "components", "kind", "target", "version"],
+    )
+    .ok_or(VerificationError::BundleManifest)?;
     let components = v
         .get("components")
         .and_then(Value::as_array)
         .ok_or(VerificationError::BundleManifest)?;
+    let bootstrap_assets = v
+        .get("bootstrapAssets")
+        .and_then(Value::as_array)
+        .ok_or(VerificationError::BundleManifest)?;
     if components.iter().any(|c| {
+        exact(
+            c,
+            &[
+                "path",
+                "permissionProfile",
+                "resourceContract",
+                "role",
+                "sha256",
+                "size",
+                "version",
+            ],
+        )
+        .is_none()
+    }) {
+        return Err(VerificationError::BundleManifest);
+    }
+    if bootstrap_assets.iter().any(|c| {
         exact(
             c,
             &[
@@ -599,26 +950,66 @@ fn verify_bundle_manifest(
     if b.kind != "enoki-probe-bundle"
         || b.target != a.target
         || b.version != version
-        || b.components.len() != 1
+        || b.components.len() != BUNDLE_COMPONENTS.len()
+        || b.bootstrap_assets.len() != BUNDLED_BOOTSTRAP_ASSETS.len()
     {
         return Err(VerificationError::BundleManifest);
     }
-    let c = &b.components[0];
-    if c.role != "probe"
-        || c.path != COMPONENT_PATH
-        || c.permission_profile != "probe-v1"
-        || c.version != version
-        || c.size == 0
-        || c.size > MAX_COMPONENT_BYTES
-        || !is_sha256_hex(&c.sha256)
-    {
-        return Err(VerificationError::BundleManifest);
+    for (path, permission_profile, resource_contract, role) in BUNDLE_COMPONENTS {
+        let matches = b
+            .components
+            .iter()
+            .filter(|component| component.role == role)
+            .collect::<Vec<_>>();
+        let [component] = matches.as_slice() else {
+            return Err(VerificationError::BundleManifest);
+        };
+        if component.path != path
+            || component.permission_profile != permission_profile
+            || component.resource_contract.as_deref() != Some(resource_contract)
+            || component.version != version
+            || component.size == 0
+            || component.size > MAX_COMPONENT_BYTES
+            || !is_sha256_hex(&component.sha256)
+        {
+            return Err(VerificationError::BundleManifest);
+        }
     }
+    let probe = b
+        .components
+        .iter()
+        .find(|component| component.role == "probe")
+        .ok_or(VerificationError::BundleManifest)?;
+    let probe_size = probe.size;
+    for (path, permission_profile, role) in BUNDLED_BOOTSTRAP_ASSETS {
+        let matches = b
+            .bootstrap_assets
+            .iter()
+            .filter(|asset| asset.role == role)
+            .collect::<Vec<_>>();
+        let [asset] = matches.as_slice() else {
+            return Err(VerificationError::BundleManifest);
+        };
+        if asset.path != path
+            || asset.permission_profile != permission_profile
+            || asset.version != version
+            || asset.size == 0
+            || asset.size > MAX_COMPONENT_BYTES
+            || !is_sha256_hex(&asset.sha256)
+        {
+            return Err(VerificationError::BundleManifest);
+        }
+    }
+    let mut roles = b.components;
+    roles.extend(b.bootstrap_assets);
     Ok(VerifiedBundle {
         version: version.to_owned(),
         target: a.target.clone(),
+        asset_set_manifest_sha256: String::new(),
+        manifest_sha256: sha256_hex(bytes),
         delegation_generation: generation,
-        component_len: c.size,
+        component_len: probe_size,
+        bootstrap_assets: roles,
     })
 }
 
@@ -699,15 +1090,6 @@ fn require_exact_gzip_and_tar_eof(
     }
     Ok(())
 }
-fn component_digest(bytes: &[u8]) -> Result<String, VerificationError> {
-    let v: Value = serde_json::from_slice(bytes).map_err(|_| VerificationError::BundleManifest)?;
-    let b: BundleManifest =
-        serde_json::from_value(v).map_err(|_| VerificationError::BundleManifest)?;
-    b.components
-        .first()
-        .map(|c| c.sha256.clone())
-        .ok_or(VerificationError::BundleManifest)
-}
 fn canonical_public_key(bytes: &[u8]) -> Option<Vec<u8>> {
     let s = std::str::from_utf8(bytes).ok()?;
     RsaPublicKey::from_public_key_pem(s)
@@ -786,11 +1168,13 @@ struct AssetManifest {
     signature: ManifestSignature,
     version: String,
 }
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BundleComponent {
+pub(crate) struct BundleComponent {
     path: String,
     permission_profile: String,
+    #[serde(default)]
+    resource_contract: Option<String>,
     role: String,
     sha256: String,
     size: u64,
@@ -798,6 +1182,8 @@ struct BundleComponent {
 }
 #[derive(Deserialize)]
 struct BundleManifest {
+    #[serde(default, rename = "bootstrapAssets")]
+    bootstrap_assets: Vec<BundleComponent>,
     components: Vec<BundleComponent>,
     kind: String,
     target: String,
@@ -808,13 +1194,20 @@ struct BundleManifest {
 mod tests {
     use super::*;
     use flate2::{Compression, read::GzDecoder as ReadGzDecoder, write::GzEncoder};
-    use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey, rand_core::OsRng};
+    use rsa::{
+        RsaPrivateKey,
+        pkcs1v15::SigningKey,
+        pkcs8::EncodePublicKey,
+        rand_core::OsRng,
+        signature::{RandomizedSigner, SignatureEncoding},
+    };
     use std::{fs::File, io::Write, path::Path, process::Command};
     use tar::{Builder, Header};
     use tempfile::{NamedTempFile, tempdir};
     const TARGET: &str = "x86_64-unknown-linux-gnu";
     struct Fixture {
         archive: NamedTempFile,
+        daily: RsaPrivateKey,
         h: Handoff,
         root: Vec<u8>,
         fingerprint: String,
@@ -834,14 +1227,89 @@ mod tests {
         }
     }
     fn fixture() -> Fixture {
-        let vector = signed_test_handoff(1);
+        let mut rng = OsRng;
+        let root = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let daily = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let root_pem = root
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let daily_pem = daily
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let payload = b"probe".to_vec();
+        let runtime = b"runtime".to_vec();
+        let cpu_provider = b"system-state-provider".to_vec();
+        let disk_health_provider = b"disk-health-provider".to_vec();
+        let lifecycle_companion = b"lifecycle-companion".to_vec();
+        let acquirer = b"acquirer".to_vec();
+        let activator = b"activator".to_vec();
+        let bundle=format!("{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v3\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":{},\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",sha256_hex(&acquirer),acquirer.len(),sha256_hex(&activator),activator.len(),sha256_hex(&payload),sha256_hex(&runtime),runtime.len(),sha256_hex(&cpu_provider),cpu_provider.len(),sha256_hex(&disk_health_provider),disk_health_provider.len(),sha256_hex(&lifecycle_companion),lifecycle_companion.len()).into_bytes();
+        let gzip = GzEncoder::new(Vec::new(), Compression::default());
+        let mut tar = Builder::new(gzip);
+        for (name, data, kind) in [
+            ("bundle-manifest.json", bundle.clone(), b'0'),
+            ("enoki-probe", payload, b'0'),
+            ("enoki-observation-runtime", runtime, b'0'),
+            ("enoki-cpu-resource-provider", cpu_provider, b'0'),
+            (
+                "enoki-disk-health-resource-provider",
+                disk_health_provider,
+                b'0',
+            ),
+            ("enoki-probe-lifecycle-companion", lifecycle_companion, b'0'),
+            ("bootstrap/enoki-probe-bootstrap-acquire", acquirer, b'0'),
+            ("bootstrap/enoki-probe-bootstrap-activate", activator, b'0'),
+        ] {
+            let mut h = Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o600);
+            h.set_entry_type(tar::EntryType::new(kind));
+            h.set_cksum();
+            tar.append_data(&mut h, name, &data[..]).unwrap();
+        }
+        let archive = tar.into_inner().unwrap().finish().unwrap();
+        let delegation = Delegation {
+            distribution: "enoki".into(),
+            generation: 1,
+            kind: "enoki-probe-trust-delegation".into(),
+            purpose: "probe-asset-signing".into(),
+            root_key_id: sha256_hex(&root_pem),
+            schema_version: 1,
+            signing_identity: SigningIdentity {
+                algorithm: "rsa-sha256".into(),
+                key_id: sha256_hex(&daily_pem),
+                public_key_pem: String::from_utf8(daily_pem.clone()).unwrap(),
+            },
+        };
+        let delegation_bytes = canonical_json(&delegation).unwrap();
+        let mut signed = DELEGATION_DOMAIN.to_vec();
+        signed.extend_from_slice(&delegation_bytes);
+        let ds = SigningKey::<Sha256>::new(root)
+            .sign_with_rng(&mut rng, &signed)
+            .to_vec();
+        let manifest=format!("{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-{TARGET}.tar.gz\",\"sha256\":\"{}\",\"size\":{},\"target\":\"{TARGET}\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":1,\"delegationKeyId\":\"{}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",sha256_hex(&bundle),sha256_hex(&archive),archive.len(),delegation.signing_identity.key_id).into_bytes();
+        let ms = SigningKey::<Sha256>::new(daily.clone())
+            .sign_with_rng(&mut rng, &manifest)
+            .to_vec();
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&vector.archive).unwrap();
+        f.write_all(&archive).unwrap();
         Fixture {
             archive: f,
-            h: vector.handoff,
-            fingerprint: sha256_hex(&vector.root),
-            root: vector.root,
+            daily,
+            h: Handoff {
+                delegation: delegation_bytes,
+                delegation_signature: ds,
+                manifest,
+                manifest_signature: ms,
+                signing_key: daily_pem,
+                bundle_manifest: bundle,
+            },
+            fingerprint: sha256_hex(&root_pem),
+            root: root_pem,
         }
     }
 
@@ -850,6 +1318,15 @@ mod tests {
         x.archive.as_file_mut().seek(SeekFrom::Start(0)).unwrap();
         x.archive.as_file_mut().write_all(&archive).unwrap();
         x.archive.as_file_mut().sync_all().unwrap();
+        let daily_id = sha256_hex(&x.h.signing_key);
+        x.h.manifest = format!(
+            "{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-{TARGET}.tar.gz\",\"sha256\":\"{}\",\"size\":{},\"target\":\"{TARGET}\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":1,\"delegationKeyId\":\"{daily_id}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",
+            sha256_hex(&x.h.bundle_manifest), sha256_hex(&archive), archive.len()
+        ).into_bytes();
+        let mut rng = OsRng;
+        x.h.manifest_signature = SigningKey::<Sha256>::new(x.daily.clone())
+            .sign_with_rng(&mut rng, &x.h.manifest)
+            .to_vec();
     }
 
     fn replace_authenticated_archive(x: &mut Fixture, archive: Vec<u8>) -> VerifiedMetadata {
@@ -895,13 +1372,66 @@ mod tests {
         })();
         result.is_err()
     }
+
     #[test]
-    fn accepts_archive_from_official_node_packager() {
+    fn accepts_only_the_two_fixed_bootstrap_entries_in_the_signed_bundle_manifest() {
+        let asset = Asset {
+            bundle_manifest_sha256: "a".repeat(64),
+            file: format!("enoki-probe-{TARGET}.tar.gz"),
+            sha256: "b".repeat(64),
+            size: 1,
+            target: TARGET.to_owned(),
+        };
+        let manifest = format!(
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":12,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v3\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":19,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"{TARGET}\",\"version\":\"1.2.3\"}}\n",
+            "1".repeat(64),
+            "2".repeat(64),
+            "3".repeat(64),
+            "4".repeat(64),
+            "5".repeat(64),
+            "6".repeat(64),
+            "7".repeat(64),
+        );
+
+        assert!(verify_bundle_manifest(manifest.as_bytes(), "1.2.3", &asset, 1).is_ok());
+
+        let mixed_contract = manifest.replace("system-state-v3", "cpu-counters-v1");
+        assert!(
+            verify_bundle_manifest(mixed_contract.as_bytes(), "1.2.3", &asset, 1).is_err(),
+            "a current manifest must reject the legacy CPU-only provider contract",
+        );
+        let mixed_permission_profile =
+            manifest.replace("system-state-provider-v5", "system-state-provider-v3");
+        assert!(
+            verify_bundle_manifest(mixed_permission_profile.as_bytes(), "1.2.3", &asset, 1)
+                .is_err(),
+            "当前清单不得接受旧 Provider sandbox profile",
+        );
+    }
+
+    #[test]
+    fn rejects_the_runtime_only_packager_output_until_bootstrap_roles_are_composed() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let temporary = tempdir().unwrap();
         let binary = test_probe_elf();
         let binary_path = temporary.path().join("probe");
         std::fs::write(&binary_path, &binary).unwrap();
+        std::fs::write(temporary.path().join("enoki-observation-runtime"), &binary).unwrap();
+        std::fs::write(
+            temporary.path().join("enoki-cpu-resource-provider"),
+            &binary,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("enoki-disk-health-resource-provider"),
+            &binary,
+        )
+        .unwrap();
+        std::fs::write(
+            temporary.path().join("enoki-probe-lifecycle-companion"),
+            &binary,
+        )
+        .unwrap();
         let output_dir = temporary.path().join("output");
         let status = Command::new("node")
             .arg(workspace.join("scripts/release-candidate.mjs"))
@@ -926,33 +1456,17 @@ mod tests {
         let archive_bytes = std::fs::read(&archive_path).unwrap();
         let mut archive = File::open(&archive_path).unwrap();
         let bundle_manifest = read_bundle_manifest(&mut archive).unwrap();
-        let vector = signed_test_handoff(1);
-        let handoff = Handoff {
-            bundle_manifest: bundle_manifest.clone(),
-            ..vector.handoff
+        let asset = Asset {
+            bundle_manifest_sha256: sha256_hex(&bundle_manifest),
+            file: format!("enoki-probe-{TARGET}.tar.gz"),
+            sha256: sha256_hex(&archive_bytes),
+            size: archive_bytes.len() as u64,
+            target: TARGET.to_owned(),
         };
-        let metadata = VerifiedMetadata {
-            asset: Asset {
-                bundle_manifest_sha256: sha256_hex(&bundle_manifest),
-                file: format!("enoki-probe-{TARGET}.tar.gz"),
-                sha256: sha256_hex(&archive_bytes),
-                size: archive_bytes.len() as u64,
-                target: TARGET.to_owned(),
-            },
-            bundle: VerifiedBundle {
-                version: "1.2.3".to_owned(),
-                target: TARGET.to_owned(),
-                delegation_generation: 1,
-                component_len: binary.len() as u64,
-            },
-        };
-        let mut extracted = Vec::new();
-
         assert_eq!(
-            verify_archive_and_extract(&mut archive, &handoff, &metadata, &mut extracted),
-            Ok(metadata.bundle.clone())
+            verify_bundle_manifest(&bundle_manifest, "1.2.3", &asset, 1),
+            Err(VerificationError::BundleManifest)
         );
-        assert_eq!(extracted, binary);
     }
 
     #[test]
@@ -1014,6 +1528,7 @@ mod tests {
         binary[interpreter_start + interpreter.len()..].copy_from_slice(marker.as_bytes());
         binary
     }
+
     #[test]
     fn authenticates_exact_bundle_bytes_and_extracts_component() {
         let x = fixture();
@@ -1029,38 +1544,6 @@ mod tests {
             Ok(m.bundle().clone())
         );
         assert_eq!(out, b"probe");
-    }
-    #[test]
-    fn rejects_a_weak_rsa_distribution_root_before_delegation_verification() {
-        let mut rng = OsRng;
-        let weak = RsaPrivateKey::new(&mut rng, 1024).unwrap();
-        let weak_pem = weak
-            .to_public_key()
-            .to_public_key_pem(LineEnding::LF)
-            .unwrap()
-            .into_bytes();
-        let policy = VerificationPolicy {
-            distribution: "enoki",
-            expected_target: TARGET,
-            highest_accepted_delegation_generation: 0,
-            external_root_fingerprint: sha256_hex(&weak_pem),
-            external_root_pem: Some(&weak_pem),
-        };
-
-        assert!(matches!(
-            trusted_root(&policy),
-            Err(VerificationError::RootFingerprint)
-        ));
-    }
-    #[test]
-    fn rejects_a_validly_root_signed_weak_delegated_key() {
-        let mut x = fixture();
-        (x.h.delegation, x.h.delegation_signature) = weak_delegation_test_vector();
-
-        assert!(matches!(
-            verify_outer_metadata(&x.h, &x.policy(0)),
-            Err(VerificationError::Delegation)
-        ));
     }
     #[test]
     fn rejects_outer_bundle_hash_and_nonpositive_component() {
@@ -1100,11 +1583,8 @@ mod tests {
             );
         }
         let mut x = fixture();
-        let mut metadata = verify_metadata(&x.h, &x.policy(0)).unwrap();
-        let malformed = raw_archive_with_extra("extra", b'0');
-        metadata.asset.sha256 = sha256_hex(&malformed);
-        metadata.asset.size = malformed.len() as u64;
-        replace_archive(&mut x, malformed);
+        replace_archive(&mut x, raw_archive_with_extra("extra", b'0'));
+        let metadata = verify_metadata(&x.h, &x.policy(0)).unwrap();
         assert_eq!(
             verify_archive_and_extract(&mut x.open(), &x.h, &metadata, &mut Vec::new(),),
             Err(VerificationError::ArchiveStructure)
@@ -1118,6 +1598,25 @@ mod tests {
         f.write_all(b"wrong").unwrap();
         assert_eq!(
             verify_component(f.as_file_mut(), &x.h, m.bundle()),
+            Err(VerificationError::Component)
+        );
+    }
+
+    #[test]
+    fn root_rechecks_the_exact_running_activator_receipt() {
+        let vector = fixture();
+        let metadata = verify_metadata(&vector.h, &vector.policy(0)).unwrap();
+        let mut exact = NamedTempFile::new().unwrap();
+        exact.write_all(b"activator").unwrap();
+        assert_eq!(
+            verify_activator_receipt(exact.as_file_mut(), metadata.bundle()),
+            Ok(())
+        );
+
+        let mut absent = NamedTempFile::new().unwrap();
+        absent.write_all(b"activate").unwrap();
+        assert_eq!(
+            verify_activator_receipt(absent.as_file_mut(), metadata.bundle()),
             Err(VerificationError::Component)
         );
     }

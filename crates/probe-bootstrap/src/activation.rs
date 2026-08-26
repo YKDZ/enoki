@@ -3,20 +3,39 @@
 use crate::{
     generation::{DelegationGenerationLease, GenerationStateError, acquire_delegation_generation},
     handoff::{Enrollment, Handoff, HandoffError},
-    install::{FixedInstallPaths, SystemAccounts, SystemSystemd, activate_current_probe},
+    install::{
+        CommittedReplacementLocalCustody, FixedInstallPaths, InstallError, SystemAccounts,
+        SystemSystemd, VerifiedCompleteFreshComponents,
+        activate_complete_replacement_current_probe_with_registration, coordinate_fresh_install,
+    },
+    lifecycle::{LifecycleRequest, LifecycleResponse},
+    replacement::{
+        FileReplacementCommitStore, ReplacementCommitStore, record_replacement_candidate_layout,
+    },
     trust::{BootstrapRole, embedded_production_trust_for},
-    verifier::{VerificationPolicy, VerifiedBundle, verify_component, verify_metadata},
+    verifier::{
+        VerificationPolicy, VerifiedBundle, verify_acquirer_receipt, verify_activator_receipt,
+        verify_component, verify_metadata, verify_role_component,
+    },
 };
+use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::fd::{AsRawFd, FromRawFd, RawFd},
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 use zeroize::Zeroize;
 
 const INBOX_DIRECTORY: &str = "inbox";
+const INSTALL_METADATA: &str = "/etc/enoki/probe-install.toml";
+const REPLACEMENT_COMMIT: &str = "/var/lib/enoki-probe-bootstrap/replacement-migration.json";
+const REPLACEMENT_COMPANION_BUDGET: Duration = Duration::from_secs(90);
+const REPLACEMENT_COMPANION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 static COMPONENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Eq, PartialEq)]
@@ -27,7 +46,8 @@ pub enum ActivationError {
     NotRoot,
     Verification,
     Io,
-    LifecycleUnavailable,
+    Install(InstallError),
+    Replacement,
 }
 
 impl From<HandoffError> for ActivationError {
@@ -49,6 +69,12 @@ pub struct ReceivedRootHandoff {
     pub handoff: Handoff,
     pub bundle: VerifiedBundle,
     component: File,
+    runtime: File,
+    cpu_provider: File,
+    disk_health_provider: File,
+    lifecycle_companion: File,
+    acquirer: Option<File>,
+    activator: Option<File>,
     enrollment: Enrollment,
     _generation_lease: DelegationGenerationLease,
 }
@@ -62,29 +88,112 @@ impl ReceivedRootHandoff {
         adapter: impl FnOnce(&mut File, &Enrollment, &VerifiedBundle) -> Result<T, ActivationError>,
     ) -> Result<T, ActivationError> {
         self.component()?;
+        validate_received_role(&mut self.runtime, &self.bundle, "observation-runtime")?;
+        validate_received_role(
+            &mut self.cpu_provider,
+            &self.bundle,
+            "system-state-provider",
+        )?;
+        validate_received_role(
+            &mut self.disk_health_provider,
+            &self.bundle,
+            "disk-health-provider",
+        )?;
+        validate_received_role(
+            &mut self.lifecycle_companion,
+            &self.bundle,
+            "lifecycle-companion",
+        )?;
         adapter(&mut self.component, &self.enrollment, &self.bundle)
     }
 
     /// Production's closed activation route. It owns the generation lease
     /// through the complete filesystem and systemd transaction; neither stdin
     /// nor a candidate component selects an installer command or path.
-    pub fn activate_fixed_current_probe(self) -> Result<(), ActivationError> {
+    pub fn activate_fixed_current_probe(mut self) -> Result<(), ActivationError> {
         let trust = embedded_production_trust_for(BootstrapRole::Activator)
             .ok_or(ActivationError::BuildTrustUnavailable)?;
-        let mut accounts = SystemAccounts;
-        let mut systemd = SystemSystemd;
-        self.activate_with(|component, enrollment, bundle| {
-            activate_current_probe(
-                component,
-                enrollment,
-                bundle,
-                &trust,
-                &FixedInstallPaths::production(),
-                &mut accounts,
+        let mut accounts = SystemAccounts::default();
+        let mut systemd = SystemSystemd::default();
+        self.component()?;
+        let acquirer = self
+            .acquirer
+            .as_mut()
+            .ok_or(ActivationError::Verification)?;
+        let activator = self
+            .activator
+            .as_mut()
+            .ok_or(ActivationError::Verification)?;
+        let replacement_activation = prepare_replacement_migration(
+            &self.enrollment,
+            &self.bundle,
+            &mut self.lifecycle_companion,
+        )?;
+        if let ReplacementActivation::Complete(commit) = &replacement_activation {
+            let paths = FixedInstallPaths::production();
+            let resume_binding = commit.resume_binding();
+            let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+            crate::install::finalize_and_retire_complete_replacement_current_probe(
+                &paths,
+                &resume_binding,
+                &self.bundle,
+                commit,
+                &mut store,
                 &mut systemd,
             )
-            .map_err(|_| ActivationError::LifecycleUnavailable)
-        })
+            .map_err(ActivationError::Install)?;
+            return Ok(());
+        }
+        let components = VerifiedCompleteFreshComponents {
+            probe: &mut self.component,
+            observation_runtime: &mut self.runtime,
+            cpu_provider: &mut self.cpu_provider,
+            disk_health_provider: &mut self.disk_health_provider,
+            lifecycle_companion: &mut self.lifecycle_companion,
+            bootstrap_acquirer: acquirer,
+            bootstrap_activator: activator,
+        };
+        let paths = FixedInstallPaths::production();
+        let result = if let ReplacementActivation::Resume(commit) = &replacement_activation {
+            let resume_binding = commit.resume_binding();
+            let registration_binding = commit
+                .registration_binding()
+                .ok_or(ActivationError::Replacement)?;
+            activate_complete_replacement_current_probe_with_registration(
+                components,
+                &self.enrollment,
+                &self.bundle,
+                &trust,
+                &paths,
+                &mut accounts,
+                &mut systemd,
+                &resume_binding,
+                &registration_binding,
+            )
+        } else {
+            coordinate_fresh_install(components, &self.enrollment, &self.bundle, &trust)
+        };
+        result.map_err(ActivationError::Install)?;
+        if let ReplacementActivation::Resume(commit) = replacement_activation {
+            let resume_binding = commit.resume_binding();
+            let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+            record_replacement_candidate_layout(&mut store, resume_binding.as_str())
+                .map_err(|_| ActivationError::Replacement)?;
+            let completed = store
+                .load()
+                .map_err(|_| ActivationError::Replacement)?
+                .ok_or(ActivationError::Replacement)?;
+            crate::install::finalize_and_retire_complete_replacement_current_probe(
+                &paths,
+                &resume_binding,
+                &self.bundle,
+                &completed,
+                &mut store,
+                &mut systemd,
+            )
+            .map_err(ActivationError::Install)?;
+        }
+        Ok(())
     }
     pub fn component(&mut self) -> Result<&mut File, ActivationError> {
         validate_regular_file(&self.component, 0, 0o600)?;
@@ -99,10 +208,352 @@ impl ReceivedRootHandoff {
     }
 }
 
+fn prepare_replacement_migration(
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    companion: &mut File,
+) -> Result<ReplacementActivation, ActivationError> {
+    let has_installed_metadata = std::path::Path::new(INSTALL_METADATA)
+        .try_exists()
+        .map_err(|_| ActivationError::Io)?;
+    let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+    prepare_replacement_migration_in(
+        enrollment,
+        bundle,
+        &mut store,
+        has_installed_metadata,
+        |fact| {
+            crate::install::classify_committed_replacement_local_custody(
+                &FixedInstallPaths::production(),
+                &fact.resume_binding(),
+            )
+            .map_err(ActivationError::Install)
+        },
+        |request| invoke_replacement_companion(request, companion, bundle),
+    )
+}
+
+enum ReplacementActivation {
+    Fresh,
+    Resume(crate::replacement::ReplacementCommitFact),
+    Complete(crate::replacement::ReplacementCommitFact),
+}
+
+enum MatchingReplacementCommit {
+    CleanupRequired(Box<crate::replacement::ReplacementCommitFact>),
+    Ready(Box<crate::replacement::ReplacementCommitFact>),
+}
+
+fn prepare_replacement_migration_in<S: crate::replacement::ReplacementCommitStore>(
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+    store: &mut S,
+    has_installed_metadata: bool,
+    mut classify_local_custody: impl FnMut(
+        &crate::replacement::ReplacementCommitFact,
+    )
+        -> Result<CommittedReplacementLocalCustody, ActivationError>,
+    mut invoke: impl FnMut(&LifecycleRequest) -> Result<(), ActivationError>,
+) -> Result<ReplacementActivation, ActivationError> {
+    if let Some(commit) = matching_replacement_commit_in(store, enrollment, bundle)? {
+        match commit {
+            MatchingReplacementCommit::CleanupRequired(fact) => {
+                if classify_local_custody(&fact)?
+                    != CommittedReplacementLocalCustody::SourceMetadata
+                {
+                    return Err(ActivationError::Replacement);
+                }
+                let request = replacement_request_for_installed_state(true, enrollment, bundle)?
+                    .ok_or(ActivationError::Replacement)?;
+                invoke(&request)?;
+            }
+            MatchingReplacementCommit::Ready(fact) => {
+                if !fact.candidate_layout_complete
+                    && classify_local_custody(&fact)?
+                        == CommittedReplacementLocalCustody::SourceMetadata
+                {
+                    let request =
+                        replacement_request_for_installed_state(true, enrollment, bundle)?
+                            .ok_or(ActivationError::Replacement)?;
+                    invoke(&request)?;
+                    return Ok(ReplacementActivation::Resume(*fact));
+                }
+                return Ok(if fact.candidate_layout_complete {
+                    ReplacementActivation::Complete(*fact)
+                } else {
+                    ReplacementActivation::Resume(*fact)
+                });
+            }
+        }
+    } else {
+        let Some(request) =
+            replacement_request_for_installed_state(has_installed_metadata, enrollment, bundle)?
+        else {
+            return Ok(ReplacementActivation::Fresh);
+        };
+        invoke(&request)?;
+    }
+    let Some(MatchingReplacementCommit::Ready(fact)) =
+        matching_replacement_commit_in(store, enrollment, bundle)?
+    else {
+        return Err(ActivationError::Replacement);
+    };
+    Ok(if fact.candidate_layout_complete {
+        ReplacementActivation::Complete(*fact)
+    } else {
+        ReplacementActivation::Resume(*fact)
+    })
+}
+
+fn matching_replacement_commit_in<S: crate::replacement::ReplacementCommitStore>(
+    store: &mut S,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> Result<Option<MatchingReplacementCommit>, ActivationError> {
+    let Some(fact) = store.load().map_err(|_| ActivationError::Replacement)? else {
+        return Ok(None);
+    };
+    let token_sha256 = format!(
+        "{:x}",
+        Sha256::digest(enrollment.enrollment_token().as_bytes())
+    );
+    let replacement = enrollment.replacement_migration();
+    let exact_request = fact.has_valid_binding()
+        && fact.intent.enrollment_token_sha256 == token_sha256
+        && fact.intent.hub_origin == enrollment.hub_origin()
+        && replacement.is_some_and(|replacement| {
+            fact.intent.enrollment_id == replacement.enrollment_id()
+                && fact.intent.host_id == replacement.target_host_id()
+                && fact.intent.old_probe_id == replacement.expected_probe_id()
+                && fact.intent.source_probe_version == replacement.source_probe_version()
+                && replacement
+                    .source_probe_sha256()
+                    .contains(&fact.intent.source_probe_sha256)
+                && fact.intent.target_probe_version == replacement.target_probe_version()
+                && fact.intent.target_asset_set_digest == replacement.target_asset_set_digest()
+        })
+        && fact.intent.target_bundle_target == bundle.target
+        && fact.intent.target_probe_version == bundle.version
+        && fact.intent.target_asset_set_digest
+            == format!("sha256:{}", bundle.asset_set_manifest_sha256)
+        && fact.intent.target_manifest_sha256 == bundle.manifest_sha256;
+    if exact_request {
+        return Ok(Some(if fact.cleanup_complete {
+            MatchingReplacementCommit::Ready(Box::new(fact))
+        } else {
+            MatchingReplacementCommit::CleanupRequired(Box::new(fact))
+        }));
+    }
+    if !fact.candidate_layout_complete {
+        return Err(ActivationError::Replacement);
+    }
+    if !fact.cleanup_complete || fact.intent.hub_origin != enrollment.hub_origin() {
+        return Err(ActivationError::Replacement);
+    }
+    Ok(None)
+}
+
+fn replacement_request_for_installed_state(
+    has_installed_metadata: bool,
+    enrollment: &Enrollment,
+    bundle: &VerifiedBundle,
+) -> Result<Option<LifecycleRequest>, ActivationError> {
+    if !has_installed_metadata {
+        return if enrollment.replacement_migration().is_some() {
+            Err(ActivationError::Replacement)
+        } else {
+            Ok(None)
+        };
+    }
+    LifecycleRequest::replacement_migration(
+        enrollment,
+        &format!("sha256:{}", bundle.asset_set_manifest_sha256),
+        &bundle.target,
+        &bundle.manifest_sha256,
+        &bundle.version,
+    )
+    .map(Some)
+    .map_err(|_| ActivationError::Replacement)
+}
+
+fn invoke_replacement_companion(
+    request: &LifecycleRequest,
+    source: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<(), ActivationError> {
+    let _standard_descriptors = reserve_closed_standard_descriptors()?;
+    let executable = sealed_lifecycle_companion(source, bundle)?;
+    let executable_path = format!("/proc/self/fd/{}", executable.as_raw_fd());
+    let mut command = Command::new(executable_path);
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .current_dir("/")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // 候选角色可能创建子进程；超时清理整个固定进程组并回收主进程。
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+    let mut child = command.spawn().map_err(|_| ActivationError::Replacement)?;
+    let Some(mut stdin) = child.stdin.take() else {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    };
+    let encoded = request.encode().map_err(|_| ActivationError::Replacement)?;
+    if stdin
+        .write_all(&encoded)
+        .and_then(|()| stdin.flush())
+        .is_err()
+    {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    }
+    drop(stdin);
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    };
+    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } != 0
+    {
+        terminate_and_reap(&mut child);
+        return Err(ActivationError::Replacement);
+    }
+    let deadline = Instant::now() + REPLACEMENT_COMPANION_BUDGET;
+    let mut response = Vec::new();
+    let mut status = None;
+    loop {
+        let mut chunk = [0_u8; 512];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) if status.is_some() => {
+                    let succeeded = status
+                        .is_some_and(|status: std::process::ExitStatus| status.success())
+                        && LifecycleResponse::decode(&response)
+                            == Ok(LifecycleResponse::succeeded());
+                    return succeeded.then_some(()).ok_or(ActivationError::Replacement);
+                }
+                Ok(0) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&chunk[..read]);
+                    if response.len() > crate::lifecycle::MAX_LIFECYCLE_REQUEST_BYTES {
+                        terminate_and_reap(&mut child);
+                        return Err(ActivationError::Replacement);
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    terminate_and_reap(&mut child);
+                    return Err(ActivationError::Replacement);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            terminate_and_reap(&mut child);
+            return Err(ActivationError::Replacement);
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(next) => status = next,
+                Err(_) => {
+                    terminate_and_reap(&mut child);
+                    return Err(ActivationError::Replacement);
+                }
+            }
+        }
+        std::thread::sleep(REPLACEMENT_COMPANION_POLL_INTERVAL);
+    }
+}
+
+fn reserve_closed_standard_descriptors() -> Result<Vec<File>, ActivationError> {
+    let mut reserved = Vec::new();
+    for descriptor in libc::STDIN_FILENO..=libc::STDERR_FILENO {
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } >= 0 {
+            continue;
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+            return Err(ActivationError::Replacement);
+        }
+        let opened = unsafe {
+            libc::open(
+                c"/dev/null".as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if opened != descriptor {
+            if opened >= 0 {
+                unsafe { libc::close(opened) };
+            }
+            return Err(ActivationError::Replacement);
+        }
+        reserved.push(unsafe { File::from_raw_fd(opened) });
+    }
+    Ok(reserved)
+}
+
+fn sealed_lifecycle_companion(
+    source: &mut File,
+    bundle: &VerifiedBundle,
+) -> Result<File, ActivationError> {
+    source.rewind().map_err(|_| ActivationError::Io)?;
+    let name = CString::new("enoki-probe-lifecycle-companion")
+        .map_err(|_| ActivationError::Replacement)?;
+    let descriptor =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if descriptor < 0 {
+        return Err(ActivationError::Replacement);
+    }
+    let mut sealed = unsafe { File::from_raw_fd(descriptor) };
+    let copied = io::copy(source, &mut sealed).map_err(|_| ActivationError::Replacement)?;
+    let (_, expected_size) = bundle
+        .component_receipt("lifecycle-companion")
+        .ok_or(ActivationError::Verification)?;
+    if copied != expected_size {
+        return Err(ActivationError::Verification);
+    }
+    sealed
+        .sync_all()
+        .map_err(|_| ActivationError::Replacement)?;
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL;
+    if unsafe { libc::fcntl(descriptor, libc::F_ADD_SEALS, seals) } != 0
+        || unsafe { libc::fcntl(descriptor, libc::F_GET_SEALS) } != seals
+    {
+        return Err(ActivationError::Replacement);
+    }
+    verify_role_component(&mut sealed, bundle, "lifecycle-companion")
+        .map_err(|_| ActivationError::Verification)?;
+    Ok(sealed)
+}
+
+fn terminate_and_reap(child: &mut std::process::Child) {
+    let _ = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for ReceivedRootHandoff {
     fn drop(&mut self) {
         self.enrollment.zeroize();
     }
+}
+
+fn validate_received_role(
+    component: &mut File,
+    bundle: &VerifiedBundle,
+    role: &str,
+) -> Result<(), ActivationError> {
+    validate_regular_file(component, 0, 0o600)?;
+    verify_role_component(component, bundle, role).map_err(|_| ActivationError::Verification)
 }
 
 /// Root orchestration boundary. The caller must construct `policy` only from
@@ -112,9 +563,13 @@ pub(crate) fn receive_root_handoff_with_policy(
     input: &mut impl Read,
     policy: &VerificationPolicy<'_>,
 ) -> Result<ReceivedRootHandoff, ActivationError> {
-    receive_root_handoff(input, policy, 0, |candidate| {
-        acquire_delegation_generation(candidate).map_err(ActivationError::from)
-    })
+    receive_root_handoff(
+        input,
+        policy,
+        0,
+        |candidate| acquire_delegation_generation(candidate).map_err(ActivationError::from),
+        None,
+    )
 }
 
 /// Root-only production receiver. It has no arguments other than stdin and
@@ -137,11 +592,47 @@ pub fn activate_from_stdin(input: &mut impl Read) -> Result<ReceivedRootHandoff,
     )
 }
 
+/// 私有 socket 只承载 metadata/component handoff；fd 0 保留为 sudo 实际
+/// 执行的 sealed activator receipt，并在任何 Host mutation 前复验。
+pub fn activate_from_socket(
+    input: &mut impl Read,
+    activator_receipt: &mut File,
+) -> Result<ReceivedRootHandoff, ActivationError> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(ActivationError::NotRoot);
+    }
+    let trust = embedded_production_trust_for(BootstrapRole::Activator)
+        .ok_or(ActivationError::BuildTrustUnavailable)?;
+    let policy = VerificationPolicy {
+        distribution: trust.distribution,
+        expected_target: trust.target,
+        highest_accepted_delegation_generation: 0,
+        external_root_fingerprint: trust.root_fingerprint.to_owned(),
+        external_root_pem: Some(trust.root_pem.as_bytes()),
+    };
+    receive_root_handoff_with_receipt(input, &policy, activator_receipt)
+}
+
+fn receive_root_handoff_with_receipt(
+    input: &mut impl Read,
+    policy: &VerificationPolicy<'_>,
+    activator_receipt: &mut File,
+) -> Result<ReceivedRootHandoff, ActivationError> {
+    receive_root_handoff(
+        input,
+        policy,
+        0,
+        |candidate| acquire_delegation_generation(candidate).map_err(ActivationError::from),
+        Some(activator_receipt),
+    )
+}
+
 fn receive_root_handoff(
     input: &mut impl Read,
     policy: &VerificationPolicy<'_>,
     expected_uid: u32,
     acquire_generation: impl FnOnce(u64) -> Result<DelegationGenerationLease, ActivationError>,
+    mut activator_receipt: Option<&mut File>,
 ) -> Result<ReceivedRootHandoff, ActivationError> {
     let handoff = Handoff::read_metadata(input)?;
 
@@ -164,6 +655,10 @@ fn receive_root_handoff(
     };
     let metadata =
         verify_metadata(&handoff, &installed_policy).map_err(|_| ActivationError::Verification)?;
+    if let Some(receipt) = activator_receipt.as_deref_mut() {
+        verify_activator_receipt(receipt, metadata.bundle())
+            .map_err(|_| ActivationError::Verification)?;
+    }
     // The enrollment capability is neither signed nor an authority to select
     // assets. It is consumed only after all signed metadata is authoritative.
     // A root-private component sink is staging only, never installed Host
@@ -177,15 +672,110 @@ fn receive_root_handoff(
         expected_uid,
     )?;
     let (temporary_name, mut component) = create_exclusive_component(&inbox, expected_uid)?;
+    let (runtime_name, mut runtime) = create_exclusive_component(&inbox, expected_uid)?;
+    let (cpu_provider_name, mut cpu_provider) = create_exclusive_component(&inbox, expected_uid)?;
+    let (disk_health_provider_name, mut disk_health_provider) =
+        create_exclusive_component(&inbox, expected_uid)?;
+    let (lifecycle_companion_name, mut lifecycle_companion) =
+        create_exclusive_component(&inbox, expected_uid)?;
+    let (acquirer_name, mut acquirer) = create_exclusive_component(&inbox, expected_uid)?;
+    let (activator_name, mut activator) = create_exclusive_component(&inbox, expected_uid)?;
+    let has_bootstrap_receipts = activator_receipt.is_some();
     let result = (|| {
         Handoff::read_component_into(input, &mut component, metadata.bundle().component_len)?;
         component.sync_all().map_err(|_| ActivationError::Io)?;
         verify_component(&mut component, &handoff, metadata.bundle())
             .map_err(|_| ActivationError::Verification)?;
+        let (_, runtime_len) = metadata
+            .bundle()
+            .component_receipt("observation-runtime")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_runtime_into(input, &mut runtime, runtime_len)?;
+        runtime.sync_all().map_err(|_| ActivationError::Io)?;
+        verify_role_component(&mut runtime, metadata.bundle(), "observation-runtime")
+            .map_err(|_| ActivationError::Verification)?;
+        let (_, cpu_provider_len) = metadata
+            .bundle()
+            .component_receipt("system-state-provider")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_cpu_provider_into(input, &mut cpu_provider, cpu_provider_len)?;
+        cpu_provider.sync_all().map_err(|_| ActivationError::Io)?;
+        verify_role_component(
+            &mut cpu_provider,
+            metadata.bundle(),
+            "system-state-provider",
+        )
+        .map_err(|_| ActivationError::Verification)?;
+        let (_, disk_health_provider_len) = metadata
+            .bundle()
+            .component_receipt("disk-health-provider")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_disk_health_provider_into(
+            input,
+            &mut disk_health_provider,
+            disk_health_provider_len,
+        )?;
+        disk_health_provider
+            .sync_all()
+            .map_err(|_| ActivationError::Io)?;
+        verify_role_component(
+            &mut disk_health_provider,
+            metadata.bundle(),
+            "disk-health-provider",
+        )
+        .map_err(|_| ActivationError::Verification)?;
+        let (_, lifecycle_companion_len) = metadata
+            .bundle()
+            .component_receipt("lifecycle-companion")
+            .ok_or(ActivationError::Verification)?;
+        Handoff::read_lifecycle_companion_into(
+            input,
+            &mut lifecycle_companion,
+            lifecycle_companion_len,
+        )?;
+        lifecycle_companion
+            .sync_all()
+            .map_err(|_| ActivationError::Io)?;
+        verify_role_component(
+            &mut lifecycle_companion,
+            metadata.bundle(),
+            "lifecycle-companion",
+        )
+        .map_err(|_| ActivationError::Verification)?;
+        if let Some(receipt) = activator_receipt {
+            let (_, acquirer_len) = metadata
+                .bundle()
+                .acquirer_receipt()
+                .ok_or(ActivationError::Verification)?;
+            Handoff::read_acquirer_into(input, &mut acquirer, acquirer_len)?;
+            acquirer.sync_all().map_err(|_| ActivationError::Io)?;
+            verify_acquirer_receipt(&mut acquirer, metadata.bundle())
+                .map_err(|_| ActivationError::Verification)?;
+            receipt
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| ActivationError::Io)?;
+            let copied = std::io::copy(receipt, &mut activator).map_err(|_| ActivationError::Io)?;
+            let (_, activator_len) = metadata
+                .bundle()
+                .activator_receipt()
+                .ok_or(ActivationError::Verification)?;
+            if copied != activator_len {
+                return Err(ActivationError::Verification);
+            }
+            activator.sync_all().map_err(|_| ActivationError::Io)?;
+            verify_activator_receipt(&mut activator, metadata.bundle())
+                .map_err(|_| ActivationError::Verification)?;
+        }
         component
             .seek(SeekFrom::Start(0))
             .map_err(|_| ActivationError::Io)?;
         unlink_at(inbox.as_raw_fd(), &temporary_name)?;
+        unlink_at(inbox.as_raw_fd(), &runtime_name)?;
+        unlink_at(inbox.as_raw_fd(), &cpu_provider_name)?;
+        unlink_at(inbox.as_raw_fd(), &disk_health_provider_name)?;
+        unlink_at(inbox.as_raw_fd(), &lifecycle_companion_name)?;
+        unlink_at(inbox.as_raw_fd(), &acquirer_name)?;
+        unlink_at(inbox.as_raw_fd(), &activator_name)?;
         // The candidate has now passed every coherence, enrollment, exact
         // byte, digest, and EOF check. Persist immediately before returning
         // the sole object that can invoke a Host-mutating activation adapter.
@@ -194,12 +784,24 @@ fn receive_root_handoff(
             handoff,
             bundle: metadata.bundle().clone(),
             component,
+            runtime,
+            cpu_provider,
+            disk_health_provider,
+            lifecycle_companion,
+            acquirer: has_bootstrap_receipts.then_some(acquirer),
+            activator: has_bootstrap_receipts.then_some(activator),
             enrollment,
             _generation_lease: generation_lease,
         })
     })();
     if result.is_err() {
         let _ = unlink_at(inbox.as_raw_fd(), &temporary_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &runtime_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &cpu_provider_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &disk_health_provider_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &lifecycle_companion_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &acquirer_name);
+        let _ = unlink_at(inbox.as_raw_fd(), &activator_name);
     }
     result
 }
@@ -326,8 +928,15 @@ mod tests {
     use crate::{
         generation::acquire_delegation_generation_for_test,
         handoff::{MAGIC, SCHEMA_VERSION},
-        verifier::signed_test_handoff,
     };
+    use rsa::{
+        RsaPrivateKey,
+        pkcs1v15::SigningKey,
+        pkcs8::{EncodePublicKey, LineEnding},
+        rand_core::OsRng,
+        signature::{RandomizedSigner, SignatureEncoding},
+    };
+    use sha2::{Digest, Sha256};
     use std::{fs, io::Cursor, os::unix::fs::PermissionsExt, sync::mpsc, thread, time::Duration};
     use tempfile::tempdir;
 
@@ -404,7 +1013,11 @@ mod tests {
             .read_to_end(&mut bytes)
             .unwrap();
         assert_eq!(bytes, b"probe");
-        assert_eq!(fs::read_dir(state_root.join("inbox")).unwrap().count(), 0);
+        assert!(
+            fs::read_dir(state_root.join("inbox"))
+                .map(|entries| entries.count() == 0)
+                .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -412,7 +1025,12 @@ mod tests {
         let temporary = tempdir().unwrap();
         let state_root = temporary.path().join("state");
         let mut fixture = fixture(4);
-        fixture.stream.pop();
+        let component = fixture
+            .stream
+            .windows(b"probe".len())
+            .position(|bytes| bytes == b"probe")
+            .unwrap();
+        fixture.stream.remove(component + b"probe".len() - 1);
 
         assert!(
             receive_for_test(
@@ -424,7 +1042,11 @@ mod tests {
         );
         let floor = acquire_delegation_generation_for_test(&state_root, 4).unwrap();
         assert_eq!(floor.current(), 0);
-        assert_eq!(fs::read_dir(state_root.join("inbox")).unwrap().count(), 0);
+        assert!(
+            fs::read_dir(state_root.join("inbox"))
+                .map(|entries| entries.count() == 0)
+                .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -457,7 +1079,12 @@ mod tests {
         let temporary = tempdir().unwrap();
         let state_root = temporary.path().join("state");
         let mut fixture = fixture(4);
-        *fixture.stream.last_mut().unwrap() ^= 1;
+        let component = fixture
+            .stream
+            .windows(b"probe".len())
+            .position(|bytes| bytes == b"probe")
+            .unwrap();
+        fixture.stream[component] ^= 1;
 
         assert!(
             receive_for_test(
@@ -492,6 +1119,449 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn installed_state_maps_the_verified_candidate_to_one_replacement_request() {
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            "c".repeat(64),
+            received.bundle.asset_set_manifest_sha256,
+        );
+        let enrollment = crate::handoff::Enrollment::from_install_input(
+            "https://hub.example",
+            enrollment_input.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            replacement_request_for_installed_state(false, &enrollment, &received.bundle),
+            Err(ActivationError::Replacement),
+            "Replacement authority 缺少旧 install metadata 时必须在任何 Host effect 前关闭",
+        );
+        assert_eq!(
+            replacement_request_for_installed_state(true, &received.enrollment, &received.bundle,),
+            Err(ActivationError::Replacement),
+            "raw-token Enrollment不得误触 Replacement",
+        );
+        let request = replacement_request_for_installed_state(true, &enrollment, &received.bundle)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            request.transition(),
+            crate::lifecycle::LifecycleTransition::ReplacementMigration
+        );
+        assert_eq!(
+            request.authority(),
+            &crate::lifecycle::LifecycleRequestAuthority::ReplacementEnrollment {
+                enrollment_token: "enk_enroll_test".to_string(),
+                enrollment_id: "enr_0123456789abcdef".to_string(),
+                hub_origin: "https://hub.example".to_string(),
+                host_id: "7".to_string(),
+                expected_probe_id: "probe_old_01".to_string(),
+                source_probe_version: "1.2.2".to_string(),
+                source_probe_sha256: vec!["c".repeat(64)],
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    received.bundle.asset_set_manifest_sha256
+                ),
+                target_bundle_target: received.bundle.target.clone(),
+                target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+                bundle_version: "1.2.3".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn completed_exact_replacement_is_idempotent_before_a_new_enrollment_can_start() {
+        struct Store(Option<crate::replacement::ReplacementCommitFact>);
+        impl crate::replacement::ReplacementCommitStore for Store {
+            type Error = ();
+
+            fn load(
+                &mut self,
+            ) -> Result<Option<crate::replacement::ReplacementCommitFact>, Self::Error>
+            {
+                Ok(self.0.clone())
+            }
+
+            fn persist(
+                &mut self,
+                _: &crate::replacement::ReplacementCommitFact,
+            ) -> Result<(), Self::Error> {
+                unreachable!()
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+        let token_sha256 = format!(
+            "{:x}",
+            Sha256::digest(received.enrollment.enrollment_token().as_bytes())
+        );
+        let fact = crate::replacement::ReplacementCommitFact::for_test(
+            crate::replacement::ReplacementIntent {
+                enrollment_id: "enr_0123456789abcdef".to_owned(),
+                enrollment_token_sha256: token_sha256,
+                host_id: "7".to_owned(),
+                hub_origin: received.enrollment.hub_origin().to_owned(),
+                old_probe_id: "probe-old".to_owned(),
+                source_probe_version: "1.2.2".to_owned(),
+                source_probe_sha256: "a".repeat(64),
+                target_bundle_target: received.bundle.target.clone(),
+                target_probe_version: received.bundle.version.clone(),
+                target_asset_set_digest: format!(
+                    "sha256:{}",
+                    received.bundle.asset_set_manifest_sha256
+                ),
+                target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+            },
+            true,
+            true,
+        );
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"{}\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe-old\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"{}\"}},\"schemaVersion\":1}}",
+            received.enrollment.enrollment_token(),
+            "a".repeat(64),
+            received.bundle.asset_set_manifest_sha256,
+            received.bundle.version,
+        );
+        let exact_enrollment = Enrollment::from_install_input(
+            received.enrollment.hub_origin(),
+            enrollment_input.as_bytes(),
+        )
+        .unwrap();
+        let exact = matching_replacement_commit_in(
+            &mut Store(Some(fact.clone())),
+            &exact_enrollment,
+            &received.bundle,
+        )
+        .unwrap()
+        .unwrap();
+        let MatchingReplacementCommit::Ready(exact) = exact else {
+            panic!("completed exact commit must be ready")
+        };
+        assert_eq!(*exact, fact);
+
+        let other_enrollment =
+            Enrollment::new(received.enrollment.hub_origin(), "enk_enroll_other").unwrap();
+        assert!(
+            matching_replacement_commit_in(
+                &mut Store(Some(fact.clone())),
+                &other_enrollment,
+                &received.bundle,
+            )
+            .unwrap()
+            .is_none(),
+            "只有 candidate receipt 完成后，新 Enrollment 才能显式开始"
+        );
+        let mut incomplete = fact;
+        incomplete.candidate_layout_complete = false;
+        assert!(matches!(
+            matching_replacement_commit_in(
+                &mut Store(Some(incomplete)),
+                &other_enrollment,
+                &received.bundle,
+            ),
+            Err(ActivationError::Replacement)
+        ));
+    }
+
+    #[test]
+    fn fresh_invocation_recognizes_the_exact_incomplete_replacement_commit() {
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Store(Rc<RefCell<Option<crate::replacement::ReplacementCommitFact>>>);
+        impl crate::replacement::ReplacementCommitStore for Store {
+            type Error = ();
+
+            fn load(
+                &mut self,
+            ) -> Result<Option<crate::replacement::ReplacementCommitFact>, Self::Error>
+            {
+                Ok(self.0.borrow().clone())
+            }
+
+            fn persist(
+                &mut self,
+                fact: &crate::replacement::ReplacementCommitFact,
+            ) -> Result<(), Self::Error> {
+                *self.0.borrow_mut() = Some(fact.clone());
+                Ok(())
+            }
+        }
+
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            "c".repeat(64),
+            received.bundle.asset_set_manifest_sha256,
+        );
+        let enrollment =
+            Enrollment::from_install_input("https://hub.example", enrollment_input.as_bytes())
+                .unwrap();
+        let intent = crate::replacement::ReplacementIntent {
+            enrollment_id: "enr_0123456789abcdef".to_owned(),
+            enrollment_token_sha256: format!(
+                "{:x}",
+                Sha256::digest(enrollment.enrollment_token().as_bytes())
+            ),
+            host_id: "7".to_owned(),
+            hub_origin: "https://hub.example".to_owned(),
+            old_probe_id: "probe_old_01".to_owned(),
+            source_probe_version: "1.2.2".to_owned(),
+            source_probe_sha256: "c".repeat(64),
+            target_bundle_target: received.bundle.target.clone(),
+            target_probe_version: received.bundle.version.clone(),
+            target_asset_set_digest: format!(
+                "sha256:{}",
+                received.bundle.asset_set_manifest_sha256
+            ),
+            target_manifest_sha256: received.bundle.manifest_sha256.clone(),
+        };
+        let fact = crate::replacement::ReplacementCommitFact::for_test(intent, false, false);
+        let shared = Rc::new(RefCell::new(Some(fact)));
+        let invoked = Rc::new(RefCell::new(Vec::new()));
+        let invoked_from_fresh_instance = Rc::clone(&invoked);
+        let committed_by_companion = Rc::clone(&shared);
+
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(Rc::clone(&shared)),
+            false,
+            |_| Ok(CommittedReplacementLocalCustody::SourceMetadata),
+            move |request| {
+                invoked_from_fresh_instance
+                    .borrow_mut()
+                    .push(request.clone());
+                let mut completed = committed_by_companion
+                    .borrow()
+                    .clone()
+                    .expect("durable commit");
+                completed.cleanup_complete = true;
+                *committed_by_companion.borrow_mut() = Some(completed);
+                Ok(())
+            },
+        )
+        .expect("fresh activation resumes exact incomplete commit");
+
+        assert!(
+            matches!(activation, ReplacementActivation::Resume(_)),
+            "cleanup 后必须继续 committed candidate activation"
+        );
+        let invoked = invoked.borrow();
+        assert_eq!(
+            invoked.len(),
+            1,
+            "fresh instance invokes one candidate Companion"
+        );
+        assert_eq!(
+            invoked[0].transition(),
+            crate::lifecycle::LifecycleTransition::ReplacementMigration
+        );
+
+        let retirement_invocations = Rc::new(RefCell::new(0));
+        let observed_retirement_invocations = Rc::clone(&retirement_invocations);
+        let source_custody = tempdir().unwrap();
+        let source_metadata = source_custody.path().join("etc/enoki/probe-install.toml");
+        fs::create_dir_all(source_metadata.parent().unwrap()).unwrap();
+        fs::write(
+            &source_metadata,
+            "source metadata under durable commit custody",
+        )
+        .unwrap();
+        let source_state = source_custody.path().join("var/lib/enoki-probe-bootstrap");
+        fs::create_dir_all(&source_state).unwrap();
+        fs::set_permissions(&source_state, fs::Permissions::from_mode(0o700)).unwrap();
+        let source_paths = FixedInstallPaths::under(source_custody.path());
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(Rc::clone(&shared)),
+            true,
+            |fact| {
+                crate::install::classify_committed_replacement_local_custody(
+                    &source_paths,
+                    &fact.resume_binding(),
+                )
+                .map_err(ActivationError::Install)
+            },
+            move |_| {
+                *observed_retirement_invocations.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect("fresh activation retires source metadata after cleanup receipt");
+        assert!(matches!(activation, ReplacementActivation::Resume(_)));
+        assert_eq!(
+            *retirement_invocations.borrow(),
+            1,
+            "cleanup receipt with source metadata must reenter the sealed Companion"
+        );
+
+        let candidate_invocations = Rc::new(RefCell::new(0));
+        let observed_candidate_invocations = Rc::clone(&candidate_invocations);
+        let activation = prepare_replacement_migration_in(
+            &enrollment,
+            &received.bundle,
+            &mut Store(Rc::clone(&shared)),
+            true,
+            |_| Ok(CommittedReplacementLocalCustody::CandidateTransaction),
+            move |_| {
+                *observed_candidate_invocations.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect("fresh activation resumes candidate transaction without retiring its metadata");
+        assert!(matches!(activation, ReplacementActivation::Resume(_)));
+        assert_eq!(
+            *candidate_invocations.borrow(),
+            0,
+            "candidate transaction custody must bypass source metadata retirement"
+        );
+
+        let wrong = Enrollment::new("https://hub.example", "enk_enroll_wrong").unwrap();
+        let wrong_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_invocations = Rc::clone(&wrong_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &wrong,
+                &received.bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
+                move |_| {
+                    *observed_wrong_invocations.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_invocations.borrow(),
+            0,
+            "wrong token has zero effects"
+        );
+
+        let mut wrong_bundle = received.bundle.clone();
+        wrong_bundle.manifest_sha256 = "f".repeat(64);
+        let wrong_bundle_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_bundle = Rc::clone(&wrong_bundle_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &wrong_bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
+                move |_| {
+                    *observed_wrong_bundle.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_bundle_invocations.borrow(),
+            0,
+            "wrong verified bundle binding has zero effects"
+        );
+
+        let mut wrong_target_bundle = received.bundle.clone();
+        wrong_target_bundle.target = "aarch64-unknown-linux-gnu".to_owned();
+        let wrong_target_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_target = Rc::clone(&wrong_target_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &enrollment,
+                &wrong_target_bundle,
+                &mut Store(Rc::clone(&shared)),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
+                move |_| {
+                    *observed_wrong_target.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_target_invocations.borrow(),
+            0,
+            "wrong target has zero Companion effects"
+        );
+
+        let wrong_intent_input =
+            enrollment_input.replace("\"targetHostId\":\"7\"", "\"targetHostId\":\"8\"");
+        let wrong_intent =
+            Enrollment::from_install_input("https://hub.example", wrong_intent_input.as_bytes())
+                .unwrap();
+        let wrong_intent_invocations = Rc::new(RefCell::new(0));
+        let observed_wrong_intent = Rc::clone(&wrong_intent_invocations);
+        assert!(matches!(
+            prepare_replacement_migration_in(
+                &wrong_intent,
+                &received.bundle,
+                &mut Store(shared),
+                false,
+                |_| Ok(CommittedReplacementLocalCustody::SourceMetadataRetired),
+                move |_| {
+                    *observed_wrong_intent.borrow_mut() += 1;
+                    Ok(())
+                },
+            ),
+            Err(ActivationError::Replacement)
+        ));
+        assert_eq!(
+            *wrong_intent_invocations.borrow(),
+            0,
+            "wrong Replacement intent has zero effects"
+        );
+    }
+
+    #[test]
+    fn replacement_companion_execution_fd_is_the_exact_sealed_candidate_role() {
+        let temporary = tempdir().unwrap();
+        let fixture = fixture(4);
+        let mut received = receive_for_test(
+            &mut Cursor::new(fixture.stream.as_slice()),
+            &temporary.path().join("state"),
+            &fixture.policy(),
+        )
+        .unwrap();
+
+        let mut sealed =
+            sealed_lifecycle_companion(&mut received.lifecycle_companion, &received.bundle)
+                .unwrap();
+        let mut bytes = Vec::new();
+        sealed.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"lifecycle-companion");
+        assert_eq!(
+            unsafe { libc::fcntl(sealed.as_raw_fd(), libc::F_GET_SEALS) },
+            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL
+        );
     }
 
     #[test]
@@ -537,10 +1607,16 @@ mod tests {
         state_root: &std::path::Path,
         policy: &VerificationPolicy<'_>,
     ) -> Result<ReceivedRootHandoff, ActivationError> {
-        receive_root_handoff(input, policy, unsafe { libc::geteuid() }, |candidate| {
-            acquire_delegation_generation_for_test(state_root, candidate)
-                .map_err(ActivationError::from)
-        })
+        receive_root_handoff(
+            input,
+            policy,
+            unsafe { libc::geteuid() },
+            |candidate| {
+                acquire_delegation_generation_for_test(state_root, candidate)
+                    .map_err(ActivationError::from)
+            },
+            None,
+        )
     }
 
     fn invalid_policy() -> VerificationPolicy<'static> {
@@ -572,24 +1648,89 @@ mod tests {
     }
 
     fn fixture(generation: u64) -> Fixture {
-        let vector = signed_test_handoff(generation);
+        let mut rng = OsRng;
+        let root = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let daily = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let root_pem = root
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let daily_pem = daily
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .into_bytes();
+        let root_id = sha256(&root_pem);
+        let daily_id = sha256(&daily_pem);
         let component = b"probe";
+        let bundle = format!(
+            "{{\"bootstrapAssets\":[{{\"path\":\"bootstrap/enoki-probe-bootstrap-acquire\",\"permissionProfile\":\"bootstrap-acquirer-v1\",\"role\":\"bootstrap-acquirer\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}},{{\"path\":\"bootstrap/enoki-probe-bootstrap-activate\",\"permissionProfile\":\"bootstrap-activator-v1\",\"role\":\"bootstrap-activator\",\"sha256\":\"{}\",\"size\":1,\"version\":\"1.2.3\"}}],\"components\":[{{\"path\":\"enoki-probe\",\"permissionProfile\":\"probe-v5\",\"resourceContract\":\"hub-reporting-v1\",\"role\":\"probe\",\"sha256\":\"{}\",\"size\":5,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-observation-runtime\",\"permissionProfile\":\"observation-runtime-v4\",\"resourceContract\":\"official-observation-v2\",\"role\":\"observation-runtime\",\"sha256\":\"{}\",\"size\":7,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-cpu-resource-provider\",\"permissionProfile\":\"system-state-provider-v5\",\"resourceContract\":\"system-state-v3\",\"role\":\"system-state-provider\",\"sha256\":\"{}\",\"size\":21,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-disk-health-resource-provider\",\"permissionProfile\":\"disk-health-provider-v3\",\"resourceContract\":\"disk-health-v1\",\"role\":\"disk-health-provider\",\"sha256\":\"{}\",\"size\":20,\"version\":\"1.2.3\"}},{{\"path\":\"enoki-probe-lifecycle-companion\",\"permissionProfile\":\"lifecycle-companion-v3\",\"resourceContract\":\"local-lifecycle-v1\",\"role\":\"lifecycle-companion\",\"sha256\":\"{}\",\"size\":19,\"version\":\"1.2.3\"}}],\"kind\":\"enoki-probe-bundle\",\"target\":\"x86_64-unknown-linux-gnu\",\"version\":\"1.2.3\"}}\n",
+            sha256(b"a"),
+            sha256(b"b"),
+            sha256(component),
+            sha256(b"runtime"),
+            sha256(b"system-state-provider"),
+            sha256(b"disk-health-provider"),
+            sha256(b"lifecycle-companion"),
+        )
+        .into_bytes();
+        let delegation = format!(
+            "{{\"distribution\":\"enoki\",\"generation\":{generation},\"kind\":\"enoki-probe-trust-delegation\",\"purpose\":\"probe-asset-signing\",\"rootKeyId\":\"{root_id}\",\"schemaVersion\":1,\"signingIdentity\":{{\"algorithm\":\"rsa-sha256\",\"keyId\":\"{daily_id}\",\"publicKeyPem\":{}}}}}\n",
+            serde_json::to_string(std::str::from_utf8(&daily_pem).unwrap()).unwrap()
+        )
+        .into_bytes();
+        let mut delegation_input = b"enoki/probe-trust-delegation/v1\0".to_vec();
+        delegation_input.extend_from_slice(&delegation);
+        let delegation_signature = SigningKey::<Sha256>::new(root)
+            .sign_with_rng(&mut rng, &delegation_input)
+            .to_vec();
+        let manifest = format!(
+            "{{\"assets\":[{{\"bundleManifestSha256\":\"{}\",\"file\":\"enoki-probe-x86_64-unknown-linux-gnu.tar.gz\",\"sha256\":\"{}\",\"size\":1,\"target\":\"x86_64-unknown-linux-gnu\"}}],\"kind\":\"enoki-probe-assets\",\"signature\":{{\"algorithm\":\"rsa-sha256\",\"delegationGeneration\":{generation},\"delegationKeyId\":\"{daily_id}\",\"file\":\"manifest.json.sig\",\"publicKey\":\"signing-key.pem\"}},\"version\":\"1.2.3\"}}\n",
+            sha256(&bundle),
+            "0".repeat(64)
+        )
+        .into_bytes();
+        let manifest_signature = SigningKey::<Sha256>::new(daily)
+            .sign_with_rng(&mut rng, &manifest)
+            .to_vec();
+        let handoff = Handoff {
+            delegation,
+            delegation_signature,
+            manifest,
+            manifest_signature,
+            signing_key: daily_pem,
+            bundle_manifest: bundle,
+        };
         let mut stream = Vec::new();
-        vector
-            .handoff
+        handoff
             .write_from(
                 &crate::handoff::Enrollment::new("https://hub.example", "enk_enroll_test").unwrap(),
                 &mut Cursor::new(component),
                 component.len() as u64,
+                &mut Cursor::new(b"runtime"),
+                7,
+                &mut Cursor::new(b"system-state-provider"),
+                21,
+                &mut Cursor::new(b"disk-health-provider"),
+                20,
+                &mut Cursor::new(b"lifecycle-companion"),
+                19,
+                &mut Cursor::new(b"a"),
+                1,
                 &mut stream,
             )
             .unwrap();
         assert_eq!(&stream[..8], &MAGIC);
         assert_eq!(&stream[8..10], &SCHEMA_VERSION.to_be_bytes());
         Fixture {
-            root_fingerprint: vector.root_fingerprint,
-            root: vector.root,
+            root: root_pem,
+            root_fingerprint: root_id,
             stream,
         }
+    }
+
+    fn sha256(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
     }
 }

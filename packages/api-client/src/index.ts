@@ -63,10 +63,16 @@ export type HostSummary = {
     mode: "inherit" | "override";
     version: string;
   };
+  probeUpgradeProblem: ProbeUpgradeOverviewProblem;
   probeVersion: string;
   status: HostStatus;
   system: string;
 };
+
+export type ProbeUpgradeOverviewProblem =
+  | { status: "in_progress" }
+  | { status: "failed" }
+  | null;
 
 export type HostsResponse = {
   hosts: HostSummary[];
@@ -86,6 +92,10 @@ export type EnrollmentTarget =
   | {
       hostId: number;
       kind: "existing_host";
+    }
+  | {
+      hostId: number;
+      kind: "manual_reinstall";
     };
 
 export type EnrollmentStatusResponse = {
@@ -100,15 +110,33 @@ export type EnrollmentStatusResponse = {
     code: string;
     message: string | null;
   } | null;
+  /** 派生的 Replacement 结果；它不是 Enrollment status 或 operation。 */
+  replacementMigration?: "waiting_host" | "incomplete" | "ready";
   status: EnrollmentStatus;
   target: EnrollmentTarget;
   verificationDeadlineAtMs: number | null;
 };
 
 export type EnrollmentResponse = EnrollmentStatusResponse & {
+  bootstrapRecipe: ProbeBootstrapRecipeRecord;
   enrollmentToken: string;
   hubUrl: string;
   installCommand: string;
+};
+
+export type ProbeBootstrapRecipeRecord = {
+  bundleVersion: string;
+  distribution: string;
+  kind: "enoki-probe-bootstrap-recipe-record";
+  recipe: {
+    file: string;
+    sha256: string;
+    size: number;
+    version: string;
+  };
+  rootFingerprint: string;
+  schemaVersion: 1;
+  targets: string[];
 };
 
 export type ProbeConfiguration = {
@@ -178,26 +206,40 @@ export type ProbeUpgradeEligibility = {
   currentProbeAssetSetVersion: string | null;
   currentProbeVersion: string | null;
   isUpgradeable: boolean;
+  manualReinstall?: {
+    sourceProbeVersion: string;
+    targetAssetSetDigest: string;
+    targetProbeVersion: string;
+  };
   nonUpgradeableReason:
     | "probe_asset_set_version_missing"
     | "probe_asset_set_version_malformed"
     | "probe_version_missing"
     | "probe_version_malformed"
     | "probe_version_development"
+    | "probe_release_transition_missing"
+    | "probe_release_transition_mismatch"
+    | "probe_release_transition_replacement_required"
     | "probe_version_current"
     | "probe_version_newer"
     | null;
 };
+
+export type ProbeUpgradeRecoveryDisposition =
+  | "retry_probe_upgrade"
+  | "probe_repair"
+  | "manual_reinstall_required";
 
 export type ProbeUpgradeStatus = {
   acceptedAtMs: number | null;
   completedAtMs: number | null;
   createdAtMs: number;
   failure: {
-    code: string;
-    message: string;
+    recoveryDisposition: ProbeUpgradeRecoveryDisposition | null;
   } | null;
   id: number;
+  /** Always projected by Hub; optional only for clients decoding older responses. */
+  kind?: "probe_upgrade" | "probe_repair" | "probe_uninstall";
   runningAtMs: number | null;
   state:
     | "pending"
@@ -215,10 +257,16 @@ export type ProbeUpgradeRequestResponse = {
   probeUpgradeRequest: ProbeUpgradeStatus;
 };
 
+export type ProbeUpgradeAllResponse = {
+  failed: number;
+  skipped: number;
+  submitted: number;
+};
+
 export type ProbeOperationResponse = {
   probeOperation: ProbeUpgradeStatus & {
     hostId: number;
-    kind: "probe_upgrade" | "probe_uninstall";
+    kind: "probe_upgrade" | "probe_repair" | "probe_uninstall";
   };
 };
 

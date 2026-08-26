@@ -14,10 +14,12 @@ import path from "node:path";
 import { validateResolvedReleaseBaseline } from "./release-baseline-lib.mjs";
 import {
   inspectProbeAssetSet,
+  releaseTransitionForValidatedCandidate,
   validateReleaseCandidate,
 } from "./release-candidate-lib.mjs";
 import { inspectHubOciArchive } from "./release-candidate-oci.mjs";
 import { readReleaseE2EMatrix } from "./release-e2e-matrix.mjs";
+import { compileReleaseScenarioPlan } from "./release-scenario-plan.mjs";
 import {
   createMatrixGateResult,
   createReleaseVerificationSummary,
@@ -97,7 +99,7 @@ async function recordMatrixGate(options) {
   const evidence = await readJson(options["--evidence"], "lifecycle evidence");
   const result = createMatrixGateResult({
     artifactName: options["--artifact-name"],
-    candidate: manifest.candidate,
+    candidateManifest: manifest,
     cellId: options["--cell-id"],
     evidence,
     scenarioOutcome: options["--scenario-outcome"],
@@ -124,7 +126,21 @@ async function recordUiGate(options) {
 
 async function summarize(options) {
   const identities = await readAttemptIdentities(options);
-  const matrix = await readReleaseE2EMatrix(options["--matrix"]);
+  let scenarioPlan = null;
+  const scenarioPlanErrors = [];
+  try {
+    scenarioPlan = compileReleaseScenarioPlan({
+      candidateManifest: identities.candidateManifest,
+      releaseTransition: releaseTransitionForValidatedCandidate(
+        identities.candidateManifest,
+      ),
+      supportedHostMatrix: await readReleaseE2EMatrix(options["--matrix"]),
+    });
+  } catch (error) {
+    scenarioPlanErrors.push(
+      `Release Scenario Plan unavailable: ${error.message}`,
+    );
+  }
   const hostEvidence = await readGateResults(
     options["--matrix-evidence-root"],
     "enoki-release-e2e-gate",
@@ -155,6 +171,7 @@ async function summarize(options) {
     componentResults: componentEvidence.value ?? {},
     evidenceErrors: [
       ...identities.errors,
+      ...scenarioPlanErrors,
       ...hostEvidence.errors,
       ...uiEvidence.errors,
       ...componentEvidence.errors,
@@ -163,7 +180,7 @@ async function summarize(options) {
     ],
     hostGates: hostEvidence.gates,
     identities,
-    matrix,
+    scenarioPlan,
     requested: {
       commit: options["--requested-commit"],
       version: options["--requested-version"],

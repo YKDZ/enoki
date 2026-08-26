@@ -8,6 +8,8 @@ import {
 } from "@/features/host/host-feedback-policy";
 import {
   decideProbeUpgradeFeedback,
+  type ProbeUpgradeAllRequestFailedFact,
+  type ProbeUpgradeAllSubmittedFact,
   type ProbeUpgradeFeedbackInitiation,
   type ProbeUpgradeRequestFailedFact,
   type ProbeUpgradeTerminalState,
@@ -18,6 +20,8 @@ import type { FeedbackAction, FeedbackDecision } from "./feedback-policy";
 export type WebFeedbackFact =
   | EnrollmentFeedbackFact
   | HostFeedbackFact
+  | ProbeUpgradeAllRequestFailedFact
+  | ProbeUpgradeAllSubmittedFact
   | ProbeUpgradeRequestFailedFact
   | {
       hostId: number;
@@ -201,6 +205,8 @@ function decide(
     case "enrollment-rejected":
       return decideEnrollmentFeedback(fact);
     case "probe-upgrade-request-failed":
+    case "probe-upgrade-all-request-failed":
+    case "probe-upgrade-all-submitted":
       return decideProbeUpgradeFeedback(fact);
     case "probe-upgrade-transition": {
       const key = probeUpgradeKey(fact.hostId, fact.operationId);

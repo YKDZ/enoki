@@ -18,9 +18,10 @@ import {
   runReleaseE2EScenario,
 } from "./release-e2e-lib.mjs";
 import {
-  readReleaseE2EMatrix,
-  resolveReleaseE2EMatrixCell,
-} from "./release-e2e-matrix.mjs";
+  compileVerifiedReleaseScenarioPlan,
+  prepareReleaseScenarioCell,
+  resolveReleaseScenarioPlanCell,
+} from "./release-scenario-plan.mjs";
 
 const usage = `Usage:
   node scripts/release-e2e.mjs run \\
@@ -86,6 +87,29 @@ async function run(options) {
           port: Number(options["--ssh-port"]),
         }
       : null;
+  const infrastructure =
+    options["--host-adapter"] === "ci"
+      ? createCiReleaseInfrastructureAdapter({
+          candidateManifestPath,
+          trustedRootPublicKeyPem,
+        })
+      : createSshReleaseInfrastructureAdapter({
+          candidateManifestPath,
+          host: options["--ssh-host"],
+          keyPath: options["--ssh-key"],
+          knownHostsPath: path.join(evidenceDir, "known_hosts"),
+          port: Number(options["--ssh-port"]),
+          trustedRootPublicKeyPem,
+        });
+  const scenarioPlan = await compileVerifiedReleaseScenarioPlan({
+    candidateManifestPath,
+    matrixPath: options["--matrix"],
+    trustedRootPublicKeyPem,
+  });
+  const matrixCell = resolveReleaseScenarioPlanCell(
+    scenarioPlan,
+    options["--matrix-cell"],
+  );
   const journal = await createRunArtifactJournal({
     evidenceDir,
     inputs: {
@@ -100,24 +124,16 @@ async function run(options) {
     ownershipToken,
     runId,
   });
-  let failurePhase = "matrix-validation";
+  let failurePhase = "plan-validated";
   let ownerPassword = null;
 
   try {
-    await journal.update({ phase: failurePhase });
-    const matrix = await readReleaseE2EMatrix(options["--matrix"]);
-    const matrixCell = resolveReleaseE2EMatrixCell(
-      matrix,
-      options["--matrix-cell"],
-    );
     await journal.update({
       matrixCell,
-      phase: "matrix-validated",
+      phase: "plan-validated",
       scenario: matrixCell.scenarioId,
     });
 
-    failurePhase = "candidate-prepare";
-    await journal.update({ phase: failurePhase });
     const ownerPasswordEnvironment = options["--owner-password-env"];
     ownerPassword = process.env[ownerPasswordEnvironment];
     if (!ownerPassword) {
@@ -125,50 +141,49 @@ async function run(options) {
         `Owner password environment variable ${ownerPasswordEnvironment} is empty`,
       );
     }
-    const infrastructure =
-      options["--host-adapter"] === "ci"
-        ? createCiReleaseInfrastructureAdapter({
-            candidateManifestPath,
-            trustedRootPublicKeyPem,
-          })
-        : createSshReleaseInfrastructureAdapter({
-            candidateManifestPath,
-            host: options["--ssh-host"],
-            keyPath: options["--ssh-key"],
-            knownHostsPath: path.join(evidenceDir, "known_hosts"),
-            port: Number(options["--ssh-port"]),
-            trustedRootPublicKeyPem,
-          });
-    const prepared = await infrastructure.prepare({ matrixCell, runId });
-    const { candidateDir, manifest } = prepared;
-    await journal.update({
-      candidate: manifest.candidate,
-      hubDigest: manifest.hub.digest,
-      infrastructure: prepared.infrastructure,
-      phase: "candidate-prepared",
-    });
-    const environment = createReleaseEnvironment({
-      bootstrapProvisioner: prepared.provisionBootstrap,
-      candidateDir,
-      execute: prepared.execute,
-      hubOwnerUrl: options["--hub-owner-url"],
-      hubPublicUrl: options["--hub-public-url"],
-      infrastructure: prepared.infrastructure,
-      matrixCell,
-      ownerPassword,
-      ownershipToken,
-      releaseInfrastructure: (context) => infrastructure.release(context),
-    });
+    failurePhase = "candidate-prepare";
+    await journal.update({ phase: failurePhase });
+    await prepareReleaseScenarioCell({
+      cellId: matrixCell.cellId,
+      compilePlan: async () => scenarioPlan,
+      initialize: async ({ prepared, takeCleanupOwnership }) => {
+        const { candidateDir, manifest } = prepared;
+        await journal.update({
+          candidate: manifest.candidate,
+          hubDigest: manifest.hub.digest,
+          infrastructure: prepared.infrastructure,
+          phase: "candidate-prepared",
+        });
+        const environment = createReleaseEnvironment({
+          bootstrapProvisioner: prepared.provisionBootstrap,
+          candidateDir,
+          execute: prepared.execute,
+          hubOwnerUrl: options["--hub-owner-url"],
+          hubPublicUrl: options["--hub-public-url"],
+          infrastructure: prepared.infrastructure,
+          matrixCell,
+          onCleanupManaged: takeCleanupOwnership,
+          ownerPassword,
+          ownershipToken,
+          releaseInfrastructure: (context) => infrastructure.release(context),
+        });
 
-    failurePhase = "scenario-running";
-    await journal.update({ hostMutationPossible: true, phase: failurePhase });
-    await runReleaseE2EScenario({
-      candidateManifest: manifest,
-      environment,
-      evidenceSink: journal.evidenceSink,
-      ownerPassword,
-      runId,
-      scenario: matrixCell.scenarioId,
+        failurePhase = "scenario-running";
+        await journal.update({
+          hostMutationPossible: true,
+          phase: failurePhase,
+        });
+        await runReleaseE2EScenario({
+          candidateManifest: manifest,
+          environment,
+          evidenceSink: journal.evidenceSink,
+          ownerPassword,
+          runId,
+          scenario: matrixCell.scenarioId,
+        });
+      },
+      provision: (cell) => infrastructure.prepare({ matrixCell: cell, runId }),
+      release: ({ prepared }) => infrastructure.release({ prepared, runId }),
     });
     await journal.update({ phase: "succeeded" });
     process.stdout.write(

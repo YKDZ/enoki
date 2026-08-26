@@ -1,0 +1,2402 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "dd613ddc-d982-4677-848f-65bd5351d269",
+  "prevIds": ["42bd4d4d-c075-420d-9e20-d9804f991986"],
+  "ddl": [
+    {
+      "name": "audit_log",
+      "entityType": "tables"
+    },
+    {
+      "name": "enrollment_tokens",
+      "entityType": "tables"
+    },
+    {
+      "name": "managed_hosts",
+      "entityType": "tables"
+    },
+    {
+      "name": "metric_samples",
+      "entityType": "tables"
+    },
+    {
+      "name": "metrics_archive_runs",
+      "entityType": "tables"
+    },
+    {
+      "name": "official_host_profiles",
+      "entityType": "tables"
+    },
+    {
+      "name": "probe_configuration_global_defaults",
+      "entityType": "tables"
+    },
+    {
+      "name": "probe_configuration_host_overrides",
+      "entityType": "tables"
+    },
+    {
+      "name": "probe_operations",
+      "entityType": "tables"
+    },
+    {
+      "name": "probe_request_nonces",
+      "entityType": "tables"
+    },
+    {
+      "name": "report_observations",
+      "entityType": "tables"
+    },
+    {
+      "name": "snapshot_replay_requests",
+      "entityType": "tables"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "occurred_at_ms",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "actor",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "action",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "outcome",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "subject_type",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "subject_id",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "remote_address",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "user_agent",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "details_json",
+      "entityType": "columns",
+      "table": "audit_log"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "enrollment_id",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "token_hash",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expires_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "used_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_kind",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_host_id",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expected_hub_origin",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expected_probe_id",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expected_probe_version",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "source_probe_sha256_json",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_asset_set_digest",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_probe_version",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'expired'",
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verification_deadline_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "ready_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "rejected_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expired_at_ms",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "rejection_code",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "rejection_message",
+      "entityType": "columns",
+      "table": "enrollment_tokens"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_id",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_secret_hash",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_public_key_pem",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "display_name_edited",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "''",
+      "generated": null,
+      "name": "description",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "hostname",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "os",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kernel",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "architecture",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_count",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_model",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_total_bytes",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_version",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_asset_bundle_version",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_asset_bundle_boot_id",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_asset_bundle_probe_id",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "connect_address",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "connect_address_edited",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "observed_ip",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_configuration_version",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_configuration_error_failed_version",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_configuration_error_code",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_configuration_error_message",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_configuration_error_reported_at_ms",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at_ms",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "deleted_at_ms",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_report_at_ms",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "clock_skew_detected",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_clock_skew_ms",
+      "entityType": "columns",
+      "table": "managed_hosts"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_id",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "boot_id",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "collected_at_ms",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "received_at_ms",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_user_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_system_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_iowait_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_steal_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_idle_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_used_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_total_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_cache_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "swap_total_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "swap_used_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "load_1",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "load_5",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "load_15",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "uptime_seconds",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "real",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "temperature_celsius",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "battery_percent",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "battery_state",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disk_used_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disk_total_bytes",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "network_rx_bytes_delta",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "network_tx_bytes_delta",
+      "entityType": "columns",
+      "table": "metric_samples"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "period",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "range_start_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "range_end_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_path",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "checksum_sha256",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "row_counts_json",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cleanup_status",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cleanup_completed_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cleanup_error_message",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at_ms",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "error_message",
+      "entityType": "columns",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "snapshot_hash",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "payload_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "hostname",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "os",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kernel",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "architecture",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_count",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_model",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "memory_total_bytes",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_version",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "collector_capabilities_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "filesystems_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "network_interfaces_json",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "report_boot_id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "report_probe_id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "report_profile_bundle_version",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "forward_operation_id",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "official_host_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "probe_configuration_global_defaults"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version",
+      "entityType": "columns",
+      "table": "probe_configuration_global_defaults"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "probe_configuration_global_defaults"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metrics_collection_interval_seconds",
+      "entityType": "columns",
+      "table": "probe_configuration_global_defaults"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "enabled_collector_ids_json",
+      "entityType": "columns",
+      "table": "probe_configuration_global_defaults"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version",
+      "entityType": "columns",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "metrics_collection_interval_seconds",
+      "entityType": "columns",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "enabled_collector_ids_json",
+      "entityType": "columns",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kind",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "state",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "current_probe_version",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_asset_set_digest",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_manifest_sha256",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "target_probe_version",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_code",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_message",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_authority_expires_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_eligibility_evidence_json",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_eligibility_evidence_sha256",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_evidence_sha256",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_eligibility_kind",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_failure_generation",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_failed_operation_id",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "repair_nonce",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "upgrade_authority_sha256",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verified_stage_sha256",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "accepted_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "running_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "superseded_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "canceled_at_ms",
+      "entityType": "columns",
+      "table": "probe_operations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_id",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "nonce",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "expires_at_ms",
+      "entityType": "columns",
+      "table": "probe_request_nonces"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "probe_id",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "boot_id",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "received_at_ms",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "observation_window_failure_reason",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cpu_resource_collection_outcome_reason",
+      "entityType": "columns",
+      "table": "report_observations"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": true,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "managed_host_id",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "collector_id",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "''",
+      "generated": null,
+      "name": "boot_id",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "sequence",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "''",
+      "generated": null,
+      "name": "snapshot_hash",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "requested_at_ms",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "fulfilled_at_ms",
+      "entityType": "columns",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_metric_samples_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "metric_samples"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_official_host_profiles_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "official_host_profiles"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_probe_configuration_host_overrides_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "probe_configuration_host_overrides"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_probe_operations_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "probe_operations"
+    },
+    {
+      "columns": ["probe_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["probe_id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_probe_request_nonces_probe_id_managed_hosts_probe_id_fk",
+      "entityType": "fks",
+      "table": "probe_request_nonces"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_report_observations_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "report_observations"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "tableTo": "managed_hosts",
+      "columnsTo": ["id"],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_snapshot_replay_requests_managed_host_id_managed_hosts_id_fk",
+      "entityType": "fks",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "audit_log_pk",
+      "table": "audit_log",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "enrollment_tokens_pk",
+      "table": "enrollment_tokens",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "managed_hosts_pk",
+      "table": "managed_hosts",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "metric_samples_pk",
+      "table": "metric_samples",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "metrics_archive_runs_pk",
+      "table": "metrics_archive_runs",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "official_host_profiles_pk",
+      "table": "official_host_profiles",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "probe_configuration_global_defaults_pk",
+      "table": "probe_configuration_global_defaults",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["managed_host_id"],
+      "nameExplicit": false,
+      "name": "probe_configuration_host_overrides_pk",
+      "table": "probe_configuration_host_overrides",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "probe_operations_pk",
+      "table": "probe_operations",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "probe_request_nonces_pk",
+      "table": "probe_request_nonces",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "report_observations_pk",
+      "table": "report_observations",
+      "entityType": "pks"
+    },
+    {
+      "columns": ["id"],
+      "nameExplicit": false,
+      "name": "snapshot_replay_requests_pk",
+      "table": "snapshot_replay_requests",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "token_hash",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "enrollment_tokens_token_hash_idx",
+      "entityType": "indexes",
+      "table": "enrollment_tokens"
+    },
+    {
+      "columns": [
+        {
+          "value": "enrollment_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "enrollment_tokens_enrollment_id_idx",
+      "entityType": "indexes",
+      "table": "enrollment_tokens"
+    },
+    {
+      "columns": [
+        {
+          "value": "target_host_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"enrollment_tokens\".\"target_kind\" in ('existing_host', 'manual_reinstall') and \"enrollment_tokens\".\"status\" in ('pending', 'verifying')",
+      "origin": "manual",
+      "name": "enrollment_tokens_one_active_existing_host_idx",
+      "entityType": "indexes",
+      "table": "enrollment_tokens"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "expires_at_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "enrollment_tokens_status_expiry_idx",
+      "entityType": "indexes",
+      "table": "enrollment_tokens"
+    },
+    {
+      "columns": [
+        {
+          "value": "probe_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "managed_hosts_probe_id_idx",
+      "entityType": "indexes",
+      "table": "managed_hosts"
+    },
+    {
+      "columns": [
+        {
+          "value": "probe_secret_hash",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "managed_hosts_probe_secret_hash_idx",
+      "entityType": "indexes",
+      "table": "managed_hosts"
+    },
+    {
+      "columns": [
+        {
+          "value": "probe_id",
+          "isExpression": false
+        },
+        {
+          "value": "boot_id",
+          "isExpression": false
+        },
+        {
+          "value": "sequence",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "metric_samples_probe_boot_sequence_idx",
+      "entityType": "indexes",
+      "table": "metric_samples"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "range_start_ms",
+          "isExpression": false
+        },
+        {
+          "value": "range_end_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metrics_archive_runs_status_range_idx",
+      "entityType": "indexes",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "columns": [
+        {
+          "value": "period",
+          "isExpression": false
+        },
+        {
+          "value": "range_start_ms",
+          "isExpression": false
+        },
+        {
+          "value": "range_end_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "metrics_archive_runs_period_range_idx",
+      "entityType": "indexes",
+      "table": "metrics_archive_runs"
+    },
+    {
+      "columns": [
+        {
+          "value": "managed_host_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "official_host_profiles_host_idx",
+      "entityType": "indexes",
+      "table": "official_host_profiles"
+    },
+    {
+      "columns": [
+        {
+          "value": "snapshot_hash",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "official_host_profiles_snapshot_hash_idx",
+      "entityType": "indexes",
+      "table": "official_host_profiles"
+    },
+    {
+      "columns": [
+        {
+          "value": "managed_host_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "state in ('pending', 'accepted', 'running')",
+      "origin": "manual",
+      "name": "probe_operations_one_active_per_host_idx",
+      "entityType": "indexes",
+      "table": "probe_operations"
+    },
+    {
+      "columns": [
+        {
+          "value": "managed_host_id",
+          "isExpression": false
+        },
+        {
+          "value": "updated_at_ms",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "state in ('pending', 'accepted', 'running')",
+      "origin": "manual",
+      "name": "probe_operations_active_for_host_idx",
+      "entityType": "indexes",
+      "table": "probe_operations"
+    },
+    {
+      "columns": [
+        {
+          "value": "managed_host_id",
+          "isExpression": false
+        },
+        {
+          "value": "updated_at_ms",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "probe_operations_latest_for_host_idx",
+      "entityType": "indexes",
+      "table": "probe_operations"
+    },
+    {
+      "columns": [
+        {
+          "value": "repair_evidence_sha256",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "repair_evidence_sha256 is not null",
+      "origin": "manual",
+      "name": "probe_operations_repair_evidence_idx",
+      "entityType": "indexes",
+      "table": "probe_operations"
+    },
+    {
+      "columns": [
+        {
+          "value": "probe_id",
+          "isExpression": false
+        },
+        {
+          "value": "nonce",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "probe_request_nonces_probe_nonce_idx",
+      "entityType": "indexes",
+      "table": "probe_request_nonces"
+    },
+    {
+      "columns": [
+        {
+          "value": "expires_at_ms",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "probe_request_nonces_expires_at_idx",
+      "entityType": "indexes",
+      "table": "probe_request_nonces"
+    },
+    {
+      "columns": [
+        {
+          "value": "probe_id",
+          "isExpression": false
+        },
+        {
+          "value": "boot_id",
+          "isExpression": false
+        },
+        {
+          "value": "sequence",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "report_observations_probe_boot_sequence_idx",
+      "entityType": "indexes",
+      "table": "report_observations"
+    },
+    {
+      "columns": [
+        {
+          "value": "managed_host_id",
+          "isExpression": false
+        },
+        {
+          "value": "collector_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "snapshot_replay_requests_host_collector_idx",
+      "entityType": "indexes",
+      "table": "snapshot_replay_requests"
+    },
+    {
+      "value": "\"status\" in ('pending', 'verifying', 'ready', 'rejected', 'expired')",
+      "name": "enrollment_tokens_status_check",
+      "entityType": "checks",
+      "table": "enrollment_tokens"
+    },
+    {
+      "value": "(\"target_kind\" = 'new_host' and \"target_host_id\" is null and \"expected_hub_origin\" is null and \"expected_probe_id\" is null and \"expected_probe_version\" is null and \"source_probe_sha256_json\" is null and \"target_asset_set_digest\" is null and \"target_probe_version\" is null) or (\"target_kind\" = 'existing_host' and \"target_host_id\" > 0 and \"expected_hub_origin\" is null and \"expected_probe_id\" is null and \"expected_probe_version\" is null and \"source_probe_sha256_json\" is null and \"target_asset_set_digest\" is null and \"target_probe_version\" is null) or (\"target_kind\" = 'manual_reinstall' and \"target_host_id\" > 0 and length(\"expected_hub_origin\") > 0 and length(\"expected_probe_id\") > 0 and length(\"expected_probe_version\") > 0 and length(\"source_probe_sha256_json\") > 0 and length(\"target_asset_set_digest\") = 71 and length(\"target_probe_version\") > 0) or (\"target_kind\" is null and \"target_host_id\" is null and \"status\" = 'expired')",
+      "name": "enrollment_tokens_target_check",
+      "entityType": "checks",
+      "table": "enrollment_tokens"
+    },
+    {
+      "value": "(\"rejection_code\" is null and \"rejection_message\" is null) or (\"rejection_code\" is not null and length(\"rejection_code\") between 1 and 64 and (\"rejection_message\" is null or length(\"rejection_message\") between 1 and 512))",
+      "name": "enrollment_tokens_rejection_check",
+      "entityType": "checks",
+      "table": "enrollment_tokens"
+    }
+  ],
+  "renames": []
+}

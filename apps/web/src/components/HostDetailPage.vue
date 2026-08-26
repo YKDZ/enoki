@@ -53,6 +53,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   back: [];
   deleteHost: [host: HostDetail, mode: DeleteHostMode];
+  replacementMigrationRequested: [hostId: number];
   openHostConfiguration: [hostId: number];
   openHostMetadata: [host: HostDetail];
   probeUpgradeRequested: [
@@ -128,6 +129,9 @@ const probeUpgradeEligibility = computed(
 );
 const probeUpgradeStatus = computed(
   () => host.value?.probeUpgradeStatus ?? null,
+);
+const replacementMigration = computed(
+  () => probeUpgradeEligibility.value?.manualReinstall ?? null,
 );
 const isProbeUpgradeActive = computed(() =>
   ["pending", "accepted", "running"].includes(
@@ -247,11 +251,6 @@ function openHostSettings(currentHost: HostDetail) {
     </StateHero>
 
     <div v-else-if="host" class="grid gap-4">
-      <ProbeUpgradeStatusAlert
-        v-if="probeUpgradeStatus"
-        :status="probeUpgradeStatus"
-      />
-
       <Alert
         v-for="warning in visibleWarnings"
         :key="`${warning.code}-${warning.occurredAtMs ?? 0}`"
@@ -296,6 +295,39 @@ function openHostSettings(currentHost: HostDetail) {
         @open-host-settings="openHostSettings"
         @switch-metrics-window="switchMetricsWindow"
       >
+        <template #current-problem>
+          <Alert
+            v-if="replacementMigration"
+            data-testid="manual-probe-reinstall"
+            class="border-amber-200 bg-amber-50"
+          >
+            <AlertTriangle class="size-4" aria-hidden="true" />
+            <AlertTitle>需要手动重新安装探针</AlertTitle>
+            <AlertDescription class="grid gap-3">
+              <p>
+                当前探针安装包无法安全原地升级。Hub
+                已将此转换封闭为手动重装；主机、主机元数据和指标历史会保留，探针身份会替换。
+              </p>
+              <p>目标探针版本：{{ replacementMigration.targetProbeVersion }}</p>
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  @click="emit('replacementMigrationRequested', host.id)"
+                >
+                  生成手动重装命令
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
+          <ProbeUpgradeStatusAlert
+            v-if="probeUpgradeStatus"
+            :status="probeUpgradeStatus"
+            @retry-probe-upgrade="isProbeUpgradeDialogOpen = true"
+          />
+        </template>
+
         <template #actions>
           <Button
             v-if="showProbeUpgradeButton"

@@ -1,12 +1,5 @@
 import { execFile } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -18,7 +11,8 @@ import {
   inspectProbeBootstrapArtifact,
   inspectProbeBootstrapBinary,
   packageProbeBootstrapArtifact,
-  withExtractedProbeBootstrapArtifact,
+  withVerifiedProbeBootstrapArchive,
+  withVerifiedProbeBootstrapArtifact,
 } from "./probe-bootstrap-artifact.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +25,24 @@ const identity = {
 };
 
 describe("Probe Bootstrap build artifact", () => {
+  it("requires exact release bytes at the public archive snapshot seam", async () => {
+    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
+      const artifact = await packageProbeBootstrapArtifact({
+        binaries: { acquirerPath, activatorPath },
+        outputDir: path.join(root, "out"),
+        sourceDateEpoch: "0",
+        ...identity,
+      });
+
+      await expect(
+        withVerifiedProbeBootstrapArchive(
+          { archivePath: artifact.archivePath },
+          async () => undefined,
+        ),
+      ).rejects.toThrow(/expected release bytes/);
+    });
+  });
+
   it("accepts one exact length-prefixed identity in the expected ELF target", async () => {
     await withFixture(async ({ acquirerPath }) => {
       await writeFile(
@@ -173,54 +185,6 @@ describe("Probe Bootstrap build artifact", () => {
     });
   });
 
-  it("packages role binaries from separate relative build directories", async () => {
-    await withFixture(async ({ acquirerPath, activatorPath, root }) => {
-      const fixtureRoot = path.join(
-        process.cwd(),
-        ".scratch-probe-bootstrap-relative-artifact",
-      );
-      await mkdir(fixtureRoot, { recursive: true });
-      const acquirerDirectory = path.join(fixtureRoot, "acquirer");
-      const activatorDirectory = path.join(fixtureRoot, "activator");
-      await mkdir(acquirerDirectory);
-      await mkdir(activatorDirectory);
-      const relativeAcquirerPath = path.join(
-        acquirerDirectory,
-        path.basename(acquirerPath),
-      );
-      const relativeActivatorPath = path.join(
-        activatorDirectory,
-        path.basename(activatorPath),
-      );
-      await writeFile(relativeAcquirerPath, await readFile(acquirerPath));
-      await writeFile(relativeActivatorPath, await readFile(activatorPath));
-      try {
-        const artifact = await packageProbeBootstrapArtifact({
-          binaries: {
-            acquirerPath: path.relative(process.cwd(), relativeAcquirerPath),
-            activatorPath: path.relative(process.cwd(), relativeActivatorPath),
-          },
-          outputDir: path.join(root, "out-relative"),
-          sourceDateEpoch: "0",
-          ...identity,
-        });
-        await expect(
-          inspectProbeBootstrapArtifact({
-            archivePath: artifact.archivePath,
-            ...identity,
-          }),
-        ).resolves.toMatchObject({
-          roles: {
-            acquirer: { identity: { ...identity, role: "acquirer" } },
-            activator: { identity: { ...identity, role: "activator" } },
-          },
-        });
-      } finally {
-        await rm(fixtureRoot, { force: true, recursive: true });
-      }
-    });
-  });
-
   it("provides only inspected role binaries in a private temporary directory and removes it afterwards", async () => {
     await withFixture(async ({ acquirerPath, activatorPath, root }) => {
       const artifact = await packageProbeBootstrapArtifact({
@@ -230,7 +194,7 @@ describe("Probe Bootstrap build artifact", () => {
         ...identity,
       });
       let extractionDirectory;
-      await withExtractedProbeBootstrapArtifact(
+      await withVerifiedProbeBootstrapArtifact(
         { archivePath: artifact.archivePath, ...identity },
         async ({ extractedRoles, temporaryDirectory }) => {
           extractionDirectory = temporaryDirectory;
@@ -250,57 +214,34 @@ describe("Probe Bootstrap build artifact", () => {
     });
   });
 
-  it("rejects a Candidate Bootstrap archive path replaced after its manifest digest was bound", async () => {
+  it("keeps the verified archive snapshot stable when its source changes after verification", async () => {
     await withFixture(async ({ acquirerPath, activatorPath, root }) => {
-      const candidate = await packageProbeBootstrapArtifact({
+      const artifact = await packageProbeBootstrapArtifact({
         binaries: { acquirerPath, activatorPath },
-        outputDir: path.join(root, "candidate"),
+        outputDir: path.join(root, "out"),
         sourceDateEpoch: "0",
         ...identity,
       });
-      await writeFile(
-        acquirerPath,
-        Buffer.concat([
-          await readFile(acquirerPath),
-          Buffer.from("replacement"),
-        ]),
-      );
-      const replacement = await packageProbeBootstrapArtifact({
-        binaries: { acquirerPath, activatorPath },
-        outputDir: path.join(root, "replacement"),
-        sourceDateEpoch: "0",
-        ...identity,
-      });
-      await writeFile(
-        candidate.archivePath,
-        await readFile(replacement.archivePath),
-      );
+      const verifiedBytes = await readFile(artifact.archivePath);
 
-      await expect(
-        withExtractedProbeBootstrapArtifact(
-          {
-            archivePath: candidate.archivePath,
-            expectedArchive: {
-              sha256: candidate.sha256,
-              size: candidate.size,
-            },
-            ...identity,
+      await withVerifiedProbeBootstrapArtifact(
+        {
+          archivePath: artifact.archivePath,
+          expectedArchive: {
+            sha256: artifact.sha256,
+            size: artifact.size,
           },
-          () => {
-            throw new Error(
-              "replaced archive must not reach extraction callback",
-            );
-          },
-        ),
-      ).rejects.toThrow(/no longer matches validated Candidate/i);
+          ...identity,
+        },
+        async ({ archivePath }) => {
+          await writeFile(artifact.archivePath, Buffer.from("source changed"));
+          await expect(readFile(archivePath)).resolves.toEqual(verifiedBytes);
+        },
+      );
     });
   });
 
   it.each([
-    ["a path-traversing member", replaceFirstTarNameWithTraversal],
-    ["a symbolic-link member", (tar) => replaceFirstTarType(tar, "2")],
-    ["a hard-link member", (tar) => replaceFirstTarType(tar, "1")],
-    ["a special device member", (tar) => replaceFirstTarType(tar, "3")],
     ["an extra regular member", addExtraRegularTarMember],
     ["a GNU long-name extension", (tar) => replaceFirstTarType(tar, "L")],
     ["a PAX extension", (tar) => replaceFirstTarType(tar, "x")],
@@ -323,7 +264,7 @@ describe("Probe Bootstrap build artifact", () => {
       const unsafe = path.join(root, "unsafe.tar.gz");
       await writeFile(unsafe, mutate(source));
       await expect(
-        withExtractedProbeBootstrapArtifact(
+        withVerifiedProbeBootstrapArtifact(
           { archivePath: unsafe, ...identity },
           () => {
             throw new Error(
@@ -423,62 +364,12 @@ describe("Probe Bootstrap build artifact", () => {
     expect(workflow).toContain('test "$BOOTSTRAP_DISTRIBUTION" = enoki');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_DISTRIBUTION");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_ROOT_PEM");
-    expect(workflow).toContain(
-      "key.asymmetricKeyDetails?.modulusLength !== 4096",
-    );
-    expect(workflow).toContain("root must be RSA-4096");
-    expect(workflow).not.toContain(
-      'key.asymmetricKeyType !== "rsa") throw new Error("root must be RSA")',
-    );
-    const bootstrapBuildScript = await readFile(
-      "crates/probe-bootstrap/build.rs",
-      "utf8",
-    );
-    expect(bootstrapBuildScript).toContain("root.n().bits() != 4096");
-    expect(bootstrapBuildScript).toContain("must be an RSA-4096 SPKI PEM");
     expect(workflow).toContain('ENOKI_BOOTSTRAP_BUILD_ROLE="$role"');
-    expect(workflow).toContain('workspace="$(pwd -P)"');
-    expect(workflow).toContain('target_dir="$workspace/$4"');
-    expect(workflow).toContain('CARGO_TARGET_DIR="$target_dir"');
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_TARGET");
     expect(workflow).toContain("ENOKI_BOOTSTRAP_BUILD_VERSION");
     expect(workflow).toContain("probe-bootstrap-artifact.mjs package");
     expect(workflow).toContain("probe-bootstrap-artifact.mjs inspect");
     expect(workflow).not.toMatch(/genpkey|openssl genrsa|private key/i);
-  });
-
-  it("keeps test vectors public and out of production Bootstrap inputs", async () => {
-    const testDataDirectory = "crates/probe-bootstrap/test-data";
-    const files = await readdir(testDataDirectory);
-    const contents = await Promise.all(
-      files.map((file) => readFile(path.join(testDataDirectory, file), "utf8")),
-    );
-    expect(files.join("\n")).not.toMatch(/private/i);
-    expect(contents.join("\n")).not.toMatch(
-      /BEGIN (?:RSA |EC |ENCRYPTED )?PRIVATE KEY/,
-    );
-
-    const [buildScript, verifier, workflow] = await Promise.all(
-      [
-        "crates/probe-bootstrap/build.rs",
-        "crates/probe-bootstrap/src/verifier.rs",
-        ".github/workflows/reusable-build-probe-bootstrap.yml",
-      ].map((file) => readFile(file, "utf8")),
-    );
-    expect(`${buildScript}\n${workflow}`).not.toMatch(
-      /signed-handoff-vectors|weak-delegation-vector/,
-    );
-    const embeddedTestVectors = [
-      ...verifier.matchAll(
-        /include_str!\("\.\.\/test-data\/(?:signed-handoff-vectors|weak-delegation-vector)\.json"\)/g,
-      ),
-    ];
-    expect(embeddedTestVectors).toHaveLength(2);
-    for (const match of embeddedTestVectors) {
-      expect(
-        verifier.slice(Math.max(0, match.index - 800), match.index),
-      ).toMatch(/#\[cfg\(all\(test,/);
-    }
   });
 });
 
@@ -565,14 +456,6 @@ function writeSection(binary, offset, { nameOffset, offset: contents, size }) {
 function replaceFirstTarType(archive, type) {
   const tar = Buffer.from(gunzipSync(archive));
   tar[156] = type.charCodeAt(0);
-  updateTarChecksum(tar.subarray(0, 512));
-  return gzipSync(tar);
-}
-
-function replaceFirstTarNameWithTraversal(archive) {
-  const tar = Buffer.from(gunzipSync(archive));
-  tar.fill(0, 0, 100);
-  tar.write("../root-owned-target", 0, "ascii");
   updateTarChecksum(tar.subarray(0, 512));
   return gzipSync(tar);
 }

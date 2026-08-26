@@ -59,6 +59,44 @@ describe("Metrics Archive file writer", () => {
       sample: {
         bootId: "boot-archive",
         collectedAtMs: archivedCollectedAtMs,
+        collectorOutcomes: [
+          {
+            collectorId: "official.memory",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.network",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.disk",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.temperature",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.battery",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+          {
+            collectorId: "official.disk-health",
+            failureCode: null,
+            failurePhase: null,
+            state: 1,
+          },
+        ],
         cpuCores: [
           {
             idle: 80,
@@ -200,6 +238,7 @@ describe("Metrics Archive file writer", () => {
         official_metric_network_summary: 1,
         official_metric_thermal_power: 1,
         official_metric_uptime: 1,
+        metric_collector_outcomes: 6,
         report_observations: 1,
       }),
     });
@@ -210,7 +249,7 @@ describe("Metrics Archive file writer", () => {
     try {
       expect(archive.prepare("select * from archive_metadata").get()).toEqual(
         expect.objectContaining({
-          archive_schema_version: 1,
+          archive_schema_version: 3,
           created_at_ms: Date.UTC(2024, 8, 1),
           host_snapshot_captured_at_ms: Date.UTC(2024, 8, 1, 0, 0, 5),
           period: "monthly",
@@ -220,6 +259,20 @@ describe("Metrics Archive file writer", () => {
           sequence: 1,
         }),
       );
+      expect(
+        archive
+          .prepare(
+            "select collector_id, state from metric_collector_outcomes order by collector_id",
+          )
+          .all(),
+      ).toEqual([
+        { collector_id: "official.battery", state: 1 },
+        { collector_id: "official.disk", state: 1 },
+        { collector_id: "official.disk-health", state: 1 },
+        { collector_id: "official.memory", state: 1 },
+        { collector_id: "official.network", state: 1 },
+        { collector_id: "official.temperature", state: 1 },
+      ]);
       expect(
         archive
           .prepare(

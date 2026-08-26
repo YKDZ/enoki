@@ -35,6 +35,7 @@ import HostListView, {
 } from "./components/HostListView.vue";
 import LoginPanel from "./components/LoginPanel.vue";
 import OverviewPagination from "./components/OverviewPagination.vue";
+import ProbeUpgradeAllDialog from "./components/ProbeUpgradeAllDialog.vue";
 import StateHero from "./components/StateHero.vue";
 import { Button } from "./components/ui/button";
 import { useHostDetail } from "./composables/useHostDetail";
@@ -47,7 +48,12 @@ import {
 } from "./feedback/sonner-feedback-adapter";
 import { createWebFeedbackCoordinator } from "./feedback/web-feedback-coordinator";
 import { webFeedbackKey } from "./feedback/web-feedback-port";
-import { apiGet, isUnauthorizedError, saveConfiguration } from "./lib/api";
+import {
+  apiGet,
+  apiMutate,
+  isUnauthorizedError,
+  saveConfiguration,
+} from "./lib/api";
 import {
   matchingHostAction,
   reconcileEnrollmentStatus,
@@ -76,6 +82,7 @@ import type {
   HostsResponse,
   ProbeConfiguration,
   ProbeConfigurationResponse,
+  ProbeUpgradeAllResponse,
   SessionResponse,
 } from "./types";
 
@@ -100,6 +107,8 @@ const isLayoutLabRoute = ref(
 const isSubmitting = ref(false);
 const isCreatingEnrollment = ref(false);
 const isLoadingHosts = ref(false);
+const isProbeUpgradeAllDialogOpen = ref(false);
+const isSubmittingProbeUpgradeAll = ref(false);
 const isShowingEnrollmentDialog = ref(false);
 const isShowingGlobalConfiguration = ref(false);
 const isSavingGlobalConfiguration = ref(false);
@@ -130,6 +139,7 @@ const isLoadingMoreHostCards = ref(false);
 const hostListPageSizeOptions = [10, 20, 50, 100];
 let hostCardLazyLoadTimer: ReturnType<typeof setTimeout> | null = null;
 let readyHostHighlightTimer: ReturnType<typeof setTimeout> | null = null;
+let probeUpgradeAllAttemptId = 0;
 const enrollment = ref<EnrollmentResponse | null>(null);
 const enrollmentError = ref("");
 const globalConfigurationDraft = ref<ProbeConfiguration | null>(null);
@@ -439,6 +449,49 @@ async function loadHosts() {
   }
 }
 
+async function submitProbeUpgradeAll() {
+  const attemptId = ++probeUpgradeAllAttemptId;
+  isSubmittingProbeUpgradeAll.value = true;
+  try {
+    const summary = await apiMutate<unknown>(
+      "/api/web/hosts/probe-upgrade-requests",
+      { body: {}, method: "POST" },
+    );
+    if (!isProbeUpgradeAllResponse(summary)) {
+      throw new Error("invalid_probe_upgrade_all_response");
+    }
+    isProbeUpgradeAllDialogOpen.value = false;
+    webFeedback.submit({
+      ...summary,
+      attemptId,
+      kind: "probe-upgrade-all-submitted",
+    });
+    await loadHosts();
+  } catch (error) {
+    if (!handleUnauthorizedError(error)) {
+      webFeedback.submit({
+        attemptId,
+        kind: "probe-upgrade-all-request-failed",
+      });
+    }
+  } finally {
+    isSubmittingProbeUpgradeAll.value = false;
+  }
+}
+
+function isProbeUpgradeAllResponse(
+  value: unknown,
+): value is ProbeUpgradeAllResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const response = value as Partial<ProbeUpgradeAllResponse>;
+  return [response.submitted, response.skipped, response.failed].every(
+    (count) =>
+      typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
+  );
+}
+
 async function createEnrollment() {
   isShowingEnrollmentDialog.value = true;
   enrollmentError.value = "";
@@ -592,6 +645,32 @@ async function createExistingHostEnrollment(hostId: number) {
       headers: { "content-type": "application/json" },
       method: "POST",
     });
+    if (handleUnauthorizedResponse(response)) return;
+    if (!response.ok) {
+      showExistingHostEnrollmentFailure(
+        hostId,
+        await responseErrorCode(response),
+      );
+      return;
+    }
+    enrollment.value = (await response.json()) as EnrollmentResponse;
+    enrollmentError.value = "";
+    isShowingEnrollmentDialog.value = true;
+    scheduleEnrollmentStatusReconciliation();
+  } catch {
+    showExistingHostEnrollmentFailure(hostId, null);
+  }
+}
+
+async function createManualReinstallEnrollment(hostId: number) {
+  try {
+    const response = await fetch(
+      `/api/web/enrollments/manual-reinstall/${hostId}`,
+      {
+        credentials: "same-origin",
+        method: "POST",
+      },
+    );
     if (handleUnauthorizedResponse(response)) return;
     if (!response.ok) {
       showExistingHostEnrollmentFailure(
@@ -1271,6 +1350,7 @@ function routePath() {
         :is-saving-host-metadata="isSavingHostMetadata"
         @back="navigateToOverview"
         @delete-host="deleteHost"
+        @replacement-migration-requested="createManualReinstallEnrollment"
         @open-host-configuration="openHostConfiguration"
         @open-host-metadata="openHostMetadata"
         @probe-upgrade-requested="trackProbeUpgradeRequest"
@@ -1349,8 +1429,13 @@ function routePath() {
 
         <div
           v-if="!isLoadingHosts && hosts.length > 0"
-          class="mb-4 flex justify-end"
+          class="mb-4 flex justify-end gap-2"
         >
+          <ProbeUpgradeAllDialog
+            v-model:open="isProbeUpgradeAllDialogOpen"
+            :is-submitting="isSubmittingProbeUpgradeAll"
+            @confirm="submitProbeUpgradeAll"
+          />
           <Button
             type="button"
             variant="outline"
@@ -1379,7 +1464,6 @@ function routePath() {
             :highlighted-host-id="highlightedReadyHostId"
             :page="hostListPage"
             :page-size="hostListPageSize"
-            @create-existing-host-enrollment="createExistingHostEnrollment"
             @open-host-detail="openHostDetail"
           />
           <OverviewPagination
@@ -1398,7 +1482,6 @@ function routePath() {
           :is-loading-more="isLoadingMoreHostCards"
           :skeleton-count="hostCardBatchSize"
           :visible-count="hostCardVisibleCount"
-          @create-existing-host-enrollment="createExistingHostEnrollment"
           @load-more="loadMoreHostCards"
           @open-host-detail="openHostDetail"
         />

@@ -15,6 +15,7 @@ export const enrollmentStatusValues = [
 export const enrollmentTargetKindValues = [
   "new_host",
   "existing_host",
+  "manual_reinstall",
 ] as const;
 
 export const maxEnrollmentRejectionCodeLength = 64;
@@ -63,10 +64,24 @@ export function enrollmentStatusResponse(
     readyAtMs: enrollment.readyAtMs,
     rejectedAtMs: enrollment.rejectedAtMs,
     rejection: rejection.value,
+    ...(target.kind === "manual_reinstall"
+      ? { replacementMigration: replacementMigrationResult(enrollment) }
+      : {}),
     status,
     target,
     verificationDeadlineAtMs: enrollment.verificationDeadlineAtMs,
   };
+}
+
+function replacementMigrationResult(
+  enrollment: EnrollmentLifecycleRecord,
+): "waiting_host" | "incomplete" | "ready" {
+  if (enrollment.status === "ready") return "ready";
+  // 注册是本切片中第一份获 Hub 信任的提交后证据：它消费此 Enrollment，并绑定
+  // 替换后的身份。等待中或仅已过期的命令不能证明 Host 已开始清理。
+  return enrollment.usedAtMs === null || enrollment.hostId === null
+    ? "waiting_host"
+    : "incomplete";
 }
 
 export function isEnrollmentStatus(value: string): value is EnrollmentStatus {
@@ -102,6 +117,13 @@ function enrollmentTarget(
     positiveInteger(enrollment.targetHostId)
   ) {
     return { hostId: enrollment.targetHostId, kind: "existing_host" };
+  }
+
+  if (
+    enrollment.targetKind === "manual_reinstall" &&
+    positiveInteger(enrollment.targetHostId)
+  ) {
+    return { hostId: enrollment.targetHostId, kind: "manual_reinstall" };
   }
 
   return null;

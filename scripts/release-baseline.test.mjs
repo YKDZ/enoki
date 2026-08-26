@@ -1,5 +1,10 @@
 import { execFile } from "node:child_process";
-import { createHash, sign as signContents } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  sign as signContents,
+} from "node:crypto";
 import {
   chmod,
   cp,
@@ -14,8 +19,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import {
+  createProbeTrustDelegation,
+  createReleaseTransitionContract,
+  createTrustEpochMigrationAuthorization,
+  probeTargets,
+} from "@enoki/probe-release";
+import { createSignedLegacyProbeAssetSetFixture } from "@enoki/probe-release/test-fixture";
 import { describe, expect, it } from "vitest";
 
+import { packageProbeBootstrapArtifact } from "./probe-bootstrap-artifact.mjs";
 import {
   createGhcrRegistryClient,
   createGitHubReleaseClient,
@@ -25,18 +38,8 @@ import {
   validateReleaseBaselineBundle,
   validateResolvedReleaseBaseline,
 } from "./release-baseline-lib.mjs";
-import {
-  createProbeTrustDelegation,
-  prepareProbeAssetSet,
-  probeTargets,
-  validateReleaseCandidate,
-} from "./release-candidate-lib.mjs";
+import { prepareProbeAssetSet } from "./release-candidate-lib.mjs";
 import { rsa4096TestKeyPair } from "./test-rsa-key-pool.mjs";
-import {
-  createTrustEpochMigrationAuthorization,
-  trustEpochMigrationAuthorizationSigningInput,
-  verifyTrustEpochMigrationAuthorization,
-} from "./trust-epoch-migration-lib.mjs";
 
 const execFileAsync = promisify(execFile);
 const indexMediaType = "application/vnd.oci.image.index.v1+json";
@@ -45,9 +48,8 @@ const configMediaType = "application/vnd.oci.image.config.v1+json";
 const layerMediaType = "application/vnd.oci.image.layer.v1.tar";
 const commitSha = "1".repeat(40);
 const tagSha = "2".repeat(40);
-// This fixture generates three distinct RSA-4096 identities. On a shared CI
-// worker that legitimate cryptographic setup can outlast Vitest's 5s default;
-// keep the allowance local and bounded so an actual hang still fails quickly.
+// Keep real RSA-4096 fixture setup bounded on shared CI while reusing named
+// identities instead of regenerating an expensive key for each test.
 const rsa4096FixtureTimeoutMs = 15_000;
 
 describe("Release Baseline resolution", () => {
@@ -156,15 +158,16 @@ describe("Release Baseline resolution", () => {
     }
   });
 
-  it("admits the one root-authorized legacy baseline only as manual reinstall", async () => {
+  it("resolves the exact root-authorized v0.1.74 baseline as replacement-required", async () => {
     const fixture = await createLegacyTrustEpochFixture();
     try {
       await expect(
         resolveReleaseBaseline(fixture.arguments_),
       ).resolves.toMatchObject({
         kind: "enoki-trust-epoch-migration-baseline",
+        schemaVersion: 1,
         tag: "v0.1.74",
-        transition: "manual-reinstall-required",
+        transition: "replacement-required",
       });
       await expect(
         recheckReleaseBaseline({
@@ -174,369 +177,87 @@ describe("Release Baseline resolution", () => {
           releaseCatalog: fixture.arguments_.releaseCatalog,
           trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
-      ).resolves.toMatchObject({ transition: "manual-reinstall-required" });
+      ).resolves.toMatchObject({ transition: "replacement-required" });
     } finally {
       await fixture.cleanup();
     }
   });
 
-  it("rejects replaying a pinned migration bundle for another candidate", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
-      await resolveReleaseBaseline(fixture.arguments_);
-      await expect(
-        validateResolvedReleaseBaseline(fixture.outputDir, {
-          candidateVersion: "v0.1.76",
-          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-        }),
-      ).rejects.toThrow("candidate");
-      await expect(
-        recheckReleaseBaseline({
-          bundleDir: fixture.outputDir,
-          candidateVersion: "v0.1.76",
-          githubRepository: "YKDZ/enoki",
-          releaseCatalog: fixture.arguments_.releaseCatalog,
-          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-        }),
-      ).rejects.toThrow("candidate");
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  it("candidate validation rejects a migration authorization issued for another candidate", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
+  it("keeps the first rooted release publication closure as an ordinary v0.1.76 baseline", async () => {
+    const fixture = await createResolverFixture({
+      candidateVersion: "v0.1.76",
+      historicalTransition: true,
+      version: "v0.1.75",
+    });
     try {
       const descriptor = await resolveReleaseBaseline(fixture.arguments_);
-      const candidateDir = path.join(
-        path.dirname(fixture.outputDir),
-        "candidate-replay",
-      );
-      await mkdir(candidateDir);
-      await cp(fixture.outputDir, path.join(candidateDir, "release-baseline"), {
-        recursive: true,
+      expect(descriptor).toMatchObject({
+        kind: "enoki-release-baseline",
+        tag: "v0.1.75",
       });
-      await writeFile(
-        path.join(candidateDir, "candidate-manifest.json"),
-        `${JSON.stringify({
-          bootstrap: {},
-          candidate: { commit: "4".repeat(40), version: "v0.1.76" },
-          hub: {},
-          kind: "enoki-release-candidate",
-          probeAssetSet: {},
-          releaseBaseline: descriptor,
-          schemaVersion: 3,
-        })}\n`,
-      );
-      await expect(
-        validateReleaseCandidate(candidateDir, {
-          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-        }),
-      ).rejects.toThrow("candidate version");
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  it("migration recheck rejects a changed published catalog", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
-      await resolveReleaseBaseline(fixture.arguments_);
-      fixture.releases.push(release("v0.1.73", { id: 171 }));
-      await expect(
-        recheckReleaseBaseline({
-          bundleDir: fixture.outputDir,
-          candidateVersion: "v0.1.75",
-          githubRepository: "YKDZ/enoki",
-          releaseCatalog: fixture.arguments_.releaseCatalog,
-          trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-        }),
-      ).rejects.toThrow("catalog changed");
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  it.each(["missing", "added", "replaced"])(
-    "pinned migration bundle rejects %s assets",
-    async (mutation) => {
-      const fixture = await createLegacyTrustEpochFixture();
-      try {
-        await resolveReleaseBaseline(fixture.arguments_);
-        const assetDir = path.join(fixture.outputDir, "probe-assets");
-        const first = fixture.expectedLegacyRelease.assets[0].name;
-        if (mutation === "missing") await rm(path.join(assetDir, first));
-        if (mutation === "added")
-          await writeFile(path.join(assetDir, "unexpected-asset"), "extra");
-        if (mutation === "replaced")
-          await writeFile(path.join(assetDir, first), "replacement");
-        await expect(
-          validateResolvedReleaseBaseline(fixture.outputDir, {
-            candidateVersion: "v0.1.75",
-            trustedRootPublicKeyPem: fixture.probe.root.publicKey,
-          }),
-        ).rejects.toThrow();
-      } finally {
-        await fixture.cleanup();
-      }
-    },
-  );
-
-  it.each([
-    "releaseId",
-    "tagRefSha",
-    "peeledCommitSha",
-    "targetCommitish",
-    "hubDigest",
-    "descriptorSchema",
-    "authorizationSignature",
-  ])("pinned migration bundle rejects changed %s", async (field) => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
-      await resolveReleaseBaseline(fixture.arguments_);
-      const descriptorPath = path.join(
-        fixture.outputDir,
-        "release-baseline.json",
-      );
-      const descriptor = JSON.parse(await readFile(descriptorPath, "utf8"));
-      if (field === "releaseId") descriptor.githubRelease.id += 1;
-      if (field === "tagRefSha")
-        descriptor.githubRelease.tagRefSha = "3".repeat(40);
-      if (field === "peeledCommitSha")
-        descriptor.githubRelease.peeledCommitSha = "3".repeat(40);
-      if (field === "targetCommitish")
-        descriptor.githubRelease.targetCommitish = "other";
-      if (field === "hubDigest")
-        descriptor.hub.digest = `sha256:${"0".repeat(64)}`;
-      if (field === "descriptorSchema") descriptor.schemaVersion = 2;
-      if (field === "authorizationSignature") {
-        const signaturePath = path.join(
-          fixture.outputDir,
+      expect(descriptor.probeAssetSet).not.toHaveProperty("releaseTransition");
+      expect(descriptor.probeAssetSet.files.map(({ file }) => file)).toEqual(
+        expect.arrayContaining([
+          "release-transition-contract.json",
+          "release-transition-contract.json.sig",
+          "trust-epoch-migration-authorization.json",
           "trust-epoch-migration-authorization.json.sig",
-        );
-        await writeFile(signaturePath, Buffer.alloc(512));
-      } else {
-        await writeFile(
-          descriptorPath,
-          `${JSON.stringify(descriptor, null, 2)}\n`,
-        );
-      }
+        ]),
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps the ordinary rooted failure when migration material is unavailable", async () => {
+    const fixture = await createResolverFixture({ legacyTrustEpoch: true });
+    try {
+      fixture.release.tagName = "v0.1.74";
+      fixture.releaseIdentity.tagName = "v0.1.74";
+      fixture.releaseIdentity.assets = fixture.release.assets;
+      fixture.arguments_.candidateVersion = "v0.1.75";
+      const error = await resolveReleaseBaseline(fixture.arguments_).catch(
+        (caught) => caught,
+      );
+      expect(error).toMatchObject({
+        classification: "rooted-baseline-metadata-closure-missing",
+        code: "RELEASE_BASELINE_ROOT_METADATA_CLOSURE_MISSING",
+      });
+      expect(error.message).toContain("must contain exactly");
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("rejects an extra migration baseline Hub directory member", async () => {
+    const fixture = await createLegacyTrustEpochFixture();
+    try {
+      await resolveReleaseBaseline(fixture.arguments_);
+      await writeFile(path.join(fixture.outputDir, "hub", "extra"), "extra");
       await expect(
         validateResolvedReleaseBaseline(fixture.outputDir, {
           candidateVersion: "v0.1.75",
           trustedRootPublicKeyPem: fixture.probe.root.publicKey,
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow("Hub directory must contain exactly");
     } finally {
       await fixture.cleanup();
     }
   });
 
-  it("canonicalizes nested migration release identity independent of input key order", async () => {
+  it("does not classify another legacy tag as the trust epoch migration", async () => {
     const fixture = await createLegacyTrustEpochFixture();
     try {
-      const canonical = createTrustEpochMigrationAuthorization({
-        candidateVersion: "v0.1.75",
-        distribution: "enoki",
-        legacyRelease: fixture.expectedLegacyRelease,
-        rootPrivateKeyPem: fixture.probe.root.privateKey,
-      });
-      const release = fixture.expectedLegacyRelease;
-      const reordered = createTrustEpochMigrationAuthorization({
-        candidateVersion: "v0.1.75",
-        distribution: "enoki",
-        legacyRelease: {
-          legacySigningKeySha256: release.legacySigningKeySha256,
-          hub: { image: release.hub.image, digest: release.hub.digest },
-          githubRelease: {
-            targetCommitish: release.githubRelease.targetCommitish,
-            tagRefSha: release.githubRelease.tagRefSha,
-            tag: release.githubRelease.tag,
-            repository: release.githubRelease.repository,
-            peeledCommitSha: release.githubRelease.peeledCommitSha,
-            id: release.githubRelease.id,
-          },
-          assets: release.assets.map(({ name, sha256, size }) => ({
-            size,
-            name,
-            sha256,
-          })),
-        },
-        rootPrivateKeyPem: fixture.probe.root.privateKey,
-      });
-      expect(reordered.bytes).toEqual(canonical.bytes);
+      fixture.release.tagName = "v0.1.73";
+      fixture.releaseIdentity.tagName = "v0.1.73";
+      fixture.arguments_.candidateVersion = "v0.1.75";
+      await expect(resolveReleaseBaseline(fixture.arguments_)).rejects.toThrow(
+        "must contain exactly",
+      );
     } finally {
       await fixture.cleanup();
     }
   });
-
-  it.each(["探针.tar.gz", "line\nbreak", "tab\tasset"])(
-    "rejects non-protocol migration asset name %j",
-    async (name) => {
-      const fixture = await createLegacyTrustEpochFixture();
-      try {
-        const legacyRelease = structuredClone(fixture.expectedLegacyRelease);
-        legacyRelease.assets[0].name = name;
-        expect(() =>
-          createTrustEpochMigrationAuthorization({
-            candidateVersion: "v0.1.75",
-            distribution: "enoki",
-            legacyRelease,
-            rootPrivateKeyPem: fixture.probe.root.privateKey,
-          }),
-        ).toThrow("asset");
-      } finally {
-        await fixture.cleanup();
-      }
-    },
-  );
-
-  it("uses one locale-independent asset order for canonical authorization bytes", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
-      const first = structuredClone(fixture.expectedLegacyRelease);
-      first.assets = [
-        { name: "z_asset", sha256: "1".repeat(64), size: 1 },
-        { name: "A.asset", sha256: "2".repeat(64), size: 2 },
-        { name: "a-asset", sha256: "3".repeat(64), size: 3 },
-      ];
-      const second = structuredClone(first);
-      second.assets.reverse();
-      const canonical = (legacyRelease) =>
-        createTrustEpochMigrationAuthorization({
-          candidateVersion: "v0.1.75",
-          distribution: "enoki",
-          legacyRelease,
-          rootPrivateKeyPem: fixture.probe.root.privateKey,
-        }).bytes;
-      expect(canonical(second)).toEqual(canonical(first));
-      expect(
-        JSON.parse(canonical(first)).legacyRelease.assets.map(
-          ({ name }) => name,
-        ),
-      ).toEqual(["A.asset", "a-asset", "z_asset"]);
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  it.each([
-    "assets",
-    "candidateVersion",
-    "distribution",
-    "legacySigningKeySha256",
-    "migrationGeneration",
-    "purpose",
-    "releaseId",
-    "peeledCommit",
-    "tagRef",
-    "targetCommitish",
-    "hubDigest",
-    "root",
-    "schemaVersion",
-    "tag",
-    "targetRootKeyId",
-    "addedAsset",
-    "replacedAsset",
-  ])(
-    "rejects a Trust Epoch Migration Authorization with wrong %s",
-    async (field) => {
-      const fixture = await createLegacyTrustEpochFixture();
-      try {
-        const parsed = JSON.parse(
-          fixture.arguments_.trustEpochMigrationAuthorizationBytes.toString(
-            "utf8",
-          ),
-        );
-        if (field === "assets") parsed.legacyRelease.assets.pop();
-        if (field === "candidateVersion") parsed.candidateVersion = "v0.1.76";
-        if (field === "distribution") parsed.distribution = "other";
-        if (field === "legacySigningKeySha256") {
-          parsed.legacyRelease.legacySigningKeySha256 = "0".repeat(64);
-        }
-        if (field === "migrationGeneration") parsed.migrationGeneration = 2;
-        if (field === "purpose") parsed.purpose = "probe-asset-signing";
-        if (field === "releaseId") parsed.legacyRelease.githubRelease.id += 1;
-        if (field === "peeledCommit")
-          parsed.legacyRelease.githubRelease.peeledCommitSha = "3".repeat(40);
-        if (field === "tagRef")
-          parsed.legacyRelease.githubRelease.tagRefSha = "3".repeat(40);
-        if (field === "targetCommitish")
-          parsed.legacyRelease.githubRelease.targetCommitish = "other";
-        if (field === "hubDigest")
-          parsed.legacyRelease.hub.digest = `sha256:${"0".repeat(64)}`;
-        if (field === "root") parsed.rootKeyId = "0".repeat(64);
-        if (field === "schemaVersion") parsed.schemaVersion = 2;
-        if (field === "tag") parsed.legacyRelease.githubRelease.tag = "v0.1.73";
-        if (field === "targetRootKeyId")
-          parsed.targetRootKeyId = "0".repeat(64);
-        if (field === "addedAsset")
-          parsed.legacyRelease.assets.push({
-            name: "extra",
-            sha256: "0".repeat(64),
-            size: 1,
-          });
-        if (field === "replacedAsset")
-          parsed.legacyRelease.assets[0].sha256 = "0".repeat(64);
-        const bytes = Buffer.from(`${JSON.stringify(parsed)}\n`);
-        expect(() =>
-          verifyTrustEpochMigrationAuthorization({
-            bytes,
-            expectedCandidateVersion: "v0.1.75",
-            expectedDistribution: "enoki",
-            expectedLegacyRelease: fixture.expectedLegacyRelease,
-            rootPublicKeyPem: fixture.probe.root.publicKey,
-            signature: signContents(
-              "RSA-SHA256",
-              trustEpochMigrationAuthorizationSigningInput(bytes),
-              fixture.probe.root.privateKey,
-            ),
-          }),
-        ).toThrow();
-      } finally {
-        await fixture.cleanup();
-      }
-    },
-  );
-
-  it("rejects an invalid migration root signature", async () => {
-    const fixture = await createLegacyTrustEpochFixture();
-    try {
-      expect(() =>
-        verifyTrustEpochMigrationAuthorization({
-          bytes: fixture.arguments_.trustEpochMigrationAuthorizationBytes,
-          expectedCandidateVersion: "v0.1.75",
-          expectedDistribution: "enoki",
-          expectedLegacyRelease: fixture.expectedLegacyRelease,
-          rootPublicKeyPem: fixture.probe.root.publicKey,
-          signature: Buffer.alloc(512),
-        }),
-      ).toThrow("signature");
-    } finally {
-      await fixture.cleanup();
-    }
-  });
-
-  it.each(["releaseId", "tagRefSha", "peeledCommitSha", "targetCommitish"])(
-    "resolver rejects changed published migration %s",
-    async (field) => {
-      const fixture = await createLegacyTrustEpochFixture();
-      try {
-        if (field === "releaseId") fixture.releaseIdentity.id += 1;
-        if (field === "tagRefSha")
-          fixture.releaseIdentity.tagRefSha = "3".repeat(40);
-        if (field === "peeledCommitSha")
-          fixture.releaseIdentity.peeledCommitSha = "3".repeat(40);
-        if (field === "targetCommitish")
-          fixture.releaseIdentity.targetCommitish = "other";
-        await expect(
-          resolveReleaseBaseline(fixture.arguments_),
-        ).rejects.toThrow();
-      } finally {
-        await fixture.cleanup();
-      }
-    },
-  );
 
   it("materializes and offline-validates one complete linux/amd64 OCI archive", async () => {
     const fixture = await createResolverFixture();
@@ -808,6 +529,18 @@ describe("Release Baseline resolution", () => {
     );
     expect(workflow).toContain("release-baseline.mjs recheck");
     expect(workflow).toContain("--trusted-root-public-key-env");
+    expect(workflow).toContain(
+      "TRUST_EPOCH_MIGRATION_AUTHORIZATION: ${{ vars.ENOKI_TRUST_EPOCH_MIGRATION_AUTHORIZATION_JSON }}",
+    );
+    expect(workflow).toContain(
+      "RELEASE_TRANSITION_CONTRACT: ${{ vars.ENOKI_RELEASE_TRANSITION_CONTRACT_JSON }}",
+    );
+    expect(workflow).toContain(
+      'if [ "$RELEASE_BASELINE_KIND" = "enoki-trust-epoch-migration-baseline" ]; then',
+    );
+    expect(releaseWorkflow).not.toMatch(
+      /trust[_-]epoch|skip[_-]baseline|legacy[_-]signing/i,
+    );
     expect(releaseWorkflow).toContain("group: enoki-release-global");
   });
 });
@@ -821,6 +554,146 @@ function release(tagName, overrides = {}) {
     tagName,
     targetCommitish: "main",
     ...overrides,
+  };
+}
+
+async function createResolverFixture(options = {}) {
+  const workDir = await mkdtemp(path.join(tmpdir(), "enoki-baseline-"));
+  const version = options.version ?? "v1.7.2";
+  const probe = await createProbeAssetSetFixture(workDir, version, {
+    legacyProbe: options.legacyProbe,
+  });
+  if (options.historicalTransition) {
+    const sourceRelease = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    const source = await createSignedLegacyProbeAssetSetFixture({
+      privateKeyPem: sourceRelease.privateKey,
+      publicKeyPem: sourceRelease.publicKey,
+    });
+    const legacyRelease = {
+      assets: source.assets,
+      githubRelease: {
+        id: 368250351,
+        peeledCommitSha: "6f639fe757785c085be31c3d92c7b1c128db3cb0",
+        repository: "YKDZ/enoki",
+        tag: "v0.1.74",
+        tagRefSha: "4".repeat(40),
+        targetCommitish: "main",
+      },
+      hub: {
+        digest: `sha256:${"5".repeat(64)}`,
+        image: "ghcr.io/ykdz/enoki-hub",
+      },
+      legacySigningKeySha256: sha256(Buffer.from(sourceRelease.publicKey)),
+    };
+    const authorization = createTrustEpochMigrationAuthorization({
+      candidateVersion: version,
+      distribution: "enoki",
+      legacyRelease,
+      rootPrivateKeyPem: probe.root.privateKey,
+    });
+    const transition = await createReleaseTransitionContract({
+      authorizationBytes: authorization.bytes,
+      authorizationSignature: authorization.signature,
+      candidateCommit: commitSha,
+      delegationBytes: await readFile(
+        path.join(probe.outputDir, "trust-delegation.json"),
+      ),
+      delegationSignature: await readFile(
+        path.join(probe.outputDir, "trust-delegation.json.sig"),
+      ),
+      legacyRelease,
+      rootPrivateKeyPem: probe.root.privateKey,
+      rootPublicKeyPem: probe.root.publicKey,
+      sourceAssetDir: source.assetDir,
+      targetManifestBytes: await readFile(
+        path.join(probe.outputDir, "manifest.json"),
+      ),
+      targetVersion: version.slice(1),
+    });
+    await source.cleanup();
+    await Promise.all([
+      writeFile(
+        path.join(probe.outputDir, "release-transition-contract.json"),
+        transition.bytes,
+      ),
+      writeFile(
+        path.join(probe.outputDir, "release-transition-contract.json.sig"),
+        transition.signature,
+      ),
+      writeFile(
+        path.join(probe.outputDir, "trust-epoch-migration-authorization.json"),
+        authorization.bytes,
+      ),
+      writeFile(
+        path.join(
+          probe.outputDir,
+          "trust-epoch-migration-authorization.json.sig",
+        ),
+        authorization.signature,
+      ),
+    ]);
+  }
+  if (options.legacyTrustEpoch) {
+    await Promise.all(
+      [
+        "root-key.pem",
+        "trust-delegation.json",
+        "trust-delegation.json.sig",
+      ].map((file) => rm(path.join(probe.outputDir, file))),
+    );
+  }
+  const hub = await createHubClosureFixture(workDir, probe.outputDir, options);
+  const contents = new Map();
+  for (const name of await readdir(probe.outputDir)) {
+    contents.set(name, await readFile(path.join(probe.outputDir, name)));
+  }
+  const assets = [...contents]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, bytes], index) => ({
+      digest: `sha256:${sha256(bytes)}`,
+      id: index + 1,
+      name,
+      size: bytes.byteLength,
+    }));
+  const release_ = release(version, { assets });
+  const releases = [release_];
+  const releaseIdentity = {
+    assets,
+    id: release_.id,
+    peeledCommitSha: commitSha,
+    tagName: release_.tagName,
+    tagRefSha: tagSha,
+    targetCommitish: release_.targetCommitish,
+  };
+  const outputDir = path.join(workDir, "release-baseline");
+  return {
+    arguments_: {
+      assetDownloader: {
+        downloadAsset: async ({ asset }) => contents.get(asset.name),
+      },
+      candidateVersion: options.candidateVersion ?? "v2.0.0",
+      githubRepository: "YKDZ/enoki",
+      hubImage: "ghcr.io/ykdz/enoki-hub",
+      outputDir,
+      registry: { downloadImage: async () => hub },
+      releaseCatalog: {
+        listReleases: async () => releases,
+        resolveReleaseIdentity: async () => releaseIdentity,
+      },
+      trustedRootPublicKeyPem: probe.root.publicKey,
+    },
+    cleanup: () => rm(workDir, { force: true, recursive: true }),
+    contents,
+    hub,
+    outputDir,
+    probe,
+    release: release_,
+    releaseIdentity,
+    releases,
   };
 }
 
@@ -860,73 +733,7 @@ async function createLegacyTrustEpochFixture() {
     authorization.bytes;
   fixture.arguments_.trustEpochMigrationAuthorizationSignature =
     authorization.signature;
-  fixture.expectedLegacyRelease = expectedLegacyRelease;
   return fixture;
-}
-
-async function createResolverFixture(options = {}) {
-  const workDir = await mkdtemp(path.join(tmpdir(), "enoki-baseline-"));
-  const probe = await createProbeAssetSetFixture(workDir, "v1.7.2", {
-    legacyProbe: options.legacyProbe,
-  });
-  if (options.legacyTrustEpoch) {
-    await Promise.all(
-      [
-        "root-key.pem",
-        "trust-delegation.json",
-        "trust-delegation.json.sig",
-      ].map((file) => rm(path.join(probe.outputDir, file))),
-    );
-  }
-  const hub = await createHubClosureFixture(workDir, probe.outputDir, options);
-  const contents = new Map();
-  for (const name of await readdir(probe.outputDir)) {
-    contents.set(name, await readFile(path.join(probe.outputDir, name)));
-  }
-  const assets = [...contents]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([name, bytes], index) => ({
-      digest: `sha256:${sha256(bytes)}`,
-      id: index + 1,
-      name,
-      size: bytes.byteLength,
-    }));
-  const release_ = release("v1.7.2", { assets });
-  const releases = [release_];
-  const releaseIdentity = {
-    assets,
-    id: release_.id,
-    peeledCommitSha: commitSha,
-    tagName: release_.tagName,
-    tagRefSha: tagSha,
-    targetCommitish: release_.targetCommitish,
-  };
-  const outputDir = path.join(workDir, "release-baseline");
-  return {
-    arguments_: {
-      assetDownloader: {
-        downloadAsset: async ({ asset }) => contents.get(asset.name),
-      },
-      candidateVersion: "v2.0.0",
-      githubRepository: "YKDZ/enoki",
-      hubImage: "ghcr.io/ykdz/enoki-hub",
-      outputDir,
-      registry: { downloadImage: async () => hub },
-      releaseCatalog: {
-        listReleases: async () => releases,
-        resolveReleaseIdentity: async () => releaseIdentity,
-      },
-      trustedRootPublicKeyPem: probe.root.publicKey,
-    },
-    cleanup: () => rm(workDir, { force: true, recursive: true }),
-    contents,
-    hub,
-    outputDir,
-    probe,
-    release: release_,
-    releaseIdentity,
-    releases,
-  };
 }
 
 async function createProbeAssetSetFixture(
@@ -936,8 +743,16 @@ async function createProbeAssetSetFixture(
 ) {
   const archivesDir = path.join(workDir, "archives");
   const outputDir = path.join(workDir, "probe-assets-source");
-  const { privateKey, publicKey } = rsa4096TestKeyPair("baseline-release");
-  const root = rsa4096TestKeyPair("baseline-root");
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
+  const root = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { format: "pem", type: "pkcs8" },
+    publicKeyEncoding: { format: "pem", type: "spki" },
+  });
   const delegation = createProbeTrustDelegation({
     distribution: "enoki",
     generation: 1,
@@ -965,8 +780,14 @@ async function createProbeAssetSetFixture(
       `${sha256(contents)}  ${file}\n`,
     );
   }
+  const bootstrapArchivesDir = await createBootstrapArchives(
+    workDir,
+    root,
+    version,
+  );
   await prepareProbeAssetSet({
     archivesDir,
+    bootstrapArchivesDir,
     outputDir,
     privateKeyPem: privateKey,
     publicKeyPem: publicKey,
@@ -1007,10 +828,127 @@ async function createProbeAssetSetFixture(
   return { outputDir, privateKey, publicKey, root };
 }
 
+async function createBootstrapArchives(workDir, root, version) {
+  const outputDir = path.join(workDir, `probe-bootstrap-${version}`);
+  const rootKeyId = sha256(
+    createPublicKey(root.publicKey).export({ format: "pem", type: "spki" }),
+  );
+  for (const target of probeTargets) {
+    const binariesDir = path.join(workDir, `bootstrap-${target}`);
+    await mkdir(binariesDir, { recursive: true });
+    const identity = {
+      distribution: "enoki",
+      rootFingerprint: rootKeyId,
+      rootKeyId,
+      target,
+      version,
+    };
+    const acquirerPath = path.join(
+      binariesDir,
+      "enoki-probe-bootstrap-acquire",
+    );
+    const activatorPath = path.join(
+      binariesDir,
+      "enoki-probe-bootstrap-activate",
+    );
+    await writeFile(
+      acquirerPath,
+      createBootstrapElf({ ...identity, role: "acquirer" }),
+      { mode: 0o755 },
+    );
+    await writeFile(
+      activatorPath,
+      createBootstrapElf({ ...identity, role: "activator" }),
+      { mode: 0o755 },
+    );
+    await packageProbeBootstrapArtifact({
+      binaries: { acquirerPath, activatorPath },
+      distribution: "enoki",
+      outputDir,
+      rootKeyId,
+      sourceDateEpoch: "0",
+      target,
+      version,
+    });
+  }
+  return outputDir;
+}
+
+function createBootstrapElf(identity) {
+  const machine = identity.target.startsWith("aarch64") ? 183 : 62;
+  const names = Buffer.from("\0.shstrtab\0.enoki_bootstrap\0");
+  const payload = Buffer.from(JSON.stringify(identity));
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(payload.byteLength);
+  const marker = Buffer.concat([
+    Buffer.from("ENOKI_BOOTSTRAP_BUILD_IDENTITY_V1\0"),
+    length,
+    payload,
+  ]);
+  const sectionOffset = 64;
+  const identityOffset = sectionOffset + 3 * 64;
+  const namesOffset = identityOffset + marker.byteLength;
+  const binary = Buffer.alloc(namesOffset + names.byteLength);
+  binary.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1], 0);
+  binary.writeUInt16LE(machine, 18);
+  binary.writeBigUInt64LE(BigInt(sectionOffset), 40);
+  binary.writeUInt16LE(64, 58);
+  binary.writeUInt16LE(3, 60);
+  binary.writeUInt16LE(1, 62);
+  writeBootstrapSection(
+    binary,
+    sectionOffset + 64,
+    1,
+    namesOffset,
+    names.length,
+  );
+  writeBootstrapSection(
+    binary,
+    sectionOffset + 128,
+    11,
+    identityOffset,
+    marker.length,
+  );
+  marker.copy(binary, identityOffset);
+  names.copy(binary, namesOffset);
+  return binary;
+}
+
+function writeBootstrapSection(binary, at, name, contents, size) {
+  binary.writeUInt32LE(name, at);
+  binary.writeBigUInt64LE(BigInt(contents), at + 24);
+  binary.writeBigUInt64LE(BigInt(size), at + 32);
+}
+
 async function writeProbeArchive(
   archivePath,
   { legacyProbe, target, version },
 ) {
+  const bootstrapAssets = [];
+  for (const [member, permissionProfile, role] of [
+    [
+      "bootstrap/enoki-probe-bootstrap-acquire",
+      "bootstrap-acquirer-v1",
+      "bootstrap-acquirer",
+    ],
+    [
+      "bootstrap/enoki-probe-bootstrap-activate",
+      "bootstrap-activator-v1",
+      "bootstrap-activator",
+    ],
+  ]) {
+    try {
+      const { stdout } = await execFileAsync(
+        "tar",
+        ["-xOzf", archivePath, member],
+        { encoding: "buffer" },
+      );
+      bootstrapAssets.push({ bytes: stdout, member, permissionProfile, role });
+    } catch {
+      bootstrapAssets.length = 0;
+      break;
+    }
+  }
   const binaryDir = `${archivePath}.contents`;
   await mkdir(binaryDir, { recursive: true });
   const binaryPath = path.join(binaryDir, "enoki-probe");
@@ -1020,13 +958,72 @@ async function writeProbeArchive(
   );
   await chmod(binaryPath, 0o755);
   const binary = await readFile(binaryPath);
+  for (const rolePath of [
+    "enoki-observation-runtime",
+    "enoki-cpu-resource-provider",
+    "enoki-disk-health-resource-provider",
+    "enoki-probe-lifecycle-companion",
+  ]) {
+    await writeFile(path.join(binaryDir, rolePath), binary, { mode: 0o755 });
+  }
   const bundleManifest = Buffer.from(
     `${JSON.stringify({
+      ...(bootstrapAssets.length
+        ? {
+            bootstrapAssets: bootstrapAssets.map(
+              ({ bytes, member, permissionProfile, role }) => ({
+                path: member,
+                permissionProfile,
+                role,
+                sha256: sha256(bytes),
+                size: bytes.byteLength,
+                version: version.slice(1),
+              }),
+            ),
+          }
+        : {}),
       components: [
         {
           path: "enoki-probe",
-          permissionProfile: "probe-v1",
+          permissionProfile: "probe-v5",
+          resourceContract: "hub-reporting-v1",
           role: "probe",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+        {
+          path: "enoki-observation-runtime",
+          permissionProfile: "observation-runtime-v4",
+          resourceContract: "official-observation-v2",
+          role: "observation-runtime",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+        {
+          path: "enoki-cpu-resource-provider",
+          permissionProfile: "system-state-provider-v5",
+          resourceContract: "system-state-v3",
+          role: "system-state-provider",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+        {
+          path: "enoki-disk-health-resource-provider",
+          permissionProfile: "disk-health-provider-v3",
+          resourceContract: "disk-health-v1",
+          role: "disk-health-provider",
+          sha256: sha256(binary),
+          size: binary.byteLength,
+          version: version.slice(1),
+        },
+        {
+          path: "enoki-probe-lifecycle-companion",
+          permissionProfile: "lifecycle-companion-v3",
+          resourceContract: "local-lifecycle-v1",
+          role: "lifecycle-companion",
           sha256: sha256(binary),
           size: binary.byteLength,
           version: version.slice(1),
@@ -1038,6 +1035,11 @@ async function writeProbeArchive(
     })}\n`,
   );
   await writeFile(path.join(binaryDir, "bundle-manifest.json"), bundleManifest);
+  for (const { bytes, member } of bootstrapAssets) {
+    const destination = path.join(binaryDir, member);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, bytes, { mode: 0o755 });
+  }
   await execFileAsync("tar", [
     "--create",
     "--gzip",
@@ -1047,6 +1049,11 @@ async function writeProbeArchive(
     binaryDir,
     "bundle-manifest.json",
     "enoki-probe",
+    "enoki-observation-runtime",
+    "enoki-cpu-resource-provider",
+    "enoki-disk-health-resource-provider",
+    "enoki-probe-lifecycle-companion",
+    ...bootstrapAssets.map(({ member }) => member),
   ]);
   await rm(binaryDir, { force: true, recursive: true });
   return { bundleManifestSha256: sha256(bundleManifest) };

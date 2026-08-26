@@ -1,0 +1,1006 @@
+const PROBE_MAIN: &str = include_str!("../src/main.rs");
+const PROBE_LIBRARY: &str = include_str!("../src/lib.rs");
+const PROBE_RUNTIME: &str = include_str!("../src/runtime.rs");
+const OBSERVATION_RUNTIME: &str = include_str!("../src/observation_runtime.rs");
+const OBSERVATION_RUNTIME_BINARY: &str = include_str!("../src/bin/enoki-observation-runtime.rs");
+const SYSTEM_STATE_PROVIDER_BINARY: &str =
+    include_str!("../src/bin/enoki-cpu-resource-provider.rs");
+const DISK_HEALTH_PROVIDER_BINARY: &str =
+    include_str!("../src/bin/enoki-disk-health-resource-provider.rs");
+const LIFECYCLE_COMPANION_BINARY: &str =
+    include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
+const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
+const UPGRADER: &str = include_str!("../src/upgrader.rs");
+const UNINSTALL: &str = include_str!("../src/upgrader/uninstall/mod.rs");
+const UNINSTALL_CLEANUP: &str = include_str!("../src/upgrader/uninstall/cleanup.rs");
+const INSTALLED_BUNDLE_REPAIR: &str =
+    include_str!("../src/runtime_failure/installed_bundle_repair.rs");
+const INSTALLED_BUNDLE_REPAIR_LIVE: &str =
+    include_str!("../src/runtime_failure/installed_bundle_repair/live.rs");
+const COMPATIBLE_UPGRADE: &str =
+    include_str!("../../probe-bootstrap/src/install/compatible_upgrade.rs");
+const BOOTSTRAP_INSTALL: &str = include_str!("../../probe-bootstrap/src/install.rs");
+const BOOTSTRAP_INSTALL_TESTS: &str = include_str!("../../probe-bootstrap/src/install/tests.rs");
+const BOOTSTRAP_LIFECYCLE: &str = include_str!("../../probe-bootstrap/src/lifecycle.rs");
+const BOOTSTRAP_ACQUISITION: &str = include_str!("../../probe-bootstrap/src/acquisition.rs");
+
+use syn::{Attribute, ForeignItem, ImplItem, Item, Visibility};
+
+fn production_source(source: &str) -> &str {
+    source.split("#[cfg(test)]").next().unwrap_or(source)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ItemVisibility {
+    Private,
+    SelfOnly,
+    Parent,
+    Wider,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct TopLevelDeclaration {
+    cfg_test: bool,
+    name: String,
+    visibility: ItemVisibility,
+}
+
+fn use_tree_name(tree: &syn::UseTree) -> String {
+    match tree {
+        syn::UseTree::Path(path) => format!("{}::{}", path.ident, use_tree_name(&path.tree)),
+        syn::UseTree::Name(name) => name.ident.to_string(),
+        syn::UseTree::Rename(rename) => rename.rename.to_string(),
+        syn::UseTree::Glob(_) => "*".to_owned(),
+        syn::UseTree::Group(_) => "{group}".to_owned(),
+    }
+}
+
+fn classify_visibility(visibility: &Visibility) -> ItemVisibility {
+    match visibility {
+        Visibility::Inherited => ItemVisibility::Private,
+        Visibility::Public(_) => ItemVisibility::Wider,
+        Visibility::Restricted(restricted) if restricted.path.is_ident("super") => {
+            ItemVisibility::Parent
+        }
+        Visibility::Restricted(restricted) if restricted.path.is_ident("self") => {
+            ItemVisibility::SelfOnly
+        }
+        Visibility::Restricted(_) => ItemVisibility::Wider,
+    }
+}
+
+fn is_cfg_test(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && attribute
+                .parse_args::<syn::Ident>()
+                .is_ok_and(|condition| condition == "test")
+    })
+}
+
+fn declaration(
+    attributes: &[Attribute],
+    name: String,
+    visibility: &Visibility,
+) -> TopLevelDeclaration {
+    TopLevelDeclaration {
+        cfg_test: is_cfg_test(attributes),
+        name,
+        visibility: classify_visibility(visibility),
+    }
+}
+
+fn validate_foreign_items(items: &[ForeignItem]) -> Result<(), String> {
+    for item in items {
+        let visibility = match item {
+            ForeignItem::Fn(item) => &item.vis,
+            ForeignItem::Static(item) => &item.vis,
+            ForeignItem::Type(item) => &item.vis,
+            ForeignItem::Macro(_) | ForeignItem::Verbatim(_) => {
+                return Err("unsupported foreign item".to_owned());
+            }
+            _ => return Err("unsupported foreign item".to_owned()),
+        };
+        if !matches!(
+            classify_visibility(visibility),
+            ItemVisibility::Private | ItemVisibility::SelfOnly
+        ) {
+            return Err("parent-reaching foreign item".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_impl_items(items: &[ImplItem]) -> Result<(), String> {
+    for item in items {
+        let visibility = match item {
+            ImplItem::Const(item) => &item.vis,
+            ImplItem::Fn(item) => &item.vis,
+            ImplItem::Type(item) => &item.vis,
+            ImplItem::Macro(_) | ImplItem::Verbatim(_) => {
+                return Err("unsupported impl item".to_owned());
+            }
+            _ => return Err("unsupported impl item".to_owned()),
+        };
+        if !matches!(
+            classify_visibility(visibility),
+            ItemVisibility::Private | ItemVisibility::SelfOnly
+        ) {
+            return Err("parent-reaching impl item".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn classify_top_level_item(item: &Item) -> Result<Option<TopLevelDeclaration>, String> {
+    let declared = match item {
+        Item::Const(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Enum(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::ExternCrate(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Fn(item) => declaration(&item.attrs, item.sig.ident.to_string(), &item.vis),
+        Item::Mod(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Static(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Struct(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Trait(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::TraitAlias(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Type(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Union(item) => declaration(&item.attrs, item.ident.to_string(), &item.vis),
+        Item::Use(item) => declaration(&item.attrs, use_tree_name(&item.tree), &item.vis),
+        Item::ForeignMod(item) => {
+            validate_foreign_items(&item.items)?;
+            return Ok(None);
+        }
+        Item::Impl(item) => {
+            validate_impl_items(&item.items)?;
+            return Ok(None);
+        }
+        Item::Macro(item) => {
+            if item
+                .attrs
+                .iter()
+                .any(|attribute| attribute.path().is_ident("macro_export"))
+            {
+                return Err("macro_export reaches outside the module".to_owned());
+            }
+            if item.ident.is_none() {
+                return Err("top-level macro invocation may export an item".to_owned());
+            }
+            return Ok(None);
+        }
+        Item::Verbatim(_) => return Err("unsupported top-level item".to_owned()),
+        _ => return Err("unsupported top-level item".to_owned()),
+    };
+    Ok(Some(declared))
+}
+
+fn top_level_declarations(source: &str) -> Result<Vec<TopLevelDeclaration>, String> {
+    let file = syn::parse_file(source).map_err(|error| error.to_string())?;
+    let mut declarations = Vec::new();
+    for item in &file.items {
+        if let Some(declaration) = classify_top_level_item(item)? {
+            declarations.push(declaration);
+        }
+    }
+    Ok(declarations)
+}
+
+#[test]
+fn rust_ast_classifier_handles_visibility_and_cfg_syntax() {
+    let fixture = r#"
+        #[doc = "pub(crate) and #[cfg(test)] are only text"]
+        pub fn bare_public() {}
+        pub(crate) struct CratePublic;
+        pub(super) enum ParentPublic { Value }
+        pub(self) type SelfPublic = ();
+        pub(in
+            crate::upgrader
+        ) use crate::sample::renamed as MultiLineRestricted;
+        #[cfg(test)]
+        pub(super) fn single_line_test() {}
+        #[cfg(
+            test
+        )]
+        #[allow(dead_code)]
+        pub(super) fn multi_line_test() {}
+        #[allow(dead_code)]
+        fn private_item() {}
+    "#;
+    assert_eq!(
+        top_level_declarations(fixture).expect("supported fixture"),
+        [
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "bare_public".to_owned(),
+                visibility: ItemVisibility::Wider
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "CratePublic".to_owned(),
+                visibility: ItemVisibility::Wider
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "ParentPublic".to_owned(),
+                visibility: ItemVisibility::Parent
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "SelfPublic".to_owned(),
+                visibility: ItemVisibility::SelfOnly
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "crate::sample::MultiLineRestricted".to_owned(),
+                visibility: ItemVisibility::Wider
+            },
+            TopLevelDeclaration {
+                cfg_test: true,
+                name: "single_line_test".to_owned(),
+                visibility: ItemVisibility::Parent
+            },
+            TopLevelDeclaration {
+                cfg_test: true,
+                name: "multi_line_test".to_owned(),
+                visibility: ItemVisibility::Parent
+            },
+            TopLevelDeclaration {
+                cfg_test: false,
+                name: "private_item".to_owned(),
+                visibility: ItemVisibility::Private
+            },
+        ]
+    );
+}
+
+#[test]
+fn rust_ast_classifier_rejects_public_foreign_item() {
+    assert!(top_level_declarations(r#"extern "C" { pub fn leaked(); }"#).is_err());
+}
+
+#[test]
+fn rust_ast_classifier_rejects_macro_export() {
+    assert!(top_level_declarations(r#"#[macro_export] macro_rules! leaked { () => {} }"#).is_err());
+}
+
+#[test]
+fn rust_ast_classifier_rejects_unsupported_item() {
+    assert!(classify_top_level_item(&Item::Verbatim(Default::default())).is_err());
+}
+
+#[test]
+fn rust_ast_classifier_allows_private_macro_definition_but_rejects_invocation() {
+    assert!(top_level_declarations("macro_rules! private_macro { () => {} }").is_ok());
+    assert!(top_level_declarations("private_macro!();").is_err());
+}
+
+#[test]
+fn rust_ast_classifier_checks_impl_associated_item_visibility() {
+    assert!(
+        top_level_declarations("struct Private; impl Private { fn private_method() {} }").is_ok()
+    );
+    assert!(
+        top_level_declarations("struct Private; impl Private { pub(super) fn leaked() {} }")
+            .is_err()
+    );
+}
+
+#[test]
+fn probe_entry_and_runtime_only_coordinate_runtime_finalized_windows() {
+    let probe_entry = production_source(PROBE_MAIN);
+    assert!(probe_entry.contains("ProbeCommand::Run"));
+    assert!(probe_entry.contains("run_probe_with_loop_control("));
+    for forbidden in [
+        "metrics::",
+        "host_profile",
+        "observation_runtime",
+        "resource_sandbox",
+        "privileged_collector",
+        "smartctl",
+    ] {
+        assert!(
+            !probe_entry.contains(forbidden),
+            "Probe 入口不得导入或调用观测实现：{forbidden}",
+        );
+    }
+
+    assert!(PROBE_RUNTIME.contains("request_finalized_window"));
+    for forbidden in [
+        "MetricCollector",
+        "CollectorRegistry",
+        "CollectorCadenceSchedule",
+        "collect_disk_health_metrics_from_smartctl_json",
+        "collect_temperature_celsius_from_sysfs",
+        "collect_battery_metrics_from_sysfs",
+        "fs::read_to_string(\"/proc",
+        "Command::new(\"smartctl",
+        "local_privilege_boundary",
+        "privileged_collector_helpers",
+    ] {
+        assert!(
+            !PROBE_RUNTIME.contains(forbidden),
+            "Probe Runtime 不得包含观测实现：{forbidden}",
+        );
+    }
+    assert!(!PROBE_LIBRARY.contains("pub mod local_privilege_boundary"));
+    assert!(!PROBE_LIBRARY.contains("pub mod privileged_collector_helpers"));
+}
+
+#[test]
+fn observation_roles_have_one_way_dependency_boundaries() {
+    assert!(OBSERVATION_RUNTIME_BINARY.contains("ObservationRuntimeServer"));
+    assert!(SYSTEM_STATE_PROVIDER_BINARY.contains("collect_temperature_inputs()"));
+    assert!(SYSTEM_STATE_PROVIDER_BINARY.contains("collect_battery_supplies()"));
+    assert!(DISK_HEALTH_PROVIDER_BINARY.contains("SMARTCTL_CANDIDATES"));
+
+    let runtime = production_source(OBSERVATION_RUNTIME);
+    for forbidden in [
+        "probe_auth",
+        "registration",
+        "HttpRegistrationTransport",
+        "post_protobuf",
+        "local_lifecycle",
+        "upgrader",
+        "ProbeRunInput",
+    ] {
+        assert!(
+            !runtime.contains(forbidden),
+            "Observation Runtime 不得反向依赖 Probe 身份、Hub 传输或生命周期：{forbidden}",
+        );
+    }
+    for forbidden in ["fs::canonicalize", "fs::read_dir"] {
+        assert!(
+            !DISK_HEALTH_CALCULATION.contains(forbidden),
+            "Runtime 可达的磁盘健康计算不得打开主机资源：{forbidden}",
+        );
+    }
+    for forbidden in [
+        "physical_device_name_from_direct_block_name",
+        "physical_device_basename",
+        "nvme_controller_name",
+    ] {
+        assert!(
+            !DISK_HEALTH_CALCULATION.contains(forbidden),
+            "Runtime 磁盘健康计算只能消费 Provider topology map：{forbidden}",
+        );
+    }
+}
+
+#[test]
+fn fresh_probe_installation_cannot_render_collector_helper_sudoers() {
+    assert!(!UPGRADER.contains("fn write_collector_helper_sudoers"));
+    assert!(UPGRADER.contains("fn remove_legacy_collector_helper_sudoers"));
+}
+
+#[test]
+fn legacy_fresh_installer_and_shallow_lifecycle_surfaces_are_absent() {
+    assert!(
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/local_lifecycle.rs")
+            .exists(),
+        "零生产 caller 的旧 installer 必须删除",
+    );
+    assert!(!PROBE_LIBRARY.contains("local_lifecycle"));
+    for retired in [
+        "LifecyclePlan",
+        "TransitionAvailability",
+        "FreshInstallLifecycleEffects",
+        "execute_fresh_install_lifecycle",
+    ] {
+        assert!(
+            !BOOTSTRAP_LIFECYCLE.contains(retired),
+            "浅 lifecycle surface 必须删除：{retired}",
+        );
+    }
+    for retired in ["activate_current_probe", "activate_fresh_current_probe"] {
+        assert!(
+            !BOOTSTRAP_INSTALL.contains(retired),
+            "零生产 caller 的 Fresh wrapper 必须删除：{retired}",
+        );
+    }
+
+    let coordinator = BOOTSTRAP_INSTALL
+        .split("pub(crate) fn coordinate_fresh_install(")
+        .nth(1)
+        .expect("Fresh coordinator 必须保持 crate-private")
+        .split("-> Result")
+        .next()
+        .expect("Fresh coordinator 必须有封闭结果");
+    for forbidden in [
+        "FixedInstallPaths",
+        "AccountPort",
+        "SystemdPort",
+        "bool",
+        "mode",
+        "phase",
+        "step",
+    ] {
+        assert!(
+            !coordinator.contains(forbidden),
+            "生产 Fresh coordinator interface 不得暴露 {forbidden}",
+        );
+    }
+
+    assert_eq!(
+        BOOTSTRAP_INSTALL_TESTS
+            .matches("activate_verified_install_layout(")
+            .count(),
+        1,
+        "内部 fault tests 只能从一个 classified Fresh seam 进入 layout mechanics",
+    );
+    let classified_test_seam = BOOTSTRAP_INSTALL_TESTS
+        .split("fn activate_classified_layout_for_test(")
+        .nth(1)
+        .expect("fault test seam 必须显式消费 classified Fresh authority")
+        .split("-> Result")
+        .next()
+        .unwrap();
+    assert!(classified_test_seam.contains("FreshInstallAuthority"));
+    assert!(!classified_test_seam.contains("Enrollment"));
+    assert!(!classified_test_seam.contains("InstallFailureSemantics"));
+}
+
+#[test]
+fn uninstall_uses_closed_transition_coordinators_and_private_cleanup_mechanics() {
+    for retired in [
+        "UninstallCommitPolicy",
+        "UninstallLifecycleEffects",
+        "execute_uninstall_lifecycle",
+    ] {
+        assert!(
+            !BOOTSTRAP_LIFECYCLE.contains(retired),
+            "浅 uninstall lifecycle surface 必须删除：{retired}",
+        );
+        assert!(
+            !UPGRADER.contains(retired)
+                && !UNINSTALL.contains(retired)
+                && !UNINSTALL_CLEANUP.contains(retired),
+            "Probe Uninstall 不得重建浅 runner surface：{retired}",
+        );
+    }
+    assert!(
+        !UPGRADER.contains("UninstallCleanupExtent")
+            && !UNINSTALL.contains("UninstallCleanupExtent")
+            && !UNINSTALL_CLEANUP.contains("UninstallCleanupExtent"),
+        "cleanup extent 不得成为 caller-selected interface",
+    );
+    assert!(UNINSTALL_CLEANUP.contains("fn cleanup_committed_replacement_install("));
+    assert!(UNINSTALL_CLEANUP.contains("fn execute_committed_replacement_cleanup("));
+    assert!(!UNINSTALL_CLEANUP.contains("cleanup_trusted_probe_install_for_reenrollment"));
+    assert!(UNINSTALL.contains("enum HubUninstallResult"));
+    assert!(UNINSTALL.contains("struct LocalUninstallComplete"));
+
+    for retired_bypass in [
+        "SealedUninstallCleanup",
+        "PREPARE_ONLY",
+        "PRESERVE_COMPANION_BINARY",
+        "run_probe_uninstaller_with_systemd_runner_and_install_metadata",
+        "read_uninstall_operation_metadata",
+        "ProbeUninstallerOperationMetadata",
+        "failed_probe_uninstaller_result",
+        "internal_probe_uninstaller",
+    ] {
+        assert!(
+            !UPGRADER.contains(retired_bypass)
+                && !UNINSTALL.contains(retired_bypass)
+                && !UNINSTALL_CLEANUP.contains(retired_bypass),
+            "Uninstall 不得保留 mode marker 或平行业务入口：{retired_bypass}",
+        );
+    }
+
+    for (coordinator, local) in [
+        ("fn coordinate_hub_uninstall(", false),
+        ("fn coordinate_local_uninstall(", true),
+    ] {
+        let interface = UNINSTALL
+            .split(coordinator)
+            .nth(1)
+            .unwrap_or_else(|| panic!("缺少封闭 coordinator：{coordinator}"))
+            .split("-> Result")
+            .next()
+            .expect("Uninstall coordinator 必须有封闭结果");
+        for forbidden in [
+            "Authority",
+            "UninstallMechanics",
+            "Path",
+            "unit",
+            "command",
+            "permission",
+            "step",
+            "phase",
+            "extent",
+            "bool",
+        ] {
+            assert!(
+                !interface.contains(forbidden),
+                "生产 Uninstall coordinator interface 不得暴露 {forbidden}",
+            );
+        }
+        assert!(
+            interface.contains(if local {
+                "LocalUninstallIntent"
+            } else {
+                "HubUninstallIntent"
+            }),
+            "coordinator 必须消费不可拆分的 classified intent",
+        );
+        if local {
+            assert!(
+                !interface.contains("Transport") && !interface.contains("transport"),
+                "Local Uninstall coordinator 不得取得 Hub transport",
+            );
+        }
+    }
+}
+
+#[test]
+fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
+    assert!(UPGRADER.contains("mod uninstall;"));
+    assert!(!UNINSTALL.contains("use super::*"));
+    assert!(!UNINSTALL_CLEANUP.contains("use super::*"));
+    assert!(!UPGRADER.contains("use super::uninstall::cleanup"));
+    assert!(
+        !UPGRADER.contains("use super::uninstall::*"),
+        "父级 tests 不得通过 wildcard 旁路 Uninstall interface",
+    );
+    let declarations = top_level_declarations(UNINSTALL).expect("supported uninstall module");
+    let production_surface = declarations
+        .iter()
+        .filter(|declaration| {
+            !declaration.cfg_test
+                && !matches!(
+                    declaration.visibility,
+                    ItemVisibility::Private | ItemVisibility::SelfOnly
+                )
+        })
+        .map(|declaration| (declaration.name.as_str(), declaration.visibility))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        production_surface,
+        [
+            (
+                "cleanup::commit_replacement_and_cleanup_install_with_systemd",
+                ItemVisibility::Parent,
+            ),
+            ("run_uninstall_lifecycle_adapter", ItemVisibility::Parent),
+            ("resume_lifecycle_companion_at", ItemVisibility::Parent),
+        ],
+        "focused Uninstall implementation layer 只向父级暴露两个 adapter hook 与一个 Replacement seam",
+    );
+    let nested_parent_surface = top_level_declarations(UNINSTALL_CLEANUP)
+        .expect("supported cleanup module")
+        .into_iter()
+        .filter(|declaration| {
+            !declaration.cfg_test && declaration.visibility == ItemVisibility::Wider
+        })
+        .map(|declaration| declaration.name)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        nested_parent_surface,
+        ["commit_replacement_and_cleanup_install_with_systemd"],
+        "cleanup 子模块不得提供第二条父级可达 seam",
+    );
+    let test_surface = declarations
+        .iter()
+        .filter(|declaration| {
+            declaration.cfg_test
+                && !matches!(
+                    declaration.visibility,
+                    ItemVisibility::Private | ItemVisibility::SelfOnly
+                )
+        })
+        .map(|declaration| (declaration.name.as_str(), declaration.visibility))
+        .collect::<Vec<_>>();
+    assert!(
+        test_surface.is_empty(),
+        "父级不得暴露任何 cfg(test) Uninstall interface：{test_surface:?}",
+    );
+    for declaration in declarations
+        .iter()
+        .filter(|declaration| declaration.cfg_test)
+    {
+        for forbidden in ["phase", "plan_", "read_", "cleanup_sequence", "mechanics"] {
+            assert!(
+                !declaration.name.contains(forbidden),
+                "test-only parent seam 不得暴露 mechanics vocabulary：{}",
+                declaration.name,
+            );
+        }
+    }
+    let production_adapter = UPGRADER
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("production upgrader adapter");
+    assert!(
+        !production_adapter.contains("use uninstall::*"),
+        "production upgrader 只能导入窄 Uninstall entry points",
+    );
+    for implementation in [
+        "struct HubUninstallIntent",
+        "struct LocalUninstallIntent",
+        "struct UninstallRecoveryCapsule",
+        "fn plan_probe_uninstall_cleanup",
+        "fn prepare_probe_uninstall_cleanup",
+        "fn finalize_recoverable_uninstall_cleanup",
+        "fn execute_committed_replacement_cleanup",
+    ] {
+        assert!(
+            !UPGRADER.contains(implementation),
+            "upgrader adapter 不得继续拥有 Uninstall implementation：{implementation}",
+        );
+        assert!(
+            UNINSTALL.contains(implementation) || UNINSTALL_CLEANUP.contains(implementation),
+            "focused Uninstall module 必须封装 implementation：{implementation}",
+        );
+    }
+}
+
+#[test]
+fn uninstall_has_no_parallel_stdin_business_or_failed_status_path() {
+    for retired_bypass in [
+        "run_probe_uninstaller_with_systemd_runner_and_install_metadata",
+        "read_uninstall_operation_metadata",
+        "ProbeUninstallerOperationMetadata",
+        "failed_probe_uninstaller_result",
+    ] {
+        assert!(
+            !UPGRADER.contains(retired_bypass)
+                && !UNINSTALL.contains(retired_bypass)
+                && !UNINSTALL_CLEANUP.contains(retired_bypass),
+            "Uninstall 业务测试与生产必须共用 classified adapter：{retired_bypass}",
+        );
+    }
+    let mechanics_oracle = UNINSTALL_CLEANUP
+        .split("fn execute_probe_uninstall_with_install_metadata_path(")
+        .nth(1)
+        .expect("legacy schema oracle must stay narrow")
+        .split("fn commit_replacement_and_cleanup_install_with_systemd")
+        .next()
+        .expect("legacy schema oracle body");
+    for business_concern in [
+        "stdin",
+        "token",
+        "operation_id",
+        "post_token_validation",
+        "post_operation_status",
+        "render_operation_status_body",
+    ] {
+        assert!(
+            !mechanics_oracle.contains(business_concern),
+            "legacy schema oracle 不得恢复业务编排：{business_concern}",
+        );
+    }
+}
+
+#[test]
+fn replacement_commit_enters_the_same_dedicated_cleanup_seam_used_by_production() {
+    let production = UPGRADER
+        .split("fn run_probe_replacement_migration(")
+        .nth(1)
+        .expect("Replacement production coordinator")
+        .split("struct InstalledProbeBinaryFacts")
+        .next()
+        .expect("Replacement production body");
+    assert!(production.contains("commit_replacement_and_cleanup_install_with_systemd("));
+    assert!(!production.contains("commit_and_cleanup_replacement("));
+
+    let dedicated = UNINSTALL_CLEANUP
+        .split("fn commit_replacement_and_cleanup_install_with_systemd")
+        .nth(1)
+        .expect("dedicated committed Replacement cleanup coordinator")
+        .split("fn cleanup_committed_replacement_install(")
+        .next()
+        .expect("dedicated coordinator body");
+    assert!(dedicated.contains("commit_and_cleanup_replacement("));
+    assert!(dedicated.contains("cleanup_committed_replacement_install("));
+}
+
+#[test]
+fn fresh_install_and_probe_binary_have_no_legacy_operation_executor() {
+    let bootstrap = production_source(BOOTSTRAP_INSTALL);
+    for forbidden in [
+        "operation_sudoers().as_bytes()",
+        "fn operation_sudoers()",
+        "upgrader_launch = \"systemd\"",
+    ] {
+        assert!(
+            !bootstrap.contains(forbidden),
+            "新安装不得创建旧 operation 权限入口：{forbidden}",
+        );
+    }
+
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("LifecycleRequest::decode"));
+    assert!(LIFECYCLE_COMPANION_BINARY.contains("run_lifecycle_companion"));
+    for forbidden in [
+        "Command::new",
+        "internal-upgrader",
+        "internal-uninstaller",
+        "launch_systemd",
+        "std::env::var",
+    ] {
+        assert!(
+            !LIFECYCLE_COMPANION_BINARY.contains(forbidden),
+            "Lifecycle Companion 入口不得接受或启动通用执行责任：{forbidden}",
+        );
+    }
+
+    let probe_entry = production_source(PROBE_MAIN);
+    for forbidden in [
+        "run_probe_local_install",
+        "run_probe_upgrader",
+        "run_probe_uninstaller",
+        "run_local_probe_uninstall",
+        "run_probe_repair",
+    ] {
+        assert!(
+            !probe_entry.contains(forbidden),
+            "Probe executable 入口不得执行旧 lifecycle 工具：{forbidden}",
+        );
+    }
+    for forbidden in [
+        "launch_systemd_probe_upgrader",
+        "launch_systemd_probe_uninstaller",
+        "SystemProbeUpgraderCommandRunner",
+        "ProbeUpgraderCommandRunner",
+        "runner.run(\"sudo\"",
+    ] {
+        assert!(
+            !PROBE_RUNTIME.contains(forbidden) && !UPGRADER.contains(forbidden),
+            "生产模块不得保留旧 systemd-run launch adapter：{forbidden}",
+        );
+    }
+}
+
+#[test]
+fn runtime_failure_recorder_dispatch_precedes_generic_lifecycle_and_http_mechanics() {
+    let recorder_branch = LIFECYCLE_COMPANION_BINARY
+        .find("mode == CompanionMode::RecordRuntimeFailure")
+        .expect("Companion 必须含固定 Runtime failure recorder 分支");
+    let stdin_decode = LIFECYCLE_COMPANION_BINARY
+        .find("read_to_end(&mut bytes)")
+        .expect("通用 Companion 仍读取有界 LifecycleRequest");
+    let http_transport = LIFECYCLE_COMPANION_BINARY
+        .find("let mut transport = HttpProbeUpgraderValidationTransport")
+        .expect("通用 Companion 仍有既有 Hub transport");
+    assert!(recorder_branch < stdin_decode);
+    assert!(recorder_branch < http_transport);
+    let recorder = include_str!("../src/runtime_failure.rs");
+    for forbidden in [
+        "LifecycleRequest::decode",
+        "HttpProbeUpgraderValidationTransport",
+        "run_compatible_upgrade",
+        "run_probe_repair",
+        "replacement_migration",
+    ] {
+        assert!(
+            !recorder.contains(forbidden),
+            "recorder 不得进入 {forbidden}"
+        );
+    }
+    assert!(BOOTSTRAP_ACQUISITION.contains("ClosedRepairEvidence::InstalledBundleFailure"));
+    assert!(BOOTSTRAP_ACQUISITION.contains("/api/probe/runtime-failures/{}/repair-authorize"));
+    assert!(!BOOTSTRAP_ACQUISITION.contains("repair_authorize_url"));
+}
+
+#[test]
+fn installed_bundle_repair_uses_complete_bundle_mechanics_and_a_latched_validation_gate() {
+    for forbidden in [
+        "crate::upgrader",
+        "ProbeRepairResult",
+        "ProbeRepairRunError",
+        "ProbeUpgraderRunError",
+        "repair_contract_failure",
+    ] {
+        assert!(
+            !INSTALLED_BUNDLE_REPAIR_LIVE.contains(forbidden),
+            "Installed Bundle Repair live Module 不得反向依赖调用它的 upgrader Adapter：{forbidden}",
+        );
+    }
+    for required in [
+        "open_verified_probe_upgrade_stage",
+        "restore_installed_bundle_for_repair",
+        "stage.bundle.manifest_sha256 != authority.manifest_sha256",
+        "mask\", \"--runtime\", \"enoki-observation-runtime.socket",
+        "ConditionPathExists=\\nConditionPathExists=/run/enoki-probe/runtime-repair-permit",
+        "request_finalized_window(Duration::from_secs(1), 0)",
+        "restore_canonical_runtime_gate",
+        "probe_repair_canonical_runtime_validation_failed",
+    ] {
+        assert!(
+            INSTALLED_BUNDLE_REPAIR_LIVE.contains(required),
+            "Installed Bundle Repair 缺少 {required}"
+        );
+    }
+    assert!(UPGRADER.contains("drive_live_installed_bundle_repair"));
+    for private_detail in [
+        "InstalledBundleRepairProgress",
+        "mark_validation_pending",
+        "mark_temporary_runtime_healthy",
+        "mark_probe_active",
+        "mark_canonical_runtime_healthy",
+        "invalidate_failure_evidence",
+        "publish_success",
+    ] {
+        assert!(
+            !UPGRADER.contains(private_detail),
+            "upgrader Adapter 不得知道 Repair 私有 checkpoint：{private_detail}"
+        );
+    }
+    for forbidden in ["retry_runtime", "activate_complete_fresh", "Replacement"] {
+        assert!(!INSTALLED_BUNDLE_REPAIR_LIVE.contains(forbidden));
+    }
+    let drive = INSTALLED_BUNDLE_REPAIR
+        .split("pub(crate) fn drive_installed_bundle_repair")
+        .nth(1)
+        .expect("Repair Module 必须封闭 drive/resume 顺序");
+    let probe_active = drive.find("mark_probe_active").unwrap();
+    let invalidation = drive.find("invalidate_failure_evidence").unwrap();
+    let canonical = drive.find("validate_canonical_runtime").unwrap();
+    let canonical_receipt = drive.find("mark_canonical_runtime_healthy").unwrap();
+    let publish = drive.find("publish_success").unwrap();
+    assert!(probe_active < invalidation);
+    assert!(invalidation < canonical);
+    assert!(canonical < canonical_receipt);
+    assert!(canonical_receipt < publish);
+
+    let exchange = UPGRADER
+        .split("fn exchange_repair_authority(")
+        .nth(1)
+        .unwrap()
+        .split('{')
+        .next()
+        .unwrap();
+    for forbidden_parameter in ["executable", "argument", "command", "path"] {
+        assert!(!exchange.contains(forbidden_parameter));
+    }
+}
+
+#[test]
+fn compatible_upgrade_enters_a_transition_specific_coordinator() {
+    assert!(
+        UPGRADER.contains("run_compatible_upgrade(request, peer_uid)"),
+        "Compatible Upgrade 的生产入口必须委托给转换专属 coordinator",
+    );
+    assert!(
+        !UPGRADER.contains("fn run_probe_compatible_upgrade("),
+        "Compatible Upgrade coordinator 不得继续内联在通用 upgrader 分派中",
+    );
+    assert!(COMPATIBLE_UPGRADE.contains("struct VerifiedMutationPlan"));
+    assert!(COMPATIBLE_UPGRADE.contains("mod mechanics"));
+    assert!(COMPATIBLE_UPGRADE.contains("SystemSystemd::for_live_upgrade()"));
+    assert!(!BOOTSTRAP_LIFECYCLE.contains("pub trait UpgradeLifecycleEffects"));
+    assert!(!BOOTSTRAP_LIFECYCLE.contains("pub fn execute_upgrade_lifecycle"));
+    for forbidden in [
+        "pub struct VerifiedMutationPlan",
+        "pub(crate) struct VerifiedMutationPlan",
+        "journal_phase",
+        "initial_mode",
+        "retry_mode",
+        "resume_mode",
+        "steps:",
+        "commands:",
+    ] {
+        assert!(
+            !COMPATIBLE_UPGRADE.contains(forbidden),
+            "私有 lifecycle mechanics Interface 不得暴露可选 phase/mode/步骤：{forbidden}",
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linked_symbols(binary: &str) -> Vec<String> {
+    use object::{Object, ObjectSymbol};
+
+    let bytes = std::fs::read(binary).expect("读取测试构建的 ELF binary");
+    let object = object::File::parse(bytes.as_slice()).expect("解析测试构建的 ELF binary");
+    object
+        .symbols()
+        .chain(object.dynamic_symbols())
+        .filter_map(|symbol| symbol.name().ok().map(ToOwned::to_owned))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn assert_linked(symbols: &[String], required: &str, binary: &str) {
+    assert!(
+        symbols.iter().any(|symbol| symbol.contains(required)),
+        "{binary} 必须链接核心入口：{required}",
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn assert_not_linked(symbols: &[String], forbidden: &[&str], binary: &str) {
+    for forbidden in forbidden {
+        assert!(
+            !symbols.iter().any(|symbol| symbol.contains(forbidden)),
+            "{binary} 不得链接越界职责：{forbidden}",
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn built_binaries_enforce_both_observation_dependency_directions() {
+    let probe = linked_symbols(env!("CARGO_BIN_EXE_enoki-probe"));
+    assert_linked(&probe, "run_probe_with_loop_control", "enoki-probe");
+    assert_linked(&probe, "request_finalized_window", "enoki-probe");
+    assert_not_linked(
+        &probe,
+        &[
+            "collect_cpu_metrics_from_counter_records",
+            "collect_memory_metrics_from_proc_meminfo",
+            "collect_disk_metrics_from_mounts",
+            "collect_network_metrics_from_proc_net_dev",
+            "collect_disk_health_metrics_from_smartctl_json",
+            "collect_local_host_profile_resource_facts",
+            "UnixSystemStateProvider",
+            "UnixDiskHealthProvider",
+            "enforce_system_state_resource_read_allowlist",
+            "enforce_disk_health_resource_read_allowlist",
+            "collect_temperature_inputs",
+            "collect_battery_supplies",
+            "privileged_collector_helpers",
+            "local_privilege_boundary",
+        ],
+        "enoki-probe",
+    );
+    assert_not_linked(
+        &probe,
+        &[
+            "run_probe_local_install",
+            "run_probe_upgrader",
+            "run_probe_uninstaller",
+            "run_local_probe_uninstall",
+            "run_probe_repair",
+            "launch_systemd_probe_upgrader",
+            "launch_systemd_probe_uninstaller",
+            "SystemProbeUpgraderCommandRunner",
+        ],
+        "enoki-probe",
+    );
+
+    let runtime = linked_symbols(env!("CARGO_BIN_EXE_enoki-observation-runtime"));
+    assert_linked(
+        &runtime,
+        "ObservationRuntimeServer",
+        "enoki-observation-runtime",
+    );
+    assert_linked(
+        &runtime,
+        "serve_fixed_probe_listener",
+        "enoki-observation-runtime",
+    );
+    assert_not_linked(
+        &runtime,
+        &[
+            "probe_auth",
+            "registration",
+            "HttpRegistrationTransport",
+            "run_probe_with_loop_control",
+            "local_lifecycle",
+            "upgrader",
+            "SystemProbeUpgraderCommandRunner",
+            "launch_systemd_probe",
+            "privileged_collector_helpers",
+            "local_privilege_boundary",
+        ],
+        "enoki-observation-runtime",
+    );
+
+    let companion = linked_symbols(env!("CARGO_BIN_EXE_enoki-probe-lifecycle-companion"));
+    assert_linked(
+        &companion,
+        "run_lifecycle_companion",
+        "enoki-probe-lifecycle-companion",
+    );
+    assert_not_linked(
+        &companion,
+        &[
+            "run_probe_upgrader",
+            "execute_probe_upgrade",
+            "run_probe_repair",
+            "run_probe_local_install",
+            "launch_systemd_probe",
+        ],
+        "enoki-probe-lifecycle-companion",
+    );
+}

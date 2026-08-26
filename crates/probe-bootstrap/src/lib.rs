@@ -6,9 +6,14 @@
 pub mod acquisition;
 #[cfg(feature = "activator")]
 pub mod activation;
+mod bundle_role;
 pub mod generation;
 pub mod handoff;
 #[cfg(feature = "activator")]
 pub mod install;
+pub mod lifecycle;
+pub mod operation_status;
+pub mod replacement;
+pub mod secure_file;
 pub mod trust;
 pub mod verifier;

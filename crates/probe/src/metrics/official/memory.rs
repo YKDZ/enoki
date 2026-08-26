@@ -1,40 +1,4 @@
-use std::fs;
-
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorError, CollectorId, MetricCollector,
-};
-use crate::protocol::enoki::v1::MetricSample;
-
-pub const DEFINITION: CollectorDefinition =
-    CollectorDefinition::new(CollectorId::Memory, CollectorCadence::EveryTick);
-
-#[derive(Default)]
-pub struct MemoryMetricCollector;
-
-impl MetricCollector for MemoryMetricCollector {
-    fn definition(&self) -> CollectorDefinition {
-        DEFINITION
-    }
-
-    fn collect(&mut self, sample: &mut MetricSample) -> Result<bool, CollectorError> {
-        let Some(metrics) = fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|contents| collect_memory_metrics_from_proc_meminfo(&contents))
-        else {
-            return Ok(false);
-        };
-
-        sample.memory_cache_bytes = Some(metrics.cache_bytes);
-        sample.memory_total_bytes = Some(metrics.total_bytes);
-        sample.memory_used_bytes = Some(metrics.used_bytes);
-        sample.swap_total_bytes = Some(metrics.swap_total_bytes);
-        sample.swap_used_bytes = Some(metrics.swap_used_bytes);
-
-        Ok(true)
-    }
-}
-
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MemoryMetrics {
     pub cache_bytes: u64,
     pub swap_total_bytes: u64,
@@ -81,4 +45,23 @@ fn meminfo_kilobytes(contents: &str, key: &str) -> Option<u64> {
     let line = contents.lines().find(|line| line.starts_with(key))?;
 
     line.split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proc_meminfo_preserves_byte_units_and_linux_cache_semantics() {
+        let metrics = collect_memory_metrics_from_proc_meminfo(
+            "MemTotal: 2048000 kB\nMemAvailable: 1536000 kB\nBuffers: 64000 kB\nCached: 256000 kB\nSReclaimable: 32000 kB\nShmem: 16000 kB\nSwapTotal: 1024000 kB\nSwapFree: 768000 kB\n",
+        )
+        .expect("memory metrics");
+
+        assert_eq!(metrics.total_bytes, 2_097_152_000);
+        assert_eq!(metrics.used_bytes, 524_288_000);
+        assert_eq!(metrics.cache_bytes, 344_064_000);
+        assert_eq!(metrics.swap_total_bytes, 1_048_576_000);
+        assert_eq!(metrics.swap_used_bytes, 262_144_000);
+    }
 }

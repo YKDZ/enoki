@@ -401,7 +401,8 @@ export function hubRouteId(method: string, pathname: string): HubRouteId {
   }
   if (
     (method === "POST" &&
-      /^\/api\/web\/hosts\/[^/]+\/probe-upgrade-requests$/.test(pathname)) ||
+      (pathname === "/api/web/hosts/probe-upgrade-requests" ||
+        /^\/api\/web\/hosts\/[^/]+\/probe-upgrade-requests$/.test(pathname))) ||
     (method === "DELETE" &&
       /^\/api\/web\/hosts\/[^/]+\/probe-upgrade-requests\/[^/]+$/.test(
         pathname,

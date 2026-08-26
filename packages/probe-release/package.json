@@ -1,0 +1,29 @@
+{
+  "name": "@enoki/probe-release",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.mjs"
+    },
+    "./test-fixture": {
+      "types": "./src/test-fixture.d.ts",
+      "import": "./src/release-transition-test-fixture.mjs"
+    }
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "turbo": {
+    "tags": [
+      "library"
+    ]
+  }
+}

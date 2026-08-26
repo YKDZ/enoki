@@ -42,6 +42,7 @@ describe("HTTP API contracts", () => {
         mode: "inherit",
         version: "default-v1",
       },
+      probeUpgradeProblem: null,
       probeVersion: "0.1.0",
       status: "online",
       system: "Linux",
@@ -126,6 +127,20 @@ describe("HTTP API contracts", () => {
       authenticated: true,
     } satisfies SessionResponse;
     const enrollment = {
+      bootstrapRecipe: {
+        bundleVersion: "1.2.3",
+        distribution: "enoki",
+        kind: "enoki-probe-bootstrap-recipe-record",
+        recipe: {
+          file: "enoki-probe-bootstrap.py",
+          sha256: "a".repeat(64),
+          size: 123,
+          version: "v1",
+        },
+        rootFingerprint: "b".repeat(64),
+        schemaVersion: 1,
+        targets: ["x86_64-unknown-linux-gnu"],
+      },
       createdAtMs: 1_725_000_000_000,
       enrollmentId: "enr_example",
       enrollmentToken: "enk_enroll_example",
@@ -134,7 +149,7 @@ describe("HTTP API contracts", () => {
       hostId: null,
       hubUrl: "https://hub.example.test",
       installCommand:
-        "ENOKI_HUB_URL='https://hub.example.test' ENOKI_ENROLLMENT_TOKEN='enk_enroll_test' /usr/local/bin/enoki-probe-bootstrap-acquire | sudo -- /usr/local/bin/enoki-probe-bootstrap-activate",
+        "printf '%s\\n' 'enk_enroll_test' | python3 -- ./enoki-probe-bootstrap.py --hub-origin 'https://hub.example.test'",
       readyAtMs: null,
       rejectedAtMs: null,
       rejection: null,
@@ -172,6 +187,19 @@ describe("HTTP API contracts", () => {
         updatedAtMs: 1_725_000_800_000,
       },
     } satisfies ProbeUpgradeRequestResponse;
+    const unknownFailedProbeUpgrade = {
+      probeUpgradeRequest: {
+        acceptedAtMs: 1_725_000_800_100,
+        completedAtMs: 1_725_000_800_300,
+        createdAtMs: 1_725_000_800_000,
+        failure: { recoveryDisposition: null },
+        id: 8,
+        runningAtMs: 1_725_000_800_200,
+        state: "failed",
+        targetProbeVersion: "0.2.0",
+        updatedAtMs: 1_725_000_800_300,
+      },
+    } satisfies ProbeUpgradeRequestResponse;
 
     expect({
       enrollment,
@@ -180,6 +208,7 @@ describe("HTTP API contracts", () => {
       probeConfiguration,
       probeUpgrade,
       session,
+      unknownFailedProbeUpgrade,
     }).toBeDefined();
   });
 });

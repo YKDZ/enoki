@@ -9,12 +9,10 @@ use std::{
 use prost::Message;
 use sha2::{Digest, Sha256};
 
-use crate::metrics::{
-    CollectorCadence, CollectorDefinition, CollectorId, last_disk_health_collector_capability,
-};
 use crate::protocol::enoki::v1::{
     CollectorCapabilities, DiskHealthCollectorCapability, DiskHealthCollectorCapabilityStatus,
-    FilesystemProfile, HostProfileSnapshot, NetworkInterfaceProfile, OfficialCollectorCapabilities,
+    FilesystemProfile, HostProfileResourceFacts, HostProfileSnapshot, NetworkInterfaceProfile,
+    OfficialCollectorCapabilities,
 };
 
 const EXCLUDED_FILESYSTEMS: &[&str] = &[
@@ -22,69 +20,76 @@ const EXCLUDED_FILESYSTEMS: &[&str] = &[
     "tmpfs", "tracefs",
 ];
 
-pub fn collect_local_host_profile() -> HostProfileSnapshot {
-    HostProfileCollectorRegistry::official().collect_startup()
+/// 固定 Provider 读取 Host Profile 的不可变事实；Snapshot 计算仍属于 Runtime。
+pub fn collect_local_host_profile_resource_facts_with_memory_total(
+    memory_total_bytes: u64,
+) -> HostProfileResourceFacts {
+    collect_local_host_profile_resource_facts_with_filesystems(
+        memory_total_bytes,
+        collect_filesystems(),
+    )
 }
 
-trait HostProfileCollector {
-    fn definition(&self) -> CollectorDefinition;
-
-    fn collect(
-        &mut self,
-        context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
+/// Provider 可复用同一次 mount-table/capacity Resource facts，避免重复读取。
+pub fn collect_local_host_profile_resource_facts_with_filesystems(
+    memory_total_bytes: u64,
+    filesystems: Vec<FilesystemProfile>,
+) -> HostProfileResourceFacts {
+    let context = HostProfileCollectionContext::read_with_memory_total_and_filesystems(
+        memory_total_bytes,
+        filesystems,
     );
+    HostProfileResourceFacts {
+        architecture: std::env::consts::ARCH.to_string(),
+        hostname: read_trimmed("/proc/sys/kernel/hostname")
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .unwrap_or_default(),
+        kernel: read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default(),
+        os: read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string()),
+        cpu_base_frequency_mhz: read_cpu_base_frequency_mhz(&context.cpuinfo).unwrap_or(0),
+        cpu_cache_l3_bytes: read_cpu_l3_cache_bytes(&context.cpuinfo).unwrap_or(0),
+        cpu_count: context.cpu_count,
+        cpu_model: read_cpu_model(&context.cpuinfo).unwrap_or_default(),
+        cpu_physical_count: read_cpu_physical_count(&context.cpuinfo).unwrap_or(0),
+        cpu_socket_count: read_cpu_socket_count(&context.cpuinfo).unwrap_or(0),
+        filesystems: context.filesystems,
+        memory_total_bytes: context.memory_total_bytes,
+        network_interfaces: context.network_interfaces,
+        process_count: context.process_snapshot.process_count,
+        thread_count: context.process_snapshot.thread_count,
+    }
 }
 
-struct RegisteredHostProfileCollector {
-    definition: CollectorDefinition,
-    collector: Box<dyn HostProfileCollector>,
+/// Runtime 将 Provider facts 计算为 Hub-facing Snapshot。
+pub fn host_profile_from_resource_facts(facts: HostProfileResourceFacts) -> HostProfileSnapshot {
+    HostProfileSnapshot {
+        architecture: facts.architecture,
+        hostname: facts.hostname,
+        kernel: facts.kernel,
+        os: facts.os,
+        cpu_base_frequency_mhz: facts.cpu_base_frequency_mhz,
+        cpu_cache_l3_bytes: facts.cpu_cache_l3_bytes,
+        cpu_count: facts.cpu_count,
+        cpu_model: facts.cpu_model,
+        cpu_physical_count: facts.cpu_physical_count,
+        cpu_socket_count: facts.cpu_socket_count,
+        filesystems: facts.filesystems,
+        memory_total_bytes: facts.memory_total_bytes,
+        network_interfaces: facts.network_interfaces,
+        process_count: facts.process_count,
+        thread_count: facts.thread_count,
+        probe_version: crate::version::probe_version().to_string(),
+        collector_capabilities: Some(official_collector_capabilities()),
+        probe_asset_bundle_version: crate::version::probe_version().to_string(),
+    }
 }
 
-struct HostProfileCollectorRegistry {
-    collectors: Vec<RegisteredHostProfileCollector>,
-}
-
-impl HostProfileCollectorRegistry {
-    fn official() -> Self {
-        Self::from_collectors(vec![
-            Box::new(SystemHostProfileCollector),
-            Box::new(CpuHostProfileCollector),
-            Box::new(MemoryHostProfileCollector),
-            Box::new(DiskHostProfileCollector),
-            Box::new(NetworkHostProfileCollector),
-            Box::new(ProcessHostProfileCollector),
-        ])
-    }
-
-    fn from_collectors(collectors: Vec<Box<dyn HostProfileCollector>>) -> Self {
-        Self {
-            collectors: collectors
-                .into_iter()
-                .map(|collector| RegisteredHostProfileCollector {
-                    definition: collector.definition(),
-                    collector,
-                })
-                .collect(),
-        }
-    }
-
-    fn collect_startup(mut self) -> HostProfileSnapshot {
-        let context = HostProfileCollectionContext::read();
-        let mut host_profile = HostProfileSnapshot::default();
-
-        for collector in &mut self.collectors {
-            if collector.definition.cadence != CollectorCadence::Startup {
-                continue;
-            }
-
-            collector.collector.collect(&context, &mut host_profile);
-        }
-
-        host_profile.collector_capabilities = Some(official_collector_capabilities());
-
-        host_profile
-    }
+pub(crate) fn valid_host_profile_resource_facts(facts: &HostProfileResourceFacts) -> bool {
+    facts.cpu_count > 0
+        && !facts.architecture.trim().is_empty()
+        && !facts.hostname.trim().is_empty()
+        && !facts.kernel.trim().is_empty()
+        && !facts.os.trim().is_empty()
 }
 
 struct HostProfileCollectionContext {
@@ -97,7 +102,10 @@ struct HostProfileCollectionContext {
 }
 
 impl HostProfileCollectionContext {
-    fn read() -> Self {
+    fn read_with_memory_total_and_filesystems(
+        memory_total_bytes: u64,
+        filesystems: Vec<FilesystemProfile>,
+    ) -> Self {
         let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
         let cpu_count = std::thread::available_parallelism()
             .map(|count| count.get() as u32)
@@ -106,120 +114,11 @@ impl HostProfileCollectionContext {
         Self {
             cpu_count,
             cpuinfo,
-            filesystems: collect_filesystems(),
-            memory_total_bytes: read_memory_total_bytes().unwrap_or(0),
+            filesystems,
+            memory_total_bytes,
             network_interfaces: collect_network_interfaces(),
             process_snapshot: collect_process_snapshot(),
         }
-    }
-}
-
-struct SystemHostProfileCollector;
-
-impl HostProfileCollector for SystemHostProfileCollector {
-    fn definition(&self) -> CollectorDefinition {
-        CollectorDefinition::new(CollectorId::Uptime, CollectorCadence::Startup)
-    }
-
-    fn collect(
-        &mut self,
-        _context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
-    ) {
-        host_profile.architecture = std::env::consts::ARCH.to_string();
-        host_profile.hostname = read_trimmed("/proc/sys/kernel/hostname")
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_default();
-        host_profile.kernel = read_trimmed("/proc/sys/kernel/osrelease").unwrap_or_default();
-        host_profile.os = read_os_release().unwrap_or_else(|| std::env::consts::OS.to_string());
-        host_profile.probe_version = crate::version::probe_version().to_string();
-    }
-}
-
-struct CpuHostProfileCollector;
-
-impl HostProfileCollector for CpuHostProfileCollector {
-    fn definition(&self) -> CollectorDefinition {
-        CollectorDefinition::new(CollectorId::Cpu, CollectorCadence::Startup)
-    }
-
-    fn collect(
-        &mut self,
-        context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
-    ) {
-        host_profile.cpu_base_frequency_mhz =
-            read_cpu_base_frequency_mhz(&context.cpuinfo).unwrap_or(0);
-        host_profile.cpu_cache_l3_bytes = read_cpu_l3_cache_bytes(&context.cpuinfo).unwrap_or(0);
-        host_profile.cpu_count = context.cpu_count;
-        host_profile.cpu_model = read_cpu_model(&context.cpuinfo).unwrap_or_default();
-        host_profile.cpu_physical_count = read_cpu_physical_count(&context.cpuinfo).unwrap_or(0);
-        host_profile.cpu_socket_count = read_cpu_socket_count(&context.cpuinfo).unwrap_or(0);
-    }
-}
-
-struct MemoryHostProfileCollector;
-
-impl HostProfileCollector for MemoryHostProfileCollector {
-    fn definition(&self) -> CollectorDefinition {
-        CollectorDefinition::new(CollectorId::Memory, CollectorCadence::Startup)
-    }
-
-    fn collect(
-        &mut self,
-        context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
-    ) {
-        host_profile.memory_total_bytes = context.memory_total_bytes;
-    }
-}
-
-struct DiskHostProfileCollector;
-
-impl HostProfileCollector for DiskHostProfileCollector {
-    fn definition(&self) -> CollectorDefinition {
-        CollectorDefinition::new(CollectorId::Disk, CollectorCadence::Startup)
-    }
-
-    fn collect(
-        &mut self,
-        context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
-    ) {
-        host_profile.filesystems = context.filesystems.clone();
-    }
-}
-
-struct NetworkHostProfileCollector;
-
-impl HostProfileCollector for NetworkHostProfileCollector {
-    fn definition(&self) -> CollectorDefinition {
-        CollectorDefinition::new(CollectorId::Network, CollectorCadence::Startup)
-    }
-
-    fn collect(
-        &mut self,
-        context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
-    ) {
-        host_profile.network_interfaces = context.network_interfaces.clone();
-    }
-}
-
-struct ProcessHostProfileCollector;
-
-impl HostProfileCollector for ProcessHostProfileCollector {
-    fn definition(&self) -> CollectorDefinition {
-        CollectorDefinition::new(CollectorId::Load, CollectorCadence::Startup)
-    }
-
-    fn collect(
-        &mut self,
-        context: &HostProfileCollectionContext,
-        host_profile: &mut HostProfileSnapshot,
-    ) {
-        host_profile.process_count = context.process_snapshot.process_count;
-        host_profile.thread_count = context.process_snapshot.thread_count;
     }
 }
 
@@ -232,21 +131,23 @@ fn official_collector_capabilities() -> CollectorCapabilities {
 }
 
 fn disk_health_capability() -> DiskHealthCollectorCapability {
-    if let Some(capability) = last_disk_health_collector_capability() {
-        return capability;
-    }
-
-    if Path::new("/usr/sbin/smartctl").exists() || Path::new("/usr/bin/smartctl").exists() {
-        return DiskHealthCollectorCapability {
-            status: DiskHealthCollectorCapabilityStatus::Unspecified as i32,
-            diagnostic: String::new(),
-        };
-    }
-
     DiskHealthCollectorCapability {
-        status: DiskHealthCollectorCapabilityStatus::MissingSmartctl as i32,
-        diagnostic: "smartctl is not installed".to_string(),
+        status: DiskHealthCollectorCapabilityStatus::Unspecified as i32,
+        diagnostic: String::new(),
     }
+}
+
+pub(crate) fn set_disk_health_capability(
+    profile: &mut HostProfileSnapshot,
+    capability: DiskHealthCollectorCapability,
+) {
+    let capabilities = profile
+        .collector_capabilities
+        .get_or_insert_with(CollectorCapabilities::default);
+    let official = capabilities
+        .official
+        .get_or_insert_with(OfficialCollectorCapabilities::default);
+    official.disk_health = Some(capability);
 }
 
 fn read_cpu_model(contents: &str) -> Option<String> {
@@ -415,6 +316,8 @@ pub fn host_profile_hash(host_profile: &HostProfileSnapshot) -> String {
 }
 
 pub fn stable_host_profile(mut host_profile: HostProfileSnapshot) -> HostProfileSnapshot {
+    // Bundle 身份是传输一致性证据，不属于既有 Host Profile canonical hash。
+    host_profile.probe_asset_bundle_version.clear();
     host_profile.filesystems.sort_by(|left, right| {
         left.mount_point
             .cmp(&right.mount_point)
@@ -449,16 +352,6 @@ fn read_os_release_key(contents: &str, key: &str) -> Option<String> {
 
         (candidate_key == key).then(|| value.trim_matches('"').to_string())
     })
-}
-
-fn read_memory_total_bytes() -> Option<u64> {
-    let contents = fs::read_to_string("/proc/meminfo").ok()?;
-    let line = contents
-        .lines()
-        .find(|line| line.starts_with("MemTotal:"))?;
-    let kilobytes = line.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-
-    Some(kilobytes * 1024)
 }
 
 fn collect_filesystems() -> Vec<FilesystemProfile> {

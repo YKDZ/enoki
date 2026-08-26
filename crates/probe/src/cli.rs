@@ -1,28 +1,8 @@
 use std::path::PathBuf;
 
-use crate::local_privilege_boundary::{
-    PrivilegedCollectorHelperId, compiled_privileged_collector_helper_spec,
-};
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProbeCommand {
     Help,
-    InternalPrivilegedCollectorHelper {
-        helper_id: PrivilegedCollectorHelperId,
-    },
-    InternalRenderCollectorHelperSudoers {
-        service_user: String,
-        probe_binary: PathBuf,
-    },
-    InternalLocalLifecycle {
-        candidate_binary: PathBuf,
-    },
-    InternalUpgrader {
-        bootstrap_config_path: PathBuf,
-    },
-    InternalUninstaller {
-        bootstrap_config_path: PathBuf,
-    },
     Uninstall,
     Repair,
     Rejected {
@@ -44,14 +24,11 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
     let _binary = args.next();
 
     match args.next().as_deref() {
-        Some("internal-privileged-collector-helper") => {
-            parse_internal_privileged_collector_helper_command(args)
+        Some("local-install" | "internal-uninstaller" | "internal-upgrader") => {
+            ProbeCommand::Rejected {
+                code: "probe_lifecycle_companion_required",
+            }
         }
-        Some("internal-render-collector-helper-sudoers") => {
-            parse_internal_render_collector_helper_sudoers_command(args)
-        }
-        Some("local-install") => parse_internal_local_lifecycle_command(args),
-        Some("internal-uninstaller") => parse_internal_uninstaller_command(args),
         Some("uninstall") => {
             if args.next().is_none() {
                 ProbeCommand::Uninstall
@@ -59,7 +36,6 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
                 ProbeCommand::Help
             }
         }
-        Some("internal-upgrader") => parse_internal_upgrader_command(args),
         Some("repair") => {
             if args.next().is_none() {
                 ProbeCommand::Repair
@@ -73,125 +49,6 @@ pub fn parse_probe_command(args: impl IntoIterator<Item = String>) -> ProbeComma
         Some("run") => parse_run_command(args),
         Some("--version" | "-V") => ProbeCommand::Version,
         _ => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_local_lifecycle_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
-    match (args.next().as_deref(), args.next()) {
-        (Some("--candidate"), Some(candidate_binary)) if args.next().is_none() => {
-            ProbeCommand::InternalLocalLifecycle {
-                candidate_binary: PathBuf::from(candidate_binary),
-            }
-        }
-        _ => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_privileged_collector_helper_command(
-    mut args: impl Iterator<Item = String>,
-) -> ProbeCommand {
-    let mut helper_id = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--helper" => {
-                if helper_id.is_some() {
-                    return ProbeCommand::Help;
-                }
-                let Some(value) = args.next() else {
-                    return ProbeCommand::Help;
-                };
-                let Some(parsed_helper_id) = PrivilegedCollectorHelperId::from_internal_arg(&value)
-                else {
-                    return ProbeCommand::Help;
-                };
-                let Some(spec) = compiled_privileged_collector_helper_spec(parsed_helper_id) else {
-                    return ProbeCommand::Help;
-                };
-                helper_id = Some(spec.id);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match helper_id {
-        Some(helper_id) => ProbeCommand::InternalPrivilegedCollectorHelper { helper_id },
-        None => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_render_collector_helper_sudoers_command(
-    mut args: impl Iterator<Item = String>,
-) -> ProbeCommand {
-    let mut service_user = None;
-    let mut probe_binary = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--service-user" => {
-                if service_user.is_some() {
-                    return ProbeCommand::Help;
-                }
-                service_user = args.next();
-            }
-            "--probe-binary" => {
-                if probe_binary.is_some() {
-                    return ProbeCommand::Help;
-                }
-                probe_binary = args.next().map(PathBuf::from);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match (service_user, probe_binary) {
-        (Some(service_user), Some(probe_binary)) => {
-            ProbeCommand::InternalRenderCollectorHelperSudoers {
-                service_user,
-                probe_binary,
-            }
-        }
-        _ => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_uninstaller_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
-    let mut bootstrap_config_path = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" => {
-                bootstrap_config_path = args.next().map(PathBuf::from);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match bootstrap_config_path {
-        Some(bootstrap_config_path) => ProbeCommand::InternalUninstaller {
-            bootstrap_config_path,
-        },
-        None => ProbeCommand::Help,
-    }
-}
-
-fn parse_internal_upgrader_command(mut args: impl Iterator<Item = String>) -> ProbeCommand {
-    let mut bootstrap_config_path = None;
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--config" => {
-                bootstrap_config_path = args.next().map(PathBuf::from);
-            }
-            _ => return ProbeCommand::Help,
-        }
-    }
-
-    match bootstrap_config_path {
-        Some(bootstrap_config_path) => ProbeCommand::InternalUpgrader {
-            bootstrap_config_path,
-        },
-        None => ProbeCommand::Help,
     }
 }
 
@@ -259,35 +116,18 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
             "Usage:\n",
             "  enoki-probe --help\n",
             "  enoki-probe --version\n",
+            "  sudo enoki-probe uninstall\n",
+            "  sudo enoki-probe repair\n",
             "  enoki-probe register --hub-url <url> ",
             "--enrollment-token <token> --config <path>\n",
-            "  sudo enoki-probe repair\n",
-            "  sudo enoki-probe uninstall\n",
             "  enoki-probe run --config <path>\n",
         )
         .to_string(),
-        ProbeCommand::InternalPrivilegedCollectorHelper { .. } => {
-            "Privileged Collector Helper executes a compiled helper entrypoint.\n".to_string()
-        }
-        ProbeCommand::InternalRenderCollectorHelperSudoers { .. } => {
-            "Privileged Collector Helper sudoers rendering uses compiled helper declarations.\n"
-                .to_string()
-        }
-        ProbeCommand::InternalLocalLifecycle { .. } => {
-            "Probe Local Lifecycle performs typed fresh installation and readiness verification.\n"
-                .to_string()
-        }
-        ProbeCommand::InternalUpgrader { .. } => {
-            "Probe Upgrader performs privileged Probe Upgrade execution.\n".to_string()
-        }
-        ProbeCommand::InternalUninstaller { .. } => {
-            "Probe Uninstaller performs privileged Probe uninstall execution.\n".to_string()
-        }
         ProbeCommand::Uninstall => {
-            "Local Probe Uninstall removes this machine's local Probe installation without contacting the Hub.\n".to_string()
+            "Probe uninstall is coordinated by the installed lifecycle service.\n".to_string()
         }
         ProbeCommand::Repair => {
-            "Probe Repair reinstalls from the bound Hub using the existing Probe Identity.\n"
+            "Probe repair requires an explicit local administrator and Hub authorization.\n"
                 .to_string()
         }
         ProbeCommand::Rejected { code } => format!("Probe command rejected: code={code}\n"),
@@ -299,4 +139,9 @@ pub fn render_probe_output(command: ProbeCommand) -> String {
         }
         ProbeCommand::Version => format!("enoki-probe {}\n", crate::version::probe_version()),
     }
+}
+
+#[must_use]
+pub fn render_probe_repair_failure(code: &str) -> String {
+    format!("Probe repair failed: code={code}.\n")
 }
