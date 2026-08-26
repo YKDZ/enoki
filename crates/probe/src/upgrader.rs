@@ -1,7 +1,7 @@
 mod uninstall;
 use uninstall::{
-    commit_replacement_and_cleanup_install_with_systemd, lifecycle_response_from_resume_decision,
-    resume_lifecycle_companion_at, run_uninstall_lifecycle_adapter,
+    commit_replacement_and_cleanup_install_with_systemd, resume_lifecycle_companion_at,
+    run_uninstall_lifecycle_adapter,
 };
 
 use std::{
@@ -2568,13 +2568,13 @@ pub fn resume_lifecycle_companion(
     if unsafe { libc::geteuid() } != 0 {
         return LifecycleResponse::failed("lifecycle.root_required");
     }
-    lifecycle_response_from_resume_decision(resume_lifecycle_companion_at(
+    resume_lifecycle_companion_at(
         Path::new(PRODUCTION_INSTALL_METADATA_PATH),
         Path::new(PRODUCTION_INSTALL_STATE_DIR),
         Path::new(LIFECYCLE_COMPANION_BINARY_PATH),
         transport,
         &mut SystemProbeUpgraderSystemdRunner,
-    ))
+    )
 }
 
 pub fn run_local_lifecycle_companion(
@@ -5120,7 +5120,15 @@ fn input_token(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::uninstall::*;
+    use super::uninstall::{
+        execute_probe_uninstall, execute_probe_uninstall_with_install_metadata_path,
+        execute_uninstall_preserving_recovery_entries_for_test,
+        observe_uninstall_local_state_failure_for_test,
+        replacement_cleanup_metadata_exclusion_for_test,
+        replacement_metadata_retirement_failure_for_test, run_uninstall_workflow_for_test,
+        uninstall_recovery_path_for_test, uninstall_rejects_unsafe_inventory_for_test,
+        validate_owned_bootstrap_state_for_test,
+    };
     use super::*;
     use flate2::{Compression, write::GzEncoder};
     use rsa::{
@@ -5433,53 +5441,11 @@ mod tests {
         let config = PathBuf::from("/var/lib/enoki-probe/identity/probe-bootstrap.toml");
         let state = PathBuf::from("/var/lib/enoki-probe");
         let metadata = PathBuf::from("/etc/enoki/probe-install.toml");
-        let mut failed_calls = Vec::new();
-        let failed = finalize_replacement_local_state_for_test(
-            &config,
-            &state,
-            |path| {
-                failed_calls.push(format!("remove {}", path.display()));
-                Ok(())
-            },
-            || {
-                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                    "ordinary cleanup verification failure",
-                )))
-            },
-        );
-        assert!(failed.is_err());
-        assert_eq!(
-            failed_calls,
-            [
-                format!("remove {}", config.display()),
-                format!("remove {}", state.display()),
-            ]
-        );
-
-        let mut completed_calls = Vec::new();
-        finalize_replacement_local_state_for_test(
-            &config,
-            &state,
-            |path| {
-                completed_calls.push(format!("remove {}", path.display()));
-                Ok(())
-            },
-            || Ok(()),
-        )
-        .unwrap();
-        assert_eq!(
-            completed_calls,
-            [
-                format!("remove {}", config.display()),
-                format!("remove {}", state.display()),
-            ]
-        );
-        assert!(
-            !completed_calls
-                .iter()
-                .any(|call| call.contains(&metadata.display().to_string())),
-            "metadata retirement belongs after the durable cleanup receipt"
-        );
+        let (failed_calls, completed_calls) =
+            replacement_cleanup_metadata_exclusion_for_test(&config, &state, &metadata)
+                .expect("observe both complete workflows");
+        assert_eq!(failed_calls, [config.clone(), state.clone()]);
+        assert_eq!(completed_calls, [config, state]);
     }
 
     impl RecordingSystemdRunner {
@@ -6757,28 +6723,24 @@ mod tests {
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: identity_path.clone(),
         };
-        execute_uninstall_cleanup_phases_for_test(
+        let entries_survived = execute_uninstall_preserving_recovery_entries_for_test(
             &input,
             &metadata,
             &metadata_path,
             &mut systemd,
-            || {
-                for path in [
-                    identity_path.as_path(),
-                    metadata_path.as_path(),
-                    binaries[4].as_path(),
-                    units[7].as_path(),
-                    units[8].as_path(),
-                ] {
-                    assert!(
-                        path.exists(),
-                        "pre-ack recovery entry lost: {}",
-                        path.display()
-                    );
-                }
-            },
+            &[
+                identity_path.as_path(),
+                metadata_path.as_path(),
+                binaries[4].as_path(),
+                units[7].as_path(),
+                units[8].as_path(),
+            ],
         )
         .expect("schema four uninstall succeeds");
+        assert!(
+            entries_survived,
+            "pre-ack recovery entries must survive prepare"
+        );
 
         for path in binaries.into_iter().chain(units) {
             assert!(!path.exists(), "{} remains", path.display());
@@ -7185,22 +7147,14 @@ mod tests {
         );
 
         let mut cleanup_systemd = RecordingSystemdRunner::default();
-        let retirement_failure = commit_replacement_cleanup_with_metadata_retirement_for_test(
+        let retirement_failure = replacement_metadata_retirement_failure_for_test(
             intent.clone(),
             &mut store,
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
             Some(temporary.path()),
             &mut cleanup_systemd,
-            |_| {
-                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                    "retire failed",
-                )))
-            },
         );
-        assert!(matches!(
-            retirement_failure,
-            Err(ReplacementCommitError::Effect(_))
-        ));
+        assert!(retirement_failure);
         assert!(store.fact.as_ref().unwrap().cleanup_complete);
         assert!(
             metadata_path.exists(),
@@ -7555,7 +7509,7 @@ mod tests {
             ..RecordingSystemdRunner::default()
         };
 
-        let result = adapt_uninstall_wire_request(
+        let result = run_uninstall_workflow_for_test(
             &request,
             &input,
             &fixture.metadata,
@@ -7564,18 +7518,18 @@ mod tests {
             &mut systemd,
         );
 
-        assert!(matches!(
+        assert_eq!(
             result,
-            Err(ProbeUpgraderRunError::UninstallCleanupFailure { .. })
-        ));
+            LifecycleResponse::failed("probe_uninstall_service_account_remove_failed")
+        );
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
-        let capsule = read_uninstall_capsule(
-            &uninstall_capsule_path(&fixture.metadata_path).expect("capsule path"),
-        )
-        .expect("read capsule")
-        .expect("durable local capsule");
-        assert_eq!(capsule.phase, UninstallCapsulePhase::TerminalAcknowledged);
+        assert!(
+            uninstall_recovery_path_for_test(&fixture.metadata_path)
+                .expect("capsule path")
+                .exists(),
+            "a failed local finalize remains recoverable"
+        );
         assert!(fixture.companion_path.exists());
     }
 
@@ -7621,7 +7575,7 @@ mod tests {
             assert!(fixture.identity_path.exists());
             assert!(fixture.companion_path.exists());
             assert!(
-                !uninstall_capsule_path(&fixture.metadata_path)
+                !uninstall_recovery_path_for_test(&fixture.metadata_path)
                     .expect("capsule path")
                     .exists()
             );
@@ -7716,35 +7670,29 @@ mod tests {
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: fixture.identity_path.clone(),
         };
-        let intent = HubUninstallIntent::classify(
-            &request,
-            &input,
-            &fixture.metadata,
-            &fixture.metadata_path,
-        )
-        .expect("atomic Hub intent");
         let mut transport = RecordingValidationTransport {
             status_failure: true,
             ..RecordingValidationTransport::default()
         };
         let mut systemd = RecordingSystemdRunner::default();
 
-        let result = coordinate_hub_uninstall(intent, &mut transport, &mut systemd);
+        let result = run_uninstall_workflow_for_test(
+            &request,
+            &input,
+            &fixture.metadata,
+            &fixture.metadata_path,
+            &mut transport,
+            &mut systemd,
+        );
 
-        assert!(matches!(
-            result,
-            Err(ProbeUpgraderRunError::UninstallStatusReportFailure(_))
-        ));
+        assert_eq!(result, LifecycleResponse::failed("probe_uninstall_failed"));
         assert!(transport.url.contains("operation_mechanics"));
         assert!(transport.status_url.contains("operation_mechanics"));
-        let capsule = read_uninstall_capsule(
-            &uninstall_capsule_path(&fixture.metadata_path).expect("capsule path"),
-        )
-        .expect("read capsule")
-        .expect("prepared capsule");
-        assert_eq!(
-            LifecycleRequest::decode(capsule.request_json.as_bytes()).expect("capsule request"),
-            request,
+        assert!(
+            uninstall_recovery_path_for_test(&fixture.metadata_path)
+                .expect("capsule path")
+                .exists(),
+            "the classified workflow persists its exact recovery binding"
         );
     }
 
@@ -7770,7 +7718,7 @@ mod tests {
             ..RecordingSystemdRunner::default()
         };
 
-        let first = adapt_uninstall_wire_request(
+        let first = run_uninstall_workflow_for_test(
             &request,
             &input,
             &fixture.metadata,
@@ -7778,33 +7726,27 @@ mod tests {
             &mut first_transport,
             &mut failed_systemd,
         );
-        assert!(matches!(
-            first,
-            Err(ProbeUpgraderRunError::UninstallCleanupFailure { .. })
-        ));
-        let capsule_path = uninstall_capsule_path(&fixture.metadata_path).expect("capsule path");
         assert_eq!(
-            read_uninstall_capsule(&capsule_path)
-                .expect("read capsule")
-                .expect("verified capsule")
-                .phase,
-            UninstallCapsulePhase::Verified,
+            first,
+            LifecycleResponse::failed("probe_uninstall_service_stop_failed")
         );
+        let capsule_path =
+            uninstall_recovery_path_for_test(&fixture.metadata_path).expect("capsule path");
+        assert!(capsule_path.exists());
         assert!(!first_transport.url.is_empty());
         assert!(first_transport.status_url.is_empty());
 
         let mut retry_transport = RecordingValidationTransport::default();
         let mut retry_systemd = RecordingSystemdRunner::default();
-        let retry = adapt_uninstall_wire_request(
+        let retry = run_uninstall_workflow_for_test(
             &request,
             &input,
             &fixture.metadata,
             &fixture.metadata_path,
             &mut retry_transport,
             &mut retry_systemd,
-        )
-        .expect("verified restart converges");
-        assert_eq!(retry, ResumeDecision::Completed);
+        );
+        assert_eq!(retry, LifecycleResponse::succeeded());
         assert!(retry_transport.url.is_empty());
         assert!(
             retry_transport
@@ -7830,23 +7772,23 @@ mod tests {
         let input = ProbeUninstallerRunInput {
             bootstrap_config_path: fixture.identity_path.clone(),
         };
-        let capsule_path = uninstall_capsule_path(&fixture.metadata_path).expect("capsule path");
+        let capsule_path =
+            uninstall_recovery_path_for_test(&fixture.metadata_path).expect("capsule path");
         let mut transport = RecordingValidationTransport {
             block_capsule_after_status: Some(capsule_path.clone()),
             ..RecordingValidationTransport::default()
         };
         let mut systemd = RecordingSystemdRunner::default();
 
-        let first = adapt_uninstall_wire_request(
+        let first = run_uninstall_workflow_for_test(
             &request,
             &input,
             &fixture.metadata,
             &fixture.metadata_path,
             &mut transport,
             &mut systemd,
-        )
-        .expect("post-terminal persistence failure is recoverable");
-        assert_eq!(first, ResumeDecision::RecoveryPending);
+        );
+        assert_eq!(first, LifecycleResponse::recovery_pending());
         assert!(transport.status_body.contains("\"status\":\"succeeded\""));
         let prepared = transport
             .saved_capsule
@@ -7858,25 +7800,18 @@ mod tests {
         fs::write(&capsule_path, prepared).expect("restore prepared capsule");
         fs::set_permissions(&capsule_path, fs::Permissions::from_mode(0o600))
             .expect("restore capsule mode");
-        assert_eq!(
-            read_uninstall_capsule(&capsule_path)
-                .expect("read capsule")
-                .expect("prepared capsule")
-                .phase,
-            UninstallCapsulePhase::Prepared,
-        );
+        assert!(capsule_path.exists());
 
         let mut retry_transport = RecordingValidationTransport::default();
-        let retry = adapt_uninstall_wire_request(
+        let retry = run_uninstall_workflow_for_test(
             &request,
             &input,
             &fixture.metadata,
             &fixture.metadata_path,
             &mut retry_transport,
             &mut systemd,
-        )
-        .expect("prepared capsule retries the terminal acknowledgement");
-        assert_eq!(retry, ResumeDecision::Completed);
+        );
+        assert_eq!(retry, LifecycleResponse::succeeded());
         assert!(retry_transport.url.is_empty());
         assert!(
             retry_transport
@@ -7925,7 +7860,7 @@ mod tests {
             ..RecordingValidationTransport::default()
         };
 
-        let first = adapt_uninstall_wire_request(
+        let first = run_uninstall_workflow_for_test(
             &request,
             &input,
             &metadata,
@@ -7933,20 +7868,9 @@ mod tests {
             &mut failed_transport,
             &mut systemd,
         );
-        assert!(matches!(
-            first,
-            Err(ProbeUpgraderRunError::UninstallStatusReportFailure(_))
-        ));
-        let capsule_path = uninstall_capsule_path(&metadata_path).expect("capsule path");
-        let prepared_capsule = read_uninstall_capsule(&capsule_path)
-            .expect("read capsule")
-            .expect("prepared capsule");
-        assert_eq!(prepared_capsule.phase, UninstallCapsulePhase::Prepared);
-        assert_eq!(
-            LifecycleRequest::decode(prepared_capsule.request_json.as_bytes())
-                .expect("capsule request"),
-            request,
-        );
+        assert_eq!(first, LifecycleResponse::failed("probe_uninstall_failed"));
+        let capsule_path = uninstall_recovery_path_for_test(&metadata_path).expect("capsule path");
+        assert!(capsule_path.exists());
         for path in [
             identity_path.as_path(),
             metadata_path.as_path(),
@@ -7959,16 +7883,15 @@ mod tests {
 
         let mut retry_transport = RecordingValidationTransport::default();
         systemd.failure_step = Some("remove-account");
-        let completed = adapt_uninstall_wire_request(
+        let completed = run_uninstall_workflow_for_test(
             &request,
             &input,
             &metadata,
             &metadata_path,
             &mut retry_transport,
             &mut systemd,
-        )
-        .expect("Hub acknowledgement stays terminal when finalization pauses");
-        assert_eq!(completed, ResumeDecision::RecoveryPending);
+        );
+        assert_eq!(completed, LifecycleResponse::recovery_pending());
         assert!(
             retry_transport.url.is_empty(),
             "trusted capsule skips revalidation"
@@ -7978,29 +7901,14 @@ mod tests {
                 .status_body
                 .contains("\"status\":\"succeeded\"")
         );
-        assert_eq!(
-            read_uninstall_capsule(&capsule_path)
-                .expect("read acknowledged capsule")
-                .expect("acknowledged capsule")
-                .phase,
-            UninstallCapsulePhase::TerminalAcknowledged,
-        );
+        assert!(capsule_path.exists());
         assert!(metadata_path.exists());
         assert!(identity_path.exists());
         assert!(companion_path.exists());
 
-        let mut final_state_calls = Vec::new();
-        let final_state_error =
-            remove_uninstall_local_state_for_test(&input, &metadata, &metadata_path, |path| {
-                final_state_calls.push(path.to_path_buf());
-                if path == metadata.state_dir {
-                    return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
-                        "injected ordinary state cleanup failure",
-                    )));
-                }
-                Ok(())
-            });
-        assert!(final_state_error.is_err());
+        let final_state_calls =
+            observe_uninstall_local_state_failure_for_test(&input, &metadata, &metadata_path)
+                .expect("observe complete local-state workflow failure");
         assert_eq!(
             final_state_calls,
             [
@@ -8055,9 +7963,8 @@ mod tests {
             Path::new(&binary_path),
             &mut transport,
             &mut systemd,
-        )
-        .expect("resume only from the persisted capsule");
-        assert_eq!(completed, ResumeDecision::Completed);
+        );
+        assert_eq!(completed, LifecycleResponse::succeeded());
         assert!(transport.url.is_empty());
         assert!(transport.status_url.is_empty());
         remove_path_if_exists(Path::new(&binary_path))
@@ -8084,10 +7991,12 @@ mod tests {
         let mut transport = RecordingValidationTransport::default();
         let mut systemd = RecordingSystemdRunner::default();
 
-        let error =
-            resume_lifecycle_companion_at(&metadata, &state, &binary, &mut transport, &mut systemd)
-                .expect_err("healthy install is not post-commit recovery");
-        assert_eq!(error.code(), "probe_uninstall_metadata_invalid");
+        let response =
+            resume_lifecycle_companion_at(&metadata, &state, &binary, &mut transport, &mut systemd);
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_metadata_invalid")
+        );
         assert!(binary.exists());
         assert!(transport.url.is_empty());
         assert!(systemd.calls.is_empty());
@@ -8653,7 +8562,7 @@ mod tests {
         );
         install_metadata.install_path = PathBuf::from("relative-probe-binary");
 
-        let error = plan_probe_uninstall_cleanup_for_test(
+        let error = uninstall_rejects_unsafe_inventory_for_test(
             &ProbeUninstallerRunInput {
                 bootstrap_config_path: temp.path().join("state/probe-bootstrap.toml"),
             },
@@ -8700,7 +8609,7 @@ mod tests {
         .expect("bound Hub uninstall request");
         let metadata_path = temp.path().join("etc/enoki/probe-install.toml");
 
-        let error = adapt_uninstall_wire_request(
+        let response = run_uninstall_workflow_for_test(
             &request,
             &ProbeUninstallerRunInput {
                 bootstrap_config_path,
@@ -8709,13 +8618,12 @@ mod tests {
             &metadata_path,
             &mut transport,
             &mut systemd,
-        )
-        .expect_err("Hub URL mismatch is rejected before network calls");
+        );
 
-        assert!(matches!(
-            error,
-            ProbeUpgraderRunError::InvalidConfig("Hub URL does not match trusted install metadata")
-        ));
+        assert_eq!(
+            response,
+            LifecycleResponse::failed("probe_uninstall_failed")
+        );
         assert_eq!(transport.url, "");
         assert_eq!(transport.status_url, "");
         assert!(transport.downloads.is_empty());

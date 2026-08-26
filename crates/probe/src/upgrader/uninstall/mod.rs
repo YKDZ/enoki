@@ -38,39 +38,109 @@ pub(in crate::upgrader) use cleanup::{
 };
 
 #[cfg(test)]
-pub(in crate::upgrader) fn execute_uninstall_cleanup_phases_for_test(
+pub(in crate::upgrader) fn run_uninstall_workflow_for_test(
+    request: &LifecycleRequest,
+    input: &ProbeUninstallerRunInput,
+    metadata: &TrustedProbeInstallMetadata,
+    install_metadata_path: &Path,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> LifecycleResponse {
+    lifecycle_response_from_resume_decision(adapt_uninstall_wire_request(
+        request,
+        input,
+        metadata,
+        install_metadata_path,
+        transport,
+        systemd,
+    ))
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn uninstall_recovery_path_for_test(
+    install_metadata_path: &Path,
+) -> Result<PathBuf, ProbeUpgraderRunError> {
+    uninstall_capsule_path(install_metadata_path)
+}
+
+#[cfg(test)]
+pub(in crate::upgrader) fn execute_uninstall_preserving_recovery_entries_for_test(
     input: &ProbeUninstallerRunInput,
     metadata: &TrustedProbeInstallMetadata,
     install_metadata_path: &Path,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-    after_prepare: impl FnOnce(),
-) -> Result<(), ProbeUpgraderRunError> {
+    recovery_entries: &[&Path],
+) -> Result<bool, ProbeUpgraderRunError> {
     let plan = cleanup::plan_probe_uninstall_cleanup(input, metadata, install_metadata_path)?;
     cleanup::prepare_probe_uninstall_cleanup(&plan, systemd)?;
-    after_prepare();
+    let entries_survived = recovery_entries.iter().all(|path| path.exists());
     cleanup::finalize_recoverable_uninstall_cleanup(&plan, systemd)?;
-    cleanup::remove_lifecycle_companion_binary(&plan)
+    cleanup::remove_lifecycle_companion_binary(&plan)?;
+    Ok(entries_survived)
 }
 
 #[cfg(test)]
-pub(in crate::upgrader) fn remove_uninstall_local_state_for_test(
+pub(in crate::upgrader) fn observe_uninstall_local_state_failure_for_test(
     input: &ProbeUninstallerRunInput,
     metadata: &TrustedProbeInstallMetadata,
     install_metadata_path: &Path,
-    remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
-) -> Result<(), ProbeUpgraderRunError> {
+) -> Result<Vec<PathBuf>, ProbeUpgraderRunError> {
     let plan = cleanup::plan_probe_uninstall_recovery(input, metadata, install_metadata_path)?;
-    cleanup::remove_uninstall_local_state_with(&plan, remove)
+    let mut calls = Vec::new();
+    let result = cleanup::remove_uninstall_local_state_with(&plan, |path| {
+        calls.push(path.to_path_buf());
+        if path == metadata.state_dir {
+            return Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                "injected ordinary state cleanup failure",
+            )));
+        }
+        Ok(())
+    });
+    result.expect_err("state cleanup failure must remain observable");
+    Ok(calls)
 }
 
 #[cfg(test)]
-pub(in crate::upgrader) fn finalize_replacement_local_state_for_test(
+pub(in crate::upgrader) fn replacement_cleanup_metadata_exclusion_for_test(
     bootstrap_config_path: &Path,
     state_dir: &Path,
-    remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
-    verify: impl FnOnce() -> Result<(), ProbeUpgraderRunError>,
-) -> Result<(), ProbeUpgraderRunError> {
-    cleanup::finalize_replacement_local_state_with(bootstrap_config_path, state_dir, remove, verify)
+    metadata_path: &Path,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProbeUpgraderRunError> {
+    let mut failed_calls = Vec::new();
+    let failed = cleanup::finalize_replacement_local_state_with(
+        bootstrap_config_path,
+        state_dir,
+        |path| {
+            failed_calls.push(path.to_path_buf());
+            Ok(())
+        },
+        || {
+            Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                "ordinary cleanup verification failure",
+            )))
+        },
+    );
+    failed.expect_err("verification failure must remain observable");
+    let mut completed_calls = Vec::new();
+    cleanup::finalize_replacement_local_state_with(
+        bootstrap_config_path,
+        state_dir,
+        |path| {
+            completed_calls.push(path.to_path_buf());
+            Ok(())
+        },
+        || Ok(()),
+    )?;
+    if failed_calls
+        .iter()
+        .chain(&completed_calls)
+        .any(|path| path == metadata_path)
+    {
+        return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
+            "Replacement cleanup retired metadata before its durable receipt",
+        ));
+    }
+    Ok((failed_calls, completed_calls))
 }
 
 #[cfg(test)]
@@ -81,7 +151,7 @@ pub(in crate::upgrader) fn validate_owned_bootstrap_state_for_test(
 }
 
 #[cfg(test)]
-pub(in crate::upgrader) fn plan_probe_uninstall_cleanup_for_test(
+pub(in crate::upgrader) fn uninstall_rejects_unsafe_inventory_for_test(
     input: &ProbeUninstallerRunInput,
     metadata: &TrustedProbeInstallMetadata,
     install_metadata_path: &Path,
@@ -90,7 +160,7 @@ pub(in crate::upgrader) fn plan_probe_uninstall_cleanup_for_test(
 }
 
 #[cfg(test)]
-pub(in crate::upgrader) fn commit_replacement_cleanup_with_metadata_retirement_for_test<
+pub(in crate::upgrader) fn replacement_metadata_retirement_failure_for_test<
     S: enoki_probe_bootstrap::replacement::ReplacementCommitStore,
 >(
     intent: enoki_probe_bootstrap::replacement::ReplacementIntent,
@@ -98,61 +168,64 @@ pub(in crate::upgrader) fn commit_replacement_cleanup_with_metadata_retirement_f
     install_metadata_path: &Path,
     test_root: Option<&Path>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
-    retire_metadata: impl FnOnce(&Path) -> Result<(), ProbeUpgraderRunError>,
-) -> Result<
-    enoki_probe_bootstrap::replacement::ReplacementCommitFact,
-    enoki_probe_bootstrap::replacement::ReplacementCommitError<S::Error, ProbeUpgraderRunError>,
-> {
-    cleanup::commit_replacement_cleanup_with_metadata_retirement(
-        intent,
-        store,
-        install_metadata_path,
-        test_root,
-        systemd,
-        retire_metadata,
+) -> bool {
+    matches!(
+        cleanup::commit_replacement_cleanup_with_metadata_retirement(
+            intent,
+            store,
+            install_metadata_path,
+            test_root,
+            systemd,
+            |_| {
+                Err(ProbeUpgraderRunError::Io(std::io::Error::other(
+                    "retire failed",
+                )))
+            },
+        ),
+        Err(enoki_probe_bootstrap::replacement::ReplacementCommitError::Effect(_))
     )
 }
 
-pub(super) const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
-pub(super) const MAX_UNINSTALL_CAPSULE_BYTES: u64 = 64 * 1024;
+const UNINSTALL_CAPSULE_FILE_NAME: &str = "probe-uninstall.capsule";
+const MAX_UNINSTALL_CAPSULE_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub(super) enum UninstallCapsulePhase {
+enum UninstallCapsulePhase {
     Verified,
     Prepared,
     TerminalAcknowledged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ResumeDecision {
+enum ResumeDecision {
     Completed,
     RecoveryPending,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct CompanionBinaryFacts {
-    pub(super) regular_file: bool,
-    pub(super) link_count: u64,
-    pub(super) owner_uid: u32,
-    pub(super) mode: u32,
+struct CompanionBinaryFacts {
+    regular_file: bool,
+    link_count: u64,
+    owner_uid: u32,
+    mode: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PostCommitSelfFinalizeFacts {
-    pub(super) install_metadata_absent: bool,
-    pub(super) install_state_absent: bool,
-    pub(super) companion_binary: CompanionBinaryFacts,
+struct PostCommitSelfFinalizeFacts {
+    install_metadata_absent: bool,
+    install_state_absent: bool,
+    companion_binary: CompanionBinaryFacts,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct UninstallRecoveryCapsule {
-    pub(super) schema_version: u16,
-    pub(super) authority_sha256: String,
-    pub(super) phase: UninstallCapsulePhase,
-    pub(super) request_json: String,
-    pub(super) install_metadata: TrustedProbeInstallMetadata,
+struct UninstallRecoveryCapsule {
+    schema_version: u16,
+    authority_sha256: String,
+    phase: UninstallCapsulePhase,
+    request_json: String,
+    install_metadata: TrustedProbeInstallMetadata,
 }
 
 pub(super) fn run_uninstall_lifecycle_adapter(
@@ -211,14 +284,14 @@ pub(super) fn run_uninstall_lifecycle_adapter(
     ))
 }
 
-pub(super) struct HubUninstallIntent<'a> {
+struct HubUninstallIntent<'a> {
     operation_id: &'a str,
     operation_token: &'a str,
     mechanics: UninstallMechanics<'a>,
 }
 
 impl<'a> HubUninstallIntent<'a> {
-    pub(super) fn classify(
+    fn classify(
         request: &'a LifecycleRequest,
         input: &'a ProbeUninstallerRunInput,
         install_metadata: &'a TrustedProbeInstallMetadata,
@@ -247,12 +320,12 @@ impl<'a> HubUninstallIntent<'a> {
     }
 }
 
-pub(super) struct LocalUninstallIntent<'a> {
+struct LocalUninstallIntent<'a> {
     mechanics: UninstallMechanics<'a>,
 }
 
 impl<'a> LocalUninstallIntent<'a> {
-    pub(super) fn classify(
+    fn classify(
         request: &'a LifecycleRequest,
         input: &'a ProbeUninstallerRunInput,
         install_metadata: &'a TrustedProbeInstallMetadata,
@@ -278,15 +351,15 @@ impl<'a> LocalUninstallIntent<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum HubUninstallResult {
+enum HubUninstallResult {
     Complete,
     RecoveryPending,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct LocalUninstallComplete;
+struct LocalUninstallComplete;
 
-pub(super) fn prepare_uninstall_mechanics<'a>(
+fn prepare_uninstall_mechanics<'a>(
     request: &'a LifecycleRequest,
     input: &'a ProbeUninstallerRunInput,
     install_metadata: &'a TrustedProbeInstallMetadata,
@@ -330,7 +403,7 @@ pub(super) fn prepare_uninstall_mechanics<'a>(
     })
 }
 
-pub(super) struct UninstallMechanics<'a> {
+struct UninstallMechanics<'a> {
     request: &'a LifecycleRequest,
     plan: ProbeUninstallCleanupPlan<'a>,
     capsule_path: PathBuf,
@@ -381,7 +454,7 @@ impl UninstallMechanics<'_> {
         self.persist_verified()
     }
 
-    pub(super) fn persist_verified(&mut self) -> Result<(), ProbeUpgraderRunError> {
+    fn persist_verified(&mut self) -> Result<(), ProbeUpgraderRunError> {
         if self.capsule.is_none() {
             persist_uninstall_capsule(
                 &self.capsule_path,
@@ -394,7 +467,7 @@ impl UninstallMechanics<'_> {
         Ok(())
     }
 
-    pub(super) fn prepare(
+    fn prepare(
         &mut self,
         systemd: &mut impl ProbeUpgraderSystemdRunner,
     ) -> Result<(), ProbeUpgraderRunError> {
@@ -435,7 +508,7 @@ impl UninstallMechanics<'_> {
         Ok(())
     }
 
-    pub(super) fn acknowledge_terminal(&mut self) -> Result<(), ProbeUpgraderRunError> {
+    fn acknowledge_terminal(&mut self) -> Result<(), ProbeUpgraderRunError> {
         persist_uninstall_capsule(
             &self.capsule_path,
             self.request,
@@ -446,7 +519,7 @@ impl UninstallMechanics<'_> {
         Ok(())
     }
 
-    pub(super) fn finalize(
+    fn finalize(
         &mut self,
         systemd: &mut impl ProbeUpgraderSystemdRunner,
     ) -> Result<(), ProbeUpgraderRunError> {
@@ -464,7 +537,7 @@ impl UninstallMechanics<'_> {
     }
 }
 
-pub(super) fn coordinate_hub_uninstall(
+fn coordinate_hub_uninstall(
     intent: HubUninstallIntent<'_>,
     transport: &mut impl ProbeUpgraderValidationTransport,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
@@ -483,7 +556,7 @@ pub(super) fn coordinate_hub_uninstall(
     Ok(HubUninstallResult::Complete)
 }
 
-pub(super) fn coordinate_local_uninstall(
+fn coordinate_local_uninstall(
     intent: LocalUninstallIntent<'_>,
     systemd: &mut impl ProbeUpgraderSystemdRunner,
 ) -> Result<LocalUninstallComplete, ProbeUpgraderRunError> {
@@ -495,7 +568,7 @@ pub(super) fn coordinate_local_uninstall(
     Ok(LocalUninstallComplete)
 }
 
-pub(super) fn adapt_uninstall_wire_request(
+fn adapt_uninstall_wire_request(
     request: &LifecycleRequest,
     input: &ProbeUninstallerRunInput,
     install_metadata: &TrustedProbeInstallMetadata,
@@ -534,14 +607,14 @@ pub(super) fn adapt_uninstall_wire_request(
     }
 }
 
-pub(super) fn commit_lifecycle_capsule_with(
+fn commit_lifecycle_capsule_with(
     capsule_path: &Path,
     mut remove: impl FnMut(&Path) -> Result<(), ProbeUpgraderRunError>,
 ) -> Result<(), ProbeUpgraderRunError> {
     remove(capsule_path)
 }
 
-pub(super) fn lifecycle_response_from_resume_decision(
+fn lifecycle_response_from_resume_decision(
     decision: Result<ResumeDecision, ProbeUpgraderRunError>,
 ) -> LifecycleResponse {
     match decision {
@@ -551,7 +624,7 @@ pub(super) fn lifecycle_response_from_resume_decision(
     }
 }
 
-pub(super) fn resume_lifecycle_companion_at(
+fn resume_lifecycle_companion_decision_at(
     install_metadata_path: &Path,
     install_state_dir: &Path,
     companion_binary_path: &Path,
@@ -587,7 +660,23 @@ pub(super) fn resume_lifecycle_companion_at(
     )
 }
 
-pub(super) fn read_post_commit_self_finalize_facts(
+pub(super) fn resume_lifecycle_companion_at(
+    install_metadata_path: &Path,
+    install_state_dir: &Path,
+    companion_binary_path: &Path,
+    transport: &mut impl ProbeUpgraderValidationTransport,
+    systemd: &mut impl ProbeUpgraderSystemdRunner,
+) -> LifecycleResponse {
+    lifecycle_response_from_resume_decision(resume_lifecycle_companion_decision_at(
+        install_metadata_path,
+        install_state_dir,
+        companion_binary_path,
+        transport,
+        systemd,
+    ))
+}
+
+fn read_post_commit_self_finalize_facts(
     install_metadata_path: &Path,
     install_state_dir: &Path,
     companion_binary_path: &Path,
@@ -607,7 +696,7 @@ pub(super) fn read_post_commit_self_finalize_facts(
     })
 }
 
-pub(super) fn path_absence_fact(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
+fn path_absence_fact(path: &Path) -> Result<bool, ProbeUpgraderRunError> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Ok(_) => Ok(false),
@@ -615,7 +704,7 @@ pub(super) fn path_absence_fact(path: &Path) -> Result<bool, ProbeUpgraderRunErr
     }
 }
 
-pub(super) fn post_commit_self_finalize_policy(
+fn post_commit_self_finalize_policy(
     facts: PostCommitSelfFinalizeFacts,
 ) -> Result<ResumeDecision, ()> {
     (facts.install_metadata_absent
@@ -628,9 +717,7 @@ pub(super) fn post_commit_self_finalize_policy(
         .ok_or(())
 }
 
-pub(super) fn uninstall_capsule_path(
-    install_metadata_path: &Path,
-) -> Result<PathBuf, ProbeUpgraderRunError> {
+fn uninstall_capsule_path(install_metadata_path: &Path) -> Result<PathBuf, ProbeUpgraderRunError> {
     let Some(parent) = install_metadata_path.parent() else {
         return Err(ProbeUpgraderRunError::InvalidInstallMetadata(
             "install metadata path has no parent",
@@ -639,16 +726,14 @@ pub(super) fn uninstall_capsule_path(
     Ok(parent.join(UNINSTALL_CAPSULE_FILE_NAME))
 }
 
-pub(super) fn lifecycle_authority_sha256(
-    request: &LifecycleRequest,
-) -> Result<String, ProbeUpgraderRunError> {
+fn lifecycle_authority_sha256(request: &LifecycleRequest) -> Result<String, ProbeUpgraderRunError> {
     request
         .encode()
         .map(|bytes| hex_sha256(&bytes))
         .map_err(|_| ProbeUpgraderRunError::InvalidInstallMetadata("lifecycle authority invalid"))
 }
 
-pub(super) fn read_uninstall_capsule(
+fn read_uninstall_capsule(
     path: &Path,
 ) -> Result<Option<UninstallRecoveryCapsule>, ProbeUpgraderRunError> {
     let metadata = match fs::symlink_metadata(path) {
@@ -688,7 +773,7 @@ pub(super) fn read_uninstall_capsule(
     Ok(Some(capsule))
 }
 
-pub(super) fn persist_uninstall_capsule(
+fn persist_uninstall_capsule(
     path: &Path,
     request: &LifecycleRequest,
     install_metadata: &TrustedProbeInstallMetadata,
@@ -743,7 +828,7 @@ pub(super) fn persist_uninstall_capsule(
     sync_directory(parent)
 }
 
-pub(super) fn uninstall_capsule_phase_rank(phase: UninstallCapsulePhase) -> u8 {
+fn uninstall_capsule_phase_rank(phase: UninstallCapsulePhase) -> u8 {
     match phase {
         UninstallCapsulePhase::Verified => 0,
         UninstallCapsulePhase::Prepared => 1,
@@ -751,7 +836,7 @@ pub(super) fn uninstall_capsule_phase_rank(phase: UninstallCapsulePhase) -> u8 {
     }
 }
 
-pub(super) fn capsule_receipt_matches_request(
+fn capsule_receipt_matches_request(
     metadata: &TrustedProbeInstallMetadata,
     request: &LifecycleRequest,
 ) -> bool {

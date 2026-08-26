@@ -281,12 +281,46 @@ fn uninstall_implementation_lives_behind_one_focused_crate_private_module() {
     assert!(UPGRADER.contains("mod uninstall;"));
     assert!(!UNINSTALL.contains("use super::*"));
     assert!(!UNINSTALL_CLEANUP.contains("use super::*"));
-    assert_eq!(
-        UNINSTALL_CLEANUP.matches("pub(in crate::upgrader)").count(),
-        3,
-        "cleanup implementation may expose only two cfg(test) complete oracles and one Replacement seam",
+    let cleanup_without_test_oracles = UNINSTALL_CLEANUP.replace(
+        "#[cfg(test)]\npub(in crate::upgrader)",
+        "#[cfg(test)]\nTEST_ONLY_PARENT_VISIBILITY",
     );
+    assert_eq!(
+        cleanup_without_test_oracles
+            .matches("pub(in crate::upgrader)")
+            .count(),
+        1,
+        "cleanup implementation may expose only one production seam to upgrader",
+    );
+    assert!(cleanup_without_test_oracles.contains(
+        "pub(in crate::upgrader) fn commit_replacement_and_cleanup_install_with_systemd"
+    ));
     assert!(!UPGRADER.contains("use super::uninstall::cleanup"));
+    assert!(
+        !UPGRADER.contains("use super::uninstall::*"),
+        "父级 tests 不得通过 wildcard 旁路 Uninstall interface",
+    );
+    let parent_surface = UNINSTALL
+        .lines()
+        .filter(|line| line.starts_with("pub(super)"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        parent_surface,
+        [
+            "pub(super) use cleanup::commit_replacement_and_cleanup_install_with_systemd;",
+            "pub(super) fn run_uninstall_lifecycle_adapter(",
+            "pub(super) fn resume_lifecycle_companion_at(",
+        ],
+        "focused Uninstall implementation layer 只向父级暴露两个 adapter hook 与一个 Replacement seam",
+    );
+    let uninstall_without_test_wrappers = UNINSTALL.replace(
+        "#[cfg(test)]\npub(in crate::upgrader)",
+        "#[cfg(test)]\nTEST_ONLY_PARENT_VISIBILITY",
+    );
+    assert!(
+        !uninstall_without_test_wrappers.contains("pub(in crate::upgrader)"),
+        "新增的父级 test interface 必须显式标注 cfg(test)",
+    );
     let production_adapter = UPGRADER
         .split("#[cfg(test)]\nmod tests")
         .next()
