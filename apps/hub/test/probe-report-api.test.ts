@@ -847,7 +847,7 @@ describe("Probe report API", () => {
     database.close();
   });
 
-  it("rejects hash-only Host Profile Produced without satisfying readiness", async () => {
+  it("requests replay for an unknown Host Profile hash without satisfying readiness", async () => {
     const database = await createTemporaryDatabase();
     const app = createHubApp({
       auth: {
@@ -882,9 +882,14 @@ describe("Probe report API", () => {
         )
       ).status,
     ).toBe(200);
+    expect(
+      database.sqlite.prepare("select status from enrollment_tokens").get(),
+    ).toEqual({ status: "verifying" });
+    const snapshotHash = hashStableHostProfile(sampleHostProfileSnapshot());
     const hashOnly = ReportRequest.encode(
       ReportRequest.create({
         bootId: "boot-hash-only-readiness",
+        enrollmentId: registration.enrollmentId,
         metrics: [
           {
             collectedAtMs: 1_725_000_000_000,
@@ -900,23 +905,373 @@ describe("Probe report API", () => {
         snapshots: [
           {
             collectorId: "official.host-profile",
-            snapshotHash: hashStableHostProfile(sampleHostProfileSnapshot()),
+            snapshotHash,
           },
         ],
       }),
     ).finish();
 
+    const response = await app.request(
+      "/api/probe/report",
+      signedProbeRequest(registration, "/api/probe/report", hashOnly),
+    );
+    expect(response.status).toBe(200);
+    expect(
+      root.enoki.v1.ProbeReportResponse.decode(
+        new Uint8Array(await response.arrayBuffer()),
+      ).requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+    expect(
+      database.sqlite.prepare("select status from enrollment_tokens").get(),
+    ).toEqual({ status: "verifying" });
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-hash-only-readiness",
+      fulfilled_at_ms: null,
+      sequence: 2,
+      snapshot_hash: snapshotHash,
+    });
+    database.close();
+  });
+
+  it("accepts known compact Host Profiles and requests replay for an unknown current-identity hash", async () => {
+    const database = await createTemporaryDatabase();
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+    });
+    const ownerSession = await loginOwner(app);
+    const registration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const bootId = "boot-known-produced-compact";
+    const hostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.1.0",
+    });
+    const snapshotHash = hashStableHostProfile(hostProfile);
+    const send = (sequence: number, full: boolean) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId,
+          metrics: [
+            {
+              collectedAtMs: 1_725_000_000_000 + sequence,
+              collectorOutcomes: [
+                { collectorId: "official.host-profile", state: 1 },
+              ],
+              sequence,
+            },
+          ],
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots: [
+            {
+              collectorId: "official.host-profile",
+              ...(full ? { hostProfile } : {}),
+              snapshotHash,
+            },
+          ],
+        }),
+      ).finish();
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    };
+
+    const startup = ReportRequest.encode(
+      ReportRequest.create({
+        bootId,
+        probeAssetBundleVersion: "0.1.0",
+        probeConfigurationVersion: "default-v1",
+        probeId: registration.probeId,
+        sequenceEnd: 1,
+        sequenceStart: 1,
+      }),
+    ).finish();
     expect(
       (
         await app.request(
           "/api/probe/report",
-          signedProbeRequest(registration, "/api/probe/report", hashOnly),
+          signedProbeRequest(registration, "/api/probe/report", startup),
+        )
+      ).status,
+    ).toBe(200);
+    expect((await send(2, true)).status).toBe(200);
+    expect((await send(3, false)).status).toBe(200);
+    expect((await send(4, false)).status).toBe(200);
+
+    const host = database.hosts.findByProbeId(registration.probeId);
+    if (!host) throw new Error("registered Host is missing");
+    database.sqlite
+      .prepare("delete from enrollment_tokens where managed_host_id = ?")
+      .run(host.id);
+    expect((await send(5, false)).status).toBe(200);
+
+    const otherRegistration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const otherProfile = sampleHostProfileSnapshot({
+      hostname: "other-host",
+      probeAssetBundleVersion: "0.1.0",
+    });
+    const otherHash = hashStableHostProfile(otherProfile);
+    const sendOther = (
+      sequence: number,
+      snapshotHash: string,
+      full: boolean,
+    ) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: "boot-other-host-compact",
+          enrollmentId: otherRegistration.enrollmentId,
+          metrics:
+            sequence === 1
+              ? []
+              : [
+                  {
+                    collectedAtMs: 1_725_000_000_000 + sequence,
+                    collectorOutcomes: [
+                      { collectorId: "official.host-profile", state: 1 },
+                    ],
+                    sequence,
+                  },
+                ],
+          probeAssetBundleVersion: sequence === 1 ? "0.1.0" : undefined,
+          probeConfigurationVersion: "default-v1",
+          probeId: otherRegistration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots:
+            sequence === 1
+              ? []
+              : [
+                  {
+                    collectorId: "official.host-profile",
+                    ...(full ? { hostProfile: otherProfile } : {}),
+                    snapshotHash,
+                  },
+                ],
+        }),
+      ).finish();
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(otherRegistration, "/api/probe/report", body),
+      );
+    };
+    expect((await sendOther(1, "", false)).status).toBe(200);
+    expect((await sendOther(2, otherHash, true)).status).toBe(200);
+    const unknownCompact = await sendOther(3, snapshotHash, false);
+    expect(unknownCompact.status).toBe(200);
+    expect(
+      root.enoki.v1.ProbeReportResponse.decode(
+        new Uint8Array(await unknownCompact.arrayBuffer()),
+      ).requestedSnapshotCollectorIds,
+    ).toEqual(["official.host-profile"]);
+    expect(
+      database.sqlite
+        .prepare(
+          "select boot_id, sequence, snapshot_hash, fulfilled_at_ms from snapshot_replay_requests",
+        )
+        .get(),
+    ).toEqual({
+      boot_id: "boot-other-host-compact",
+      fulfilled_at_ms: null,
+      sequence: 3,
+      snapshot_hash: snapshotHash,
+    });
+
+    database.close();
+  });
+
+  it("rejects an old-identity Host Profile hash until the current identity sends the full snapshot", async () => {
+    const database = await createTemporaryDatabase();
+    let nowMs = 1_725_000_000_000;
+    const app = createHubApp({
+      auth: {
+        failureDelayMs: 0,
+        ownerPassword: "correct horse battery staple",
+        sessionCookieName: "enoki_owner_session",
+      },
+      database,
+      now: () => nowMs,
+    });
+    const ownerSession = await loginOwner(app);
+    const firstRegistration = await registerProbe(
+      app,
+      await createEnrollmentToken(app, ownerSession),
+    );
+    const host = database.hosts.findByProbeId(firstRegistration.probeId);
+    if (!host) throw new Error("registered Host is missing");
+    const ReportRequest = root.enoki.v1.ProbeReportRequest;
+    const hostProfile = sampleHostProfileSnapshot({
+      probeAssetBundleVersion: "0.1.0",
+    });
+    const snapshotHash = hashStableHostProfile(hostProfile);
+    const send = (
+      registration: {
+        enrollmentId?: string;
+        privateKeyPem: string;
+        probeId: string;
+      },
+      sequence: number,
+      full: boolean,
+      produced: boolean,
+    ) => {
+      const body = ReportRequest.encode(
+        ReportRequest.create({
+          bootId: `boot-${registration.probeId}`,
+          enrollmentId: registration.enrollmentId,
+          metrics: produced
+            ? [
+                {
+                  collectedAtMs: nowMs,
+                  collectorOutcomes: [
+                    { collectorId: "official.host-profile", state: 1 },
+                  ],
+                  sequence,
+                },
+              ]
+            : [],
+          probeAssetBundleVersion: sequence === 1 ? "0.1.0" : undefined,
+          probeConfigurationVersion: "default-v1",
+          probeId: registration.probeId,
+          sequenceEnd: sequence,
+          sequenceStart: sequence,
+          snapshots:
+            sequence === 1
+              ? []
+              : [
+                  {
+                    collectorId: "official.host-profile",
+                    ...(full ? { hostProfile } : {}),
+                    snapshotHash,
+                  },
+                ],
+        }),
+      ).finish();
+      return app.request(
+        "/api/probe/report",
+        signedProbeRequest(registration, "/api/probe/report", body),
+      );
+    };
+
+    expect((await send(firstRegistration, 1, false, false)).status).toBe(200);
+    expect((await send(firstRegistration, 2, true, true)).status).toBe(200);
+
+    const currentIdentity = createTestProbeIdentity();
+    const currentRegistration = {
+      enrollmentId: "enr_current_identity_profile",
+      privateKeyPem: currentIdentity.privateKeyPem,
+      probeId: "probe_current_identity_profile",
+    };
+    database.sqlite
+      .prepare("delete from probe_request_nonces where probe_id = ?")
+      .run(firstRegistration.probeId);
+    database.sqlite
+      .prepare(
+        "update managed_hosts set probe_id = ?, probe_public_key_pem = ?, last_report_at_ms = null where id = ?",
+      )
+      .run(currentRegistration.probeId, currentIdentity.publicKeyPem, host.id);
+    database.sqlite
+      .prepare(
+        `insert into enrollment_tokens (
+          enrollment_id, token_hash, created_at_ms, expires_at_ms, used_at_ms,
+          target_kind, target_host_id, expected_hub_origin, expected_probe_id,
+          expected_probe_version, source_probe_sha256_json,
+          target_asset_set_digest, target_probe_version, status,
+          managed_host_id, verification_deadline_at_ms
+        ) values (?, ?, ?, ?, ?, 'manual_reinstall', ?, ?, ?, '0.1.0', ?, ?,
+          '0.1.0', 'verifying', ?, ?)`,
+      )
+      .run(
+        currentRegistration.enrollmentId,
+        "current-identity-token-hash",
+        nowMs,
+        nowMs + 600_000,
+        nowMs,
+        host.id,
+        "http://localhost",
+        firstRegistration.probeId,
+        JSON.stringify(["a".repeat(64)]),
+        `sha256:${"b".repeat(64)}`,
+        host.id,
+        nowMs + 600_000,
+      );
+    expect(currentRegistration.probeId).not.toBe(firstRegistration.probeId);
+    expect(
+      database.snapshotCollectors.hostProfile.hasSnapshot(
+        host.id,
+        snapshotHash,
+      ),
+    ).toBe(true);
+    expect((await send(currentRegistration, 1, false, false)).status).toBe(200);
+
+    const oldIdentityCompact = await send(firstRegistration, 3, false, true);
+    expect(oldIdentityCompact.status).toBe(401);
+    const beforeWrongEnrollment = database.sqlite
+      .prepare(
+        `select
+          (select status from enrollment_tokens where enrollment_id = ?) as status,
+          (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
+          (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
+          (select count(*) from report_observations) as observationCount,
+          (select count(*) from metric_samples) as metricCount,
+          (select count(*) from audit_log) as auditCount`,
+      )
+      .get(
+        currentRegistration.enrollmentId,
+        currentRegistration.enrollmentId,
+        host.id,
+      );
+    expect(
+      (
+        await send(
+          {
+            ...currentRegistration,
+            enrollmentId: firstRegistration.enrollmentId,
+          },
+          2,
+          true,
+          true,
         )
       ).status,
     ).toBe(400);
     expect(
-      database.sqlite.prepare("select status from enrollment_tokens").get(),
-    ).toEqual({ status: "verifying" });
+      database.sqlite
+        .prepare(
+          `select
+            (select status from enrollment_tokens where enrollment_id = ?) as status,
+            (select ready_at_ms from enrollment_tokens where enrollment_id = ?) as readyAtMs,
+            (select snapshot_hash from official_host_profiles where managed_host_id = ?) as snapshotHash,
+            (select count(*) from report_observations) as observationCount,
+            (select count(*) from metric_samples) as metricCount,
+            (select count(*) from audit_log) as auditCount`,
+        )
+        .get(
+          currentRegistration.enrollmentId,
+          currentRegistration.enrollmentId,
+          host.id,
+        ),
+    ).toEqual(beforeWrongEnrollment);
+    expect((await send(currentRegistration, 2, false, true)).status).toBe(400);
+    expect((await send(currentRegistration, 2, true, true)).status).toBe(200);
+    expect((await send(currentRegistration, 3, false, true)).status).toBe(200);
+
     database.close();
   });
 

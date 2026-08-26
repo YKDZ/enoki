@@ -25,6 +25,9 @@ use crate::{
     transport::{HttpAttemptError, post_protobuf},
 };
 
+const SYSTEMD_STATE_DIRECTORY: &str = "/var/lib/enoki-probe";
+const SYSTEMD_BOOTSTRAP_CONFIG: &str = "/var/lib/enoki-probe/identity/probe-bootstrap.toml";
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct ProbeRegistrationInput {
     pub bootstrap_config_path: PathBuf,
@@ -401,7 +404,12 @@ struct InstallerOwnedFields {
 }
 
 fn read_installer_owned_fields(path: &Path) -> Result<InstallerOwnedFields, RegistrationError> {
-    let contents = match read_regular_file(path) {
+    let read = if path == Path::new(SYSTEMD_BOOTSTRAP_CONFIG) {
+        enoki_probe_bootstrap::secure_file::read_systemd_probe_bootstrap_config()
+    } else {
+        read_regular_file(path)
+    };
+    let contents = match read {
         Ok(contents) => String::from_utf8(contents)
             .map_err(|_| RegistrationError::InvalidResponse("invalid bootstrap config TOML"))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -443,6 +451,14 @@ fn store_bootstrap_config(
     path: &Path,
     config: &BootstrapConfig<'_>,
 ) -> Result<(), RegistrationError> {
+    if path == Path::new(SYSTEMD_BOOTSTRAP_CONFIG)
+        && config.installer_owned_fields.state_dir.as_deref() == Some(SYSTEMD_STATE_DIRECTORY)
+    {
+        enoki_probe_bootstrap::secure_file::atomic_write_systemd_probe_bootstrap_config(
+            render_bootstrap_config(config).as_bytes(),
+        )?;
+        return Ok(());
+    }
     atomic_write(
         path,
         render_bootstrap_config(config).as_bytes(),

@@ -2045,20 +2045,27 @@ pub fn run_lifecycle_companion_from_peer(
     if request.transition() == LifecycleTransition::Upgrade {
         return run_compatible_upgrade(request, peer_uid);
     }
-    let metadata = match read_trusted_probe_install_metadata(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
+    let replacement_root = if request.transition() == LifecycleTransition::ReplacementMigration {
+        match replacement_production_root() {
+            Ok(root) => root,
+            Err(()) => return LifecycleResponse::failed("lifecycle.invalid_authority"),
+        }
+    } else {
+        None
+    };
+    let metadata_path = replacement_production_path(
+        PRODUCTION_INSTALL_METADATA_PATH,
+        replacement_root.as_deref(),
+    );
+    let metadata = match read_trusted_probe_install_metadata(&metadata_path, None) {
         Ok(metadata) => metadata,
         Err(_) => return LifecycleResponse::failed("lifecycle.install_state_invalid"),
     };
-    let identity = match read_trusted_probe_install_preflight(
-        Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-        None,
-    ) {
-        Ok(identity) => identity,
-        Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
-    };
+    let identity =
+        match read_trusted_probe_install_preflight(&metadata_path, replacement_root.as_deref()) {
+            Ok(identity) => identity,
+            Err(_) => return LifecycleResponse::failed("lifecycle.identity_invalid"),
+        };
     if request.transition() == LifecycleTransition::Repair {
         let LifecycleRequestAuthority::LocalRepair {
             probe_id,
@@ -2085,7 +2092,12 @@ pub fn run_lifecycle_companion_from_peer(
         ));
     }
     if request.transition() == LifecycleTransition::ReplacementMigration {
-        return run_probe_replacement_migration(request, &metadata, &identity);
+        return run_probe_replacement_migration(
+            request,
+            &metadata,
+            &identity,
+            replacement_root.as_deref(),
+        );
     }
     if request.transition() != LifecycleTransition::Uninstall {
         return LifecycleResponse::not_enabled();
@@ -2216,10 +2228,16 @@ fn run_probe_replacement_migration(
     request: &LifecycleRequest,
     metadata: &TrustedProbeInstallMetadata,
     identity: &TrustedProbeInstallPreflight,
+    production_root: Option<&Path>,
 ) -> LifecycleResponse {
     let LifecycleRequestAuthority::ReplacementEnrollment {
         enrollment_token,
+        enrollment_id,
         hub_origin,
+        host_id,
+        expected_probe_id,
+        source_probe_version,
+        source_probe_sha256,
         target_asset_set_digest,
         target_bundle_target,
         target_manifest_sha256,
@@ -2228,27 +2246,26 @@ fn run_probe_replacement_migration(
     else {
         return LifecycleResponse::failed("lifecycle.invalid_authority");
     };
-    let mut registration = crate::registration::HttpRegistrationTransport;
-    let inspected = crate::registration::inspect_probe_installation(
-        crate::registration::ProbeInstallationInspectionInput {
-            enrollment_token: enrollment_token.clone(),
-            hub_url: hub_origin.clone(),
-        },
-        &mut registration,
-    );
-    let Ok(crate::registration::ProbeInstallationTarget::ManualReinstall(authority)) = inspected
-    else {
-        return LifecycleResponse::failed("lifecycle.authority_rejected");
-    };
-    let installed_probe_sha256 = match fixed_installed_probe_sha256(&metadata.install_path) {
-        Ok(digest) => digest,
-        Err(_) => return LifecycleResponse::failed("lifecycle.authority_invalid"),
+    let installed_probe_sha256 =
+        match fixed_installed_probe_sha256(&metadata.install_path, production_root) {
+            Ok(digest) => digest,
+            Err(_) => return LifecycleResponse::failed("lifecycle.authority_invalid"),
+        };
+    let claimed_authority = crate::registration::ProbeReplacementAuthorization {
+        enrollment_id: enrollment_id.clone(),
+        host_id: host_id.clone(),
+        expected_hub_origin: hub_origin.clone(),
+        expected_probe_id: expected_probe_id.clone(),
+        source_probe_version: source_probe_version.clone(),
+        source_probe_sha256: source_probe_sha256.clone(),
+        target_asset_set_digest: target_asset_set_digest.clone(),
+        target_probe_version: bundle_version.clone(),
     };
     let authority_match = replacement_authority_matches(
         hub_origin,
         target_asset_set_digest,
         bundle_version,
-        &authority,
+        &claimed_authority,
         metadata,
         identity,
         &installed_probe_sha256,
@@ -2261,34 +2278,58 @@ fn run_probe_replacement_migration(
         });
     }
     let intent = ReplacementIntent {
-        enrollment_id: authority.enrollment_id,
+        enrollment_id: enrollment_id.clone(),
         enrollment_token_sha256: format!("{:x}", Sha256::digest(enrollment_token.as_bytes())),
-        host_id: authority.host_id,
-        hub_origin: authority.expected_hub_origin,
-        old_probe_id: authority.expected_probe_id,
-        source_probe_version: authority.source_probe_version,
+        host_id: host_id.clone(),
+        hub_origin: hub_origin.clone(),
+        old_probe_id: expected_probe_id.clone(),
+        source_probe_version: source_probe_version.clone(),
         source_probe_sha256: installed_probe_sha256,
-        target_probe_version: authority.target_probe_version,
-        target_asset_set_digest: authority.target_asset_set_digest,
+        target_probe_version: bundle_version.clone(),
+        target_asset_set_digest: target_asset_set_digest.clone(),
         target_manifest_sha256: target_manifest_sha256.clone(),
     };
     let Some(registration_binding) = intent.registration_binding(target_bundle_target) else {
         return LifecycleResponse::failed("lifecycle.authority_invalid");
     };
     let enrollment_token = enrollment_token.clone();
-    let mut store = FileReplacementCommitStore::at(PRODUCTION_REPLACEMENT_COMMIT_PATH, 0);
+    if crate::registration::prepare_root_replacement_registration_attempt(
+        &replacement_production_path(
+            PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH,
+            production_root,
+        ),
+        crate::registration::RootReplacementRegistrationAttemptInput {
+            enrollment_token: enrollment_token.clone(),
+            binding: registration_binding,
+        },
+    )
+    .is_err()
+    {
+        return LifecycleResponse::failed("lifecycle.registration_attempt_failed");
+    }
+    let mut registration = crate::registration::HttpRegistrationTransport;
+    let inspected = crate::registration::inspect_probe_installation(
+        crate::registration::ProbeInstallationInspectionInput {
+            enrollment_token: enrollment_token.clone(),
+            hub_url: hub_origin.clone(),
+        },
+        &mut registration,
+    );
+    let Ok(crate::registration::ProbeInstallationTarget::ManualReinstall(authority)) = inspected
+    else {
+        return LifecycleResponse::failed("lifecycle.authority_rejected");
+    };
+    if authority != claimed_authority {
+        return LifecycleResponse::failed("lifecycle.authority_mismatch");
+    }
+    let mut store = FileReplacementCommitStore::at(
+        replacement_production_path(PRODUCTION_REPLACEMENT_COMMIT_PATH, production_root),
+        0,
+    );
     let mut cleanup = || {
-        crate::registration::prepare_root_replacement_registration_attempt(
-            Path::new(PRODUCTION_REPLACEMENT_REGISTRATION_ATTEMPT_PATH),
-            crate::registration::RootReplacementRegistrationAttemptInput {
-                enrollment_token: enrollment_token.clone(),
-                binding: registration_binding.clone(),
-            },
-        )
-        .map_err(|error| std::io::Error::other(error.to_string()))?;
         cleanup_trusted_probe_install_for_reenrollment(
             Path::new(PRODUCTION_INSTALL_METADATA_PATH),
-            None,
+            production_root,
         )
     };
     match commit_and_cleanup_replacement(intent, &mut store, &mut cleanup) {
@@ -2317,19 +2358,23 @@ struct InstalledProbeBinaryFacts {
     owner_uid: u32,
 }
 
-fn fixed_installed_probe_sha256(path: &Path) -> Result<String, std::io::Error> {
+fn fixed_installed_probe_sha256(
+    path: &Path,
+    production_root: Option<&Path>,
+) -> Result<String, std::io::Error> {
     if path != Path::new(PRODUCTION_PROBE_BINARY_PATH) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "installed Probe path is not the fixed production path",
         ));
     }
-    let path_facts = installed_probe_binary_facts(&fs::symlink_metadata(path)?);
+    let opened_path = preflight_rooted_path(production_root, path);
+    let path_facts = installed_probe_binary_facts(&fs::symlink_metadata(&opened_path)?);
     validate_installed_probe_binary_facts(path_facts)?;
     let mut file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(path)?;
+        .open(opened_path)?;
     let opened_facts = installed_probe_binary_facts(&file.metadata()?);
     validate_installed_probe_binary_facts(opened_facts)?;
     if path_facts != opened_facts {
@@ -2346,6 +2391,30 @@ fn fixed_installed_probe_sha256(path: &Path) -> Result<String, std::io::Error> {
         ));
     }
     Ok(digest)
+}
+
+#[cfg(feature = "deterministic-test-seams")]
+fn replacement_production_root() -> Result<Option<PathBuf>, ()> {
+    let Some(value) = std::env::var_os("ENOKI_TEST_REPLACEMENT_PRODUCTION_ROOT") else {
+        return Ok(None);
+    };
+    let root = PathBuf::from(value);
+    if !root.is_absolute() || root == Path::new("/") {
+        return Err(());
+    }
+    Ok(Some(root))
+}
+
+#[cfg(not(feature = "deterministic-test-seams"))]
+fn replacement_production_root() -> Result<Option<PathBuf>, ()> {
+    Ok(None)
+}
+
+fn replacement_production_path(absolute: &str, root: Option<&Path>) -> PathBuf {
+    root.map_or_else(
+        || PathBuf::from(absolute),
+        |root| root.join(absolute.trim_start_matches('/')),
+    )
 }
 
 fn installed_probe_binary_facts(metadata: &fs::Metadata) -> InstalledProbeBinaryFacts {

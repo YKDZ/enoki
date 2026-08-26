@@ -196,6 +196,19 @@ function createOwnerEnrollment(
     enrollmentToken,
     ...renderInstallCommand(installation, {
       enrollmentToken,
+      ...(target.kind === "manual_reinstall"
+        ? {
+            replacementMigration: {
+              enrollmentId,
+              expectedProbeId: target.expectedProbeId,
+              sourceProbeSha256: target.sourceProbeSha256,
+              sourceProbeVersion: target.expectedProbeVersion,
+              targetAssetSetDigest: target.targetAssetSetDigest,
+              targetHostId: String(target.hostId),
+              targetProbeVersion: target.targetProbeVersion,
+            },
+          }
+        : {}),
     }),
   } satisfies EnrollmentResponse;
 

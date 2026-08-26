@@ -550,6 +550,27 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           }
         }
       }
+      const reportedEnrollmentId = nonemptyString(request.enrollmentId);
+      const reportedEnrollment = reportedEnrollmentId
+        ? services.enrollments.readStatus(
+            reportedEnrollmentId,
+            reportReceivedAtMs,
+          )
+        : null;
+      if (
+        reportedEnrollmentId &&
+        (!reportedEnrollment || reportedEnrollment.hostId !== host.id)
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
+      }
+      if (
+        hasProducedHostProfile(request) &&
+        !hostProfileSnapshot?.hostProfile &&
+        reportedEnrollment?.targetKind === "manual_reinstall" &&
+        reportedEnrollment.status === "verifying"
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
+      }
       const startupEnrollment =
         !isSnapshotReplay &&
         (isProbeStartupReport({
@@ -557,9 +578,10 @@ export function createProbeRoutes(services: ProbeRouteServices) {
           reportedHostProfile: hostProfileSnapshot?.hostProfile ?? null,
           request,
         }) ||
-          hasProducedHostProfile(request))
+          (hasProducedHostProfile(request) &&
+            Boolean(hostProfileSnapshot?.hostProfile)))
           ? services.enrollments.resolveStartupReport({
-              enrollmentId: nonemptyString(request.enrollmentId),
+              enrollmentId: null,
               hostId: host.id,
               probeAssetBundleVersion: reportedBundleVersion,
               probeVersion: nonemptyString(
@@ -571,6 +593,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
               reportedAtMs: reportReceivedAtMs,
             })
           : null;
+
+      if (
+        reportedEnrollmentId &&
+        startupEnrollment &&
+        startupEnrollment.enrollment.enrollmentId !== reportedEnrollmentId
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
+      }
 
       if (startupEnrollment?.status === "rejected") {
         // Commit the Enrollment's terminal timeout by itself, then reject the
@@ -588,6 +618,14 @@ export function createProbeRoutes(services: ProbeRouteServices) {
             409,
           ),
         };
+      }
+
+      if (
+        hasProducedHostProfile(request) &&
+        !hostProfileSnapshot?.hostProfile &&
+        startupEnrollment?.status === "verifying"
+      ) {
+        throw new ReportBusinessRejection("malformed_probe_report", 400);
       }
 
       const operationPlan = planProbeOperationReportApplication({
@@ -2817,10 +2855,10 @@ function hostProfileOutcomeWindowIsCoherent(request: ProtoMessage) {
     return (
       snapshots.length === 1 &&
       Boolean(snapshots[0]?.snapshotHash) &&
-      Boolean(snapshots[0]?.hostProfile) &&
-      Boolean(
-        nonemptyString(snapshots[0]?.hostProfile?.probeAssetBundleVersion),
-      )
+      (!snapshots[0]?.hostProfile ||
+        Boolean(
+          nonemptyString(snapshots[0]?.hostProfile?.probeAssetBundleVersion),
+        ))
     );
   }
   return snapshots.length === 0 && [2, 3].includes(Number(outcome.state));

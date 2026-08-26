@@ -2,17 +2,27 @@ use super::{
     FixedInstallPaths, InstallError, ServiceIdentity,
     installed_layout::{self, Fingerprint, TargetKind},
 };
+use crate::secure_file::{
+    SystemdProbeDirectory, SystemdProbeStateProjection,
+    open_systemd_probe_state_projection_for_finalization,
+};
 use crate::{replacement::ReplacementCommitFact, verifier::VerifiedBundle};
 use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey};
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::MetadataExt;
+use std::{ffi::OsStr, os::unix::fs::MetadataExt};
+
+struct IdentityCustody {
+    owner_receipt: ServiceIdentity,
+    projection: Option<SystemdProbeStateProjection>,
+}
 
 pub(super) fn verify_exact_layout(
     paths: &FixedInstallPaths,
     bundle: &VerifiedBundle,
     commit: &ReplacementCommitFact,
 ) -> Result<(), InstallError> {
-    let identity_owner_receipt = identity_directory_owner(paths)?;
+    let identity_custody = identity_custody(paths)?;
+    let identity_owner_receipt = identity_custody.owner_receipt;
     let identity_owner = paths.observed_identity_owner(identity_owner_receipt);
     if commit.schema_version != 1
         || !commit.cleanup_complete
@@ -36,7 +46,9 @@ pub(super) fn verify_exact_layout(
     if current_layout != format!("schema_version=1\nversion={}\n", bundle.version) {
         return Err(InstallError::ExistingResidue);
     }
-    verify_identity_directory(paths, identity_owner)?;
+    if identity_custody.projection.is_none() {
+        verify_identity_directory(paths, identity_owner)?;
+    }
 
     let registry = installed_layout::registry(paths);
     if registry.len() != installed_layout::TARGET_COUNT {
@@ -73,19 +85,45 @@ pub(super) fn verify_exact_layout(
                 )?;
             }
             TargetKind::Metadata => verify_metadata(paths, bundle, commit)?,
-            TargetKind::Identity => verify_identity(paths, bundle, commit, identity_owner)?,
+            TargetKind::Identity => verify_identity(
+                paths,
+                bundle,
+                commit,
+                identity_owner,
+                identity_custody.projection.as_ref(),
+            )?,
         }
     }
     Ok(())
 }
 
-fn identity_directory_owner(paths: &FixedInstallPaths) -> Result<ServiceIdentity, InstallError> {
+fn identity_custody(paths: &FixedInstallPaths) -> Result<IdentityCustody, InstallError> {
     let state =
         std::fs::symlink_metadata(paths.state()).map_err(|_| InstallError::ExistingResidue)?;
+    if state.file_type().is_symlink() {
+        let projection = open_systemd_probe_state_projection_for_finalization(
+            &paths.state(),
+            (paths.expected_root_uid(), paths.expected_root_gid()),
+        )
+        .map_err(|_| InstallError::ExistingResidue)?;
+        let observed = projection.owner();
+        let owner_receipt = paths.identity_owner_receipt(ServiceIdentity {
+            uid: observed.0,
+            gid: observed.1,
+        });
+        if owner_receipt.uid == paths.expected_root_uid()
+            || owner_receipt.gid == paths.expected_root_gid()
+        {
+            return Err(InstallError::ExistingResidue);
+        }
+        return Ok(IdentityCustody {
+            owner_receipt,
+            projection: Some(projection),
+        });
+    }
     let identity = std::fs::symlink_metadata(paths.identity_dir())
         .map_err(|_| InstallError::ExistingResidue)?;
-    if state.file_type().is_symlink()
-        || identity.file_type().is_symlink()
+    if identity.file_type().is_symlink()
         || !state.is_dir()
         || !identity.is_dir()
         || state.uid() != identity.uid()
@@ -102,7 +140,10 @@ fn identity_directory_owner(paths: &FixedInstallPaths) -> Result<ServiceIdentity
     if receipt.uid == paths.expected_root_uid() || receipt.gid == paths.expected_root_gid() {
         return Err(InstallError::ExistingResidue);
     }
-    Ok(receipt)
+    Ok(IdentityCustody {
+        owner_receipt: receipt,
+        projection: None,
+    })
 }
 
 fn verify_identity_directory(
@@ -156,8 +197,20 @@ fn verify_identity(
     bundle: &VerifiedBundle,
     commit: &ReplacementCommitFact,
     owner: ServiceIdentity,
+    projection: Option<&SystemdProbeStateProjection>,
 ) -> Result<(), InstallError> {
-    let identity = installed_layout::trusted_text(&paths.identity(), owner.uid, owner.gid, 0o600)?;
+    let identity = match projection {
+        Some(projection) => String::from_utf8(
+            projection
+                .read_file(
+                    SystemdProbeDirectory::Identity,
+                    OsStr::new("probe-bootstrap.toml"),
+                )
+                .map_err(|_| InstallError::ExistingResidue)?,
+        )
+        .map_err(|_| InstallError::ExistingResidue)?,
+        None => installed_layout::trusted_text(&paths.identity(), owner.uid, owner.gid, 0o600)?,
+    };
     let private_key = super::upgrade::metadata_string(&identity, "probe_private_key_pem")
         .ok_or(InstallError::ExistingResidue)?;
     if RsaPrivateKey::from_pkcs8_pem(&private_key).is_err()

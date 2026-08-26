@@ -15,7 +15,8 @@ use crate::{
     hub_url,
     protocol::enoki::v1::{ProbeRegistrationAttempt, ProbeRegistrationRequest},
     secure_file::{
-        atomic_write, ensure_directory, read_bounded_private_credential, read_private_regular_file,
+        atomic_write, ensure_directory, read_private_regular_file,
+        read_registration_attempt_credential_bytes,
     },
 };
 
@@ -450,8 +451,10 @@ fn read_registration_attempt_capsule(
 fn read_registration_attempt_credential(
     path: &Path,
 ) -> Result<Option<ProbeRegistrationAttemptCapsule>, std::io::Error> {
-    let bytes = match read_bounded_private_credential(path, MAX_REGISTRATION_ATTEMPT_CAPSULE_BYTES)
-    {
+    let bytes = match read_registration_attempt_credential_bytes(
+        path,
+        MAX_REGISTRATION_ATTEMPT_CAPSULE_BYTES,
+    ) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),

@@ -628,9 +628,9 @@ pub fn acquire_and_activate_from_environment(
 ) -> Result<(), AcquisitionFailure> {
     let hub_origin =
         std::env::var("ENOKI_HUB_URL").map_err(|_| AcquisitionFailure::InvalidOrigin)?;
-    let token = read_enrollment_token(input)?;
-    let enrollment =
-        Enrollment::new(&hub_origin, &token).map_err(|_| AcquisitionFailure::InvalidEnrollment)?;
+    let enrollment_input = read_enrollment_input(input)?;
+    let enrollment = Enrollment::from_install_input(&hub_origin, &enrollment_input)
+        .map_err(|_| AcquisitionFailure::InvalidEnrollment)?;
     let trust = embedded_production_trust_for(BootstrapRole::Acquirer)
         .ok_or(AcquisitionFailure::BuildTrustUnavailable)?;
     let policy = VerificationPolicy {
@@ -652,10 +652,10 @@ pub fn acquire_and_activate_from_environment(
     acquired.launch_authenticated_activator(&enrollment)
 }
 
-fn read_enrollment_token(input: &mut impl Read) -> Result<String, AcquisitionFailure> {
+fn read_enrollment_input(input: &mut impl Read) -> Result<Vec<u8>, AcquisitionFailure> {
     let mut bytes = Vec::new();
     input
-        .take(256)
+        .take((crate::handoff::MAX_ENROLLMENT_BYTES + 2) as u64)
         .read_to_end(&mut bytes)
         .map_err(|_| AcquisitionFailure::InvalidEnrollment)?;
     if bytes.last() == Some(&b'\n') {
@@ -664,7 +664,10 @@ fn read_enrollment_token(input: &mut impl Read) -> Result<String, AcquisitionFai
     if bytes.contains(&b'\n') || bytes.contains(&b'\r') {
         return Err(AcquisitionFailure::InvalidEnrollment);
     }
-    String::from_utf8(bytes).map_err(|_| AcquisitionFailure::InvalidEnrollment)
+    if bytes.is_empty() || bytes.len() > crate::handoff::MAX_ENROLLMENT_BYTES {
+        return Err(AcquisitionFailure::InvalidEnrollment);
+    }
+    Ok(bytes)
 }
 
 /// Production entry point. It consults the process effective uid directly;

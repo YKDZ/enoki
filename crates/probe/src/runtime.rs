@@ -484,7 +484,10 @@ fn run_reporting_loop(
         request.encode_to_vec(),
         sleeper,
     )?;
-    notify_ready().map_err(ProbeRunError::Notify)?;
+    let mut local_ready = !bootstrap_config.requires_current_host_profile_readiness();
+    if local_ready {
+        notify_ready().map_err(ProbeRunError::Notify)?;
+    }
     refresh_probe_request_auth(&mut request_auth, &response);
     reports_sent += 1;
     operation_reports.observe_response(&response, operation_runner);
@@ -575,6 +578,10 @@ fn run_reporting_loop(
             sleeper,
             active_configuration.reporting_interval,
         )?;
+        if !local_ready && send_full_host_profile {
+            notify_ready().map_err(ProbeRunError::Notify)?;
+            local_ready = true;
+        }
         refresh_probe_request_auth(&mut request_auth, &response);
         full_host_profile_reported |= send_full_host_profile;
         reports_sent += 1;
@@ -1914,6 +1921,7 @@ struct BootstrapConfig {
     probe_configuration_version: Option<String>,
     probe_id: Option<String>,
     probe_private_key_pem: Option<String>,
+    registration_signed_attempt_sha256: Option<String>,
     server_time_offset_ms: Option<i64>,
     state_dir: Option<String>,
     target_manifest_sha256: Option<String>,
@@ -1936,6 +1944,12 @@ impl BootstrapConfig {
                 .map_err(ReportError::InvalidConfig),
             None => Ok(MetricsCollectionConfig::all_enabled()),
         }
+    }
+
+    fn requires_current_host_profile_readiness(&self) -> bool {
+        self.registration_signed_attempt_sha256
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
     }
 }
 
@@ -1981,6 +1995,10 @@ fn read_bootstrap_config(path: &PathBuf) -> Result<BootstrapConfig, ProbeRunErro
         probe_configuration_version: string_value(&value, "probe_configuration_version")?,
         probe_id: string_value(&value, "probe_id")?,
         probe_private_key_pem: string_value(&value, "probe_private_key_pem")?,
+        registration_signed_attempt_sha256: string_value(
+            &value,
+            "registration_signed_attempt_sha256",
+        )?,
         server_time_offset_ms: signed_integer_value(&value, "server_time_offset_ms")?,
         state_dir: string_value(&value, "state_dir")?,
         target_manifest_sha256: string_value(&value, "target_manifest_sha256")?,
@@ -2179,7 +2197,12 @@ mod tests {
         ProbeConfigurationResponse, ProbeRegistrationResponse, ProbeReportRequest,
         ProbeUpgradeOperation,
     };
-    use std::{cell::RefCell, collections::VecDeque, rc::Rc, sync::Mutex};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+        rc::Rc,
+        sync::Mutex,
+    };
 
     struct FakeObservationWindowClient {
         cadences: Mutex<Vec<Duration>>,
@@ -2767,6 +2790,247 @@ mod tests {
         assert!(matches!(error, ProbeRunError::Notify(_)));
         assert!(!error.is_permanent_report_failure());
         assert_eq!(transport.report_attempts.len(), 1);
+    }
+
+    #[test]
+    fn replacement_identity_notifies_only_after_hub_accepts_current_host_profile() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "enrollment_id = \"enr_0123456789abcdef\"",
+                "probe_id = \"probe_replacement_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                &format!("registration_signed_attempt_sha256 = {:?}", "a".repeat(64)),
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+        let observation_runtime = FakeObservationWindowClient {
+            cadences: Mutex::new(Vec::new()),
+            result: ObservationWindowResult {
+                host_profile: Some(HostProfileSnapshot::default()),
+                attempts: (2..=4)
+                    .map(
+                        |sequence| crate::observation_runtime::ObservationAttemptResult {
+                            sequence,
+                            sample: Some(crate::protocol::enoki::v1::MetricSample::default()),
+                            cpu_resource_outcome: None,
+                        },
+                    )
+                    .collect(),
+            },
+        };
+
+        let notified = Cell::new(0_u8);
+        let mut startup_only = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses: VecDeque::from([Ok(ProbeReportResponse {
+                accepted_sequence_end: 1,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1,
+            }
+            .encode_to_vec())]),
+        };
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path: bootstrap_config_path.clone(),
+            },
+            &mut startup_only,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(1),
+            },
+            LifecycleCompanionOperationRunner::from_bootstrap,
+            || {
+                notified.set(notified.get() + 1);
+                Ok(())
+            },
+            &observation_runtime,
+        )
+        .expect("startup report remains locally non-ready");
+        assert_eq!(notified.get(), 0);
+
+        let mut through_host_profile = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses: VecDeque::from([
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 1,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 1,
+                }
+                .encode_to_vec()),
+                Ok(ProbeReportResponse {
+                    accepted_sequence_end: 4,
+                    current_probe_configuration_version: "default-v1".to_string(),
+                    pending_operation: None,
+                    requested_snapshot_collector_ids: Vec::new(),
+                    server_time_ms: 2,
+                }
+                .encode_to_vec()),
+            ]),
+        };
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut through_host_profile,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(2),
+            },
+            LifecycleCompanionOperationRunner::from_bootstrap,
+            || {
+                notified.set(notified.get() + 1);
+                Ok(())
+            },
+            &observation_runtime,
+        )
+        .expect("accepted current Host Profile establishes local readiness");
+        assert_eq!(notified.get(), 1);
+    }
+
+    #[test]
+    fn first_host_profile_is_retried_then_later_profiles_remain_compact() {
+        struct ChangingHostProfileClient {
+            requests: Mutex<u8>,
+        }
+
+        impl ObservationWindowClient for ChangingHostProfileClient {
+            fn request_finalized_window(
+                &self,
+                _cadence: Duration,
+                sequence_start: u64,
+            ) -> Result<ObservationWindowResult, ObservationClientError> {
+                let mut requests = self.requests.lock().expect("requests");
+                *requests += 1;
+                Ok(ObservationWindowResult {
+                    host_profile: Some(HostProfileSnapshot {
+                        hostname: format!("host-profile-{}", (*requests).div_ceil(2)),
+                        ..Default::default()
+                    }),
+                    attempts: (sequence_start..sequence_start + 3)
+                        .map(
+                            |sequence| crate::observation_runtime::ObservationAttemptResult {
+                                sequence,
+                                sample: Some(crate::protocol::enoki::v1::MetricSample {
+                                    collected_at_ms: sequence as i64,
+                                    ..Default::default()
+                                }),
+                                cpu_resource_outcome: None,
+                            },
+                        )
+                        .collect(),
+                })
+            }
+        }
+
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let bootstrap_config_path = temporary.path().join("probe-bootstrap.toml");
+        fs::write(
+            &bootstrap_config_path,
+            [
+                "hub_url = \"https://hub.example\"",
+                "probe_id = \"probe_01\"",
+                "probe_private_key_pem = \"test-private-key\"",
+                "probe_configuration_version = \"default-v1\"",
+                "metrics_collection_interval_seconds = 1",
+                "enabled_collector_ids = []",
+                "",
+            ]
+            .join("\n"),
+        )
+        .expect("bootstrap config");
+        fs::set_permissions(&bootstrap_config_path, fs::Permissions::from_mode(0o600))
+            .expect("bootstrap permissions");
+        let mut report_responses = VecDeque::from([1, 4, 7, 10, 13].map(|accepted_sequence_end| {
+            Ok(ProbeReportResponse {
+                accepted_sequence_end,
+                current_probe_configuration_version: "default-v1".to_string(),
+                pending_operation: None,
+                requested_snapshot_collector_ids: Vec::new(),
+                server_time_ms: 1,
+            }
+            .encode_to_vec())
+        }));
+        report_responses.insert(
+            1,
+            Err(ReportError::Attempt(HttpAttemptError::ResponseRead(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection ended during the full Host Profile response",
+                ),
+            ))),
+        );
+        let mut transport = StartupRetryTransport {
+            report_attempts: Vec::new(),
+            report_responses,
+        };
+        run_probe_with_loop_control_and_runner_factory_and_notifier(
+            ProbeRunInput {
+                bootstrap_config_path,
+            },
+            &mut transport,
+            &mut NoopSleeper,
+            RunLoopControl {
+                max_reports: Some(5),
+            },
+            LifecycleCompanionOperationRunner::from_bootstrap,
+            || Ok(()),
+            &ChangingHostProfileClient {
+                requests: Mutex::new(0),
+            },
+        )
+        .expect("later Host Profile hashes remain compact");
+
+        let observation_reports = transport.report_attempts[1..]
+            .iter()
+            .map(|body| ProbeReportRequest::decode(body.as_slice()).expect("report"))
+            .collect::<Vec<_>>();
+        assert_eq!(transport.report_attempts[1], transport.report_attempts[2]);
+        assert!(matches!(
+            observation_reports[0].snapshots[0].payload,
+            Some(crate::protocol::enoki::v1::snapshot::Payload::HostProfile(
+                _
+            ))
+        ));
+        assert!(matches!(
+            observation_reports[1].snapshots[0].payload,
+            Some(crate::protocol::enoki::v1::snapshot::Payload::HostProfile(
+                _
+            ))
+        ));
+        assert!(observation_reports[2].snapshots[0].payload.is_none());
+        assert!(observation_reports[3].snapshots[0].payload.is_none());
+        assert!(observation_reports[4].snapshots[0].payload.is_none());
+        assert_eq!(
+            observation_reports[0].snapshots[0].snapshot_hash,
+            observation_reports[1].snapshots[0].snapshot_hash
+        );
+        assert_eq!(
+            observation_reports[1].snapshots[0].snapshot_hash,
+            observation_reports[2].snapshots[0].snapshot_hash
+        );
+        assert_ne!(
+            observation_reports[2].snapshots[0].snapshot_hash,
+            observation_reports[3].snapshots[0].snapshot_hash
+        );
+        assert_eq!(
+            observation_reports[3].snapshots[0].snapshot_hash,
+            observation_reports[4].snapshots[0].snapshot_hash
+        );
     }
 
     #[test]

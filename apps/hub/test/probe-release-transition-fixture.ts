@@ -26,9 +26,19 @@ export async function writeSignedProbeAssetSet(
     targetVersion: string;
     transition: "compatible" | "replacement-required";
     trustEpoch?: boolean;
+    x86_64GnuBundle?: {
+      archive: Buffer;
+      bundleManifest: Buffer;
+    };
+    x86_64GnuSourceProbeSha256?: string;
   },
 ) {
-  const sourceProbeComponents = sourceProbeComponentFixture();
+  const sourceProbeComponents = sourceProbeComponentFixture().map((component) =>
+    component.target === "x86_64-unknown-linux-gnu" &&
+    input.x86_64GnuSourceProbeSha256
+      ? { ...component, sha256: input.x86_64GnuSourceProbeSha256 }
+      : component,
+  );
   const authority = input.authority ?? testKeyPair();
   const release = testKeyPair();
   const delegation = createProbeTrustDelegation({
@@ -37,20 +47,32 @@ export async function writeSignedProbeAssetSet(
     releasePublicKeyPem: release.publicKey,
     rootPrivateKeyPem: authority.privateKey,
   });
+  const assets = [
+    "aarch64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+  ].map((target, index) => {
+    if (target === "x86_64-unknown-linux-gnu" && input.x86_64GnuBundle) {
+      return {
+        bundleManifestSha256: sha256(input.x86_64GnuBundle.bundleManifest),
+        file: `enoki-probe-${target}.tar.gz`,
+        sha256: sha256(input.x86_64GnuBundle.archive),
+        size: input.x86_64GnuBundle.archive.byteLength,
+        target,
+      };
+    }
+    return {
+      bundleManifestSha256: String(index + 1).repeat(64),
+      file: `enoki-probe-${target}.tar.gz`,
+      sha256: String(index + 5).repeat(64),
+      size: 123 + index,
+      target,
+    };
+  });
   const manifest = Buffer.from(
     `${JSON.stringify({
-      assets: [
-        "aarch64-unknown-linux-gnu",
-        "aarch64-unknown-linux-musl",
-        "x86_64-unknown-linux-gnu",
-        "x86_64-unknown-linux-musl",
-      ].map((target, index) => ({
-        bundleManifestSha256: String(index + 1).repeat(64),
-        file: `enoki-probe-${target}.tar.gz`,
-        sha256: String(index + 5).repeat(64),
-        size: 123 + index,
-        target,
-      })),
+      assets,
       kind: "enoki-probe-assets",
       signature: {
         algorithm: "rsa-sha256",
@@ -101,6 +123,14 @@ export async function writeSignedProbeAssetSet(
       path.join(assetDir, "release-transition-contract.json.sig"),
       contract.signature,
     ),
+    ...(input.x86_64GnuBundle
+      ? [
+          writeFile(
+            path.join(assetDir, "enoki-probe-x86_64-unknown-linux-gnu.tar.gz"),
+            input.x86_64GnuBundle.archive,
+          ),
+        ]
+      : []),
     ...(trustEpoch
       ? [
           writeFile(
@@ -119,13 +149,8 @@ export async function writeSignedProbeAssetSet(
     authority,
     rootPublicKeyPem: authority.publicKey,
     targetAssetSetDigest: `sha256:${createHash("sha256").update(manifest).digest("hex")}`,
-    targetBundles: [
-      "aarch64-unknown-linux-gnu",
-      "aarch64-unknown-linux-musl",
-      "x86_64-unknown-linux-gnu",
-      "x86_64-unknown-linux-musl",
-    ].map((target, index) => ({
-      bundleManifestSha256: String(index + 1).repeat(64),
+    targetBundles: assets.map(({ bundleManifestSha256, target }) => ({
+      bundleManifestSha256,
       target,
     })),
     sourceProbeSha256: (

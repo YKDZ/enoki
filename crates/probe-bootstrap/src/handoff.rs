@@ -23,10 +23,25 @@ pub enum HandoffError {
 
 /// The caller's bounded enrollment capability. It never participates in
 /// distribution trust, asset selection, or component verification.
-#[derive(Eq, PartialEq, Zeroize)]
+#[derive(Debug, Eq, PartialEq, Zeroize)]
 pub struct Enrollment {
     hub_origin: String,
     enrollment_token: String,
+    replacement_migration: Option<ReplacementMigrationEnrollment>,
+}
+
+/// 现有 manual-reinstall Enrollment 行的有界只读投影；Hub 的 inspection 与
+/// registration transaction 仍负责证明这些字段，而不是信任本机输入。
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize, Zeroize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplacementMigrationEnrollment {
+    enrollment_id: String,
+    expected_probe_id: String,
+    source_probe_sha256: Vec<String>,
+    source_probe_version: String,
+    target_asset_set_digest: String,
+    target_host_id: String,
+    target_probe_version: String,
 }
 
 impl Enrollment {
@@ -38,6 +53,55 @@ impl Enrollment {
         Ok(Self {
             hub_origin,
             enrollment_token: enrollment_token.to_owned(),
+            replacement_migration: None,
+        })
+    }
+
+    pub fn from_install_input(hub_origin: &str, bytes: &[u8]) -> Result<Self, HandoffError> {
+        if !bytes.starts_with(b"{") {
+            let token = std::str::from_utf8(bytes).map_err(|_| HandoffError::InvalidEnrollment)?;
+            return Self::new(hub_origin, token);
+        }
+        if bytes.len() > MAX_ENROLLMENT_BYTES {
+            return Err(HandoffError::TooLarge);
+        }
+        let wire: InstallEnrollmentWire =
+            serde_json::from_slice(bytes).map_err(|_| HandoffError::InvalidEnrollment)?;
+        if wire.schema_version != 1
+            || serde_json::to_vec(&wire).map_err(|_| HandoffError::InvalidEnrollment)? != bytes
+        {
+            return Err(HandoffError::InvalidEnrollment);
+        }
+        let normalized_input =
+            normalize_hub_origin(hub_origin).ok_or(HandoffError::InvalidEnrollment)?;
+        let normalized_wire =
+            normalize_hub_origin(&wire.hub_origin).ok_or(HandoffError::InvalidEnrollment)?;
+        if normalized_input != normalized_wire {
+            return Err(HandoffError::InvalidEnrollment);
+        }
+        Self::from_parts(
+            normalized_wire,
+            wire.enrollment_token,
+            Some(wire.replacement_migration),
+        )
+    }
+
+    fn from_parts(
+        hub_origin: String,
+        enrollment_token: String,
+        replacement_migration: Option<ReplacementMigrationEnrollment>,
+    ) -> Result<Self, HandoffError> {
+        if !is_enrollment_token(&enrollment_token)
+            || replacement_migration
+                .as_ref()
+                .is_some_and(|facts| !facts.valid())
+        {
+            return Err(HandoffError::InvalidEnrollment);
+        }
+        Ok(Self {
+            hub_origin,
+            enrollment_token,
+            replacement_migration,
         })
     }
 
@@ -47,11 +111,15 @@ impl Enrollment {
     pub fn enrollment_token(&self) -> &str {
         &self.enrollment_token
     }
+    pub fn replacement_migration(&self) -> Option<&ReplacementMigrationEnrollment> {
+        self.replacement_migration.as_ref()
+    }
 
     fn encode(&self) -> Result<Vec<u8>, HandoffError> {
         let value = EnrollmentWire {
             hub_origin: &self.hub_origin,
             enrollment_token: &self.enrollment_token,
+            replacement_migration: self.replacement_migration.as_ref(),
         };
         let bytes = serde_json::to_vec(&value).map_err(|_| HandoffError::InvalidEnrollment)?;
         if bytes.len() > MAX_ENROLLMENT_BYTES || bytes != canonical_enrollment_json(&value) {
@@ -66,7 +134,13 @@ impl Enrollment {
         }
         let value: EnrollmentOwnedWire =
             serde_json::from_slice(bytes).map_err(|_| HandoffError::InvalidEnrollment)?;
-        let parsed = Enrollment::new(&value.hub_origin, &value.enrollment_token)?;
+        let hub_origin =
+            normalize_hub_origin(&value.hub_origin).ok_or(HandoffError::InvalidEnrollment)?;
+        let parsed = Enrollment::from_parts(
+            hub_origin,
+            value.enrollment_token,
+            value.replacement_migration,
+        )?;
         let canonical = parsed.encode()?;
         if bytes != canonical {
             return Err(HandoffError::InvalidEnrollment);
@@ -80,16 +154,101 @@ impl Enrollment {
 struct EnrollmentWire<'a> {
     hub_origin: &'a str,
     enrollment_token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replacement_migration: Option<&'a ReplacementMigrationEnrollment>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EnrollmentOwnedWire {
     hub_origin: String,
     enrollment_token: String,
+    #[serde(default)]
+    replacement_migration: Option<ReplacementMigrationEnrollment>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InstallEnrollmentWire {
+    hub_origin: String,
+    enrollment_token: String,
+    replacement_migration: ReplacementMigrationEnrollment,
+    schema_version: u8,
 }
 fn canonical_enrollment_json(value: &EnrollmentWire<'_>) -> Vec<u8> {
     // serde struct field order is the exact wire order; no trailing newline.
     serde_json::to_vec(value).expect("bounded enrollment serialization")
+}
+
+impl ReplacementMigrationEnrollment {
+    pub fn enrollment_id(&self) -> &str {
+        &self.enrollment_id
+    }
+    pub fn expected_probe_id(&self) -> &str {
+        &self.expected_probe_id
+    }
+    pub fn source_probe_sha256(&self) -> &[String] {
+        &self.source_probe_sha256
+    }
+    pub fn source_probe_version(&self) -> &str {
+        &self.source_probe_version
+    }
+    pub fn target_asset_set_digest(&self) -> &str {
+        &self.target_asset_set_digest
+    }
+    pub fn target_host_id(&self) -> &str {
+        &self.target_host_id
+    }
+    pub fn target_probe_version(&self) -> &str {
+        &self.target_probe_version
+    }
+
+    fn valid(&self) -> bool {
+        valid_enrollment_id(&self.enrollment_id)
+            && bounded_identifier(&self.expected_probe_id)
+            && !self.source_probe_sha256.is_empty()
+            && self.source_probe_sha256.len() <= 16
+            && self
+                .source_probe_sha256
+                .iter()
+                .all(|digest| valid_sha256(digest))
+            && valid_semver(&self.source_probe_version)
+            && self
+                .target_asset_set_digest
+                .strip_prefix("sha256:")
+                .is_some_and(valid_sha256)
+            && self.target_host_id.parse::<u64>().is_ok_and(|id| id > 0)
+            && valid_semver(&self.target_probe_version)
+    }
+}
+
+fn valid_enrollment_id(value: &str) -> bool {
+    value
+        .strip_prefix("enr_")
+        .is_some_and(|suffix| suffix.len() >= 16 && bounded_identifier(suffix))
+}
+
+fn bounded_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_semver(value: &str) -> bool {
+    let parts: Vec<_> = value.split('.').collect();
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    parts.len() == 3 && parts.into_iter().all(valid_part)
 }
 
 /// Exact normalized HTTP(S) origin accepted by both roles without a URL
@@ -485,6 +644,13 @@ mod tests {
     fn enrollment() -> Enrollment {
         Enrollment::new("https://hub.example", "enk_enroll_test-1").unwrap()
     }
+    fn replacement_enrollment() -> Enrollment {
+        Enrollment::from_install_input(
+            "https://hub.example",
+            br#"{"hubOrigin":"https://hub.example","enrollmentToken":"enk_enroll_test-1","replacementMigration":{"enrollmentId":"enr_0123456789abcdef","expectedProbeId":"probe_old_01","sourceProbeSha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"sourceProbeVersion":"1.2.2","targetAssetSetDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetHostId":"7","targetProbeVersion":"1.2.3"},"schemaVersion":1}"#,
+        )
+        .unwrap()
+    }
     #[test]
     fn round_trips_ordered_handoff_after_metadata_authentication() {
         let mut encoded = Vec::new();
@@ -522,6 +688,28 @@ mod tests {
         Handoff::read_acquirer_into(&mut input, &mut acquirer, 3).unwrap();
         assert_eq!(component, b"abc");
         assert_eq!(acquirer, b"def")
+    }
+
+    #[test]
+    fn replacement_enrollment_round_trips_the_hub_row_closure_without_becoming_trust() {
+        let enrollment = replacement_enrollment();
+        let facts = enrollment.replacement_migration().unwrap();
+        assert_eq!(facts.enrollment_id(), "enr_0123456789abcdef");
+        assert_eq!(facts.target_host_id(), "7");
+        assert_eq!(facts.expected_probe_id(), "probe_old_01");
+        assert_eq!(facts.source_probe_sha256(), &["a".repeat(64)]);
+
+        let encoded = enrollment.encode().unwrap();
+        assert_eq!(Enrollment::decode(&encoded).unwrap(), enrollment);
+    }
+
+    #[test]
+    fn replacement_enrollment_rejects_a_cli_hub_mismatch_before_root_handoff() {
+        let input = br#"{"hubOrigin":"https://other.example","enrollmentToken":"enk_enroll_test-1","replacementMigration":{"enrollmentId":"enr_0123456789abcdef","expectedProbeId":"probe_old_01","sourceProbeSha256":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"sourceProbeVersion":"1.2.2","targetAssetSetDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","targetHostId":"7","targetProbeVersion":"1.2.3"},"schemaVersion":1}"#;
+        assert_eq!(
+            Enrollment::from_install_input("https://hub.example", input),
+            Err(HandoffError::InvalidEnrollment)
+        );
     }
     #[test]
     fn rejects_secret_before_component_for_noncanonical_token_origin_and_trailing_stream() {

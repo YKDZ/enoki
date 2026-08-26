@@ -75,6 +75,21 @@ pub(crate) fn retire_attempt_source(paths: &FixedInstallPaths) -> Result<(), Ins
     )
 }
 
+pub(super) fn require_canonical_restart_ready(
+    paths: &FixedInstallPaths,
+    binding: &ReplacementRegistrationBinding,
+) -> Result<(), InstallError> {
+    match fs::symlink_metadata(paths.replacement_registration_drop_in()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) | Err(_) => return Err(InstallError::ExistingResidue),
+    }
+    match fs::symlink_metadata(paths.replacement_registration_attempt_source()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) if registered_identity_matches(paths, binding) => Ok(()),
+        Ok(_) | Err(_) => Err(InstallError::ExistingResidue),
+    }
+}
+
 pub(super) fn registered_identity_matches(
     paths: &FixedInstallPaths,
     binding: &ReplacementRegistrationBinding,
@@ -186,8 +201,11 @@ fn retire_private_file(path: &Path, uid: u32, gid: u32) -> Result<(), InstallErr
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(InstallError::ExistingResidue),
     }
-    crate::secure_file::retire_replacement_atomic_write_residue(path, 0o600, (uid, gid))
-        .map_err(|_| InstallError::ExistingResidue)?;
+    match crate::secure_file::retire_replacement_atomic_write_residue(path, 0o600, (uid, gid)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(InstallError::ExistingResidue),
+    }
     match fs::remove_dir(path.parent().ok_or(InstallError::Io)?) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

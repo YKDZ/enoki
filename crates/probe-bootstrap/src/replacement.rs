@@ -170,6 +170,7 @@ where
 
 pub struct FileReplacementCommitStore {
     path: PathBuf,
+    expected_owner_gid: u32,
     expected_owner_uid: u32,
 }
 
@@ -177,8 +178,50 @@ impl FileReplacementCommitStore {
     pub fn at(path: impl Into<PathBuf>, expected_owner_uid: u32) -> Self {
         Self {
             path: path.into(),
+            expected_owner_gid: unsafe { libc::getegid() },
             expected_owner_uid,
         }
+    }
+
+    /// 只有已完成且与 finalizer 手中 receipt 完全相同的 commit fact 才能退休。
+    /// 删除与目录 fsync 之间的中断可由相同 finalizer 幂等重放。
+    #[cfg(feature = "activator")]
+    pub(crate) fn retire_exact(&mut self, expected: &ReplacementCommitFact) -> std::io::Result<()> {
+        let actual = self.load()?;
+        match actual {
+            Some(actual)
+                if actual == *expected
+                    && actual.cleanup_complete
+                    && actual.candidate_layout_complete => {}
+            None => {
+                return crate::secure_file::retire_replacement_atomic_write_residue(
+                    &self.path,
+                    0o600,
+                    (self.expected_owner_uid, self.expected_owner_gid),
+                );
+            }
+            Some(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "replacement commit fact does not match finalizer receipt",
+                ));
+            }
+        }
+
+        match crate::secure_file::remove_private_regular_file(
+            &self.path,
+            0o600,
+            (self.expected_owner_uid, self.expected_owner_gid),
+        ) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        crate::secure_file::retire_replacement_atomic_write_residue(
+            &self.path,
+            0o600,
+            (self.expected_owner_uid, self.expected_owner_gid),
+        )
     }
 }
 
@@ -500,5 +543,39 @@ mod tests {
                 .collect::<Vec<_>>(),
             [std::ffi::OsString::from("replacement-migration.json")]
         );
+    }
+
+    #[test]
+    fn filesystem_store_retires_only_the_exact_complete_replacement_fact() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = temporary.path().join("replacement-migration.json");
+        let mut store = FileReplacementCommitStore::at(&path, unsafe { libc::geteuid() });
+        let mut cleanup = Cleanup::default();
+        let committed = commit_and_cleanup_replacement(intent(), &mut store, &mut cleanup).unwrap();
+        let complete =
+            record_replacement_candidate_layout(&mut store, &committed.canonical_intent_sha256)
+                .unwrap();
+        let mut wrong = complete.clone();
+        wrong.candidate_layout_complete = false;
+
+        assert!(store.retire_exact(&wrong).is_err());
+        assert_eq!(store.load().unwrap(), Some(complete.clone()));
+
+        store.persist(&wrong).unwrap();
+        assert!(store.retire_exact(&wrong).is_err());
+        assert_eq!(store.load().unwrap(), Some(wrong));
+
+        let mut tampered = complete.clone();
+        tampered.intent.host_id = "wrong-host".to_owned();
+        store.persist(&tampered).unwrap();
+        assert!(store.retire_exact(&tampered).is_err());
+        assert!(path.exists());
+
+        store.persist(&complete).unwrap();
+        store.retire_exact(&complete).unwrap();
+        assert_eq!(store.load().unwrap(), None);
+        store.retire_exact(&complete).unwrap();
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
     }
 }

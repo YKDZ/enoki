@@ -19,7 +19,8 @@ mod transaction;
 mod upgrade;
 
 use crate::replacement::{
-    ReplacementCommitFact, ReplacementRegistrationBinding, ReplacementResumeBinding,
+    FileReplacementCommitStore, ReplacementCommitFact, ReplacementRegistrationBinding,
+    ReplacementResumeBinding,
 };
 use crate::{
     bundle_role::{
@@ -275,6 +276,11 @@ pub trait SystemdPort {
     fn daemon_reload(&mut self) -> Result<(), InstallError>;
     fn enable(&mut self) -> Result<(), InstallError>;
     fn start(&mut self) -> Result<(), InstallError>;
+    /// 只重启 canonical Probe unit，并在无 registration credential 的新 invocation
+    /// 已激活后返回；不得复用广义 rollback stop。
+    fn restart_canonical(&mut self) -> Result<(), InstallError> {
+        Err(InstallError::Systemd)
+    }
     /// 只确认本机 unit 已激活；Hub 的安装就绪证据不属于 root activator。
     fn wait_local_activated(&mut self) -> Result<(), InstallError>;
     fn stop(&mut self) -> Result<(), InstallError>;
@@ -860,6 +866,28 @@ pub(crate) fn finalize_complete_replacement_current_probe(
     Ok(())
 }
 
+/// Root finalizer 的完整 Replacement retirement 边界。只有 exact layout 与注册结果
+/// 均已 durable，才按 registration attempt、commit fact 的顺序释放恢复 custody。
+pub(crate) fn finalize_and_retire_complete_replacement_current_probe(
+    paths: &FixedInstallPaths,
+    resume_binding: &ReplacementResumeBinding,
+    bundle: &VerifiedBundle,
+    commit: &ReplacementCommitFact,
+    commit_store: &mut FileReplacementCommitStore,
+    systemd: &mut impl SystemdPort,
+) -> Result<(), InstallError> {
+    finalize_complete_replacement_current_probe(paths, resume_binding, bundle, commit)?;
+    let registration_binding = commit
+        .registration_binding(&bundle.target)
+        .ok_or(InstallError::ExistingResidue)?;
+    replacement_registration::require_canonical_restart_ready(paths, &registration_binding)?;
+    systemd.restart_canonical()?;
+    retire_replacement_registration_attempt_source(paths)?;
+    commit_store
+        .retire_exact(commit)
+        .map_err(|_| InstallError::ExistingResidue)
+}
+
 struct BootstrapRolePath {
     path: PathBuf,
     rollback: RollbackStep,
@@ -1374,7 +1402,7 @@ fn activate_verified_fresh_install(
     match result {
         Ok(()) => {
             journal.commit_layout(
-                &paths.bootstrap_state(),
+                paths,
                 &bundle.version,
                 failure_semantics.is_committed_replacement(),
             )?;
@@ -1877,7 +1905,7 @@ const DENY_FIRST_EXECUTION_POLICY: &str = "NoNewPrivileges=true\nAmbientCapabili
 
 fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Enoki Probe\nAfter=network-online.target enoki-observation-runtime.socket\nAfter=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\nWants=network-online.target enoki-observation-runtime.socket\nWants=enoki-probe-lifecycle-companion.socket enoki-probe-lifecycle-upgrade.socket\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-probe\nGroup=enoki-probe\nDynamicUser=true\nSupplementaryGroups=enoki-probe-ipc\nStateDirectory=enoki-probe\nStateDirectoryMode=0750\nExecStart=/usr/local/bin/enoki-probe run --config /var/lib/enoki-probe/identity/probe-bootstrap.toml\nRestart=on-failure\nRestartPreventExitStatus=78\nRestartSec=5s\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket -/run/enoki-cpu-resource-provider.sock -/run/enoki-disk-health-resource-provider.sock\nReadWritePaths=/var/lib/enoki-probe /var/lib/enoki-probe/identity\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -1907,7 +1935,7 @@ fn observation_runtime_socket_unit() -> &'static str {
 
 fn observation_runtime_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nOnFailure=enoki-observation-runtime-failure.service\nConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nWatchdogSec=30s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release /var/lib/enoki-probe/identity -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket\n"
+        "[Unit]\nDescription=Enoki Observation Runtime\nRequires=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nAfter=enoki-cpu-resource-provider.socket enoki-disk-health-resource-provider.socket\nOnFailure=enoki-observation-runtime-failure.service\nConditionPathExists=!/var/lib/enoki-probe/runtime-failure/latch\nStartLimitIntervalSec=60s\nStartLimitBurst=3\n\n[Service]\nType=notify\nNotifyAccess=main\nUser=enoki-observation-runtime\nGroup=enoki-observation-runtime\nDynamicUser=true\nSupplementaryGroups=enoki-observation-ipc\nExecStart=/usr/local/bin/enoki-observation-runtime\nRestart=on-failure\nRestartSec=5s\nWatchdogSec=30s\nKillMode=control-group\n{DENY_FIRST_EXECUTION_POLICY}CapabilityBoundingSet=\nPrivateDevices=true\nPrivateNetwork=true\nProtectHome=true\nProtectHostname=true\nProtectProc=invisible\nProcSubset=pid\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX\nIPAddressDeny=any\nSocketBindDeny=any\nInaccessiblePaths=-/proc/stat -/proc/loadavg -/proc/meminfo -/proc/uptime -/proc/cpuinfo -/proc/mounts -/proc/net/dev -/proc/net/route -/proc/net/ipv6_route -/proc/diskstats -/proc/sys/kernel/hostname -/proc/sys/kernel/osrelease /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block /etc/os-release /usr/lib/os-release /var/lib/enoki-probe/identity -/run/systemd/private -/run/systemd/system -/run/dbus/system_bus_socket\n"
     )
 }
 
@@ -1923,7 +1951,7 @@ fn cpu_provider_socket_unit() -> &'static str {
 
 fn cpu_provider_unit() -> String {
     format!(
-        "[Unit]\nDescription=Enoki one-shot System State Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStartSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=read-only\nProtectProc=ptraceable\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
+        "[Unit]\nDescription=Enoki one-shot System State Resource Provider\nCollectMode=inactive-or-failed\n\n[Service]\nType=exec\nExecStart=/usr/local/bin/enoki-cpu-resource-provider\nStandardInput=socket\nStandardOutput=socket\nUser=root\nGroup=root\nRuntimeMaxSec=3s\nTimeoutStartSec=3s\nTimeoutStopSec=1s\nKillMode=control-group\nSendSIGKILL=yes\nOOMPolicy=kill\n{DENY_FIRST_EXECUTION_POLICY}SystemCallFilter=landlock_create_ruleset landlock_add_rule landlock_restrict_self\nCapabilityBoundingSet=\nPrivateDevices=true\nProtectHome=read-only\nProtectProc=ptraceable\nMemoryMax=256M\nRestrictAddressFamilies=AF_UNIX AF_NETLINK\nIPAddressDeny=any\nSocketBindDeny=ipv4:any\nSocketBindDeny=ipv6:any\nBindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block\nReadOnlyPaths=/proc/net\nReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts /proc/diskstats /proc/sys/kernel/hostname /proc/sys/kernel/osrelease\n"
     )
 }
 

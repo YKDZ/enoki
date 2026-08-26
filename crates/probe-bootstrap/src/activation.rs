@@ -132,14 +132,16 @@ impl ReceivedRootHandoff {
         if let ReplacementActivation::Complete(commit) = &replacement_activation {
             let paths = FixedInstallPaths::production();
             let resume_binding = commit.resume_binding();
-            crate::install::finalize_complete_replacement_current_probe(
+            let mut store = FileReplacementCommitStore::at(REPLACEMENT_COMMIT, 0);
+            crate::install::finalize_and_retire_complete_replacement_current_probe(
                 &paths,
                 &resume_binding,
                 &self.bundle,
                 commit,
+                &mut store,
+                &mut systemd,
             )
             .map_err(ActivationError::Install)?;
-            retire_replacement_registration_attempt(&paths)?;
             return Ok(());
         }
         let components = VerifiedCompleteFreshComponents {
@@ -189,14 +191,15 @@ impl ReceivedRootHandoff {
                 .load()
                 .map_err(|_| ActivationError::Replacement)?
                 .ok_or(ActivationError::Replacement)?;
-            crate::install::finalize_complete_replacement_current_probe(
+            crate::install::finalize_and_retire_complete_replacement_current_probe(
                 &paths,
                 &resume_binding,
                 &self.bundle,
                 &completed,
+                &mut store,
+                &mut systemd,
             )
             .map_err(ActivationError::Install)?;
-            retire_replacement_registration_attempt(&paths)?;
         }
         Ok(())
     }
@@ -211,13 +214,6 @@ impl ReceivedRootHandoff {
             .map_err(|_| ActivationError::Io)?;
         Ok(&mut self.component)
     }
-}
-
-fn retire_replacement_registration_attempt(
-    paths: &FixedInstallPaths,
-) -> Result<(), ActivationError> {
-    crate::install::retire_replacement_registration_attempt_source(paths)
-        .map_err(ActivationError::Install)
 }
 
 fn prepare_replacement_migration(
@@ -310,8 +306,7 @@ fn replacement_request_for_installed_state(
         return Ok(None);
     }
     LifecycleRequest::replacement_migration(
-        enrollment.enrollment_token(),
-        enrollment.hub_origin(),
+        enrollment,
         &format!("sha256:{}", bundle.asset_set_manifest_sha256),
         &bundle.target,
         &bundle.manifest_sha256,
@@ -326,12 +321,14 @@ fn invoke_replacement_companion(
     source: &mut File,
     bundle: &VerifiedBundle,
 ) -> Result<(), ActivationError> {
+    let _standard_descriptors = reserve_closed_standard_descriptors()?;
     let executable = sealed_lifecycle_companion(source, bundle)?;
     let executable_path = format!("/proc/self/fd/{}", executable.as_raw_fd());
     let mut command = Command::new(executable_path);
     command
         .env_clear()
         .env("LANG", "C")
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .current_dir("/")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -416,6 +413,32 @@ fn invoke_replacement_companion(
         }
         std::thread::sleep(REPLACEMENT_COMPANION_POLL_INTERVAL);
     }
+}
+
+fn reserve_closed_standard_descriptors() -> Result<Vec<File>, ActivationError> {
+    let mut reserved = Vec::new();
+    for descriptor in libc::STDIN_FILENO..=libc::STDERR_FILENO {
+        if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } >= 0 {
+            continue;
+        }
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EBADF) {
+            return Err(ActivationError::Replacement);
+        }
+        let opened = unsafe {
+            libc::open(
+                c"/dev/null".as_ptr(),
+                libc::O_RDWR | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if opened != descriptor {
+            if opened >= 0 {
+                unsafe { libc::close(opened) };
+            }
+            return Err(ActivationError::Replacement);
+        }
+        reserved.push(unsafe { File::from_raw_fd(opened) });
+    }
+    Ok(reserved)
 }
 
 fn sealed_lifecycle_companion(
@@ -1049,15 +1072,29 @@ mod tests {
         )
         .unwrap();
 
+        let enrollment_input = format!(
+            "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+            "c".repeat(64),
+            received.bundle.asset_set_manifest_sha256,
+        );
+        let enrollment = crate::handoff::Enrollment::from_install_input(
+            "https://hub.example",
+            enrollment_input.as_bytes(),
+        )
+        .unwrap();
         assert!(
-            replacement_request_for_installed_state(false, &received.enrollment, &received.bundle)
+            replacement_request_for_installed_state(false, &enrollment, &received.bundle)
                 .unwrap()
                 .is_none()
         );
-        let request =
-            replacement_request_for_installed_state(true, &received.enrollment, &received.bundle)
-                .unwrap()
-                .unwrap();
+        assert_eq!(
+            replacement_request_for_installed_state(true, &received.enrollment, &received.bundle,),
+            Err(ActivationError::Replacement),
+            "raw-token Enrollment不得误触 Replacement",
+        );
+        let request = replacement_request_for_installed_state(true, &enrollment, &received.bundle)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             request.transition(),
             crate::lifecycle::LifecycleTransition::ReplacementMigration
@@ -1066,7 +1103,12 @@ mod tests {
             request.authority(),
             &crate::lifecycle::LifecycleRequestAuthority::ReplacementEnrollment {
                 enrollment_token: "enk_enroll_test".to_string(),
+                enrollment_id: "enr_0123456789abcdef".to_string(),
                 hub_origin: "https://hub.example".to_string(),
+                host_id: "7".to_string(),
+                expected_probe_id: "probe_old_01".to_string(),
+                source_probe_version: "1.2.2".to_string(),
+                source_probe_sha256: vec!["c".repeat(64)],
                 target_asset_set_digest: format!(
                     "sha256:{}",
                     received.bundle.asset_set_manifest_sha256

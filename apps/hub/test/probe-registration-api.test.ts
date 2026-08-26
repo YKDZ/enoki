@@ -725,6 +725,20 @@ describe("Probe registration API", () => {
     const { enrollmentId, enrollmentToken } = enrollmentCommand;
     expect(enrollmentCommand.installCommand).toContain(enrollmentToken);
     expect(enrollmentCommand.installCommand).not.toContain("&&");
+    expect(installCommandEnrollment(enrollmentCommand.installCommand)).toEqual({
+      enrollmentToken,
+      hubOrigin: "https://hub.example",
+      replacementMigration: {
+        enrollmentId,
+        expectedProbeId: firstIdentity.probeId,
+        sourceProbeSha256: release.sourceProbeSha256,
+        sourceProbeVersion: "0.1.0",
+        targetAssetSetDigest: release.targetAssetSetDigest,
+        targetHostId: String(host.id),
+        targetProbeVersion: "0.2.0",
+      },
+      schemaVersion: 1,
+    });
     const pendingStatus = await app.request(
       `/api/web/enrollments/${enrollmentId}`,
       {
@@ -3397,3 +3411,9 @@ describe("Probe registration API", () => {
     database.close();
   });
 });
+
+function installCommandEnrollment(command: string): unknown {
+  const match = /^printf '%s\\n' '([^']+)' \|/.exec(command);
+  expect(match?.[1]).toBeTruthy();
+  return JSON.parse(match![1]!);
+}

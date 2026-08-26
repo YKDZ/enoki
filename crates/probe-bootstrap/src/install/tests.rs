@@ -9,6 +9,7 @@ mod tests {
     use super::*;
     use crate::handoff::Enrollment;
     use crate::lifecycle::UpgradeCompletion;
+    use crate::replacement::ReplacementCommitStore;
     use crate::trust::BootstrapRole;
     use hmac::{Hmac, Mac};
     use rsa::{
@@ -39,7 +40,7 @@ mod tests {
     #[test]
     fn system_state_boundary_assigns_host_facts_only_to_the_fixed_provider() {
         for unit in [service_unit(), observation_runtime_unit()] {
-            assert!(unit.contains("InaccessiblePaths=/proc/stat"));
+            assert!(unit.contains("InaccessiblePaths=-/proc/stat"));
             assert!(unit.contains("/proc/cpuinfo"));
             assert!(unit.contains("/etc/os-release"));
             assert!(unit.contains("/sys/class/block"));
@@ -50,11 +51,67 @@ mod tests {
         assert!(provider.contains("ProtectHome=read-only"));
         assert!(provider.contains("BindReadOnlyPaths=/etc/os-release /usr/lib/os-release /sys/devices/system/cpu /sys/class/hwmon /sys/class/power_supply /sys/class/block"));
         assert!(provider.contains("ReadOnlyPaths=/proc/stat /proc/loadavg /proc/meminfo /proc/uptime /proc/cpuinfo /proc/mounts"));
+        assert!(provider.contains("ReadOnlyPaths=/proc/net\n"));
         assert!(
-            provider.contains("/proc/net/dev /proc/net/route /proc/net/ipv6_route /proc/diskstats")
+            !provider
+                .lines()
+                .filter(|line| line.starts_with("ReadOnlyPaths="))
+                .any(|line| line.contains("/proc/net/")),
+            "/proc/net 的子路径会在 namespace 内解析为尚不存在的 child PID"
         );
+        assert!(provider.contains("ReadOnlyPaths=/proc/stat"));
+        assert!(provider.contains("/proc/diskstats"));
         assert!(provider.contains("IPAddressDeny=any"));
         assert!(provider.contains("SocketBindDeny=ipv4:any"));
+    }
+
+    #[test]
+    fn proc_subset_units_make_only_already_hidden_proc_paths_optional() {
+        let hidden_proc_paths = [
+            "/proc/stat",
+            "/proc/loadavg",
+            "/proc/meminfo",
+            "/proc/uptime",
+            "/proc/cpuinfo",
+            "/proc/mounts",
+            "/proc/net/dev",
+            "/proc/net/route",
+            "/proc/net/ipv6_route",
+            "/proc/diskstats",
+            "/proc/sys/kernel/hostname",
+            "/proc/sys/kernel/osrelease",
+        ];
+
+        for unit in [service_unit(), observation_runtime_unit()] {
+            let inaccessible = unit
+                .lines()
+                .find_map(|line| line.strip_prefix("InaccessiblePaths="))
+                .expect("canonical unit 必须声明 inaccessible paths");
+            let tokens: Vec<_> = inaccessible.split_ascii_whitespace().collect();
+            for path in hidden_proc_paths {
+                assert!(tokens.contains(&format!("-{path}").as_str()));
+                assert!(!tokens.contains(&path));
+            }
+            for mandatory in [
+                "/sys/devices/system/cpu",
+                "/sys/class/block",
+                "/etc/os-release",
+            ] {
+                assert!(tokens.contains(&mandatory));
+                assert!(!tokens.contains(&format!("-{mandatory}").as_str()));
+            }
+        }
+        let runtime = observation_runtime_unit();
+        let inaccessible = runtime
+            .lines()
+            .find_map(|line| line.strip_prefix("InaccessiblePaths="))
+            .unwrap();
+        assert!(
+            inaccessible
+                .split_ascii_whitespace()
+                .any(|token| token == "/var/lib/enoki-probe/identity")
+        );
+        assert!(!inaccessible.contains("-/var/lib/enoki-probe/identity"));
     }
 
     #[test]
@@ -272,6 +329,7 @@ mod tests {
         fail_enable: bool,
         fail_start: bool,
         fail_ready: bool,
+        fail_restart: bool,
         residue: bool,
         registration_identity: Option<PathBuf>,
     }
@@ -297,6 +355,12 @@ mod tests {
         fn start(&mut self) -> Result<(), InstallError> {
             self.calls.push("start");
             (!self.fail_start)
+                .then_some(())
+                .ok_or(InstallError::Systemd)
+        }
+        fn restart_canonical(&mut self) -> Result<(), InstallError> {
+            self.calls.push("canonical-restart");
+            (!self.fail_restart)
                 .then_some(())
                 .ok_or(InstallError::Systemd)
         }
@@ -3169,6 +3233,7 @@ mod tests {
             &registration,
         );
         assert_eq!(first, Err(InstallError::Systemd));
+        assert!(!systemd.calls.contains(&"canonical-restart"));
         let drop_in = paths.replacement_registration_drop_in();
         assert!(drop_in.exists(), "Readiness ambiguity retains one-shot delivery");
         let canonical_unit = fs::read_to_string(paths.unit()).unwrap();
@@ -3236,6 +3301,23 @@ mod tests {
         let paths = FixedInstallPaths::under(temporary.path());
         let source = paths.replacement_registration_attempt_source();
         let drop_in = paths.replacement_registration_drop_in();
+        let commit_path = paths
+            .bootstrap_state()
+            .join("replacement-migration.json");
+        let runtime_credential = temporary
+            .path()
+            .join("run/credentials/enoki-probe.service/registration-attempt");
+        fs::create_dir_all(paths.bootstrap_state()).unwrap();
+        fs::set_permissions(
+            paths.bootstrap_state(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let replacement_bundle = bundle().with_test_complete_receipts(5);
+        let replacement_commit = replacement_commit(&replacement_bundle);
+        FileReplacementCommitStore::at(&commit_path, unsafe { libc::geteuid() })
+            .persist(&replacement_commit)
+            .unwrap();
 
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
@@ -3316,7 +3398,58 @@ mod tests {
         ));
         assert!(!drop_in.exists());
         assert!(source.exists());
+        assert!(commit_path.exists(), "未完成 Readiness 必须保留 commit custody");
+        assert!(runtime_credential.exists());
         assert!(!fs::read_to_string(paths.unit()).unwrap().contains("LoadCredential="));
+
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            None,
+        ));
+        assert!(source.exists());
+        assert!(commit_path.exists());
+        assert!(runtime_credential.exists());
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+
+        fs::create_dir_all(drop_in.parent().unwrap()).unwrap();
+        fs::set_permissions(
+            drop_in.parent().unwrap(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::write(&drop_in, b"stale delivery").unwrap();
+        fs::set_permissions(&drop_in, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            None,
+        ));
+        assert!(source.exists());
+        assert!(commit_path.exists());
+        assert!(runtime_credential.exists());
+        fs::remove_file(&drop_in).unwrap();
+        fs::remove_dir(drop_in.parent().unwrap()).unwrap();
+
+        for point in ["fail-restart", "before-restart"] {
+            assert!(!run_replacement_lifecycle_child(
+                temporary.path(),
+                "retire-source",
+                Some((&runtime_credential, point)),
+            ));
+            assert!(source.exists());
+            assert!(commit_path.exists());
+            assert!(runtime_credential.exists());
+        }
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&runtime_credential, "after-restart")),
+        ));
+        assert!(source.exists());
+        assert!(commit_path.exists());
+        assert!(!runtime_credential.exists());
 
         assert!(!run_replacement_lifecycle_child(
             temporary.path(),
@@ -3330,12 +3463,30 @@ mod tests {
             Some((&source, "after-unlink")),
         ));
         assert!(!source.exists());
+        assert!(commit_path.exists(), "registration retirement 中断必须保留 commit");
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&commit_path, "before-unlink")),
+        ));
+        assert!(commit_path.exists());
+        assert!(!run_replacement_lifecycle_child(
+            temporary.path(),
+            "retire-source",
+            Some((&commit_path, "after-unlink")),
+        ));
+        assert!(!commit_path.exists());
         assert!(run_replacement_lifecycle_child(
             temporary.path(),
             "retire-source",
             None,
         ));
         assert!(!source.parent().unwrap().exists());
+        assert!(!commit_path.exists());
+        assert!(
+            !runtime_credential.exists(),
+            "Replacement finalizer 成功返回前必须收敛为无注册 credential 的 canonical invocation"
+        );
         assert!(run_replacement_lifecycle_child(
             temporary.path(),
             "canonical-start",
@@ -3450,14 +3601,25 @@ mod tests {
             "retire-source" => {
                 let bundle = bundle().with_test_complete_receipts(5);
                 let commit = replacement_commit(&bundle);
-                finalize_complete_replacement_current_probe(
+                let mut store = FileReplacementCommitStore::at(
+                    paths
+                        .bootstrap_state()
+                        .join("replacement-migration.json"),
+                    unsafe { libc::geteuid() },
+                );
+                let mut systemd = ProductionRecoverySystemd {
+                    paths: &paths,
+                    timeout: false,
+                };
+                finalize_and_retire_complete_replacement_current_probe(
                     &paths,
                     &commit.resume_binding(),
                     &bundle,
                     &commit,
+                    &mut store,
+                    &mut systemd,
                 )
                 .unwrap();
-                retire_replacement_registration_attempt_source(&paths).unwrap();
             }
             "canonical-start" => {
                 ProductionRecoverySystemd {
@@ -3502,7 +3664,40 @@ mod tests {
             {
                 return Err(InstallError::ExistingResidue);
             }
+            if self.paths.replacement_registration_drop_in().exists() {
+                let credential = self
+                    .paths
+                    .root
+                    .join("run/credentials/enoki-probe.service/registration-attempt");
+                fs::create_dir_all(credential.parent().unwrap()).map_err(|_| InstallError::Io)?;
+                fs::write(credential, b"invocation-owned").map_err(|_| InstallError::Io)?;
+            }
             Ok(())
+        }
+
+        fn restart_canonical(&mut self) -> Result<(), InstallError> {
+            let credential = self
+                .paths
+                .root
+                .join("run/credentials/enoki-probe.service/registration-attempt");
+            let selected = std::env::var_os("ENOKI_TEST_SECURE_FILE_PATH").as_deref()
+                == Some(credential.as_os_str());
+            let point = std::env::var("ENOKI_TEST_SECURE_FILE_CRASH_POINT").ok();
+            if selected && point.as_deref() == Some("fail-restart") {
+                return Err(InstallError::Systemd);
+            }
+            if selected && point.as_deref() == Some("before-restart") {
+                std::process::abort();
+            }
+            match fs::remove_file(&credential) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(InstallError::Systemd),
+            }
+            if selected && point.as_deref() == Some("after-restart") {
+                std::process::abort();
+            }
+            self.start()
         }
 
         fn wait_local_activated(&mut self) -> Result<(), InstallError> {
@@ -3712,6 +3907,7 @@ mod tests {
         for parent in [
             "usr/local/bin",
             "var/lib",
+            "etc/enoki",
             "etc/systemd/system",
             "etc/sudoers.d",
         ] {
@@ -3983,6 +4179,7 @@ mod tests {
         )
         .unwrap();
         assert!(!paths.bootstrap_state().join("activation-journal.json").exists());
+        assert!(paths.etc_enoki().is_dir());
         for guarded in [paths.identity(), paths.metadata()] {
             let backup = guarded.with_extension("safe-open-backup");
             fs::rename(&guarded, &backup).unwrap();
@@ -4044,6 +4241,7 @@ mod tests {
         for parent in [
             "usr/local/bin",
             "var/lib",
+            "etc/enoki",
             "etc/systemd/system",
             "etc/sudoers.d",
         ] {
@@ -4086,6 +4284,21 @@ mod tests {
         assert!(accounts.calls.contains(&"create"));
         assert!(!accounts.calls.contains(&"remove"));
         assert!(paths.etc_enoki().exists());
+        let interrupted: serde_json::Value = serde_json::from_slice(
+            &fs::read(paths.bootstrap_state().join("activation-journal.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            interrupted["paths"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|receipt| receipt["path"] != serde_json::json!(paths.etc_enoki()))
+        );
+        assert_eq!(
+            interrupted["pre_existing_paths"][0]["path"],
+            serde_json::json!(paths.etc_enoki())
+        );
 
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
@@ -5394,6 +5607,7 @@ mod tests {
                 .join("etc/systemd/system/enoki-probe.service")
                 .exists()
         );
+        assert!(temporary.path().join("etc/enoki").is_dir());
         assert!(
             temporary
                 .path()

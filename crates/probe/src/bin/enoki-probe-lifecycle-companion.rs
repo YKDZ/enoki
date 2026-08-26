@@ -265,9 +265,13 @@ mod tests {
     }
 
     fn replacement_authority() -> LifecycleRequestAuthority {
-        LifecycleRequest::replacement_migration(
-            "enk_enroll_test",
+        let enrollment = enoki_probe_bootstrap::handoff::Enrollment::from_install_input(
             "https://hub.example",
+            br#"{"hubOrigin":"https://hub.example","enrollmentToken":"enk_enroll_test","replacementMigration":{"enrollmentId":"enr_0123456789abcdef","expectedProbeId":"probe_old_01","sourceProbeSha256":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"sourceProbeVersion":"1.2.2","targetAssetSetDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","targetHostId":"7","targetProbeVersion":"1.2.3"},"schemaVersion":1}"#,
+        )
+        .unwrap();
+        LifecycleRequest::replacement_migration(
+            &enrollment,
             &format!("sha256:{}", "a".repeat(64)),
             "x86_64-unknown-linux-gnu",
             &"b".repeat(64),

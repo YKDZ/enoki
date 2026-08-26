@@ -9,6 +9,15 @@ export type InstallationCommandConfig = {
 
 export type InstallCommandInput = {
   enrollmentToken: string;
+  replacementMigration?: {
+    enrollmentId: string;
+    expectedProbeId: string;
+    sourceProbeSha256: string[];
+    sourceProbeVersion: string;
+    targetAssetSetDigest: string;
+    targetHostId: string;
+    targetProbeVersion: string;
+  };
 };
 
 export type InstallCommandResult = {
@@ -111,13 +120,21 @@ export function renderInstallCommand(
   input: InstallCommandInput,
 ): InstallCommandResult {
   const hubUrl = config.probeApiOrigin ?? "http://localhost";
+  const enrollmentInput = input.replacementMigration
+      ? JSON.stringify({
+        hubOrigin: hubUrl,
+        enrollmentToken: input.enrollmentToken,
+        replacementMigration: input.replacementMigration,
+        schemaVersion: 1,
+      })
+    : input.enrollmentToken;
   return {
     bootstrapRecipe: config.bootstrapRecipe ?? developmentRecipeRecord,
     hubUrl,
     installCommand: [
       "printf",
       "'%s\\n'",
-      shellQuote(input.enrollmentToken),
+      shellQuote(enrollmentInput),
       "|",
       "python3",
       "--",

@@ -433,7 +433,12 @@ pub enum LifecycleRequestAuthority {
     },
     ReplacementEnrollment {
         enrollment_token: String,
+        enrollment_id: String,
         hub_origin: String,
+        host_id: String,
+        expected_probe_id: String,
+        source_probe_version: String,
+        source_probe_sha256: Vec<String>,
         target_asset_set_digest: String,
         target_bundle_target: String,
         target_manifest_sha256: String,
@@ -699,19 +704,31 @@ impl LifecycleRequest {
     }
 
     pub fn replacement_migration(
-        enrollment_token: &str,
-        hub_origin: &str,
+        enrollment: &crate::handoff::Enrollment,
         target_asset_set_digest: &str,
         target_bundle_target: &str,
         target_manifest_sha256: &str,
         bundle_version: &str,
     ) -> Result<Self, LifecycleRejection> {
+        let facts = enrollment
+            .replacement_migration()
+            .ok_or(LifecycleRejection::InvalidAuthority)?;
+        if facts.target_asset_set_digest() != target_asset_set_digest
+            || facts.target_probe_version() != bundle_version
+        {
+            return Err(LifecycleRejection::InvalidAuthority);
+        }
         let request = Self {
             schema_version: 1,
             transition: LifecycleTransition::ReplacementMigration,
             authority: LifecycleRequestAuthority::ReplacementEnrollment {
-                enrollment_token: enrollment_token.to_owned(),
-                hub_origin: hub_origin.to_owned(),
+                enrollment_token: enrollment.enrollment_token().to_owned(),
+                enrollment_id: facts.enrollment_id().to_owned(),
+                hub_origin: enrollment.hub_origin().to_owned(),
+                host_id: facts.target_host_id().to_owned(),
+                expected_probe_id: facts.expected_probe_id().to_owned(),
+                source_probe_version: facts.source_probe_version().to_owned(),
+                source_probe_sha256: facts.source_probe_sha256().to_vec(),
                 target_asset_set_digest: target_asset_set_digest.to_owned(),
                 target_bundle_target: target_bundle_target.to_owned(),
                 target_manifest_sha256: target_manifest_sha256.to_owned(),
@@ -844,7 +861,12 @@ impl LifecycleRequest {
             }
             LifecycleRequestAuthority::ReplacementEnrollment {
                 enrollment_token,
+                enrollment_id,
                 hub_origin,
+                host_id,
+                expected_probe_id,
+                source_probe_version,
+                source_probe_sha256,
                 target_asset_set_digest,
                 target_bundle_target,
                 target_manifest_sha256,
@@ -854,7 +876,16 @@ impl LifecycleRequest {
                     || enrollment_token.is_empty()
                     || enrollment_token.len() > MAX_OPERATION_TOKEN_BYTES
                     || enrollment_token.bytes().any(|byte| byte.is_ascii_control())
+                    || !valid_identifier(enrollment_id)
                     || !valid_hub_origin(hub_origin)
+                    || !valid_identifier(host_id)
+                    || !valid_identifier(expected_probe_id)
+                    || !valid_bundle_version(source_probe_version)
+                    || source_probe_sha256.is_empty()
+                    || source_probe_sha256.len() > 16
+                    || !source_probe_sha256
+                        .iter()
+                        .all(|digest| is_sha256_hex(digest))
                     || !is_prefixed_sha256(target_asset_set_digest)
                     || !matches!(
                         target_bundle_target.as_str(),
@@ -1159,8 +1190,11 @@ mod tests {
     #[test]
     fn replacement_migration_authority_roundtrips_as_one_bounded_request() {
         let request = LifecycleRequest::replacement_migration(
-            "enk_enroll_test",
-            "https://hub.example",
+            &crate::handoff::Enrollment::from_install_input(
+                "https://hub.example",
+                br#"{"hubOrigin":"https://hub.example","enrollmentToken":"enk_enroll_test","replacementMigration":{"enrollmentId":"enr_0123456789abcdef","expectedProbeId":"probe_old_01","sourceProbeSha256":["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],"sourceProbeVersion":"1.2.2","targetAssetSetDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","targetHostId":"7","targetProbeVersion":"1.2.3"},"schemaVersion":1}"#,
+            )
+            .unwrap(),
             &format!("sha256:{}", "a".repeat(64)),
             "x86_64-unknown-linux-gnu",
             &"b".repeat(64),

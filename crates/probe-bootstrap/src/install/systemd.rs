@@ -42,6 +42,14 @@ const ROLLBACK_RESET_UNITS: &[&str] = &[
     "enoki-probe-lifecycle-companion@*.service",
     "enoki-probe-lifecycle-upgrade@*.service",
 ];
+const REPLACEMENT_REGISTRATION_CREDENTIAL: &str =
+    "/run/credentials/enoki-probe.service/registration-attempt";
+
+fn canonical_restart_deadline(now: Instant, _install_deadline: Option<Instant>) -> Instant {
+    // canonical convergence 是安装事务完成后的独立有界步骤；install deadline 可能已被
+    // response/config crash 恢复耗尽，不能阻止固定 canonical restart 被实际提交。
+    now + Duration::from_secs(60)
+}
 
 fn attempt_all_fixed_units(
     units: &[&str],
@@ -145,6 +153,37 @@ impl SystemdPort for SystemSystemd {
                 .unwrap_or_else(|| Instant::now() + COMMAND_STEP_BUDGET),
         )
     }
+    fn restart_canonical(&mut self) -> Result<(), InstallError> {
+        let deadline = canonical_restart_deadline(Instant::now(), self.command_deadline);
+        require_success(
+            "/usr/bin/systemctl",
+            &["restart", "--no-block", "enoki-probe.service"],
+            InstallError::Systemd,
+            deadline,
+        )?;
+        loop {
+            let active = require_success(
+                "/usr/bin/systemctl",
+                &["is-active", "--quiet", "enoki-probe.service"],
+                InstallError::Systemd,
+                deadline,
+            )
+            .is_ok();
+            let credential_absent = match fs::symlink_metadata(REPLACEMENT_REGISTRATION_CREDENTIAL)
+            {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Ok(_) => false,
+                Err(_) => return Err(InstallError::ExistingResidue),
+            };
+            if active && credential_absent {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(InstallError::Systemd);
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
     fn wait_local_activated(&mut self) -> Result<(), InstallError> {
         let local_deadline = Instant::now() + Duration::from_secs(60);
         let deadline = std::cmp::min(
@@ -236,8 +275,20 @@ impl SystemdPort for SystemSystemd {
 mod tests {
     use super::{
         InstallError, ROLLBACK_RESET_UNITS, ROLLBACK_STOP_UNITS, ROLLBACK_VERIFY_UNITS,
-        attempt_all_fixed_units, is_live_upgrade_companion_unit, rollback_unit_is_absent,
+        attempt_all_fixed_units, canonical_restart_deadline, is_live_upgrade_companion_unit,
+        rollback_unit_is_absent,
     };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn canonical_restart_gets_a_new_bounded_deadline_after_install_deadline() {
+        let now = Instant::now();
+        let expired_install_deadline = now - Duration::from_secs(1);
+
+        let deadline = canonical_restart_deadline(now, Some(expired_install_deadline));
+
+        assert_eq!(deadline.duration_since(now), Duration::from_secs(60));
+    }
 
     #[test]
     fn live_upgrade_preserves_only_its_fixed_recovery_socket_and_instance() {
