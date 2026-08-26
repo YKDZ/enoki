@@ -10,7 +10,6 @@ const DISK_HEALTH_PROVIDER_BINARY: &str =
 const LIFECYCLE_COMPANION_BINARY: &str =
     include_str!("../src/bin/enoki-probe-lifecycle-companion.rs");
 const DISK_HEALTH_CALCULATION: &str = include_str!("../src/metrics/disk_health.rs");
-const LOCAL_LIFECYCLE: &str = include_str!("../src/local_lifecycle.rs");
 const UPGRADER: &str = include_str!("../src/upgrader.rs");
 const INSTALLED_BUNDLE_REPAIR: &str =
     include_str!("../src/runtime_failure/installed_bundle_repair.rs");
@@ -109,13 +108,36 @@ fn observation_roles_have_one_way_dependency_boundaries() {
 
 #[test]
 fn fresh_probe_installation_cannot_render_collector_helper_sudoers() {
-    let lifecycle = production_source(LOCAL_LIFECYCLE);
-    assert!(!lifecycle.contains("internal-render-collector-helper-sudoers"));
-    assert!(!lifecycle.contains("write_collector_helper_sudoers("));
-    assert!(lifecycle.contains("collector_helper_sudoers_path"));
-
     assert!(!UPGRADER.contains("fn write_collector_helper_sudoers"));
     assert!(UPGRADER.contains("fn remove_legacy_collector_helper_sudoers"));
+}
+
+#[test]
+fn legacy_fresh_installer_and_shallow_lifecycle_surfaces_are_absent() {
+    assert!(
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/local_lifecycle.rs")
+            .exists(),
+        "零生产 caller 的旧 installer 必须删除",
+    );
+    assert!(!PROBE_LIBRARY.contains("local_lifecycle"));
+    for retired in [
+        "LifecyclePlan",
+        "TransitionAvailability",
+        "FreshInstallLifecycleEffects",
+        "execute_fresh_install_lifecycle",
+    ] {
+        assert!(
+            !BOOTSTRAP_LIFECYCLE.contains(retired),
+            "浅 lifecycle surface 必须删除：{retired}",
+        );
+    }
+    for retired in ["activate_current_probe", "activate_fresh_current_probe"] {
+        assert!(
+            !BOOTSTRAP_INSTALL.contains(retired),
+            "零生产 caller 的 Fresh wrapper 必须删除：{retired}",
+        );
+    }
 }
 
 #[test]

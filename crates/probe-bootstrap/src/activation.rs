@@ -5,8 +5,8 @@ use crate::{
     handoff::{Enrollment, Handoff, HandoffError},
     install::{
         FixedInstallPaths, InstallError, SystemAccounts, SystemSystemd,
-        VerifiedCompleteFreshComponents, activate_complete_fresh_current_probe,
-        activate_complete_replacement_current_probe_with_registration,
+        VerifiedCompleteFreshComponents,
+        activate_complete_replacement_current_probe_with_registration, coordinate_fresh_install,
     },
     lifecycle::{LifecycleRequest, LifecycleResponse},
     replacement::{
@@ -171,7 +171,7 @@ impl ReceivedRootHandoff {
                 &registration_binding,
             )
         } else {
-            activate_complete_fresh_current_probe(
+            coordinate_fresh_install(
                 components,
                 &self.enrollment,
                 &self.bundle,
@@ -303,7 +303,11 @@ fn replacement_request_for_installed_state(
     bundle: &VerifiedBundle,
 ) -> Result<Option<LifecycleRequest>, ActivationError> {
     if !has_installed_metadata {
-        return Ok(None);
+        return if enrollment.replacement_migration().is_some() {
+            Err(ActivationError::Replacement)
+        } else {
+            Ok(None)
+        };
     }
     LifecycleRequest::replacement_migration(
         enrollment,
@@ -1082,10 +1086,10 @@ mod tests {
             enrollment_input.as_bytes(),
         )
         .unwrap();
-        assert!(
-            replacement_request_for_installed_state(false, &enrollment, &received.bundle)
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            replacement_request_for_installed_state(false, &enrollment, &received.bundle),
+            Err(ActivationError::Replacement),
+            "Replacement authority 缺少旧 install metadata 时必须在任何 Host effect 前关闭",
         );
         assert_eq!(
             replacement_request_for_installed_state(true, &received.enrollment, &received.bundle,),

@@ -495,7 +495,7 @@ impl LifecycleResponse {
         Self {
             schema_version: 1,
             status: LifecycleResultStatus::NotEnabled,
-            code: LifecycleRejection::TransitionNotEnabled.code().to_owned(),
+            code: "lifecycle.transition_not_enabled".to_owned(),
         }
     }
 
@@ -923,38 +923,10 @@ impl LifecycleRequest {
     }
 }
 
-impl LifecycleTransition {
-    pub const ALL: [Self; 5] = [
-        Self::FreshInstall,
-        Self::Upgrade,
-        Self::Repair,
-        Self::ReplacementMigration,
-        Self::Uninstall,
-    ];
-
-    #[must_use]
-    pub const fn availability(self) -> TransitionAvailability {
-        match self {
-            Self::FreshInstall
-            | Self::Upgrade
-            | Self::Repair
-            | Self::ReplacementMigration
-            | Self::Uninstall => TransitionAvailability::Enabled,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransitionAvailability {
-    Enabled,
-    NotEnabled,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleRejection {
     InvalidAuthority,
     InvalidState,
-    TransitionNotEnabled,
 }
 
 impl LifecycleRejection {
@@ -963,27 +935,7 @@ impl LifecycleRejection {
         match self {
             Self::InvalidAuthority => "lifecycle.invalid_authority",
             Self::InvalidState => "lifecycle.invalid_state",
-            Self::TransitionNotEnabled => "lifecycle.transition_not_enabled",
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct LifecyclePlan {
-    transition: LifecycleTransition,
-}
-
-impl LifecyclePlan {
-    pub fn for_transition(transition: LifecycleTransition) -> Result<Self, LifecycleRejection> {
-        match transition.availability() {
-            TransitionAvailability::Enabled => Ok(Self { transition }),
-            TransitionAvailability::NotEnabled => Err(LifecycleRejection::TransitionNotEnabled),
-        }
-    }
-
-    #[must_use]
-    pub const fn transition(self) -> LifecycleTransition {
-        self.transition
     }
 }
 
@@ -1035,8 +987,6 @@ pub(crate) trait UpgradeLifecycleEffects {
 pub(crate) fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
     effects: &mut E,
 ) -> Result<UpgradeCompletion, E::Error> {
-    LifecyclePlan::for_transition(LifecycleTransition::Upgrade)
-        .expect("构建期固定的兼容升级转换必须保持启用");
     effects.verify_and_prepare()?;
     match effects.activate_complete_bundle() {
         Ok(()) => Ok(UpgradeCompletion::Activated),
@@ -1052,22 +1002,6 @@ pub(crate) fn execute_upgrade_lifecycle<E: UpgradeLifecycleEffects>(
 pub enum UninstallCommitPolicy {
     Local,
     HubTerminal,
-}
-
-pub trait FreshInstallLifecycleEffects {
-    type Error;
-
-    fn verify(&mut self) -> Result<(), Self::Error>;
-    fn stage_and_activate(&mut self) -> Result<(), Self::Error>;
-}
-
-pub fn execute_fresh_install_lifecycle<E: FreshInstallLifecycleEffects>(
-    effects: &mut E,
-) -> Result<(), E::Error> {
-    LifecyclePlan::for_transition(LifecycleTransition::FreshInstall)
-        .expect("构建期固定的新装转换必须保持启用");
-    effects.verify()?;
-    effects.stage_and_activate()
 }
 
 pub trait UninstallLifecycleEffects {
@@ -1137,31 +1071,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transition_registry_enables_only_delivered_lifecycle_paths() {
-        assert_eq!(LifecycleTransition::ALL.len(), 5);
-        assert_eq!(
-            LifecycleTransition::FreshInstall.availability(),
-            TransitionAvailability::Enabled
-        );
-        assert_eq!(
-            LifecycleTransition::ReplacementMigration.availability(),
-            TransitionAvailability::Enabled
-        );
-        assert_eq!(
-            LifecycleTransition::Uninstall.availability(),
-            TransitionAvailability::Enabled
-        );
-        assert_eq!(
-            LifecycleTransition::Upgrade.availability(),
-            TransitionAvailability::Enabled
-        );
-        assert_eq!(
-            LifecycleTransition::Repair.availability(),
-            TransitionAvailability::Enabled
-        );
-    }
-
-    #[test]
     fn compatible_upgrade_authority_roundtrips_with_source_target_and_stage_bindings() {
         let request = LifecycleRequest::hub_upgrade(
             "https://hub.example",
@@ -1205,16 +1114,6 @@ mod tests {
 
         assert!(encoded.len() <= MAX_LIFECYCLE_REQUEST_BYTES);
         assert_eq!(LifecycleRequest::decode(&encoded), Ok(request));
-    }
-
-    #[test]
-    fn repair_is_an_enabled_explicit_lifecycle_transition() {
-        assert_eq!(
-            LifecyclePlan::for_transition(LifecycleTransition::Repair)
-                .expect("Repair is explicitly enabled")
-                .transition(),
-            LifecycleTransition::Repair,
-        );
     }
 
     #[test]
@@ -1337,26 +1236,6 @@ mod tests {
             LifecycleRequest::decode(invalid.as_bytes()),
             Err(LifecycleRejection::InvalidAuthority),
         );
-    }
-
-    #[test]
-    fn fresh_install_runner_executes_one_enabled_typed_effect() {
-        struct Effects(Vec<&'static str>);
-        impl FreshInstallLifecycleEffects for Effects {
-            type Error = &'static str;
-            fn verify(&mut self) -> Result<(), Self::Error> {
-                self.0.push("verify");
-                Ok(())
-            }
-            fn stage_and_activate(&mut self) -> Result<(), Self::Error> {
-                self.0.push("stage-and-activate");
-                Ok(())
-            }
-        }
-        let mut effects = Effects(Vec::new());
-        let result = execute_fresh_install_lifecycle(&mut effects);
-        assert_eq!(result, Ok(()));
-        assert_eq!(effects.0, ["verify", "stage-and-activate"]);
     }
 
     #[test]

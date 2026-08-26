@@ -21,6 +21,91 @@ mod tests {
     use std::sync::OnceLock;
     use tempfile::tempdir;
 
+    struct LayoutBootstrapComponentsForTest<'a> {
+        probe: &'a mut File,
+        bootstrap_acquirer: &'a mut File,
+        bootstrap_activator: &'a mut File,
+    }
+
+    fn activate_layout_with_bootstrap_for_test(
+        components: LayoutBootstrapComponentsForTest<'_>,
+        enrollment: &Enrollment,
+        bundle: &VerifiedBundle,
+        trust: &BuildTrust,
+        paths: &FixedInstallPaths,
+        accounts: &mut impl AccountPort,
+        systemd: &mut impl SystemdPort,
+    ) -> Result<(), InstallError> {
+        let mut files = SystemInstallFiles;
+        activate_verified_install_layout(
+            components.probe,
+            None,
+            Some((
+                components.bootstrap_acquirer,
+                components.bootstrap_activator,
+            )),
+            enrollment,
+            bundle,
+            trust,
+            paths,
+            &mut InstallPorts {
+                accounts,
+                systemd,
+                files: &mut files,
+            },
+            InstallFailureSemantics::FreshRollback,
+        )
+    }
+
+    fn activate_layout_without_roles_for_test(
+        component: &mut File,
+        enrollment: &Enrollment,
+        bundle: &VerifiedBundle,
+        trust: &BuildTrust,
+        paths: &FixedInstallPaths,
+        accounts: &mut impl AccountPort,
+        systemd: &mut impl SystemdPort,
+    ) -> Result<(), InstallError> {
+        let mut files = SystemInstallFiles;
+        activate_verified_install_layout(
+            component,
+            None,
+            None,
+            enrollment,
+            bundle,
+            trust,
+            paths,
+            &mut InstallPorts {
+                accounts,
+                systemd,
+                files: &mut files,
+            },
+            InstallFailureSemantics::FreshRollback,
+        )
+    }
+
+    fn activate_layout_mechanics_for_test(
+        component: &mut File,
+        bootstrap_components: Option<(&mut File, &mut File)>,
+        enrollment: &Enrollment,
+        bundle: &VerifiedBundle,
+        trust: &BuildTrust,
+        paths: &FixedInstallPaths,
+        ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
+    ) -> Result<(), InstallError> {
+        activate_verified_install_layout(
+            component,
+            None,
+            bootstrap_components,
+            enrollment,
+            bundle,
+            trust,
+            paths,
+            ports,
+            InstallFailureSemantics::FreshRollback,
+        )
+    }
+
     #[test]
     fn installed_layout_mechanics_are_shared_without_replacement_or_repair_policy() {
         let mechanics = include_str!("installed_layout.rs");
@@ -533,7 +618,7 @@ mod tests {
         let bundle = bundle().with_test_complete_receipts(5);
         let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
-        activate_complete_fresh_current_probe(
+        coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -994,7 +1079,7 @@ mod tests {
         let mut component = component();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
-        activate_current_probe(
+        activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
@@ -1103,8 +1188,8 @@ mod tests {
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
 
-        activate_fresh_current_probe(
-            VerifiedFreshComponents {
+        activate_layout_with_bootstrap_for_test(
+            LayoutBootstrapComponentsForTest {
                 probe: &mut component,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
@@ -1159,7 +1244,7 @@ mod tests {
         ] = std::array::from_fn(|_| component());
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
-        activate_complete_fresh_current_probe(
+        coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut source_probe,
                 observation_runtime: &mut source_runtime,
@@ -1423,7 +1508,7 @@ mod tests {
             mut source_acquirer,
             mut source_activator,
         ] = std::array::from_fn(|_| component());
-        activate_complete_fresh_current_probe(
+        coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut source_probe,
                 observation_runtime: &mut source_runtime,
@@ -1582,7 +1667,7 @@ mod tests {
         let installed_bundle = bundle().with_test_complete_receipts(5);
         let [mut probe, mut runtime, mut provider, mut disk, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
-        activate_complete_fresh_current_probe(
+        coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -2833,7 +2918,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
 
-        activate_complete_fresh_current_probe(
+        coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -3028,7 +3113,7 @@ mod tests {
             ..Systemd::default()
         };
 
-        let result = activate_complete_fresh_current_probe(
+        let result = coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -3865,6 +3950,51 @@ mod tests {
     }
 
     #[test]
+    fn fresh_coordinator_rejects_replacement_authority_before_host_effects() {
+        let temporary = tempdir().unwrap();
+        let paths = FixedInstallPaths::under(temporary.path());
+        let enrollment = Enrollment::from_install_input(
+            "https://hub.example",
+            format!(
+                "{{\"hubOrigin\":\"https://hub.example\",\"enrollmentToken\":\"enk_enroll_test\",\"replacementMigration\":{{\"enrollmentId\":\"enr_0123456789abcdef\",\"expectedProbeId\":\"probe_old_01\",\"sourceProbeSha256\":[\"{}\"],\"sourceProbeVersion\":\"1.2.2\",\"targetAssetSetDigest\":\"sha256:{}\",\"targetHostId\":\"7\",\"targetProbeVersion\":\"1.2.3\"}},\"schemaVersion\":1}}",
+                "c".repeat(64),
+                "a".repeat(64),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
+            std::array::from_fn(|_| component());
+        let mut accounts = Accounts::default();
+        let mut systemd = Systemd::default();
+
+        assert_eq!(
+            coordinate_fresh_install(
+                VerifiedCompleteFreshComponents {
+                    probe: &mut probe,
+                    observation_runtime: &mut runtime,
+                    cpu_provider: &mut provider,
+                    disk_health_provider: &mut disk_health,
+                    lifecycle_companion: &mut lifecycle,
+                    bootstrap_acquirer: &mut acquirer,
+                    bootstrap_activator: &mut activator,
+                },
+                &enrollment,
+                &bundle().with_test_observation_receipts(5),
+                &trust(),
+                &paths,
+                &mut accounts,
+                &mut systemd,
+            ),
+            Err(InstallError::InvalidVerifiedComponent),
+        );
+        assert!(accounts.calls.is_empty());
+        assert!(accounts.ipc_calls.is_empty());
+        assert!(systemd.calls.is_empty());
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[test]
     fn committed_replacement_rejects_a_stale_journal_from_another_enrollment() {
         let temporary = tempdir().unwrap();
         for parent in [
@@ -3911,7 +4041,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         assert_eq!(
-            activate_complete_fresh_current_probe(
+            coordinate_fresh_install(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -4002,7 +4132,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         assert_eq!(
-            activate_complete_fresh_current_probe(
+            coordinate_fresh_install(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -4229,7 +4359,7 @@ mod tests {
         let [mut probe, mut runtime, mut provider, mut disk_health, mut lifecycle, mut acquirer, mut activator] =
             std::array::from_fn(|_| component());
         assert_eq!(
-            activate_complete_fresh_current_probe(
+            coordinate_fresh_install(
                 VerifiedCompleteFreshComponents {
                     probe: &mut probe,
                     observation_runtime: &mut runtime,
@@ -4870,7 +5000,7 @@ mod tests {
         let mut activator = component();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
-        activate_complete_fresh_current_probe(
+        coordinate_fresh_install(
             VerifiedCompleteFreshComponents {
                 probe: &mut probe,
                 observation_runtime: &mut runtime,
@@ -4961,7 +5091,7 @@ mod tests {
         };
 
         assert_eq!(
-            activate_current_probe_with_files(
+            activate_layout_mechanics_for_test(
                 &mut probe,
                 Some((&mut acquirer, &mut activator)),
                 &Enrollment::new("https://hub.example", "enk_enroll_failure").unwrap(),
@@ -4985,8 +5115,8 @@ mod tests {
                 .exists()
         );
 
-        activate_fresh_current_probe(
-            VerifiedFreshComponents {
+        activate_layout_with_bootstrap_for_test(
+            LayoutBootstrapComponentsForTest {
                 probe: &mut probe,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
@@ -5024,7 +5154,7 @@ mod tests {
             replace_first: Some(paths.bootstrap_acquirer()),
         };
 
-        let error = activate_current_probe_with_files(
+        let error = activate_layout_mechanics_for_test(
             &mut probe,
             Some((&mut acquirer, &mut activator)),
             &Enrollment::new("https://hub.example", "enk_enroll_replaced").unwrap(),
@@ -5072,8 +5202,8 @@ mod tests {
         );
 
         assert!(matches!(
-            activate_fresh_current_probe(
-                VerifiedFreshComponents {
+            activate_layout_with_bootstrap_for_test(
+                LayoutBootstrapComponentsForTest {
                     probe: &mut probe,
                     bootstrap_acquirer: &mut acquirer,
                     bootstrap_activator: &mut activator,
@@ -5141,8 +5271,8 @@ mod tests {
         let mut accounts = FailCreation { calls: Vec::new() };
 
         assert_eq!(
-            activate_fresh_current_probe(
-                VerifiedFreshComponents {
+            activate_layout_with_bootstrap_for_test(
+                LayoutBootstrapComponentsForTest {
                     probe: &mut probe,
                     bootstrap_acquirer: &mut acquirer,
                     bootstrap_activator: &mut activator,
@@ -5166,8 +5296,8 @@ mod tests {
                 .exists()
         );
 
-        activate_fresh_current_probe(
-            VerifiedFreshComponents {
+        activate_layout_with_bootstrap_for_test(
+            LayoutBootstrapComponentsForTest {
                 probe: &mut probe,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
@@ -5256,8 +5386,8 @@ mod tests {
             };
 
             assert_eq!(
-                activate_fresh_current_probe(
-                    VerifiedFreshComponents {
+                activate_layout_with_bootstrap_for_test(
+                    LayoutBootstrapComponentsForTest {
                         probe: &mut probe,
                         bootstrap_acquirer: &mut acquirer,
                         bootstrap_activator: &mut activator,
@@ -5282,8 +5412,8 @@ mod tests {
                 "{failure:?}"
             );
 
-            activate_fresh_current_probe(
-                VerifiedFreshComponents {
+            activate_layout_with_bootstrap_for_test(
+                LayoutBootstrapComponentsForTest {
                     probe: &mut probe,
                     bootstrap_acquirer: &mut acquirer,
                     bootstrap_activator: &mut activator,
@@ -5322,8 +5452,8 @@ mod tests {
         };
 
         assert_eq!(
-            activate_fresh_current_probe(
-                VerifiedFreshComponents {
+            activate_layout_with_bootstrap_for_test(
+                LayoutBootstrapComponentsForTest {
                     probe: &mut probe,
                     bootstrap_acquirer: &mut acquirer,
                     bootstrap_activator: &mut activator,
@@ -5347,8 +5477,8 @@ mod tests {
         );
 
         systemd.fail_start = false;
-        activate_fresh_current_probe(
-            VerifiedFreshComponents {
+        activate_layout_with_bootstrap_for_test(
+            LayoutBootstrapComponentsForTest {
                 probe: &mut probe,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
@@ -5381,8 +5511,8 @@ mod tests {
         let mut probe = component();
 
         assert_eq!(
-            activate_fresh_current_probe(
-                VerifiedFreshComponents {
+            activate_layout_with_bootstrap_for_test(
+                LayoutBootstrapComponentsForTest {
                     probe: &mut probe,
                     bootstrap_acquirer: &mut acquirer,
                     bootstrap_activator: &mut activator,
@@ -5439,7 +5569,7 @@ mod tests {
             ..Accounts::default()
         };
         let mut systemd = Systemd::default();
-        activate_current_probe(
+        activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_restart").unwrap(),
             &bundle(),
@@ -5506,7 +5636,7 @@ mod tests {
         let paths = FixedInstallPaths::under(temporary.path());
         drop(TransactionJournal::begin(&paths.bootstrap_state()).unwrap());
 
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component(),
             &Enrollment::new("https://hub.example", "enk_enroll_restart").unwrap(),
             &bundle(),
@@ -5565,8 +5695,8 @@ mod tests {
         let mut acquirer = component();
         let mut activator = component();
         let mut probe = component();
-        activate_fresh_current_probe(
-            VerifiedFreshComponents {
+        activate_layout_with_bootstrap_for_test(
+            LayoutBootstrapComponentsForTest {
                 probe: &mut probe,
                 bootstrap_acquirer: &mut acquirer,
                 bootstrap_activator: &mut activator,
@@ -5627,7 +5757,7 @@ mod tests {
             state: paths.bootstrap_state(),
             checked: false,
         };
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component(),
             &Enrollment::new("https://hub.example", "enk_enroll_intent").unwrap(),
             &bundle(),
@@ -5664,7 +5794,7 @@ mod tests {
         let mut component = component();
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
@@ -5702,7 +5832,7 @@ mod tests {
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
 
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
@@ -5741,7 +5871,7 @@ mod tests {
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
 
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
@@ -5776,7 +5906,7 @@ mod tests {
             fail_start: true,
             ..Systemd::default()
         };
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
@@ -5822,7 +5952,7 @@ mod tests {
                 .exists()
         );
         systemd.fail_start = false;
-        activate_current_probe(
+        activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
             &bundle(),
@@ -5934,7 +6064,7 @@ mod tests {
             reloads: 0,
         };
 
-        let error = activate_current_probe(
+        let error = activate_layout_without_roles_for_test(
             &mut component,
             &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
             &bundle(),
@@ -6093,7 +6223,7 @@ mod tests {
             };
 
             assert_eq!(
-                activate_current_probe_with_files(
+                activate_layout_mechanics_for_test(
                     &mut component,
                     None,
                     &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
@@ -6123,7 +6253,7 @@ mod tests {
             assert!(paths.bootstrap_acquirer().exists());
             assert!(paths.bootstrap_activator().exists());
 
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
                 &bundle(),
@@ -6210,7 +6340,7 @@ mod tests {
         };
 
         assert_eq!(
-            activate_current_probe_with_files(
+            activate_layout_mechanics_for_test(
                 &mut component,
                 None,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
@@ -6231,7 +6361,7 @@ mod tests {
         assert!(!paths.unit().exists());
 
         assert_eq!(
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
                 &bundle(),
@@ -6310,7 +6440,7 @@ mod tests {
             };
 
             assert_eq!(
-                activate_current_probe(
+                activate_layout_without_roles_for_test(
                     &mut component,
                     &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                     &bundle(),
@@ -6337,7 +6467,7 @@ mod tests {
             assert!(!paths.metadata().exists());
             assert!(!paths.unit().exists());
 
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_retry").unwrap(),
                 &bundle(),
@@ -6370,7 +6500,7 @@ mod tests {
             ..Systemd::default()
         };
         assert_eq!(
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                 &bundle(),
@@ -6422,7 +6552,7 @@ mod tests {
         let mut accounts = Accounts::default();
         let mut systemd = Systemd::default();
         assert_eq!(
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                 &bundle(),
@@ -6460,7 +6590,7 @@ mod tests {
         let mut systemd = Systemd::default();
 
         assert_eq!(
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                 &bundle(),
@@ -6499,7 +6629,7 @@ mod tests {
         let mut systemd = Systemd::default();
 
         assert_eq!(
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                 &bundle(),
@@ -6542,7 +6672,7 @@ mod tests {
         let mut systemd = Systemd::default();
 
         assert_eq!(
-            activate_current_probe(
+            activate_layout_without_roles_for_test(
                 &mut component,
                 &Enrollment::new("https://hub.example", "enk_enroll_secret").unwrap(),
                 &bundle(),

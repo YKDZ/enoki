@@ -29,10 +29,7 @@ use crate::{
         SYSTEM_STATE_PERMISSION_PROFILE,
     },
     handoff::Enrollment,
-    lifecycle::{
-        FreshInstallLifecycleEffects, derive_lifecycle_authority_install_key,
-        execute_fresh_install_lifecycle,
-    },
+    lifecycle::derive_lifecycle_authority_install_key,
     trust::{BootstrapRole, BuildTrust},
     verifier::VerifiedBundle,
 };
@@ -604,44 +601,7 @@ pub fn set_installed_bundle_repair_crash_for_test(
     Ok(())
 }
 
-/// Activates precisely the verified current `probe` component.  It is a
-/// fresh-install-only operation: any previously managed evidence is a closed
-/// failure, rather than an implicit upgrade, repair, or reinstall.
-pub fn activate_current_probe(
-    component: &mut File,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    accounts: &mut impl AccountPort,
-    systemd: &mut impl SystemdPort,
-) -> Result<(), InstallError> {
-    let mut files = SystemInstallFiles;
-    activate_current_probe_with_files(
-        component,
-        None,
-        enrollment,
-        bundle,
-        trust,
-        paths,
-        &mut InstallPorts {
-            accounts,
-            systemd,
-            files: &mut files,
-        },
-    )
-}
-
-/// Fresh-machine adapter: publishes only the two verified Bootstrap receipts,
-/// then enters the existing closed Probe transaction. On failure it removes
-/// only the exact inodes created by this attempt.
-pub struct VerifiedFreshComponents<'a> {
-    pub probe: &'a mut File,
-    pub bootstrap_acquirer: &'a mut File,
-    pub bootstrap_activator: &'a mut File,
-}
-
-pub struct VerifiedCompleteFreshComponents<'a> {
+pub(crate) struct VerifiedCompleteFreshComponents<'a> {
     pub probe: &'a mut File,
     pub observation_runtime: &'a mut File,
     pub cpu_provider: &'a mut File,
@@ -654,6 +614,7 @@ pub struct VerifiedCompleteFreshComponents<'a> {
 #[derive(Clone, Copy)]
 enum InstallFailureSemantics<'a> {
     FreshRollback,
+    #[cfg_attr(not(test), allow(dead_code))]
     CommittedReplacement(&'a ReplacementResumeBinding),
     CommittedReplacementWithRegistration {
         registration: &'a ReplacementRegistrationBinding,
@@ -688,35 +649,9 @@ enum InterruptedInstall {
     Complete,
 }
 
-pub fn activate_fresh_current_probe(
-    components: VerifiedFreshComponents<'_>,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    accounts: &mut impl AccountPort,
-    systemd: &mut impl SystemdPort,
-) -> Result<(), InstallError> {
-    let mut files = SystemInstallFiles;
-    activate_current_probe_with_files(
-        components.probe,
-        Some((
-            components.bootstrap_acquirer,
-            components.bootstrap_activator,
-        )),
-        enrollment,
-        bundle,
-        trust,
-        paths,
-        &mut InstallPorts {
-            accounts,
-            systemd,
-            files: &mut files,
-        },
-    )
-}
-
-pub fn activate_complete_fresh_current_probe(
+/// Fresh 专属 coordinator：只接受普通新 Host Enrollment 与完整已验证角色集合。
+/// Replacement authority 在构造任何 account/filesystem/systemd effect 前关闭。
+pub(crate) fn coordinate_fresh_install(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -725,8 +660,11 @@ pub fn activate_complete_fresh_current_probe(
     accounts: &mut impl AccountPort,
     systemd: &mut impl SystemdPort,
 ) -> Result<(), InstallError> {
+    if enrollment.replacement_migration().is_some() {
+        return Err(InstallError::InvalidVerifiedComponent);
+    }
     let mut files = SystemInstallFiles;
-    activate_current_probe_with_observation_files(
+    activate_verified_install_layout(
         components.probe,
         Some((
             components.observation_runtime,
@@ -754,7 +692,8 @@ pub fn activate_complete_fresh_current_probe(
 /// 仅用于 Replacement；调用者已持久化精确的 Replacement Migration commit fact，
 /// 因此候选激活失败时保留 durable journal，绝不调用普通 fresh-install rollback。
 #[allow(clippy::too_many_arguments)]
-pub fn activate_complete_replacement_current_probe(
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn activate_complete_replacement_current_probe(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -777,7 +716,7 @@ pub fn activate_complete_replacement_current_probe(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn activate_complete_replacement_current_probe_with_registration(
+pub(crate) fn activate_complete_replacement_current_probe_with_registration(
     components: VerifiedCompleteFreshComponents<'_>,
     enrollment: &Enrollment,
     bundle: &VerifiedBundle,
@@ -815,7 +754,7 @@ fn activate_complete_replacement_current_probe_with_semantics<'a>(
     semantics: InstallFailureSemantics<'a>,
 ) -> Result<(), InstallError> {
     let mut files = SystemInstallFiles;
-    activate_current_probe_with_observation_files(
+    activate_verified_install_layout(
         components.probe,
         Some((
             components.observation_runtime,
@@ -927,32 +866,10 @@ fn validate_bootstrap_roles(paths: &FixedInstallPaths) -> Result<(), InstallErro
     Ok(())
 }
 
-fn activate_current_probe_with_files(
-    component: &mut File,
-    bootstrap_components: Option<(&mut File, &mut File)>,
-    enrollment: &Enrollment,
-    bundle: &VerifiedBundle,
-    trust: &BuildTrust,
-    paths: &FixedInstallPaths,
-    ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
-) -> Result<(), InstallError> {
-    activate_current_probe_with_observation_files(
-        component,
-        None,
-        bootstrap_components,
-        enrollment,
-        bundle,
-        trust,
-        paths,
-        ports,
-        InstallFailureSemantics::FreshRollback,
-    )
-}
-
 // The closed activation boundary makes every authority-bearing dependency
 // explicit; none of these values are caller-selected role collections.
 #[allow(clippy::too_many_arguments)]
-fn activate_current_probe_with_observation_files(
+fn activate_verified_install_layout(
     component: &mut File,
     observation_components: Option<(&mut File, &mut File, &mut File, &mut File)>,
     bootstrap_components: Option<(&mut File, &mut File)>,
@@ -963,7 +880,9 @@ fn activate_current_probe_with_observation_files(
     ports: &mut InstallPorts<'_, impl AccountPort, impl SystemdPort, impl InstallFilePort>,
     failure_semantics: InstallFailureSemantics<'_>,
 ) -> Result<(), InstallError> {
-    let mut effects = FreshInstallEffects {
+    let mut observation_components = observation_components;
+    verify_fresh_install_inputs(component, observation_components.as_mut(), bundle, trust)?;
+    activate_verified_fresh_install(
         component,
         observation_components,
         bootstrap_components,
@@ -973,57 +892,7 @@ fn activate_current_probe_with_observation_files(
         paths,
         ports,
         failure_semantics,
-    };
-    execute_fresh_install_lifecycle(&mut effects)
-}
-
-struct FreshInstallEffects<'input, 'ports, A, S, F> {
-    component: &'input mut File,
-    observation_components: Option<(
-        &'input mut File,
-        &'input mut File,
-        &'input mut File,
-        &'input mut File,
-    )>,
-    bootstrap_components: Option<(&'input mut File, &'input mut File)>,
-    enrollment: &'input Enrollment,
-    bundle: &'input VerifiedBundle,
-    trust: &'input BuildTrust,
-    paths: &'input FixedInstallPaths,
-    ports: &'input mut InstallPorts<'ports, A, S, F>,
-    failure_semantics: InstallFailureSemantics<'input>,
-}
-
-impl<A, S, F> FreshInstallLifecycleEffects for FreshInstallEffects<'_, '_, A, S, F>
-where
-    A: AccountPort,
-    S: SystemdPort,
-    F: InstallFilePort,
-{
-    type Error = InstallError;
-
-    fn verify(&mut self) -> Result<(), Self::Error> {
-        verify_fresh_install_inputs(
-            self.component,
-            self.observation_components.as_mut(),
-            self.bundle,
-            self.trust,
-        )
-    }
-
-    fn stage_and_activate(&mut self) -> Result<(), Self::Error> {
-        activate_verified_fresh_install(
-            self.component,
-            self.observation_components.take(),
-            self.bootstrap_components.take(),
-            self.enrollment,
-            self.bundle,
-            self.trust,
-            self.paths,
-            self.ports,
-            self.failure_semantics,
-        )
-    }
+    )
 }
 
 fn verify_fresh_install_inputs(
